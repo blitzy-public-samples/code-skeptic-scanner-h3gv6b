@@ -1,0 +1,30 @@
+# Use an official Node.js runtime as the base image
+FROM node:14-alpine
+
+# Set the working directory in the container
+WORKDIR /app
+
+# Copy package.json and package-lock.json to the working directory
+COPY package.json package-lock.json ./
+
+# Install dependencies
+RUN npm ci --only=production
+
+# Copy the frontend source code to the working directory
+COPY . .
+
+# Build the React application
+RUN npm run build
+
+# Expose the port that the application will run on
+EXPOSE 3000
+
+# Set the command to serve the built application
+CMD ["npm", "start"]
+
+# HUMAN ASSISTANCE NEEDED
+# Please verify the following:
+# 1. The Node.js version (14) is appropriate for your project.
+# 2. The exposed port (3000) matches your application's configuration.
+# 3. The build and start commands are correct for your specific React setup.
+# 4. Consider adding a non-root user for better security practices.

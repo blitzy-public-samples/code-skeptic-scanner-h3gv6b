@@ -1,0 +1,71 @@
+name: Code Skeptic Scanner CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.9'
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: '14'
+
+    - name: Install backend dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r backend/requirements.txt
+
+    - name: Install frontend dependencies
+      working-directory: ./frontend
+      run: npm ci
+
+    - name: Run backend linting and type checking
+      run: |
+        pip install flake8 mypy
+        flake8 backend
+        mypy backend
+
+    - name: Run frontend linting and type checking
+      working-directory: ./frontend
+      run: |
+        npm run lint
+        npm run type-check
+
+    - name: Run backend tests
+      run: |
+        pip install pytest
+        pytest backend/tests
+
+    - name: Run frontend tests
+      working-directory: ./frontend
+      run: npm test
+
+    - name: Build backend
+      run: |
+        pip install build
+        python -m build
+
+    - name: Build frontend
+      working-directory: ./frontend
+      run: npm run build
+
+    # HUMAN ASSISTANCE NEEDED
+    # The following step requires configuration for your specific staging environment.
+    # Please replace with the appropriate deployment commands for your setup.
+    - name: Deploy to staging
+      run: |
+        # Add your deployment commands here
+        echo "Deploying to staging environment"

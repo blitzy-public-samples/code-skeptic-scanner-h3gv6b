@@ -1,0 +1,75 @@
+name: Continuous Deployment
+
+on:
+  workflow_run:
+    workflows: ["Continuous Integration"]
+    branches: [main]
+    types:
+      - completed
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  BACKEND_IMAGE: gcr.io/${{ secrets.GCP_PROJECT_ID }}/code-skeptic-backend
+  FRONTEND_BUCKET: ${{ secrets.GCP_FRONTEND_BUCKET }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Google Cloud SDK
+      uses: google-github-actions/setup-gcloud@v0.2.1
+      with:
+        project_id: ${{ secrets.GCP_PROJECT_ID }}
+        service_account_key: ${{ secrets.GCP_SA_KEY }}
+        export_default_credentials: true
+
+    - name: Authenticate with Google Cloud
+      run: gcloud auth configure-docker
+
+    - name: Build and push backend Docker image
+      run: |
+        docker build -t $BACKEND_IMAGE ./backend
+        docker push $BACKEND_IMAGE
+
+    - name: Deploy backend to Google Cloud Run
+      run: |
+        gcloud run deploy code-skeptic-backend \
+          --image $BACKEND_IMAGE \
+          --platform managed \
+          --region us-central1 \
+          --allow-unauthenticated
+
+    - name: Build frontend
+      run: |
+        cd frontend
+        npm install
+        npm run build
+
+    - name: Deploy frontend to Google Cloud Storage
+      run: |
+        gsutil -m rsync -r frontend/build gs://$FRONTEND_BUCKET
+
+    - name: Set up Cloud CDN
+      run: |
+        gcloud compute backend-buckets create code-skeptic-frontend \
+          --gcs-bucket-name=$FRONTEND_BUCKET \
+          --enable-cdn
+
+    - name: Run post-deployment tests
+      run: |
+        # HUMAN ASSISTANCE NEEDED
+        # Add post-deployment test commands here
+        # Example: npm run test:e2e
+
+    - name: Notify team of successful deployment
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        text: Deployment to production completed successfully!
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+      if: success()

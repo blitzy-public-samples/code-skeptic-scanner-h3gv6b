@@ -20,24 +20,24 @@ import java.time.LocalDateTime;
  * The table is created from these annotations by {@code spring.jpa.hibernate.ddl-auto} — see
  * docs/DECISION_LOG.md DL-026.
  *
- * <p>{@code id} is a generated surrogate key and is typed to match {@link Tweet#getId()} — see
+ * <p>{@code id} is a generated surrogate key and shares the type of {@link Tweet#getId()} — see
  * docs/DECISION_LOG.md DL-025 and DL-049. The X post identifier is not carried in it and no
  * natural-key column is declared, so ingestion performs no de-duplication — see
  * docs/DECISION_LOG.md DL-049. {@code id} and {@code tweet_id} are both carried as {@link String} at
  * the wire boundary — see docs/DECISION_LOG.md DL-023.
  *
- * <p>{@code is_approved} carries the approval flag for a human to read. No code path in this
- * application publishes to X, so the flag is never a trigger.
+ * <p>{@code is_approved} carries the approval flag for a human reviewer to read. It is never a
+ * trigger: no code path in this application writes to X.
  *
- * <p>No column declares {@code nullable = false}, {@code unique} or a length bound, reproducing the
- * unconstrained source declarations.
+ * <p>The five columns reproduce the unconstrained source declarations exactly: none adds a not-null
+ * marker, a duplicate-value restriction or a width bound.
  */
 // Ported from backend/app/db/models.py:L20-28 (faithful port) — see docs/DECISION_LOG.md
 // Deviations from the literal source declaration, each recorded in the decision log: the type keeps
-// the source name Response rather than being renamed — DL-025; id is Long with
-// GenerationType.IDENTITY over Column(Integer, primary_key=True) — DL-049; the tweet_id column and
-// the tweet relationship at backend/app/db/models.py:L27-28 are mapped by the single @ManyToOne
-// association that owns the foreign key — see docs/DECISION_LOG.md
+// the source name Response — DL-025; id is Long with GenerationType.IDENTITY over
+// Column(Integer, primary_key=True) — DL-025 and DL-049; the tweet_id column and the tweet
+// relationship at backend/app/db/models.py:L27-28 are mapped by the single @ManyToOne association
+// that owns the foreign key — DL-025 — see docs/DECISION_LOG.md
 // equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see
 // docs/DECISION_LOG.md
 @Entity
@@ -59,7 +59,7 @@ public class Response {
     private LocalDateTime generatedAt;
 
     // backend/app/db/models.py:L26
-    // Read by a human reviewer; never a trigger to publish.
+    // A flag a human reads; never a trigger.
     @Column(name = "is_approved")
     private Boolean isApproved;
 

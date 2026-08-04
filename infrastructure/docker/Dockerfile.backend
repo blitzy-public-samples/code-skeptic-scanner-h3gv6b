@@ -1,28 +1,32 @@
-# Use an official Python runtime as the base image
-FROM python:3.9-slim
+# Build the application with Maven on a Java 21 toolchain
+FROM maven:3.9-eclipse-temurin-21 AS build
 
 # Set the working directory in the container
 WORKDIR /app
 
-# Copy the requirements file into the container
-COPY requirements.txt .
+# Copy the Maven project descriptor into the container
+COPY pom.xml .
 
-# Install the Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Download the project dependencies into the local Maven repository
+RUN mvn -B dependency:go-offline
 
 # Copy the backend source code into the container
-COPY ./backend .
+COPY src ./src
 
-# Expose the port that the Flask app will run on
+# Build the executable jar
+RUN mvn -B clean package -DskipTests
+
+# Use an official Java runtime as the base image
+FROM eclipse-temurin:21-jre
+
+# Set the working directory in the container
+WORKDIR /app
+
+# Copy the executable jar from the build stage
+COPY --from=build /app/target/*.jar app.jar
+
+# Expose the port that the application will run on
 EXPOSE 5000
 
-# Set the command to run the Flask application
-CMD ["python", "app.py"]
-
-# HUMAN ASSISTANCE NEEDED
-# Please verify the following:
-# 1. Ensure that the Python version (3.9) is appropriate for your project.
-# 2. Confirm that the requirements.txt file is located in the same directory as the Dockerfile.
-# 3. Verify that the backend source code is in a directory named 'backend' at the same level as the Dockerfile.
-# 4. Check if the main Flask application file is indeed named 'app.py'.
-# 5. Confirm that port 5000 is the correct port for your Flask application.
+# Set the command to run the application
+CMD ["java", "-jar", "app.jar"]

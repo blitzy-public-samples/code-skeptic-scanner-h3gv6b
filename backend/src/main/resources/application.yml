@@ -41,7 +41,7 @@ scanner:
     # Ported from backend/app/tasks/tweet_monitoring.py:L46-47 (faithful port) — DL-031 — see docs/DECISION_LOG.md
     consumer-key: ${TWITTER_CONSUMER_KEY:${TWITTER_API_KEY:}}
     consumer-secret: ${TWITTER_CONSUMER_SECRET:${TWITTER_API_SECRET:}}
-    # Ported from backend/app/services/twitter_service.py:L13 and backend/app/tasks/tweet_monitoring.py:L48-49 (faithful port) — DL-046 — see docs/DECISION_LOG.md
+    # Ported from backend/app/services/twitter_service.py:L13 and backend/app/tasks/tweet_monitoring.py:L48-49 (faithful port) — DL-031 — see docs/DECISION_LOG.md
     access-token: ${TWITTER_ACCESS_TOKEN:}
     access-token-secret: ${TWITTER_ACCESS_TOKEN_SECRET:}
 

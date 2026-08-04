@@ -14,17 +14,16 @@ import jakarta.persistence.Table;
  * generated. The table is created from these annotations by
  * {@code spring.jpa.hibernate.ddl-auto} — see docs/DECISION_LOG.md DL-026.
  *
- * <p>{@code value} and {@code description} declare {@code length = Integer.MAX_VALUE}, which renders
- * each vendor's unbounded character type and reproduces the unbounded {@code Column(String)} at
- * backend/app/db/models.py:L43-44 — DL-068 — see docs/DECISION_LOG.md. {@code key} declares
- * {@code length = 255}: it is the primary key, and an unbounded character column cannot be indexed
- * on every supported vendor — DL-069 — see docs/DECISION_LOG.md.
+ * <p>{@code value} and {@code description} declare {@code length = Integer.MAX_VALUE} and are
+ * generated as each vendor's unbounded character type. Their source declaration is the bare
+ * {@code Column(String)} at backend/app/db/models.py:L43-44 — DL-068 — see docs/DECISION_LOG.md.
+ * {@code key} declares {@link #KEY_LENGTH} and is generated as {@code varchar(768)} on H2,
+ * PostgreSQL and MySQL — DL-069 — see docs/DECISION_LOG.md.
  */
 // Ported from backend/app/db/models.py:L39-44 (faithful port) — see docs/DECISION_LOG.md
-// Deviation from the literal @Column(name = "key") / @Column(name = "value") mapping: both are
-// declared as JPA quoted identifiers; the physical column names are key and value — DL-061 — see
-// docs/DECISION_LOG.md
-// Deviation from an unbounded primary-key column: key declares an explicit length — DL-069 — see
+// Departures from the literal source declaration, each recorded in the decision log: key and value
+// are declared as JPA quoted identifiers, with the physical column names key and value — DL-061;
+// key declares length = 768 where the source declared no bound — DL-069 — see
 // docs/DECISION_LOG.md
 // equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see
 // docs/DECISION_LOG.md
@@ -33,21 +32,19 @@ import jakarta.persistence.Table;
 public class Setting {
 
     /**
-     * Declared character length of the {@code settings.key} primary-key column — DL-069 — see
-     * docs/DECISION_LOG.md.
+     * Declared character length of the {@code settings.key} primary-key column. It is generated as
+     * {@code varchar(768)} on H2, PostgreSQL and MySQL — DL-069 — see docs/DECISION_LOG.md.
      */
-    private static final int KEY_LENGTH = 255;
+    static final int KEY_LENGTH = 768;
 
-    // backend/app/db/models.py:L42
-    // Quoted-identifier deviation — DL-061 — see docs/DECISION_LOG.md
-    // Explicit primary-key length — DL-069 — see docs/DECISION_LOG.md
+    // backend/app/db/models.py:L42 — quoted identifier — DL-061 — and declared capacity 768 —
+    // DL-069 — see docs/DECISION_LOG.md
     @Id
     @Column(name = "\"key\"", length = KEY_LENGTH)
     private String key;
 
-    // backend/app/db/models.py:L43
-    // Quoted-identifier deviation — DL-061 — see docs/DECISION_LOG.md
-    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
+    // backend/app/db/models.py:L43 — quoted identifier — DL-061 — and unbounded character mapping
+    // — DL-068 — see docs/DECISION_LOG.md
     @Column(name = "\"value\"", length = Integer.MAX_VALUE)
     private String value;
 

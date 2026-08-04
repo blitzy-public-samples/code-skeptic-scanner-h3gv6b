@@ -6,7 +6,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 /**
  * Spring Data JPA repository for the {@link AiTool} entity, which maps the {@code ai_tools} table.
  *
- * <p>The identifier type is {@link Long}, matching the {@code @Id} field of {@link AiTool} — see
+ * <p>The identifier type is {@link Integer}, matching the {@code @Id} field of {@link AiTool} — see
  * docs/DECISION_LOG.md DL-070. The {@code ai_tools} table declares no association. Both consumers
  * call the inherited surface:
  *
@@ -36,5 +36,5 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * @see AiTool
  */
 // Ported from backend/app/db/database.py:L10-13 (faithful port) — see docs/DECISION_LOG.md
-public interface AiToolRepository extends JpaRepository<AiTool, Long> {
+public interface AiToolRepository extends JpaRepository<AiTool, Integer> {
 }

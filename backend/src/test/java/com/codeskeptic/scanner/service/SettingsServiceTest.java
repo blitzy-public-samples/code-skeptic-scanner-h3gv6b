@@ -6,6 +6,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.same;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -19,6 +22,9 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Parameter;
 import java.lang.reflect.RecordComponent;
+
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -41,7 +47,11 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.SimpleTransactionStatus;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.SettingDto;
@@ -58,10 +68,12 @@ import com.codeskeptic.scanner.service.mapper.SettingMapper;
  * {@link SettingsService#getAllSettings()}, {@link SettingsService#updateSetting(String, String)}
  * and {@link SettingsService#seedDefaultSettings()}.
  *
- * <p>Every test drives the service through three mocked collaborators — {@link SettingRepository},
- * {@link SettingMapper} and {@link ScannerProperties} — held by a service instance this class
- * constructs directly. No Spring context is started, no database is opened, no configuration file is
- * read and no credential is resolved.
+ * <p>Every test drives the service through mocked collaborators — {@link SettingRepository},
+ * {@link SettingMapper}, {@link ScannerProperties} and the {@link EntityManager} the seeding insert
+ * is issued through — held by a service instance this class constructs directly, together with a
+ * transaction manager that runs the insert inline and records the definition it was opened with. No
+ * Spring context is started, no database is opened, no configuration file is read and no credential
+ * is resolved.
  *
  * <p>Every seeding test supplies its configured values through the {@link ScannerProperties}
  * accessors, using {@link #CONFIGURED_POPULARITY_THRESHOLD},
@@ -163,8 +175,13 @@ class SettingsServiceTest {
     private static final String SETTING_NOT_FOUND = "Setting not found";
 
     /** Simple names of the types that can contribute schema. */
+    /** The only persistence-context operation the seeding uses to write a row. */
+    private static final String PERSIST_OPERATION = "persist";
+
+    /** The only persistence-context operation the seeding uses to force the write out. */
+    private static final String FLUSH_OPERATION = "flush";
+
     private static final List<String> SCHEMA_CAPABLE_TYPE_NAMES = List.of(
-            "EntityManager",
             "EntityManagerFactory",
             "SessionFactory",
             "Session",
@@ -195,12 +212,24 @@ class SettingsServiceTest {
     @Mock
     private ScannerProperties properties;
 
-    /** Unit under test, holding the three mocked collaborators. */
+    /**
+     * Stubbed persistence context. The seeding path issues its insert through
+     * {@link EntityManager#persist(Object)} and {@link EntityManager#flush()} — DL-159 — see
+     * docs/DECISION_LOG.md.
+     */
+    @Mock
+    private EntityManager entityManager;
+
+    /** Definition of every transaction the seeding insert opened, oldest first. */
+    private final List<TransactionDefinition> openedTransactions = new CopyOnWriteArrayList<>();
+
+    /** Unit under test, holding the mocked collaborators. */
     private SettingsService service;
 
     @BeforeEach
     void createService() {
-        service = new SettingsService(settingRepository, settingMapper, properties);
+        service = new SettingsService(settingRepository, settingMapper, properties, entityManager,
+                inlineTransactionManager());
     }
 
     // -----------------------------------------------------------------------
@@ -259,13 +288,16 @@ class SettingsServiceTest {
     }
 
     @Test
-    @DisplayName("takes its repository mapper and configuration through its only constructor")
-    void takesItsRepositoryMapperAndConfigurationThroughItsOnlyConstructor() {
+    @DisplayName("takes its repository mapper configuration persistence context and transaction "
+            + "manager through its only constructor")
+    void takesItsCollaboratorsThroughItsOnlyConstructor() {
         List<Constructor<?>> constructors = List.of(SettingsService.class.getDeclaredConstructors());
 
         assertThat(constructors).hasSize(1);
         assertThat(constructors.get(0).getParameterTypes())
-                .containsExactly(SettingRepository.class, SettingMapper.class, ScannerProperties.class);
+                .containsExactly(SettingRepository.class, SettingMapper.class,
+                        ScannerProperties.class, EntityManager.class,
+                        PlatformTransactionManager.class);
     }
 
     @Test
@@ -299,6 +331,23 @@ class SettingsServiceTest {
         assertThat(declaredCollaboratorTypes())
                 .extracting(Class::getSimpleName)
                 .doesNotContainAnyElementsOf(SCHEMA_CAPABLE_TYPE_NAMES);
+    }
+
+    // Rows are the only thing the seeding contributes — DL-040, DL-159 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reaches the persistence context for the insert alone and issues no statement of "
+            + "its own")
+    void reachesThePersistenceContextForTheInsertAloneAndIssuesNoStatementOfItsOwn() {
+        stubConfiguredSeedValues();
+        stubEveryKeyAbsent();
+
+        service.seedDefaultSettings();
+
+        assertThat(mockingDetails(entityManager).getInvocations())
+                .extracting(invocation -> invocation.getMethod().getName())
+                .as("persistence-context operations the seeding performed")
+                .isNotEmpty()
+                .containsOnly(PERSIST_OPERATION, FLUSH_OPERATION);
     }
 
     // -----------------------------------------------------------------------
@@ -728,11 +777,13 @@ class SettingsServiceTest {
 
         service.seedDefaultSettings();
 
+        verify(entityManager, never()).persist(any());
         verify(settingRepository, never()).saveAndFlush(any(Setting.class));
         verify(settingRepository, never()).save(any(Setting.class));
         verify(settingRepository, times(3)).existsById(anyString());
         verifyNoMoreInteractions(settingRepository);
         verifyNoInteractions(settingMapper);
+        verifyNoInteractions(entityManager);
     }
 
     @Test
@@ -766,7 +817,7 @@ class SettingsServiceTest {
 
         assertThat(storedRows).hasSize(3);
         assertThat(storedRows).extracting(Setting::getKey).containsExactlyElementsOf(SEEDED_KEYS);
-        verify(settingRepository, times(3)).saveAndFlush(any(Setting.class));
+        verify(entityManager, times(3)).persist(any(Setting.class));
         verify(settingRepository, times(6)).existsById(anyString());
     }
 
@@ -815,18 +866,34 @@ class SettingsServiceTest {
     // -----------------------------------------------------------------------
 
     @Test
-    @DisplayName("writes each seeded row with a flushing write so a taken key is reported before the "
-            + "next key is reached")
-    void writesEachSeededRowWithAFlushingWrite() {
+    @DisplayName("inserts each seeded row and never merges, so no statement it issues can update a "
+            + "stored row")
+    void insertsEachSeededRowAndNeverMerges() {
         stubConfiguredSeedValues();
         stubEveryKeyAbsent();
-        when(settingRepository.saveAndFlush(any(Setting.class)))
-                .thenAnswer(invocation -> invocation.getArgument(0));
 
         service.seedDefaultSettings();
 
-        verify(settingRepository, times(3)).saveAndFlush(any(Setting.class));
+        verify(entityManager, times(3)).persist(any(Setting.class));
+        verify(entityManager, times(3)).flush();
+        verify(entityManager, never()).merge(any());
+        verify(settingRepository, never()).saveAndFlush(any(Setting.class));
         verify(settingRepository, never()).save(any(Setting.class));
+    }
+
+    @Test
+    @DisplayName("opens a transaction of its own for each inserted row")
+    void opensATransactionOfItsOwnForEachInsertedRow() {
+        stubConfiguredSeedValues();
+        stubEveryKeyAbsent();
+
+        service.seedDefaultSettings();
+
+        assertThat(openedTransactions).as("transactions opened for the three inserts").hasSize(3);
+        assertThat(openedTransactions).allSatisfy(definition ->
+                assertThat(definition.getPropagationBehavior())
+                        .as("propagation behaviour of the insert transaction")
+                        .isEqualTo(TransactionDefinition.PROPAGATION_REQUIRES_NEW));
     }
 
     @Test
@@ -882,8 +949,8 @@ class SettingsServiceTest {
     void rethrowsTheRejectionWhenTheKeyIsStillAbsentAfterTheWriteFails() {
         when(properties.popularityThreshold()).thenReturn(CONFIGURED_POPULARITY_THRESHOLD);
         when(settingRepository.existsById(TWEET_POPULARITY_THRESHOLD_KEY)).thenReturn(false, false);
-        when(settingRepository.saveAndFlush(any(Setting.class)))
-                .thenThrow(new DataIntegrityViolationException(DUPLICATE_KEY_MESSAGE));
+        doThrow(new DataIntegrityViolationException(DUPLICATE_KEY_MESSAGE))
+                .when(entityManager).persist(any(Setting.class));
 
         assertThatThrownBy(service::seedDefaultSettings)
                 .isInstanceOf(DataIntegrityViolationException.class)
@@ -899,8 +966,8 @@ class SettingsServiceTest {
     void propagatesAWriteFailureThatIsNotAnIntegrityViolation() {
         when(properties.popularityThreshold()).thenReturn(CONFIGURED_POPULARITY_THRESHOLD);
         when(settingRepository.existsById(TWEET_POPULARITY_THRESHOLD_KEY)).thenReturn(false);
-        when(settingRepository.saveAndFlush(any(Setting.class)))
-                .thenThrow(new IllegalStateException(UNRELATED_FAILURE_MESSAGE));
+        doThrow(new IllegalStateException(UNRELATED_FAILURE_MESSAGE))
+                .when(entityManager).persist(any(Setting.class));
 
         assertThatThrownBy(service::seedDefaultSettings)
                 .isInstanceOf(IllegalStateException.class)
@@ -920,14 +987,16 @@ class SettingsServiceTest {
         stubConfiguredSeedValues();
         when(settingRepository.existsById(anyString()))
                 .thenAnswer(invocation -> table.containsKey((String) invocation.getArgument(0)));
-        when(settingRepository.saveAndFlush(any(Setting.class))).thenAnswer(invocation -> {
+        // persist always inserts, so a key already stored is rejected by the primary key and the
+        // stored row is left untouched — the behaviour DL-159 relies on.
+        doAnswer(invocation -> {
             Setting written = invocation.getArgument(0);
             if (table.putIfAbsent(written.getKey(), written) != null) {
                 rejections.incrementAndGet();
-                throw new DataIntegrityViolationException(DUPLICATE_KEY_MESSAGE);
+                throw new PersistenceException(DUPLICATE_KEY_MESSAGE);
             }
-            return written;
-        });
+            return null;
+        }).when(entityManager).persist(any(Setting.class));
 
         runConcurrently(service::seedDefaultSettings, raised);
 
@@ -1046,18 +1115,15 @@ class SettingsServiceTest {
     }
 
     /**
-     * Stubs the flushing write to reject {@code rejectedKey} with an integrity violation and to
-     * accept every other key.
+     * Stubs the insert to reject {@code rejectedKey} with an integrity violation and to accept every
+     * other key.
      *
-     * @param rejectedKey the key whose write is rejected
+     * @param rejectedKey the key whose insert is rejected
      */
     private void stubWriteRejectedFor(String rejectedKey) {
-        when(settingRepository
-                .saveAndFlush(argThat(row -> row != null && !rejectedKey.equals(row.getKey()))))
-                .thenAnswer(invocation -> invocation.getArgument(0));
-        when(settingRepository
-                .saveAndFlush(argThat(row -> row != null && rejectedKey.equals(row.getKey()))))
-                .thenThrow(new DataIntegrityViolationException(DUPLICATE_KEY_MESSAGE));
+        doThrow(new DataIntegrityViolationException(DUPLICATE_KEY_MESSAGE)).when(entityManager)
+                .persist(argThat(row -> row instanceof Setting stored
+                        && rejectedKey.equals(stored.getKey())));
     }
 
     /**
@@ -1107,14 +1173,14 @@ class SettingsServiceTest {
     private void stubRepositoryBackedBy(List<Setting> storedRows) {
         when(settingRepository.existsById(anyString()))
                 .thenAnswer(invocation -> holdsKey(storedRows, invocation.getArgument(0)));
-        when(settingRepository.saveAndFlush(any(Setting.class))).thenAnswer(invocation -> {
+        doAnswer(invocation -> {
             Setting written = invocation.getArgument(0);
             if (holdsKey(storedRows, written.getKey())) {
                 throw new DataIntegrityViolationException(DUPLICATE_KEY_MESSAGE);
             }
             storedRows.add(written);
-            return written;
-        });
+            return null;
+        }).when(entityManager).persist(any(Setting.class));
     }
 
     /** Stubs the three configured values the seeding reads. */
@@ -1140,16 +1206,43 @@ class SettingsServiceTest {
     }
 
     /**
-     * Captures the rows {@link SettingsService#seedDefaultSettings()} asked the repository to write,
-     * which it writes with {@code saveAndFlush} — DL-159 — see docs/DECISION_LOG.md.
+     * Captures the rows {@link SettingsService#seedDefaultSettings()} inserted, which it inserts with
+     * {@link EntityManager#persist(Object)} — DL-159 — see docs/DECISION_LOG.md.
      *
-     * @param expectedWrites the number of writes expected
-     * @return the captured rows in the order they were written
+     * @param expectedWrites the number of inserts expected
+     * @return the captured rows in the order they were inserted
      */
     private List<Setting> flushedRows(int expectedWrites) {
         ArgumentCaptor<Setting> written = ArgumentCaptor.forClass(Setting.class);
-        verify(settingRepository, times(expectedWrites)).saveAndFlush(written.capture());
+        verify(entityManager, times(expectedWrites)).persist(written.capture());
         return written.getAllValues();
+    }
+
+    /**
+     * Builds a transaction manager that runs the seeding insert inline and records the definition each
+     * insert was opened with, so the per-key transaction is observable without a database.
+     *
+     * @return the recording transaction manager
+     */
+    private PlatformTransactionManager inlineTransactionManager() {
+        return new PlatformTransactionManager() {
+
+            @Override
+            public TransactionStatus getTransaction(TransactionDefinition definition) {
+                openedTransactions.add(definition);
+                return new SimpleTransactionStatus();
+            }
+
+            @Override
+            public void commit(TransactionStatus status) {
+                // No transaction is started, so there is nothing to commit.
+            }
+
+            @Override
+            public void rollback(TransactionStatus status) {
+                // No transaction is started, so there is nothing to roll back.
+            }
+        };
     }
 
     /**

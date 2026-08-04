@@ -199,7 +199,7 @@ public class TwitterService {
      * Renders the {@code tweets} row carrying the given identifier.
      *
      * <p>The identifier is the path value exactly as the route received it. A value that does not parse
-     * as a {@code long}, a {@code null} value, and a value that parses but matches no row are all
+     * as an {@code int}, a {@code null} value, and a value that parses but matches no row are all
      * reported as a {@link NotFoundException} carrying {@link NotFoundException#TWEET_NOT_FOUND}, which
      * the error-handling advice renders as HTTP 404 with the body
      * {@code {"error": "Tweet not found"}} — DL-048.
@@ -212,7 +212,7 @@ public class TwitterService {
      */
     @Transactional(readOnly = true)
     public TweetDto getTweet(String tweetId) {
-        long identifier = parseTweetIdOrNotFound(tweetId);
+        int identifier = parseTweetIdOrNotFound(tweetId);
         Tweet tweet = tweetRepository.findById(identifier)
                 .orElseThrow(NotFoundException::tweetNotFound);
         log.debug("Rendering tweet row {}.", identifier);
@@ -244,7 +244,7 @@ public class TwitterService {
      */
     @Transactional
     public void updateTweetAnalysis(String tweetId, double analysisResult) {
-        long identifier = parseTweetIdOrNotFound(tweetId);
+        int identifier = parseTweetIdOrNotFound(tweetId);
         Tweet tweet = tweetRepository.findById(identifier)
                 .orElseThrow(NotFoundException::tweetNotFound);
 
@@ -302,22 +302,23 @@ public class TwitterService {
     /**
      * Parses a path identifier into the repository identifier type.
      *
-     * <p>A {@code null} value, a blank value and a value that is not a {@code long} all raise a
-     * {@link NotFoundException} carrying {@link NotFoundException#TWEET_NOT_FOUND} — DL-048. The
-     * triggering {@link NumberFormatException} is attached as the cause and never reaches the
-     * client-visible message.
+     * <p>A {@code null} value, a blank value and a value that is not an {@code int} all raise a
+     * {@link NotFoundException} carrying {@link NotFoundException#TWEET_NOT_FOUND} — DL-048. A value
+     * beyond the range of an {@code int} is reported the same way. The triggering
+     * {@link NumberFormatException} is attached as the cause and never reaches the client-visible
+     * message.
      *
      * @param tweetId the path value, as received
      * @return the parsed identifier
-     * @throws NotFoundException when the value does not parse as a {@code long}
+     * @throws NotFoundException when the value does not parse as an {@code int}
      */
-    private long parseTweetIdOrNotFound(String tweetId) {
+    private int parseTweetIdOrNotFound(String tweetId) {
         if (tweetId == null) {
             log.debug("Reporting an absent tweet identifier as a row that is not present.");
             throw NotFoundException.tweetNotFound();
         }
         try {
-            return Long.parseLong(tweetId);
+            return Integer.parseInt(tweetId);
         } catch (NumberFormatException ex) {
             log.debug("Reporting tweet identifier '{}' as a row that is not present.", tweetId);
             throw NotFoundException.tweetNotFound().withCause(ex);

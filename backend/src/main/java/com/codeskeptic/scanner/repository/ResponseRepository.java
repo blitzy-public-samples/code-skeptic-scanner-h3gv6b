@@ -11,7 +11,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * Spring Data JPA repository for the {@link Response} entity, which maps the {@code responses}
  * table.
  *
- * <p>The identifier type is {@link Long}, matching the generated {@code @Id} field of
+ * <p>The identifier type is {@link Integer}, matching the generated {@code @Id} field of
  * {@link Response} — see docs/DECISION_LOG.md DL-025 and DL-049. An identifier reaches this
  * interface already parsed; it is carried as a {@link String} only at the wire boundary — see
  * docs/DECISION_LOG.md DL-023 and DL-048.
@@ -26,7 +26,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
  *       constructs the {@link Pageable} and converts the 1-based wire {@code page}
  *       ({@code backend/app/api/responses.py:L11-12}) to the 0-based index this operation takes —
  *       see docs/DECISION_LOG.md DL-038.
- *   <li>{@code findById(Long)} returns one row wrapped in an {@link java.util.Optional}. An empty
+ *   <li>{@code findById(Integer)} returns one row wrapped in an {@link java.util.Optional}. An empty
  *       {@link java.util.Optional} denotes an identifier that is not present, which
  *       {@code ResponseService} translates into the 404 bodies at
  *       {@code backend/app/api/responses.py:L31} and {@code :L65}.
@@ -66,15 +66,14 @@ import org.springframework.data.jpa.repository.JpaRepository;
 // The declared member has no source counterpart: backend/app/api/analytics.py:L3 imported an
 // AnalyticsService that no module defined; the summary metric set is net-new — DL-041 — see
 // docs/DECISION_LOG.md
-public interface ResponseRepository extends JpaRepository<Response, Long> {
+public interface ResponseRepository extends JpaRepository<Response, Integer> {
 
-    // Re-declared to attach an entity graph; the inherited behaviour is unchanged — DL-087 — see
-    // docs/DECISION_LOG.md
+    // Re-declared to attach an entity graph — DL-087 — see docs/DECISION_LOG.md
     /**
      * Returns one page of {@code responses} rows with the {@code tweet} association fetched in the
      * same statement.
      *
-     * <p>The entity graph makes the {@code tweet} association part of the page query, so rendering a
+     * <p>The entity graph makes the {@code tweet} association part of the page query: rendering a
      * page issues one statement for the rows plus the count statement {@link Page} requires, and no
      * per-row statement for the association {@code ResponseMapper} reads to render {@code tweet_id} —
      * DL-087.

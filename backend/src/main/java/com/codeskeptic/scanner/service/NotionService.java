@@ -6,7 +6,6 @@ import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +19,7 @@ import org.springframework.web.client.RestClientResponseException;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.TweetDto;
+import com.codeskeptic.scanner.util.DelimitedStringListConverter;
 import com.fasterxml.jackson.databind.JsonNode;
 
 // Ported from backend/app/services/notion_service.py:L5-53 (faithful port) — see docs/DECISION_LOG.md
@@ -164,13 +164,6 @@ public class NotionService {
 
     /** Rich-text property, carrying the generated reply. Addition — see docs/DECISION_LOG.md. */
     private static final String PROPERTY_RESPONSE = "Response";
-
-    /**
-     * Separator joining a list component into the single delimited text one rich-text property
-     * carries. It is the separator {@code util.DelimitedStringListConverter} reads and writes for
-     * the same two columns — see docs/DECISION_LOG.md DL-024.
-     */
-    private static final String VALUE_DELIMITER = ",";
 
     // Notion JSON member names, transcribed from the payload shapes at
     // backend/app/services/notion_service.py:L14-20 and :L34-38.
@@ -532,8 +525,9 @@ public class NotionService {
      * <p>All nine components of {@link TweetDto} are mirrored — see docs/DECISION_LOG.md DL-088. A
      * property whose value is absent, or whose numeric value is not finite, is omitted from the map, and
      * an omitted property reads back as a {@code null} component. {@code media} and
-     * {@code aiToolsMentioned} are written as one {@value #VALUE_DELIMITER}-delimited rich-text value
-     * each, the same form the columns hold ({@code backend/app/db/models.py:L15,L18}).
+     * {@code aiToolsMentioned} are each written as one delimited rich-text value produced by
+     * {@link DelimitedStringListConverter#encode(List)}, the same form the columns hold
+     * ({@code backend/app/db/models.py:L15,L18}).
      * {@code Response} is not written here.
      *
      * @param tweet the post to map; not {@code null}
@@ -560,20 +554,20 @@ public class NotionService {
     }
 
     /**
-     * Joins a list component into the single delimited text one rich-text property carries.
+     * Renders a list component as the single delimited text one rich-text property carries.
      *
-     * <p>Elements are joined with {@value #VALUE_DELIMITER} in list order. A {@code null} list and a
-     * list holding no element both yield {@code null}, which omits the property.
+     * <p>The rendering is performed by {@link DelimitedStringListConverter#encode(List)}, the one
+     * authorized codec for this representation, so the text written to Notion is byte-for-byte the
+     * text the corresponding column holds. A {@code null} list, a list holding no element and a list
+     * retaining no element after that codec's write contract is applied all yield {@code null}, which
+     * omits the property.
      *
      * @param values the list component; may be {@code null} and may be empty
      * @return the delimited text, or {@code null} when the component carries no element
      */
-    // DL-088 — see docs/DECISION_LOG.md
+    // DL-088, DL-164 — see docs/DECISION_LOG.md
     private static String delimited(List<String> values) {
-        if (values == null || values.isEmpty()) {
-            return null;
-        }
-        return String.join(VALUE_DELIMITER, values);
+        return DelimitedStringListConverter.encode(values);
     }
 
     /**
@@ -755,25 +749,20 @@ public class NotionService {
     /**
      * Reads one delimited rich-text property back into a list component.
      *
-     * <p>The text is split on {@value #VALUE_DELIMITER}, each token is trimmed and empty tokens are
-     * dropped, which is how {@code util.DelimitedStringListConverter} reads the same form from the
-     * column — see docs/DECISION_LOG.md DL-024. An absent property yields an empty list.
+     * <p>The text is read by {@link DelimitedStringListConverter#decode(String)}, the one authorized
+     * codec for this representation, so a mirrored value and the corresponding column value read back
+     * identically — see docs/DECISION_LOG.md DL-024 and DL-164. An absent property yields an empty
+     * list.
      *
      * @param properties   the page's property map; not {@code null}
      * @param propertyName the Notion property name; not {@code null}
      * @return the list component, empty when the property is absent or holds no token; never
      *     {@code null}
      */
-    // DL-088 — see docs/DECISION_LOG.md
+    // DL-088, DL-164 — see docs/DECISION_LOG.md
     private static List<String> readList(JsonNode properties, String propertyName) {
-        String delimited = readText(properties, propertyName, KEY_RICH_TEXT);
-        if (delimited == null || delimited.isBlank()) {
-            return List.of();
-        }
-        return Arrays.stream(delimited.split(VALUE_DELIMITER))
-                .map(String::trim)
-                .filter(token -> !token.isEmpty())
-                .toList();
+        return DelimitedStringListConverter.decode(readText(properties, propertyName,
+                KEY_RICH_TEXT));
     }
 
     /**

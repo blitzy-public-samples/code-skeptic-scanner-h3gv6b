@@ -6,13 +6,19 @@ import java.util.Optional;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceException;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.SettingDto;
@@ -51,18 +57,20 @@ import com.codeskeptic.scanner.service.mapper.SettingMapper;
  * Neither literal is minted here and no key name, driver text or stack detail is appended to either.
  * This class selects no HTTP status; {@code api.GlobalExceptionHandler} does.
  *
- * <p>The {@code settings} table is reached through {@link SettingRepository} only. This class
- * declares no JPQL and no native query, so neither of the reserved column names {@code key} and
- * {@code value} is spelled in a statement. It opens no connection to an external system, memoises
- * nothing and declares no operation that publishes to X.
+ * <p>The {@code settings} table is reached through {@link SettingRepository} for every read and
+ * update, and through {@link EntityManager#persist(Object)} for the seeding insert alone — DL-159.
+ * This class declares no JPQL and no native query, so neither of the reserved column names
+ * {@code key} and {@code value} is spelled in a statement. It opens no connection to an external
+ * system, memoises nothing and declares no operation that publishes to X.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-039, DL-040,
- * DL-043, DL-052 and DL-073; construct-level provenance is recorded in
+ * DL-043, DL-052, DL-073 and DL-159; construct-level provenance is recorded in
  * {@code docs/TRACEABILITY_MATRIX.md}.
  *
- * <p>This class is thread-safe. It is a singleton bean, its three collaborators are held in final
- * fields and are themselves singletons, and this class holds no other state. Two callers updating the
- * same key concurrently both write and the later write stands.
+ * <p>This class is thread-safe. It is a singleton bean, its collaborators are held in final fields
+ * and are themselves singletons or thread-safe, and this class holds no other state. Two callers
+ * updating the same key concurrently both write and the later write stands; two callers seeding the
+ * same key concurrently insert once and neither overwrites the stored row.
  */
 @Service
 public class SettingsService {
@@ -120,6 +128,15 @@ public class SettingsService {
     /** Source of the three seeded values. */
     private final ScannerProperties properties;
 
+    /** Issues the insert-only write of one seeded row — DL-159 — see docs/DECISION_LOG.md. */
+    private final EntityManager entityManager;
+
+    /**
+     * Demarcates the transaction one seeded row is inserted in. Its propagation behaviour is
+     * {@code REQUIRES_NEW} — DL-159 — see docs/DECISION_LOG.md.
+     */
+    private final TransactionTemplate insertTransaction;
+
     /**
      * Creates the bean with its collaborators, replacing the static invocation at
      * {@code backend/app/api/settings.py:L10,L20} — DL-043.
@@ -128,15 +145,27 @@ public class SettingsService {
      * @param settingMapper     entity-to-wire converter, must not be {@code null}
      * @param properties        bound configuration supplying the seeded values, must not be
      *                          {@code null}
+     * @param entityManager     persistence context the seeding insert is issued through, must not be
+     *                          {@code null}
+     * @param transactionManager transaction manager the per-key insert transaction is opened on, must
+     *                          not be {@code null}
      * @throws NullPointerException when any argument is {@code null}
      */
     public SettingsService(SettingRepository settingRepository,
             SettingMapper settingMapper,
-            ScannerProperties properties) {
+            ScannerProperties properties,
+            EntityManager entityManager,
+            PlatformTransactionManager transactionManager) {
         this.settingRepository = Objects.requireNonNull(settingRepository,
                 "settingRepository must not be null.");
         this.settingMapper = Objects.requireNonNull(settingMapper, "settingMapper must not be null.");
         this.properties = Objects.requireNonNull(properties, "properties must not be null.");
+        this.entityManager = Objects.requireNonNull(entityManager,
+                "entityManager must not be null.");
+        this.insertTransaction = new TransactionTemplate(Objects.requireNonNull(transactionManager,
+                "transactionManager must not be null."));
+        this.insertTransaction.setPropagationBehavior(
+                TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     // Call site backend/app/api/settings.py:L10 — see docs/DECISION_LOG.md DL-039
@@ -228,7 +257,7 @@ public class SettingsService {
      *
      * <p>This method runs on {@link ApplicationReadyEvent}, after the context is refreshed, and is
      * also directly invocable. It declares no transaction — DL-159 — see docs/DECISION_LOG.md. Each
-     * repository call it reaches demarcates its own; a rejected write is rolled back on its own and the
+     * key is written in a transaction of its own; a rejected write is rolled back on its own and the
      * remaining keys are still attempted. A key taken concurrently, by a second instance or by a second
      * caller, is absorbed per key by {@link #seedIfAbsent(String, String, String)}.
      *
@@ -249,29 +278,33 @@ public class SettingsService {
     }
 
     /**
-     * Writes one default row when its key is absent, and writes nothing when the key is present.
+     * Inserts one default row when its key is absent, and writes nothing when the key is present.
      *
-     * <p>Presence is established with {@code existsById}, which loads no row. The write is issued with
-     * {@code saveAndFlush} — DL-159 — see docs/DECISION_LOG.md. The row reaches the database before
-     * this method returns and a primary key already taken is reported here, not at a later commit.
+     * <p>The write is an insert and only an insert: the row is handed to
+     * {@link jakarta.persistence.EntityManager#persist(Object)} and flushed, so the statement issued
+     * is always {@code insert into settings}. No merge is performed and no {@code update} statement
+     * can be produced by this method, which is what makes a stored row unreachable from here — see
+     * docs/DECISION_LOG.md DL-159.
      *
-     * <p>{@code settings.key} is an assigned {@link String} primary key and the write is a JPA merge:
-     * it reads the row by key and then inserts or updates. Three concurrent outcomes are possible for
-     * one key, and each is reached without raising:
+     * <p>The insert runs in a transaction of its own, opened by {@link #insertTransaction} with
+     * {@code PROPAGATION_REQUIRES_NEW}. A rejected insert therefore rolls back that transaction
+     * alone, leaving any transaction the caller holds usable and the remaining keys still writable.
+     *
+     * <p>{@code existsById} is consulted first and loads no row. It is an optimisation, not the
+     * guard: the primary key is. Two concurrent outcomes are possible for one key and neither writes
+     * over a stored row:
      *
      * <ul>
      *   <li>the key is present when {@code existsById} runs — nothing is written;
-     *   <li>the key is taken between {@code existsById} and the insert the merge issues — the insert
-     *       is rejected, {@link DataIntegrityViolationException} is caught, presence is re-established
-     *       and the row the other writer stored is left as it stands;
-     *   <li>the key is taken between {@code existsById} and the read the merge issues — the merge
-     *       finds that row and updates it, storing the {@code value} and {@code description} this call
-     *       computed.
+     *   <li>the key is taken after {@code existsById} and before the insert reaches the database —
+     *       the insert is rejected by the primary key, the rejection is caught, presence is
+     *       re-established and the row the other writer stored is left exactly as it stands, both its
+     *       {@code value} and its {@code description}.
      * </ul>
      *
-     * <p>A {@link DataIntegrityViolationException} raised while the key is still absent afterwards is
-     * rethrown. Each repository call runs in its own transaction; the rejected write is rolled back on
-     * its own and the re-established presence is read outside it.
+     * <p>A rejection raised while the key is still absent afterwards is rethrown, wrapped in a
+     * {@link DataIntegrityViolationException} when the persistence provider reported it as a
+     * {@link PersistenceException}.
      *
      * <p>An insert is logged once at {@code INFO} and names the key; a key already present, and a key
      * taken concurrently, are logged at {@code DEBUG}. No stored value is written to the log.
@@ -279,20 +312,26 @@ public class SettingsService {
      * @param key         the primary key of the default row
      * @param value       the value to store when the row is written
      * @param description the description to store when the row is written
-     * @throws DataIntegrityViolationException when the write is rejected and the key is still absent
+     * @throws DataIntegrityViolationException when the insert is rejected and the key is still absent
      */
-    // Concurrent seeding of one key — DL-159 — see docs/DECISION_LOG.md
+    // Insert-only seeding of one key — DL-159 — see docs/DECISION_LOG.md
     private void seedIfAbsent(String key, String value, String description) {
         if (settingRepository.existsById(key)) {
             log.debug("Default setting '{}' is already present and is left unchanged.", key);
             return;
         }
         try {
-            settingRepository.saveAndFlush(new Setting(key, value, description));
+            insertTransaction.executeWithoutResult(status -> {
+                entityManager.persist(new Setting(key, value, description));
+                entityManager.flush();
+            });
             log.info("Seeded default setting '{}'.", key);
-        } catch (DataIntegrityViolationException keyTaken) {
+        } catch (DataIntegrityViolationException | PersistenceException keyTaken) {
             if (!settingRepository.existsById(key)) {
-                throw keyTaken;
+                throw (keyTaken instanceof DataIntegrityViolationException rejected)
+                        ? rejected
+                        : new DataIntegrityViolationException(
+                                "The insert of setting '" + key + "' was rejected.", keyTaken);
             }
             log.debug("Default setting '{}' was stored concurrently and is left unchanged.", key);
         }

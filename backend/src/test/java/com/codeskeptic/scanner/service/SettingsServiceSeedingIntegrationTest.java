@@ -2,10 +2,14 @@ package com.codeskeptic.scanner.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -17,6 +21,11 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+import jakarta.persistence.EntityManager;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.SettingDto;
@@ -39,8 +48,10 @@ import com.codeskeptic.scanner.service.mapper.SettingMapper;
  *
  * <p>A Spring Boot test context is started through {@code SpringApplication}, which publishes
  * {@link ApplicationReadyEvent} once the context is refreshed. The three rows are therefore already
- * present when the first test method runs, and they are committed rather than enrolled in any test
- * transaction. Each test method's own writes are rolled back when it returns.
+ * present when the first test method runs. No test-managed transaction wraps a test method — the
+ * seeding inserts each row in a transaction of its own (DL-159), which cannot observe state another
+ * transaction has not committed — so every write a test performs is committed and the table is
+ * restored after each test.
  *
  * <p>The three seeded keys are rows, never schema.
  */
@@ -48,6 +59,7 @@ import com.codeskeptic.scanner.service.mapper.SettingMapper;
 @ActiveProfiles("test")
 @EnableConfigurationProperties(ScannerProperties.class)
 @Import({SettingsService.class, SettingMapper.class})
+@Transactional(propagation = Propagation.NOT_SUPPORTED)
 @DisplayName("SettingsService seeding on ApplicationReadyEvent")
 class SettingsServiceSeedingIntegrationTest {
 
@@ -71,10 +83,13 @@ class SettingsServiceSeedingIntegrationTest {
     private static final String OPERATOR_DESCRIPTION = "Edited through PUT /settings/{key}.";
 
     /** Declared character length of {@code settings.key} — DL-069 — see docs/DECISION_LOG.md. */
-    private static final int SETTINGS_KEY_LENGTH = 255;
+    private static final int SETTINGS_KEY_LENGTH = 768;
 
     /** Delimiter joining the seeded stream keywords. */
     private static final String KEYWORD_DELIMITER = ",";
+
+    /** Name of the presence-check operation a stale read is simulated on. */
+    private static final String EXISTS_BY_ID = "existsById";
 
     /** Unit under test, imported as a bean so its event listener is registered. */
     @Autowired
@@ -95,6 +110,24 @@ class SettingsServiceSeedingIntegrationTest {
     /** This test's own context, carried by every event this class publishes. */
     @Autowired
     private ConfigurableApplicationContext applicationContext;
+
+    /** Persistence context a second service instance is built on for the race test. */
+    @Autowired
+    private EntityManager entityManager;
+
+    /** Transaction manager a second service instance is built on for the race test. */
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+
+    /**
+     * Restores the table to its seeded state after each test. No test-managed transaction wraps a
+     * test method, so every write a test performs is committed and has to be undone here.
+     */
+    @AfterEach
+    void restoreTheSeededTable() {
+        settingRepository.deleteAll();
+        settingsService.seedDefaultSettings();
+    }
 
     @Test
     @DisplayName("has seeded the three default rows by the time the context is ready")
@@ -161,11 +194,55 @@ class SettingsServiceSeedingIntegrationTest {
         assertThat(settingRepository.count()).isEqualTo(SEEDED_KEYS.size());
     }
 
+    // A key taken between the presence check and the insert — DL-159 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("leaves a row inserted after the presence check exactly as it stands, value and "
+            + "description alike")
+    void leavesARowInsertedAfterThePresenceCheckExactlyAsItStands() {
+        settingsService.updateSetting(TWEET_POPULARITY_THRESHOLD_KEY, OPERATOR_VALUE);
+        Setting operatorRow = row(TWEET_POPULARITY_THRESHOLD_KEY);
+        operatorRow.setDescription(OPERATOR_DESCRIPTION);
+        settingRepository.saveAndFlush(operatorRow);
+
+        SettingsService seedingOnAStalePresenceRead = new SettingsService(
+                repositoryReportingKeyAbsent(TWEET_POPULARITY_THRESHOLD_KEY), new SettingMapper(),
+                properties, entityManager, transactionManager);
+
+        seedingOnAStalePresenceRead.seedDefaultSettings();
+
+        Setting afterTheSeeding = row(TWEET_POPULARITY_THRESHOLD_KEY);
+        assertThat(afterTheSeeding.getValue()).as("value of the operator-owned row")
+                .isEqualTo(OPERATOR_VALUE);
+        assertThat(afterTheSeeding.getDescription()).as("description of the operator-owned row")
+                .isEqualTo(OPERATOR_DESCRIPTION);
+        assertThat(settingRepository.count()).as("stored row count")
+                .isEqualTo(SEEDED_KEYS.size());
+    }
+
+    // A key taken between the presence check and the insert, on a key nothing else holds — DL-159
+    @Test
+    @DisplayName("still inserts a genuinely absent row when another key reports a stale presence")
+    void stillInsertsAGenuinelyAbsentRowWhenAnotherKeyReportsAStalePresence() {
+        settingRepository.deleteById(STREAM_KEYWORDS_KEY);
+
+        SettingsService seedingOnAStalePresenceRead = new SettingsService(
+                repositoryReportingKeyAbsent(TWEET_POPULARITY_THRESHOLD_KEY), new SettingMapper(),
+                properties, entityManager, transactionManager);
+
+        seedingOnAStalePresenceRead.seedDefaultSettings();
+
+        assertThat(settingRepository.findAll()).extracting(Setting::getKey)
+                .as("stored keys after the seeding")
+                .containsExactlyInAnyOrderElementsOf(SEEDED_KEYS);
+        assertThat(row(STREAM_KEYWORDS_KEY).getValue()).as("re-inserted tracked terms")
+                .isEqualTo(String.join(KEYWORD_DELIMITER,
+                        properties.ingestion().streamBaseKeywords()));
+    }
+
     @Test
     @DisplayName("writes only the row that is absent and leaves the two present ones untouched")
     void writesOnlyTheRowThatIsAbsentAndLeavesTheTwoPresentOnesUntouched() {
         settingRepository.deleteById(STREAM_KEYWORDS_KEY);
-        settingRepository.flush();
         Setting presentBefore = detached(row(TWEET_POPULARITY_THRESHOLD_KEY));
 
         publishApplicationReadyEvent();
@@ -184,7 +261,6 @@ class SettingsServiceSeedingIntegrationTest {
     @DisplayName("re-seeds every row when the table has been emptied")
     void reSeedsEveryRowWhenTheTableHasBeenEmptied() {
         settingRepository.deleteAll();
-        settingRepository.flush();
         assertThat(settingRepository.count()).isZero();
 
         publishApplicationReadyEvent();
@@ -214,6 +290,37 @@ class SettingsServiceSeedingIntegrationTest {
             assertThat(seeded.getKey()).isIn(SEEDED_KEYS);
             assertThat(seeded.getKey().length()).isLessThanOrEqualTo(SETTINGS_KEY_LENGTH);
         });
+    }
+
+    /**
+     * Wraps the real repository so that the first presence check of one key reports it absent while
+     * its row is really stored, and every later check reports the truth.
+     *
+     * <p>This is the interleaving a second instance produces: it checks presence, another writer
+     * commits the same key, its own insert is then rejected by the actual primary key of the
+     * {@code settings} table — not by a stub — and its re-check sees the row the other writer stored.
+     * Every operation other than that first check reaches the real repository and the real database.
+     *
+     * @param absentKey the key whose first presence check reports absent
+     * @return the wrapping repository
+     */
+    private SettingRepository repositoryReportingKeyAbsent(String absentKey) {
+        AtomicBoolean firstCheck = new AtomicBoolean(true);
+        return (SettingRepository) Proxy.newProxyInstance(
+                SettingRepository.class.getClassLoader(),
+                new Class<?>[] {SettingRepository.class},
+                (proxy, method, arguments) -> {
+                    if (EXISTS_BY_ID.equals(method.getName()) && arguments != null
+                            && arguments.length == 1 && absentKey.equals(arguments[0])
+                            && firstCheck.compareAndSet(true, false)) {
+                        return Boolean.FALSE;
+                    }
+                    try {
+                        return method.invoke(settingRepository, arguments);
+                    } catch (InvocationTargetException delegated) {
+                        throw delegated.getCause();
+                    }
+                });
     }
 
     /**

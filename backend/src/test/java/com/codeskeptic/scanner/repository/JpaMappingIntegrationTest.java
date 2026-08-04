@@ -7,11 +7,15 @@ import com.codeskeptic.scanner.entity.AiTool;
 import com.codeskeptic.scanner.entity.Response;
 import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.entity.Tweet;
+import com.codeskeptic.scanner.util.DelimitedStringListConverter;
 import jakarta.persistence.Column;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Table;
+import java.io.IOException;
 import java.lang.reflect.Field;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Clob;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -31,9 +35,12 @@ import java.util.Optional;
 import java.util.Set;
 import javax.sql.DataSource;
 import org.hibernate.SessionFactory;
+import org.hibernate.boot.MetadataSources;
+import org.hibernate.boot.registry.StandardServiceRegistryBuilder;
+import org.hibernate.cfg.AvailableSettings;
+import org.hibernate.engine.jdbc.connections.internal.UserSuppliedConnectionProviderImpl;
 import org.hibernate.stat.Statistics;
 import org.junit.jupiter.api.DisplayName;
-import org.springframework.data.domain.Slice;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
@@ -128,28 +135,38 @@ class JpaMappingIntegrationTest {
     private static final int UNBOUNDED_ANNOTATION_LENGTH = Integer.MAX_VALUE;
 
     /**
-     * Every character column the source declares as a bare, unbounded {@code Column(String)} and
-     * that the port therefore maps unbounded — backend/app/db/models.py:L11,L15-18 (tweets),
-     * :L24 (responses) and :L36-37 (ai_tools) — DL-068 — see docs/DECISION_LOG.md.
+     * Capacity the {@code settings} primary key is mapped at, on every supported vendor — DL-069 —
+     * see docs/DECISION_LOG.md.
      */
-    private static final Map<String, List<String>> UNBOUNDED_CHARACTER_COLUMNS = Map.of(
+    private static final int PORTABLE_PRIMARY_KEY_LENGTH = 768;
+
+    /**
+     * Every character column the source declares as a bare, unbounded {@code Column(String)} —
+     * backend/app/db/models.py:L11,L15-18 (tweets), :L24 (responses), :L36-37 (ai_tools) and
+     * :L42-44 (settings). All eleven are asserted to carry a physical capacity past the annotation
+     * default — DL-068, DL-069 — see docs/DECISION_LOG.md.
+     */
+    private static final Map<String, List<String>> SOURCE_UNBOUNDED_CHARACTER_COLUMNS = Map.of(
             TWEETS_TABLE,
             List.of("content", "media", "quoted_tweet_id", "user_id", "ai_tools_mentioned"),
             RESPONSES_TABLE, List.of("content"),
             AI_TOOLS_TABLE, List.of("name", "description"),
-            SETTINGS_TABLE, List.of("value", "description"));
+            SETTINGS_TABLE, List.of("key", "value", "description"));
+
+    /** Count of the character columns backend/app/db/models.py declares without a bound. */
+    private static final int SOURCE_UNBOUNDED_CHARACTER_COLUMN_COUNT = 11;
 
     /**
-     * The single character column the port bounds: {@code settings.key} is the natural primary key
-     * and no supported vendor indexes an unbounded character type — DL-069 — see
-     * docs/DECISION_LOG.md.
+     * The {@code settings} primary-key column, mapped at the declared capacity of
+     * {@link #PORTABLE_PRIMARY_KEY_LENGTH} where the other ten carry the unbounded capacity —
+     * DL-069 — see docs/DECISION_LOG.md.
      */
-    private static final String BOUNDED_PRIMARY_KEY_COLUMN = "key";
+    private static final String PRIMARY_KEY_CHARACTER_COLUMN = "key";
 
     /**
-     * Smallest physical capacity a column mapped unbounded may report. It is one character past the
-     * capacity an undeclared {@code @Column#length()} would render, so a column that silently
-     * acquired the annotation default fails.
+     * Smallest physical capacity a column mapped unbounded may report: one character past
+     * {@link #DEFAULT_ANNOTATION_LENGTH}, the capacity an undeclared {@code @Column#length()}
+     * renders.
      */
     private static final int SMALLEST_UNBOUNDED_COLUMN_SIZE = DEFAULT_ANNOTATION_LENGTH + 1;
 
@@ -167,20 +184,40 @@ class JpaMappingIntegrationTest {
     private static final String IS_NULLABLE = "IS_NULLABLE";
     private static final String IS_AUTOINCREMENT = "IS_AUTOINCREMENT";
 
-    private static final Set<Integer> LONG_IDENTIFIER_TYPES = Set.of(Types.BIGINT);
-    private static final Set<Integer> INTEGER_TYPES = Set.of(Types.INTEGER, Types.SMALLINT);
-    private static final Set<Integer> TIMESTAMP_TYPES =
-            Set.of(Types.TIMESTAMP, Types.TIMESTAMP_WITH_TIMEZONE);
+    /**
+     * The type family of the three surrogate keys and the one foreign key, all four of which
+     * backend/app/db/models.py:L10,L23,L27,L35 declares {@code Integer}. A 64-bit identifier column
+     * fails this expectation.
+     */
+    private static final Set<Integer> IDENTIFIER_TYPES = Set.of(Types.INTEGER);
+
+    /** The type family of {@code tweets.like_count}, declared {@code Column(Integer)} at :L12. */
+    private static final Set<Integer> INTEGER_TYPES = Set.of(Types.INTEGER);
+
+    /**
+     * The type family of the two {@code Column(DateTime)} columns at :L13 and :L25. SQLAlchemy's
+     * {@code DateTime} carries no time zone, so a zone-aware column fails this expectation.
+     */
+    private static final Set<Integer> TIMESTAMP_TYPES = Set.of(Types.TIMESTAMP);
+
+    /** The type family of {@code tweets.doubt_rating}, declared {@code Column(Float)} at :L14. */
     private static final Set<Integer> FLOATING_POINT_TYPES =
             Set.of(Types.DOUBLE, Types.FLOAT, Types.REAL);
+
+    /** The type family of {@code responses.is_approved}, declared {@code Column(Boolean)} at :L26. */
     private static final Set<Integer> BOOLEAN_TYPES = Set.of(Types.BOOLEAN, Types.BIT);
-    private static final Set<Integer> CHARACTER_TYPES = Set.of(Types.CHAR, Types.VARCHAR,
-            Types.LONGVARCHAR, Types.NCHAR, Types.NVARCHAR, Types.LONGNVARCHAR, Types.CLOB,
-            Types.NCLOB);
+
+    /**
+     * The type family of every {@code Column(String)}. SQLAlchemy renders that declaration as a
+     * variable-length character type, so the fixed-width {@code CHAR} and {@code NCHAR} families are
+     * excluded.
+     */
+    private static final Set<Integer> CHARACTER_TYPES = Set.of(Types.VARCHAR,
+            Types.LONGVARCHAR, Types.NVARCHAR, Types.LONGNVARCHAR, Types.CLOB, Types.NCLOB);
 
     private static final Map<String, Map<String, Set<Integer>>> MAPPED_COLUMN_TYPES = Map.of(
             TWEETS_TABLE, Map.of(
-                    "id", LONG_IDENTIFIER_TYPES,
+                    "id", IDENTIFIER_TYPES,
                     "content", CHARACTER_TYPES,
                     "like_count", INTEGER_TYPES,
                     "created_at", TIMESTAMP_TYPES,
@@ -190,13 +227,13 @@ class JpaMappingIntegrationTest {
                     "user_id", CHARACTER_TYPES,
                     "ai_tools_mentioned", CHARACTER_TYPES),
             RESPONSES_TABLE, Map.of(
-                    "id", LONG_IDENTIFIER_TYPES,
+                    "id", IDENTIFIER_TYPES,
                     "content", CHARACTER_TYPES,
                     "generated_at", TIMESTAMP_TYPES,
                     "is_approved", BOOLEAN_TYPES,
-                    "tweet_id", LONG_IDENTIFIER_TYPES),
+                    "tweet_id", IDENTIFIER_TYPES),
             AI_TOOLS_TABLE, Map.of(
-                    "id", LONG_IDENTIFIER_TYPES,
+                    "id", IDENTIFIER_TYPES,
                     "name", CHARACTER_TYPES,
                     "description", CHARACTER_TYPES),
             SETTINGS_TABLE, Map.of(
@@ -204,8 +241,82 @@ class JpaMappingIntegrationTest {
                     "value", CHARACTER_TYPES,
                     "description", CHARACTER_TYPES));
 
+    /** Hibernate setting selecting the script-generation action. */
+    private static final String SCHEMA_GENERATION_SCRIPTS_ACTION =
+            "jakarta.persistence.schema-generation.scripts.action";
+
+    /** Hibernate setting naming the file the create script is written to. */
+    private static final String SCHEMA_GENERATION_SCRIPTS_CREATE_TARGET =
+            "jakarta.persistence.schema-generation.scripts.create-target";
+
+    /** Build directory the generated scripts are written under; backend/.gitignore excludes it. */
+    private static final Path GENERATED_SCRIPT_DIRECTORY = Path.of("target", "generated-schema");
+
+    /**
+     * The physical column type each supported vendor must generate for every one of the twenty
+     * mapped columns, stated as the fragment the {@code create table} statement must contain.
+     *
+     * <p>The expectations are the physical shape of the source declarations at
+     * backend/app/db/models.py:L10-18, :L23-28, :L35-37 and :L42-44: a 32-bit column for every
+     * {@code Column(Integer)} including the {@code responses.tweet_id} foreign key, a zone-free
+     * timestamp for every {@code Column(DateTime)}, a 53-bit binary floating-point column for
+     * {@code Column(Float)}, a boolean column for {@code Column(Boolean)}, the vendor's unbounded
+     * character type for every unbounded {@code Column(String)}, and
+     * {@code varchar(}{@link #PORTABLE_PRIMARY_KEY_LENGTH}{@code )} for the {@code settings} primary
+     * key.
+     *
+     * <p>DL-166 — see docs/DECISION_LOG.md.
+     */
+    private static final Map<String, Map<String, List<String>>> EXPECTED_GENERATED_COLUMN_TYPES =
+            Map.of(
+                    "org.hibernate.dialect.H2Dialect", Map.of(
+                            TWEETS_TABLE, List.of("id integer", "content clob",
+                                    "like_count integer", "created_at timestamp(6)",
+                                    "doubt_rating float(53)", "media clob",
+                                    "quoted_tweet_id clob", "user_id clob",
+                                    "ai_tools_mentioned clob"),
+                            RESPONSES_TABLE, List.of("id integer", "content clob",
+                                    "generated_at timestamp(6)", "is_approved boolean",
+                                    "tweet_id integer"),
+                            AI_TOOLS_TABLE,
+                            List.of("id integer", "name clob", "description clob"),
+                            SETTINGS_TABLE, List.of("\"key\" varchar(768)", "\"value\" clob",
+                                    "description clob")),
+                    "org.hibernate.dialect.PostgreSQLDialect", Map.of(
+                            TWEETS_TABLE, List.of("id integer", "content text",
+                                    "like_count integer", "created_at timestamp(6)",
+                                    "doubt_rating float(53)", "media text",
+                                    "quoted_tweet_id text", "user_id text",
+                                    "ai_tools_mentioned text"),
+                            RESPONSES_TABLE, List.of("id integer", "content text",
+                                    "generated_at timestamp(6)", "is_approved boolean",
+                                    "tweet_id integer"),
+                            AI_TOOLS_TABLE,
+                            List.of("id integer", "name text", "description text"),
+                            SETTINGS_TABLE, List.of("\"key\" varchar(768)", "\"value\" text",
+                                    "description text")),
+                    "org.hibernate.dialect.MySQLDialect", Map.of(
+                            TWEETS_TABLE, List.of("id integer", "content longtext",
+                                    "like_count integer", "created_at datetime(6)",
+                                    "doubt_rating float(53)", "media longtext",
+                                    "quoted_tweet_id longtext", "user_id longtext",
+                                    "ai_tools_mentioned longtext"),
+                            RESPONSES_TABLE, List.of("id integer", "content longtext",
+                                    "generated_at datetime(6)", "is_approved bit",
+                                    "tweet_id integer"),
+                            AI_TOOLS_TABLE,
+                            List.of("id integer", "name longtext", "description longtext"),
+                            SETTINGS_TABLE, List.of("`key` varchar(768)", "`value` longtext",
+                                    "description longtext")));
+
     private static final String DELIMITER = ",";
     private static final double TOLERANCE = 1.0e-9;
+
+    /**
+     * Number of unanswered {@code tweets} rows the backlog query is asserted to return in one call.
+     * It exceeds the largest batch bound any earlier revision of that query carried.
+     */
+    private static final int BACKLOG_ROW_COUNT = 55;
 
     @Autowired
     private TestEntityManager entityManager;
@@ -397,12 +508,12 @@ class JpaMappingIntegrationTest {
     // Ported from backend/app/db/models.py:L10-18,L23-28,L35-37,L42-44 (faithful port) — see
     // docs/DECISION_LOG.md
     // backend/app/db/models.py declares each of those columns as a bare Column(<Type>): none
-    // carries nullable=False, unique=True or a length argument. Every character column declares
-    // length = Integer.MAX_VALUE — DL-068 — except the settings primary key, which declares
-    // length = 255 — DL-069 — see docs/DECISION_LOG.md
+    // carries nullable=False, unique=True or a length argument. Ten character columns declare
+    // length = Integer.MAX_VALUE — DL-068 — and the settings primary key declares length = 768 —
+    // DL-069 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("every mapped entity field leaves the column defaults for nullability and "
-            + "uniqueness in place and declares no narrowing length")
+            + "uniqueness in place and no character column carries the annotation default length")
     void everyMappedEntityFieldLeavesTheColumnDefaultsInPlace() {
         int columnFields = 0;
         int joinColumnFields = 0;
@@ -413,19 +524,23 @@ class JpaMappingIntegrationTest {
                 String location = entityType.getSimpleName() + "#" + field.getName();
                 boolean characterColumn = field.getType().equals(String.class)
                         || field.getType().equals(List.class);
-                boolean boundedPrimaryKey =
-                        normalise(BOUNDED_PRIMARY_KEY_COLUMN).equals(unquotedColumnName(column))
+                boolean primaryKeyCharacterColumn =
+                        normalise(PRIMARY_KEY_CHARACTER_COLUMN).equals(unquotedColumnName(column))
                                 && field.isAnnotationPresent(Id.class);
 
                 assertThat(column.nullable()).as("@Column#nullable of %s", location).isTrue();
                 assertThat(column.unique()).as("@Column#unique of %s", location).isFalse();
-                if (characterColumn && !boundedPrimaryKey) {
+                if (primaryKeyCharacterColumn) {
                     assertThat(column.length()).as("@Column#length of %s", location)
+                            .isNotEqualTo(DEFAULT_ANNOTATION_LENGTH)
+                            .isEqualTo(PORTABLE_PRIMARY_KEY_LENGTH);
+                } else if (characterColumn) {
+                    assertThat(column.length()).as("@Column#length of %s", location)
+                            .isNotEqualTo(DEFAULT_ANNOTATION_LENGTH)
                             .isEqualTo(UNBOUNDED_ANNOTATION_LENGTH);
                 } else {
                     assertThat(column.length()).as("@Column#length of %s", location)
-                            .isGreaterThanOrEqualTo(DEFAULT_ANNOTATION_LENGTH)
-                            .isIn(DEFAULT_ANNOTATION_LENGTH, UNBOUNDED_ANNOTATION_LENGTH);
+                            .isEqualTo(DEFAULT_ANNOTATION_LENGTH);
                 }
                 columnFields++;
             }
@@ -449,18 +564,19 @@ class JpaMappingIntegrationTest {
                 .isEqualTo(MAPPED_COLUMN_COUNT);
     }
 
-    // Ported from backend/app/db/models.py:L11,L15-18,L24,L36-37,L43-44 (faithful port) — DL-068 —
-    // see docs/DECISION_LOG.md
+    // Ported from backend/app/db/models.py:L11,L15-18,L24,L36-37,L42-44 (faithful port) — DL-068,
+    // DL-069 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("every source-unbounded character column is generated with a capacity past the "
-            + "annotation default")
+    @DisplayName("every character column the source leaves unbounded is generated with a capacity "
+            + "past the annotation default")
     void everySourceUnboundedCharacterColumnIsGeneratedUnbounded() throws SQLException {
         int assertedColumns = 0;
 
         try (Connection connection = dataSource.getConnection()) {
             DatabaseMetaData metaData = connection.getMetaData();
 
-            for (Map.Entry<String, List<String>> table : UNBOUNDED_CHARACTER_COLUMNS.entrySet()) {
+            for (Map.Entry<String, List<String>> table
+                    : SOURCE_UNBOUNDED_CHARACTER_COLUMNS.entrySet()) {
                 for (String columnName : table.getValue()) {
                     Map<String, Object> attributes =
                             readColumn(metaData, table.getKey(), columnName);
@@ -479,28 +595,47 @@ class JpaMappingIntegrationTest {
             }
         }
 
-        assertThat(assertedColumns).as("source-unbounded character columns asserted").isEqualTo(10);
+        assertThat(assertedColumns).as("character columns the source leaves unbounded")
+                .isEqualTo(SOURCE_UNBOUNDED_CHARACTER_COLUMN_COUNT);
     }
 
-    // The settings primary key is the single bounded character column — DL-069 — see
-    // docs/DECISION_LOG.md
+    // The declared capacity of the settings primary key — DL-069 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("the settings primary key is the only character column generated with a bound")
-    void theSettingsPrimaryKeyIsTheOnlyBoundedCharacterColumn() throws SQLException {
+    @DisplayName("the settings primary key is generated at the portable maximum capacity and never "
+            + "at the annotation default")
+    void theSettingsPrimaryKeyIsGeneratedAtThePortableMaximumCapacity() throws SQLException {
         try (Connection connection = dataSource.getConnection()) {
             DatabaseMetaData metaData = connection.getMetaData();
             Map<String, Object> attributes =
-                    readColumn(metaData, SETTINGS_TABLE, BOUNDED_PRIMARY_KEY_COLUMN);
+                    readColumn(metaData, SETTINGS_TABLE, PRIMARY_KEY_CHARACTER_COLUMN);
 
             assertThat(attributes.get(DATA_TYPE))
                     .as("java.sql.Types code of column %s.%s", SETTINGS_TABLE,
-                            BOUNDED_PRIMARY_KEY_COLUMN)
+                            PRIMARY_KEY_CHARACTER_COLUMN)
                     .isIn(CHARACTER_TYPES);
             assertThat((int) attributes.get(COLUMN_SIZE))
                     .as("generated capacity of column %s.%s", SETTINGS_TABLE,
-                            BOUNDED_PRIMARY_KEY_COLUMN)
-                    .isEqualTo(DEFAULT_ANNOTATION_LENGTH);
+                            PRIMARY_KEY_CHARACTER_COLUMN)
+                    .isNotEqualTo(DEFAULT_ANNOTATION_LENGTH)
+                    .isEqualTo(PORTABLE_PRIMARY_KEY_LENGTH);
         }
+    }
+
+    // The settings primary key accepts a value of the full generated capacity — DL-069 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("the settings primary key stores a key of the full generated capacity")
+    void theSettingsPrimaryKeyStoresAKeyOfTheFullGeneratedCapacity() {
+        String widestKey = "k".repeat(PORTABLE_PRIMARY_KEY_LENGTH);
+
+        settingRepository.save(new Setting(widestKey, "stored", "A key of the declared width"));
+        entityManager.flush();
+        entityManager.clear();
+
+        Optional<Setting> reloaded = settingRepository.findById(widestKey);
+        assertThat(reloaded).as("row stored under a key of the declared width").isPresent();
+        assertThat(reloaded.get().getKey()).as("stored key")
+                .hasSize(PORTABLE_PRIMARY_KEY_LENGTH).isEqualTo(widestKey);
     }
 
     // Ported from backend/app/db/models.py:L7-8,L20-21,L32-33,L39-40 (faithful port) — see
@@ -563,7 +698,7 @@ class JpaMappingIntegrationTest {
             + "inverse association resolved")
     void reloadedTweetExposesItsResponsesInAscendingIdentifierOrder() {
         Tweet tweet = saveTweet(LocalDateTime.of(2026, 1, 1, 12, 0), 6.5, 120);
-        List<Long> savedResponseIds = new ArrayList<>();
+        List<Integer> savedResponseIds = new ArrayList<>();
         savedResponseIds.add(saveResponse(tweet, "First drafted reply", Boolean.FALSE).getId());
         savedResponseIds.add(saveResponse(tweet, "Second drafted reply", Boolean.TRUE).getId());
         savedResponseIds.add(saveResponse(tweet, "Third drafted reply", null).getId());
@@ -571,14 +706,14 @@ class JpaMappingIntegrationTest {
         entityManager.flush();
         entityManager.clear();
 
-        List<Long> ascendingResponseIds = savedResponseIds.stream().sorted().toList();
+        List<Integer> ascendingResponseIds = savedResponseIds.stream().sorted().toList();
         Optional<Tweet> reloaded = tweetRepository.findById(tweet.getId());
         assertThat(reloaded).as("reloaded tweets row").isPresent();
 
         List<Response> responses = reloaded.get().getResponses();
         assertThat(responses).as("responses of the reloaded tweet").hasSize(3);
 
-        List<Long> loadedResponseIds = responses.stream().map(Response::getId).toList();
+        List<Integer> loadedResponseIds = responses.stream().map(Response::getId).toList();
         assertThat(loadedResponseIds).as("identifier order of the responses collection")
                 .containsExactlyElementsOf(ascendingResponseIds);
         assertThat(loadedResponseIds)
@@ -741,6 +876,125 @@ class JpaMappingIntegrationTest {
                 .isNotNull().isEmpty();
     }
 
+    // Ported from backend/app/db/models.py:L15,L18 (faithful port) — DL-164 — see
+    // docs/DECISION_LOG.md
+    // The codec gives no character a special meaning: a comma inside an element separates it and a
+    // backslash is stored literally. Both are asserted on the stored column text and on the reloaded
+    // attribute.
+    @Test
+    @DisplayName("a delimiter inside an element separates it and a backslash is stored literally")
+    void aDelimiterInsideAnElementSeparatesItAndABackslashIsStoredLiterally() {
+        Tweet tweet = new Tweet();
+        tweet.setContent("An element carrying a delimiter and one carrying a backslash");
+        tweet.setMedia(List.of("https://pbs.example/a,b.png"));
+        tweet.setAiToolsMentioned(List.of("Copi\\lot", "Cursor\\"));
+        Tweet saved = tweetRepository.save(tweet);
+
+        Object[] rawColumns = readDelimitedColumns(saved.getId());
+
+        assertThat((String) rawColumns[0]).as("raw media column value")
+                .isEqualTo("https://pbs.example/a,b.png");
+        assertThat((String) rawColumns[1]).as("raw ai_tools_mentioned column value")
+                .isEqualTo("Copi\\lot,Cursor\\");
+
+        entityManager.clear();
+
+        Optional<Tweet> reloaded = tweetRepository.findById(saved.getId());
+        assertThat(reloaded).as("reloaded tweets row").isPresent();
+        assertThat(reloaded.get().getMedia()).as("media attribute")
+                .containsExactly("https://pbs.example/a", "b.png");
+        assertThat(reloaded.get().getAiToolsMentioned()).as("ai_tools_mentioned attribute")
+                .containsExactly("Copi\\lot", "Cursor\\");
+    }
+
+    // Ported from backend/app/db/models.py:L15,L18 (faithful port) — DL-164 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("surrounding whitespace is discarded on the way in and interior whitespace is kept")
+    void surroundingWhitespaceIsDiscardedAndInteriorWhitespaceIsKept() {
+        Tweet tweet = new Tweet();
+        tweet.setContent("Elements carrying surrounding and interior whitespace");
+        tweet.setMedia(List.of("  https://pbs.example/one.png  ", "\thttps://pbs.example/two.png\n"));
+        tweet.setAiToolsMentioned(List.of("  Copilot  ", "Cursor  Editor", "   "));
+        Tweet saved = tweetRepository.save(tweet);
+
+        Object[] rawColumns = readDelimitedColumns(saved.getId());
+
+        assertThat((String) rawColumns[0]).as("raw media column value")
+                .isEqualTo("https://pbs.example/one.png,https://pbs.example/two.png");
+        assertThat((String) rawColumns[1]).as("raw ai_tools_mentioned column value")
+                .isEqualTo("Copilot,Cursor  Editor");
+
+        entityManager.clear();
+
+        Optional<Tweet> reloaded = tweetRepository.findById(saved.getId());
+        assertThat(reloaded).as("reloaded tweets row").isPresent();
+        assertThat(reloaded.get().getMedia()).as("media attribute")
+                .containsExactly("https://pbs.example/one.png", "https://pbs.example/two.png");
+        assertThat(reloaded.get().getAiToolsMentioned()).as("ai_tools_mentioned attribute")
+                .containsExactly("Copilot", "Cursor  Editor");
+    }
+
+    // Ported from backend/app/db/models.py:L15,L18 (faithful port) — DL-164 — see
+    // docs/DECISION_LOG.md
+    // A value written by a hand edit is read by the same codec as a value this converter wrote.
+    @Test
+    @DisplayName("a hand-written column value is read by the same codec, backslashes and repeated "
+            + "delimiters included")
+    void aHandWrittenColumnValueIsReadByTheSameCodec() {
+        Tweet tweet = new Tweet();
+        tweet.setContent("A row whose delimited columns are written as raw text");
+        Tweet saved = tweetRepository.save(tweet);
+        entityManager.flush();
+
+        writeDelimitedColumns(saved.getId(), " a , b ,,c\\d, ,e\\",
+                "Copilot,,  Cursor  ,C:\\tools\\codeium,");
+        entityManager.clear();
+
+        Object[] rawColumns = readDelimitedColumns(saved.getId());
+        assertThat((String) rawColumns[0]).as("raw media column value")
+                .isEqualTo(" a , b ,,c\\d, ,e\\");
+        assertThat((String) rawColumns[1]).as("raw ai_tools_mentioned column value")
+                .isEqualTo("Copilot,,  Cursor  ,C:\\tools\\codeium,");
+
+        Optional<Tweet> reloaded = tweetRepository.findById(saved.getId());
+        assertThat(reloaded).as("reloaded tweets row").isPresent();
+        assertThat(reloaded.get().getMedia()).as("media attribute")
+                .containsExactly("a", "b", "c\\d", "e\\");
+        assertThat(reloaded.get().getAiToolsMentioned()).as("ai_tools_mentioned attribute")
+                .containsExactly("Copilot", "Cursor", "C:\\tools\\codeium");
+    }
+
+    // Ported from backend/app/db/models.py:L15,L18 (faithful port) — DL-164 — see
+    // docs/DECISION_LOG.md
+    // The column codec and the Notion mirror are the same code; the mirror calls the two static
+    // members asserted here.
+    @Test
+    @DisplayName("the column codec is the one authorized codec and round-trips every delimiter-free "
+            + "element")
+    void theColumnCodecIsTheOneAuthorizedCodec() {
+        List<String> elements = List.of("Copilot", "C:\\tools\\codeium", "\"Cursor\"",
+                "Café — assistant", "🤖 helper", "Cursor  Editor");
+
+        String delimited = DelimitedStringListConverter.encode(elements);
+
+        assertThat(delimited).as("encoded value")
+                .isEqualTo(String.join(DELIMITER, elements));
+        assertThat(DelimitedStringListConverter.decode(delimited)).as("decoded value")
+                .containsExactlyElementsOf(elements);
+        assertThat(new DelimitedStringListConverter().convertToDatabaseColumn(elements))
+                .as("column value written through the converter").isEqualTo(delimited);
+        assertThat(new DelimitedStringListConverter().convertToEntityAttribute(delimited))
+                .as("attribute read through the converter").containsExactlyElementsOf(elements);
+        assertThat(DelimitedStringListConverter.encode(null)).as("encoded null list").isNull();
+        assertThat(DelimitedStringListConverter.encode(List.of(" ", ""))).as("encoded blank list")
+                .isNull();
+        assertThat(DelimitedStringListConverter.decode(null)).as("decoded null value")
+                .isNotNull().isEmpty();
+        assertThat(DelimitedStringListConverter.decode(" , ,")).as("decoded blank tokens")
+                .isNotNull().isEmpty();
+    }
+
     // Ported from backend/app/db/models.py:L42-44 (faithful port) — DL-061 — see
     // docs/DECISION_LOG.md
     @Test
@@ -841,24 +1095,30 @@ class JpaMappingIntegrationTest {
         entityManager.flush();
     }
 
-    // Ported from backend/app/tasks/response_generation.py:L43 (faithful port) — see
-    // docs/DECISION_LOG.md
+    // Ported from backend/app/tasks/response_generation.py:L43, whose expression ended in `.all()`
+    // (faithful port) — see docs/DECISION_LOG.md DL-182
     @Test
-    @DisplayName("the backlog query returns one bounded ascending batch of unanswered tweets")
-    void theBacklogQueryReturnsOneBoundedAscendingBatchOfUnansweredTweets() {
+    @DisplayName("the backlog query returns every unanswered tweet in one unbounded call")
+    void theBacklogQueryReturnsEveryUnansweredTweetInOneUnboundedCall() {
         Tweet answered = saveTweet(LocalDateTime.of(2026, 1, 1, 9, 0), 7.0, 250);
         saveResponse(answered, "Already drafted", Boolean.FALSE);
-        Tweet unanswered = saveTweet(LocalDateTime.of(2026, 1, 1, 10, 0), 8.0, 300);
+
+        List<Integer> unansweredIds = new ArrayList<>();
+        for (int row = 0; row < BACKLOG_ROW_COUNT; row++) {
+            unansweredIds.add(saveTweet(LocalDateTime.of(2026, 1, 2, 9, 0).plusMinutes(row),
+                    8.0, 300 + row).getId());
+        }
 
         entityManager.flush();
         entityManager.clear();
 
-        Slice<Tweet> backlog =
-                tweetRepository.findByResponsesIsEmptyOrderByIdAsc(PageRequest.of(0, 50));
+        List<Tweet> backlog = tweetRepository.findByResponsesIsEmpty();
 
-        assertThat(backlog.getContent()).extracting(Tweet::getId)
-                .as("tweets carrying no response").containsExactly(unanswered.getId());
-        assertThat(backlog.hasNext()).as("a 50-row bound over one unanswered row").isFalse();
+        assertThat(backlog).extracting(Tweet::getId)
+                .as("every tweets row carrying no response")
+                .containsExactlyInAnyOrderElementsOf(unansweredIds);
+        assertThat(backlog).extracting(Tweet::getId)
+                .as("the answered row is excluded").doesNotContain(answered.getId());
     }
 
     // Net-new (no Python counterpart: the AnalyticsService imported at
@@ -985,7 +1245,7 @@ class JpaMappingIntegrationTest {
         statistics.clear();
 
         Page<Response> page = responseRepository.findAll(PageRequest.of(0, 10));
-        List<Long> parentIds = page.getContent().stream()
+        List<Integer> parentIds = page.getContent().stream()
                 .map(response -> response.getTweet().getId())
                 .toList();
 
@@ -1018,6 +1278,131 @@ class JpaMappingIntegrationTest {
                         "Editor with an integrated assistant");
         assertThat(aiToolRepository.findAll()).extracting(AiTool::getId)
                 .as("identifiers of every stored ai_tools row").doesNotContainNull();
+    }
+
+    // Ported from backend/app/db/models.py:L10-18,L23-28,L35-37,L42-44 (faithful port) — DL-166 —
+    // see docs/DECISION_LOG.md
+    // The expectations below are the physical types of the source declarations, stated per vendor;
+    // the generated statements are produced from the four entity classes with no database contacted.
+    @Test
+    @DisplayName("the generated schema carries the source column types on every supported vendor")
+    void theGeneratedSchemaCarriesTheSourceColumnTypesOnEverySupportedVendor() {
+        for (Map.Entry<String, Map<String, List<String>>> vendor
+                : EXPECTED_GENERATED_COLUMN_TYPES.entrySet()) {
+            Map<String, String> statements = generateCreateStatements(vendor.getKey());
+
+            assertThat(statements.keySet()).as("tables generated for %s", vendor.getKey())
+                    .containsExactlyInAnyOrderElementsOf(MAPPED_TABLES);
+
+            for (Map.Entry<String, List<String>> table : vendor.getValue().entrySet()) {
+                String statement = statements.get(table.getKey());
+                for (String columnFragment : table.getValue()) {
+                    assertThat(statement)
+                            .as("create statement of table %s on %s", table.getKey(),
+                                    vendor.getKey())
+                            .contains(columnFragment);
+                }
+            }
+        }
+    }
+
+    // Ported from backend/app/db/models.py:L10,L23,L27,L35 (faithful port) — DL-138, DL-070,
+    // DL-166 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("no generated statement declares a 64-bit identifier column on any supported "
+            + "vendor")
+    void noGeneratedStatementDeclaresA64BitIdentifierColumn() {
+        for (String dialect : EXPECTED_GENERATED_COLUMN_TYPES.keySet()) {
+            Map<String, String> statements = generateCreateStatements(dialect);
+
+            for (Map.Entry<String, String> table : statements.entrySet()) {
+                assertThat(table.getValue())
+                        .as("create statement of table %s on %s", table.getKey(), dialect)
+                        .doesNotContain("bigint")
+                        .doesNotContain("int8")
+                        .doesNotContain("serial");
+            }
+        }
+    }
+
+    // The declared capacity of the settings primary key — DL-069, DL-166 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("no generated statement bounds a character column at the annotation default, and "
+            + "the settings primary key alone carries the portable maximum")
+    void noGeneratedStatementBoundsACharacterColumnAtTheAnnotationDefault() {
+        String portableKeyType = "varchar(" + PORTABLE_PRIMARY_KEY_LENGTH + ")";
+        String defaultBound = "varchar(" + DEFAULT_ANNOTATION_LENGTH + ")";
+
+        for (String dialect : EXPECTED_GENERATED_COLUMN_TYPES.keySet()) {
+            Map<String, String> statements = generateCreateStatements(dialect);
+
+            for (Map.Entry<String, String> table : statements.entrySet()) {
+                assertThat(table.getValue())
+                        .as("create statement of table %s on %s", table.getKey(), dialect)
+                        .doesNotContain(defaultBound);
+            }
+            assertThat(statements.get(SETTINGS_TABLE))
+                    .as("create statement of table %s on %s", SETTINGS_TABLE, dialect)
+                    .contains(portableKeyType);
+            for (String table : List.of(TWEETS_TABLE, RESPONSES_TABLE, AI_TOOLS_TABLE)) {
+                assertThat(statements.get(table))
+                        .as("create statement of table %s on %s", table, dialect)
+                        .doesNotContain("varchar(");
+            }
+        }
+    }
+
+    /**
+     * Generates the {@code create table} statement of each mapped table for one dialect.
+     *
+     * <p>Metadata is built from the four entity classes with the dialect stated explicitly, JDBC
+     * metadata access disabled and no connection provider, so no database is contacted for a vendor
+     * that is not running. The script is written under {@code target/} and read back.
+     *
+     * @param dialect the fully qualified Hibernate dialect class name
+     * @return one lower-cased statement per mapped table, keyed by logical table name
+     */
+    // Net-new (no Python counterpart) — DL-166 — see docs/DECISION_LOG.md
+    private static Map<String, String> generateCreateStatements(String dialect) {
+        Map<String, Object> settings = new LinkedHashMap<>();
+        settings.put(AvailableSettings.DIALECT, dialect);
+        settings.put(AvailableSettings.ALLOW_METADATA_ON_BOOT, "false");
+        settings.put(AvailableSettings.CONNECTION_PROVIDER,
+                new UserSuppliedConnectionProviderImpl());
+        settings.put(SCHEMA_GENERATION_SCRIPTS_ACTION, "create");
+
+        Path script;
+        try {
+            Files.createDirectories(GENERATED_SCRIPT_DIRECTORY);
+            script = Files.createTempFile(GENERATED_SCRIPT_DIRECTORY, "schema-", ".sql");
+        } catch (IOException e) {
+            throw new AssertionError("The generated schema script could not be created.", e);
+        }
+        settings.put(SCHEMA_GENERATION_SCRIPTS_CREATE_TARGET, script.toAbsolutePath().toString());
+
+        List<String> lines;
+        try {
+            MetadataSources sources =
+                    new MetadataSources(new StandardServiceRegistryBuilder()
+                            .applySettings(settings).build());
+            MAPPED_ENTITIES.forEach(sources::addAnnotatedClass);
+            sources.buildMetadata().buildSessionFactory().close();
+            lines = Files.readAllLines(script);
+        } catch (IOException e) {
+            throw new AssertionError("The generated schema script could not be read.", e);
+        }
+
+        Map<String, String> statements = new LinkedHashMap<>();
+        for (String line : lines) {
+            String statement = line.toLowerCase(Locale.ROOT);
+            for (String logicalTable : MAPPED_TABLES) {
+                if (statement.startsWith("create table " + logicalTable + " ")) {
+                    statements.put(logicalTable, statement);
+                }
+            }
+        }
+        return statements;
     }
 
     /**
@@ -1330,13 +1715,35 @@ class JpaMappingIntegrationTest {
      * @return a two-element array holding the {@code media} value then the
      *         {@code ai_tools_mentioned} value
      */
-    private Object[] readDelimitedColumns(Long tweetId) {
+    private Object[] readDelimitedColumns(Integer tweetId) {
         entityManager.flush();
         Object[] rawColumns = (Object[]) entityManager.getEntityManager()
                 .createNativeQuery("select media, ai_tools_mentioned from tweets where id = :tweetId")
                 .setParameter("tweetId", tweetId)
                 .getSingleResult();
         return new Object[] {characterValueText(rawColumns[0]), characterValueText(rawColumns[1])};
+    }
+
+    /**
+     * Writes the raw {@code media} and {@code ai_tools_mentioned} column values of one tweet,
+     * bypassing the attribute converter.
+     *
+     * <p>This reproduces a value written by a hand edit or by an earlier revision, so the read path
+     * can be asserted against text the converter did not produce.
+     *
+     * @param tweetId          the identifier of the row to write
+     * @param media            the raw {@code media} column text
+     * @param aiToolsMentioned the raw {@code ai_tools_mentioned} column text
+     */
+    private void writeDelimitedColumns(Integer tweetId, String media, String aiToolsMentioned) {
+        entityManager.getEntityManager()
+                .createNativeQuery("update tweets set media = :media, "
+                        + "ai_tools_mentioned = :aiToolsMentioned where id = :tweetId")
+                .setParameter("media", media)
+                .setParameter("aiToolsMentioned", aiToolsMentioned)
+                .setParameter("tweetId", tweetId)
+                .executeUpdate();
+        entityManager.flush();
     }
 
     /**

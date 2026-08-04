@@ -4,8 +4,6 @@ import com.codeskeptic.scanner.entity.Tweet;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
-import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Slice;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -13,7 +11,7 @@ import org.springframework.data.repository.query.Param;
 /**
  * Spring Data JPA repository for the {@link Tweet} aggregate, which maps the {@code tweets} table.
  *
- * <p>The identifier type is {@link Long}, matching the {@code @Id} field of {@link Tweet}.
+ * <p>The identifier type is {@link Integer}, matching the {@code @Id} field of {@link Tweet}.
  *
  * <p>Consumers reach the following operations through the surface inherited from
  * {@link JpaRepository}:
@@ -22,10 +20,10 @@ import org.springframework.data.repository.query.Param;
  *   <li>{@code findAll(Pageable)} returns one page of rows and backs {@code GET /tweets}. The caller
  *       builds the {@code Pageable}: the wire {@code page} parameter is 1-based and Spring Data is
  *       0-based — see docs/DECISION_LOG.md DL-038.
- *   <li>{@code findById(Long)} returns one row wrapped in an {@link java.util.Optional} and backs
+ *   <li>{@code findById(Integer)} returns one row wrapped in an {@link java.util.Optional} and backs
  *       {@code GET /tweets/{tweetId}} and {@code POST /tweets/{tweetId}/analyze}. An empty
  *       {@link java.util.Optional} denotes a row that is not present. The caller parses the path
- *       value before calling, so this operation only ever receives a {@link Long} — see
+ *       value before calling, so this operation only ever receives an {@link Integer} — see
  *       docs/DECISION_LOG.md DL-048.
  *   <li>{@code save(Tweet)} inserts an ingested row and writes back an updated
  *       {@code doubt_rating} — see docs/DECISION_LOG.md DL-049.
@@ -42,8 +40,7 @@ import org.springframework.data.repository.query.Param;
  * a single artifact serves PostgreSQL, MySQL/MariaDB and H2 — see docs/DECISION_LOG.md DL-027.
  *
  * <p>{@link Tweet#getResponses()} is lazy and {@code spring.jpa.open-in-view} is {@code false}. The
- * empty-collection predicate of {@link #findByResponsesIsEmptyOrderByIdAsc(Pageable)} is evaluated in
- * SQL, and a
+ * empty-collection predicate of {@link #findByResponsesIsEmpty()} is evaluated in SQL, and a
  * {@link Tweet} is mapped to its wire representation inside the calling transaction.
  *
  * <p>{@code doubt_rating} is computed by {@code SentimentAnalysisService} and the popularity gate over
@@ -52,7 +49,7 @@ import org.springframework.data.repository.query.Param;
  * @see Tweet
  */
 // Ported from backend/app/db/database.py:L10-13 (faithful port) — see docs/DECISION_LOG.md
-public interface TweetRepository extends JpaRepository<Tweet, Long> {
+public interface TweetRepository extends JpaRepository<Tweet, Integer> {
 
     /**
      * Returns every {@code tweets} row that has no associated {@code responses} row.
@@ -62,18 +59,16 @@ public interface TweetRepository extends JpaRepository<Tweet, Long> {
      * predicate, which the persistence provider issues as a correlated {@code not exists} subquery.
      * The {@code responses} collection of a returned {@link Tweet} is not initialised by this call.
      *
-     * <p>The bound is carried by the supplied {@link Pageable}, so the caller always states a batch
-     * size. The rows arrive in ascending identifier order and a {@link Slice} is returned, which
-     * issues no count query — see docs/DECISION_LOG.md DL-149.
+     * <p>The result is unbounded and unordered: every matching row is returned in one call, and the
+     * method name states no sort, so the order is the one the database reports — see
+     * docs/DECISION_LOG.md DL-182.
      *
-     * @param pageable the batch bound and offset; the sort order is fixed by the method name
-     * @return one bounded, ascending batch of {@code tweets} rows with zero associated
-     *         {@code responses} rows; an empty slice when every row has at least one
+     * @return every {@code tweets} row with zero associated {@code responses} rows; an empty list
+     *         when every row has at least one. Never {@code null}
      */
     // Ported from backend/app/tasks/response_generation.py:L43, whose expression was
-    // `Tweet.query.filter(Tweet.response == None).all()` (ported with a documented bound) — see
-    // docs/DECISION_LOG.md
-    Slice<Tweet> findByResponsesIsEmptyOrderByIdAsc(Pageable pageable);
+    // `Tweet.query.filter(Tweet.response == None).all()` (faithful port) — see docs/DECISION_LOG.md
+    List<Tweet> findByResponsesIsEmpty();
 
     /**
      * Returns the mean of the {@code tweets.doubt_rating} column over every row of the table.

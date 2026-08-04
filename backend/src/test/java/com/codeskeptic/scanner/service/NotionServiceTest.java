@@ -42,6 +42,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.TweetDto;
+import com.codeskeptic.scanner.util.DelimitedStringListConverter;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -156,6 +157,21 @@ class NotionServiceTest {
 
     /** {@link TweetDto#aiToolsMentioned()} of the post the tests mirror. */
     private static final List<String> AI_TOOLS_MENTIONED = List.of("GitHub Copilot", "Cursor");
+
+    /**
+     * Value of {@link TweetDto#media()} carrying an element that itself holds the delimiter — DL-164
+     * — see docs/DECISION_LOG.md.
+     */
+    private static final List<String> EDGE_CASE_MEDIA =
+            List.of("https://pbs.example/a,b.png", "https://pbs.example/c.png");
+
+    /**
+     * Value of {@link TweetDto#aiToolsMentioned()} carrying a backslash, a trailing backslash,
+     * surrounding whitespace, interior whitespace and a blank element — DL-164 — see
+     * docs/DECISION_LOG.md.
+     */
+    private static final List<String> EDGE_CASE_AI_TOOLS = Arrays.asList("C:\\tools\\codeium",
+            "Cursor\\", "  Copilot  ", "Cursor  Editor", "   ", null);
 
     // -------------------------------------------------------------------------
     // Arguments handed to getTweets(int, String) and updateTweetResponse(String, String)
@@ -472,6 +488,75 @@ class NotionServiceTest {
         assertThat(storedProperty(PROPERTY_AI_TOOLS_MENTIONED).has(KEY_RICH_TEXT)).isTrue();
         assertThat(textOf(storedProperty(PROPERTY_AI_TOOLS_MENTIONED), KEY_RICH_TEXT))
                 .isEqualTo(String.join(",", AI_TOOLS_MENTIONED));
+    }
+
+    // The mirror and the two delimited columns share one codec — DL-164 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("writes both list properties through the codec the delimited columns use")
+    void writesBothListPropertiesThroughTheCodecTheDelimitedColumnsUse() {
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+
+        service.storeTweet(tweetCarryingLists(EDGE_CASE_MEDIA, EDGE_CASE_AI_TOOLS));
+
+        assertThat(textOf(storedProperty(PROPERTY_MEDIA), KEY_RICH_TEXT))
+                .isEqualTo(DelimitedStringListConverter.encode(EDGE_CASE_MEDIA));
+        assertThat(textOf(storedProperty(PROPERTY_AI_TOOLS_MENTIONED), KEY_RICH_TEXT))
+                .isEqualTo(DelimitedStringListConverter.encode(EDGE_CASE_AI_TOOLS));
+    }
+
+    // The mirror and the two delimited columns share one codec — DL-164 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("mirrors a delimiter, a backslash, a trailing backslash and surrounding whitespace "
+            + "exactly as the delimited columns do")
+    void mirrorsEdgeCaseListValuesExactlyAsTheDelimitedColumnsDo() {
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+        service.storeTweet(tweetCarryingLists(EDGE_CASE_MEDIA, EDGE_CASE_AI_TOOLS));
+        JsonNode written = storedProperties();
+
+        assertThat(textOf(written.path(PROPERTY_MEDIA), KEY_RICH_TEXT))
+                .as("mirrored media text")
+                .isEqualTo("https://pbs.example/a,b.png,https://pbs.example/c.png");
+        assertThat(textOf(written.path(PROPERTY_AI_TOOLS_MENTIONED), KEY_RICH_TEXT))
+                .as("mirrored ai tools text")
+                .isEqualTo("C:\\tools\\codeium,Cursor\\,Copilot,Cursor  Editor");
+
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, written)));
+        List<TweetDto> mirrored = service.getTweets(LIMIT, START_CURSOR);
+
+        assertThat(mirrored).hasSize(1);
+        assertThat(mirrored.get(0).media()).as("media read back from the mirror")
+                .containsExactlyElementsOf(
+                        DelimitedStringListConverter.decode(
+                                DelimitedStringListConverter.encode(EDGE_CASE_MEDIA)))
+                .containsExactly("https://pbs.example/a", "b.png", "https://pbs.example/c.png");
+        assertThat(mirrored.get(0).aiToolsMentioned()).as("ai tools read back from the mirror")
+                .containsExactlyElementsOf(
+                        DelimitedStringListConverter.decode(
+                                DelimitedStringListConverter.encode(EDGE_CASE_AI_TOOLS)))
+                .containsExactly("C:\\tools\\codeium", "Cursor\\", "Copilot", "Cursor  Editor");
+    }
+
+    // The mirror and the two delimited columns share one codec — DL-164 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reads a hand-written mirror value through the same codec as a column value")
+    void readsAHandWrittenMirrorValueThroughTheSameCodecAsAColumnValue() {
+        String handWritten = "Copilot,,  Cursor  ,C:\\tools\\codeium,";
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+        service.storeTweet(tweet());
+        JsonNode written = storedProperties();
+        ((ObjectNode) written).set(PROPERTY_AI_TOOLS_MENTIONED, richText(handWritten));
+
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, written)));
+        List<TweetDto> mirrored = service.getTweets(LIMIT, START_CURSOR);
+
+        assertThat(mirrored).hasSize(1);
+        assertThat(mirrored.get(0).aiToolsMentioned())
+                .as("hand-written mirror value read through the shared codec")
+                .containsExactlyElementsOf(DelimitedStringListConverter.decode(handWritten))
+                .containsExactly("Copilot", "Cursor", "C:\\tools\\codeium");
     }
 
     @Test
@@ -1059,6 +1144,18 @@ class NotionServiceTest {
                 QUOTED_TWEET_ID, USER_ID, AI_TOOLS_MENTIONED);
     }
 
+    /**
+     * Builds a post carrying the supplied list components and the remaining fixture values.
+     *
+     * @param media            value of {@link TweetDto#media()}
+     * @param aiToolsMentioned value of {@link TweetDto#aiToolsMentioned()}
+     * @return the post
+     */
+    private static TweetDto tweetCarryingLists(List<String> media, List<String> aiToolsMentioned) {
+        return new TweetDto(TWEET_ID, TWEET_CONTENT, LIKE_COUNT, CREATED_AT, DOUBT_RATING, media,
+                QUOTED_TWEET_ID, USER_ID, aiToolsMentioned);
+    }
+
     // -------------------------------------------------------------------------
     // Fixtures: the stubbed fluent chains
     // -------------------------------------------------------------------------
@@ -1192,7 +1289,7 @@ class NotionServiceTest {
         ArgumentCaptor<Object> sentBodies = ArgumentCaptor.forClass(Object.class);
         verify(spec, times(expectedCount)).body(sentBodies.capture());
         return sentBodies.getAllValues().stream()
-                .map(body -> (JsonNode) MAPPER.valueToTree(body))
+                .<JsonNode>map(MAPPER::valueToTree)
                 .toList();
     }
 

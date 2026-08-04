@@ -301,7 +301,7 @@ public class ResponseService {
 
         log.info("Generating a response for tweet '{}'.", tweetId);
 
-        Long identifier = parseIdentifier(tweetId);
+        Integer identifier = parseIdentifier(tweetId);
         try {
             TweetDto subject = readSubject(identifier);
             String generatedText = llmService.generateResponse(subject);
@@ -334,7 +334,7 @@ public class ResponseService {
      */
     // Replaces Tweet.get(tweet_id) at backend/app/tasks/response_generation.py:L16 — DL-086 — see
     // docs/DECISION_LOG.md
-    private TweetDto readSubject(Long identifier) {
+    private TweetDto readSubject(Integer identifier) {
         Optional<Tweet> found = (identifier == null)
                 ? Optional.empty()
                 : tweetRepository.findById(identifier);
@@ -363,7 +363,7 @@ public class ResponseService {
      */
     // Replaces response.save() at backend/app/tasks/response_generation.py:L25-26 — DL-086 — see
     // docs/DECISION_LOG.md
-    private ResponseDto store(Long identifier, String generatedText) {
+    private ResponseDto store(Integer identifier, String generatedText) {
         return transactionTemplate.execute(status -> {
             Optional<Tweet> found = (identifier == null)
                     ? Optional.empty()
@@ -470,7 +470,7 @@ public class ResponseService {
      * @return the row, or an empty {@link Optional} when {@code responseId} names none
      */
     private Optional<Response> findByIdentifier(String responseId) {
-        Long identifier = parseIdentifier(responseId);
+        Integer identifier = parseIdentifier(responseId);
         return (identifier == null) ? Optional.empty() : responseRepository.findById(identifier);
     }
 
@@ -478,20 +478,20 @@ public class ResponseService {
      * Converts a raw path segment or request value into the identifier type the repositories take.
      *
      * <p>{@code null} is returned for a {@code null} value and for a value that
-     * {@link Long#valueOf(String)} does not accept, which includes the empty string, a whitespace-only
-     * value, a value carrying any non-digit character and a value beyond the range of a
-     * {@link Long}. No value is trimmed before the conversion.
+     * {@link Integer#valueOf(String)} does not accept, which includes the empty string, a
+     * whitespace-only value, a value carrying any non-digit character and a value beyond the range of
+     * an {@link Integer}. No value is trimmed before the conversion.
      *
      * @param value the raw value to convert; may be {@code null}
      * @return the converted identifier, or {@code null} when {@code value} carries no number
      */
     // DL-077 — see docs/DECISION_LOG.md
-    private static Long parseIdentifier(String value) {
+    private static Integer parseIdentifier(String value) {
         if (value == null) {
             return null;
         }
         try {
-            return Long.valueOf(value);
+            return Integer.valueOf(value);
         } catch (NumberFormatException e) {
             return null;
         }

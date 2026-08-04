@@ -87,7 +87,7 @@ Four tables, twenty columns, one association — no table, column, index or cons
 
 | # | Source table | Source column and type | Java field | Java mapping | Status |
 |---|--------------|------------------------|------------|--------------|--------|
-| 1 | `tweets` | `id Integer primary_key` (`models.py:L10`) | `entity/Tweet.id` `Long` | `@Id @GeneratedValue(IDENTITY) @Column(name = "id")` (DL-049) | Delivered |
+| 1 | `tweets` | `id Integer primary_key` (`models.py:L10`) | `entity/Tweet.id` `Integer` | `@Id @GeneratedValue(IDENTITY) @Column(name = "id")` (DL-049/DL-138) | Delivered |
 | 2 | `tweets` | `content String` (`:L11`) | `entity/Tweet.content` `String` | `@Column(name = "content", length = Integer.MAX_VALUE)` (DL-068) | Delivered |
 | 3 | `tweets` | `like_count Integer` (`:L12`) | `entity/Tweet.likeCount` `Integer` | `@Column(name = "like_count")` | Delivered |
 | 4 | `tweets` | `created_at DateTime` (`:L13`) | `entity/Tweet.createdAt` `LocalDateTime` | `@Column(name = "created_at")` | Delivered |
@@ -96,7 +96,7 @@ Four tables, twenty columns, one association — no table, column, index or cons
 | 7 | `tweets` | `quoted_tweet_id String` (`:L16`) | `entity/Tweet.quotedTweetId` `String` | `@Column(name = "quoted_tweet_id", length = Integer.MAX_VALUE)` | Delivered |
 | 8 | `tweets` | `user_id String` (`:L17`) | `entity/Tweet.userId` `String` | `@Column(name = "user_id", length = Integer.MAX_VALUE)` | Delivered |
 | 9 | `tweets` | `ai_tools_mentioned String` (`:L18`) | `entity/Tweet.aiToolsMentioned` `List<String>` | `@Convert(DelimitedStringListConverter) @Column(name = "ai_tools_mentioned", length = Integer.MAX_VALUE)` — no foreign key to `ai_tools` | Delivered |
-| 10 | `responses` | `id Integer primary_key` (`:L23`) | `entity/Response.id` `Long` | `@Id @GeneratedValue(IDENTITY) @Column(name = "id")` | Delivered |
+| 10 | `responses` | `id Integer primary_key` (`:L23`) | `entity/Response.id` `Integer` | `@Id @GeneratedValue(IDENTITY) @Column(name = "id")` (DL-025/DL-138) | Delivered |
 | 11 | `responses` | `content String` (`:L24`) | `entity/Response.content` `String` | `@Column(name = "content", length = Integer.MAX_VALUE)` (DL-068) | Delivered |
 | 12 | `responses` | `generated_at DateTime` (`:L25`) | `entity/Response.generatedAt` `LocalDateTime` | `@Column(name = "generated_at")` (DL-077) | Delivered |
 | 13 | `responses` | `is_approved Boolean` (`:L26`) | `entity/Response.isApproved` `Boolean` | `@Column(name = "is_approved")` — a flag a human reads, never a trigger | Delivered |
@@ -104,7 +104,7 @@ Four tables, twenty columns, one association — no table, column, index or cons
 | 15 | `ai_tools` | `id Integer primary_key` (`:L35`) | `entity/AiTool.id` `Integer` | `@Id @GeneratedValue(IDENTITY) @Column(name = "id")` (DL-070) | Delivered |
 | 16 | `ai_tools` | `name String` (`:L36`) | `entity/AiTool.name` `String` | `@Column(name = "name", length = Integer.MAX_VALUE)` (DL-068) | Delivered |
 | 17 | `ai_tools` | `description String` (`:L37`) | `entity/AiTool.description` `String` | `@Column(name = "description", length = Integer.MAX_VALUE)` (DL-068) | Delivered |
-| 18 | `settings` | `key String primary_key` (`:L42`) | `entity/Setting.key` `String` | `@Id @Column(name = "\"key\"", length = 255)` — quoted reserved word (DL-061), bounded by the documented exception (DL-069) | Delivered |
+| 18 | `settings` | `key String primary_key` (`:L42`) | `entity/Setting.key` `String` | `@Id @Column(name = "\"key\"", length = Setting.KEY_LENGTH)` — quoted reserved word (DL-061), capacity 768, generated as `varchar(768)` on all three supported vendors (DL-069) | Delivered |
 | 19 | `settings` | `value String` (`:L43`) | `entity/Setting.value` `String` | `@Column(name = "\"value\"", length = Integer.MAX_VALUE)` (DL-061/DL-068) | Delivered |
 | 20 | `settings` | `description String` (`:L44`) | `entity/Setting.description` `String` | `@Column(name = "description", length = Integer.MAX_VALUE)` (DL-068) | Delivered |
 
@@ -356,14 +356,14 @@ signature; it is still net-new code, not a port.
 | `entity/Response.java` | `db/models.py:L21-28` | `@Table(name = "responses")`, five columns, `@ManyToOne @JoinColumn(name = "tweet_id")` (DL-025) |
 | `entity/AiTool.java` | `db/models.py:L32-37` | `@Table(name = "ai_tools")`, three columns, no association (DL-070) |
 | `entity/Setting.java` | `db/models.py:L39-44` | `@Table(name = "settings")`, `key` as `@Id`; both reserved-word columns quoted (DL-061/DL-069) |
-| `repository/TweetRepository.java` | `db/database.py:L10-13`, plus the broken candidate query at `tasks/response_generation.py:L43` | `JpaRepository<Tweet, Long>`, `findByResponsesIsEmpty()` and the analytics aggregates (A8, DL-075) |
-| `repository/ResponseRepository.java` | `db/database.py:L10-13` | `JpaRepository<Response, Long>` with `countByIsApprovedTrue()` |
+| `repository/TweetRepository.java` | `db/database.py:L10-13`, plus the broken candidate query at `tasks/response_generation.py:L43` | `JpaRepository<Tweet, Integer>`, the unbounded `findByResponsesIsEmpty()` (DL-182) and the analytics aggregates (A8, DL-075) |
+| `repository/ResponseRepository.java` | `db/database.py:L10-13` | `JpaRepository<Response, Integer>` with `countByIsApprovedTrue()` |
 | `repository/AiToolRepository.java` | `db/database.py:L10-13` | `JpaRepository<AiTool, Integer>`; supplies tool names to the keyword set (DL-044) |
 | `repository/SettingRepository.java` | `db/database.py:L10-13` | `JpaRepository<Setting, String>` — the key is the primary key |
 | `service/mapper/TweetMapper.java` | *Net-new class, derived from* the `to_dict()` called at `api/tweets.py:L19,L30` and never defined | Identifier-to-string and delimited-column-to-array conversion (A7, DL-023/DL-024) |
 | `service/mapper/ResponseMapper.java` | *Net-new class, derived from* the `to_dict()` called at `api/responses.py:L18,L29,L47,L63` and never defined | Same, for `responses` (A7) |
 | `service/mapper/SettingMapper.java` | *Net-new class, derived from* the serialisation `api/settings.py:L11,L24` performed inline and never factored out | Entity to `SettingDto` (DL-039) |
-| `util/DelimitedStringListConverter.java` | *Net-new class, derived from* `db/models.py:L15,L18` against `schema/tweet.py:L11,L14` — single `String` columns the schema exposed as `List[str]` with no conversion anywhere | Comma-delimited, blank-safe, no schema change (DL-024) |
+| `util/DelimitedStringListConverter.java` | *Net-new class, derived from* `db/models.py:L15,L18` against `schema/tweet.py:L11,L14` — single `String` columns the schema exposed as `List[str]` with no conversion anywhere | Comma-delimited, blank-safe, no schema change; the one authorized codec, reused by `service/NotionService` for the same two values (DL-024/DL-164) |
 
 ### 2.5 Exceptions
 
@@ -382,7 +382,7 @@ signature; it is still net-new code, not a port.
 | `service/NotionService.java` | `services/notion_service.py:L14-38`, plus the absent `update_tweet_response` | Mirroring only; the relational database stays the system of record (A12, DL-013) |
 | `service/LlmService.java` | `services/llm_service.py:L16-32` | Chat Completions, the three call literals preserved, `GeneratedResponse` as the internal result (DL-032 … DL-035, DL-167, DL-168) |
 | `service/ResponseService.java` | *Net-new class, derived from* the four call sites at `api/responses.py:L15,L26,L44,L60`; the class was imported at `:L3` and never existed (D4) | Signatures dictated by the call sites; never publishes to X (DL-076/DL-077/DL-168) |
-| `service/SettingsService.java` | *Net-new class, derived from* the two call sites at `api/settings.py:L10,L20`; the class was imported at `:L3` and never existed (D4) | Instance methods on an injected bean, plus idempotent seeding (DL-039/DL-040/DL-043/DL-073) |
+| `service/SettingsService.java` | *Net-new class, derived from* the two call sites at `api/settings.py:L10,L20`; the class was imported at `:L3` and never existed (D4) | Instance methods on an injected bean, plus insert-only per-key seeding (DL-039/DL-040/DL-043/DL-073/DL-159) |
 | `service/AnalyticsService.java` | *Net-new class, derived from* the two zero-argument call sites at `api/analytics.py:L14,L24`; the class was imported at `:L3` and never existed (D4) | Aggregates over the four existing tables only; no new column, index or cache (DL-041/DL-042/DL-075) |
 
 ### 2.7 Tests

@@ -15,7 +15,8 @@ import com.codeskeptic.scanner.entity.Tweet;
  *
  * <p>A conversion copies the five {@code responses} columns in the source declaration order —
  * {@code id}, {@code content}, {@code generated_at}, {@code is_approved} and {@code tweet_id} — and
- * applies one transformation, twice: a {@link Long} identifier becomes its decimal {@link String}
+ * applies one transformation, twice: an {@link Integer} identifier becomes its decimal
+ * {@link String}
  * form.
  *
  * <p>The {@code tweet_id} value is read through the {@code tweet} association, which is
@@ -51,7 +52,7 @@ public final class ResponseMapper {
         if (response == null) {
             return null;
         }
-        Long identifier = response.getId();
+        Integer identifier = response.getId();
         if (identifier == null) {
             throw new IllegalStateException(
                     "A response that carries no identifier has not been stored and has no wire form.");
@@ -91,7 +92,7 @@ public final class ResponseMapper {
      * @return the decimal string form of {@code identifier}, or {@code null} when
      *         {@code identifier} is {@code null}
      */
-    private static String identifierAsString(Long identifier) {
+    private static String identifierAsString(Integer identifier) {
         return identifier == null ? null : String.valueOf(identifier);
     }
 }

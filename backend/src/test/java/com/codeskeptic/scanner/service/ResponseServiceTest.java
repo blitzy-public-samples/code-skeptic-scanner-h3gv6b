@@ -56,7 +56,7 @@ class ResponseServiceTest {
     private static final String RESPONSE_ID = "88";
 
     /** Numeric form of {@link #TWEET_ID}, the value the repository is queried with. */
-    private static final long TWEET_KEY = 4711L;
+    private static final int TWEET_KEY = 4711;
 
     /** Text {@link LlmService} returns for an accepted generation. */
     private static final String GENERATED_TEXT = "Even seasoned reviewers disagree.";
@@ -93,7 +93,7 @@ class ResponseServiceTest {
         when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
         when(responseRepository.save(any(Response.class))).thenAnswer(invocation -> {
             Response saved = invocation.getArgument(0);
-            saved.setId(Long.valueOf(RESPONSE_ID));
+            saved.setId(Integer.valueOf(RESPONSE_ID));
             return saved;
         });
         when(responseMapper.toDto(any(Response.class))).thenAnswer(invocation -> {
@@ -127,7 +127,7 @@ class ResponseServiceTest {
             assertThat(saved.getContent()).isEqualTo(GENERATED_TEXT);
             assertThat(saved.getIsApproved()).isFalse();
             assertThat(saved.getGeneratedAt()).isNotNull();
-            saved.setId(Long.valueOf(RESPONSE_ID));
+            saved.setId(Integer.valueOf(RESPONSE_ID));
             return saved;
         });
         when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());

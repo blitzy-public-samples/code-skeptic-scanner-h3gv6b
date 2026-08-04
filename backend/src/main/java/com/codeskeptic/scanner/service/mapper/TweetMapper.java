@@ -15,7 +15,8 @@ import com.codeskeptic.scanner.entity.Tweet;
  * <p>A conversion copies all nine {@code tweets} columns in the source declaration order —
  * {@code id}, {@code content}, {@code like_count}, {@code created_at}, {@code doubt_rating},
  * {@code media}, {@code quoted_tweet_id}, {@code user_id} and {@code ai_tools_mentioned} — and
- * applies exactly one transformation: the {@link Long} identifier becomes its decimal {@link String}
+ * applies exactly one transformation: the {@link Integer} identifier becomes its decimal
+ * {@link String}
  * form, and stays {@code null} when the entity carries no identifier.
  *
  * <p>Every other column value is copied verbatim.
@@ -42,7 +43,7 @@ public final class TweetMapper {
         if (tweet == null) {
             return null;
         }
-        Long identifier = tweet.getId();
+        Integer identifier = tweet.getId();
         return new TweetDto(
                 identifier == null ? null : String.valueOf(identifier),
                 tweet.getContent(),

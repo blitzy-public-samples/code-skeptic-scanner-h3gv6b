@@ -33,7 +33,7 @@ jobs:
 
     - name: Build and push backend Docker image
       run: |
-        docker build -t $BACKEND_IMAGE ./backend
+        docker build -t $BACKEND_IMAGE -f infrastructure/docker/Dockerfile.backend ./backend
         docker push $BACKEND_IMAGE
 
     - name: Deploy backend to Google Cloud Run

@@ -1,0 +1,2 @@
+# Keep the Docker build context (./backend) small: never ship local build output.
+target/

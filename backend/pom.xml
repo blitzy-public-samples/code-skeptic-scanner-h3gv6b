@@ -7,28 +7,30 @@
     <!--
       Code Skeptic Scanner - backend service.
 
-      Replaces the retired Python 3.9 / Flask package that previously occupied this
-      directory. There was no Python dependency manifest at all (no requirements.txt,
-      pyproject.toml, Pipfile or setup.py), even though the container image, the CI
-      workflow and scripts/setup_environment.sh all tried to install from one - so this
-      file is a net-new artifact rather than a conversion.
+      Net-new (no source construct): the retired Python 3.9 / Flask tree at
+      backend/app/** and backend/tests/** carried no dependency manifest of any
+      kind, while infrastructure/docker/Dockerfile.backend:L8-11,
+      .github/workflows/ci.yml:L26-29 and scripts/setup_environment.sh:L12 each
+      installed from one. Every coordinate below was reconstructed from the
+      import statements of those 20 files.
 
-      Dependency policy: inherit spring-boot-starter-parent so that the overwhelming
-      majority of coordinates are BOM-managed, and pin explicitly only those artifacts
-      the Spring Boot BOM does not manage. There are no "latest" or placeholder versions
-      and no private repository is involved - every coordinate resolves from Maven Central
-      with default settings.
+      Decisions covering this file are recorded in docs/DECISION_LOG.md;
+      construct-level provenance is recorded in docs/TRACEABILITY_MATRIX.md.
     -->
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
         <version>3.5.16</version>
-        <relativePath/><!-- always resolve the parent from the repository -->
+        <relativePath/>
     </parent>
 
+    <!-- Names derived from Celery('code_skeptic_scanner')
+         (backend/app/tasks/response_generation.py:L8) and the backend image
+         name in .github/workflows/cd.yml:L12 - see docs/DECISION_LOG.md
+         DL-002. -->
     <groupId>com.codeskeptic</groupId>
     <artifactId>code-skeptic-scanner-backend</artifactId>
-    <version>1.0.0</version>
+    <version>0.0.1-SNAPSHOT</version>
     <packaging>jar</packaging>
 
     <name>code-skeptic-scanner-backend</name>
@@ -36,106 +38,98 @@
 
     <properties>
         <java.version>21</java.version>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
-
-        <!-- Explicitly pinned coordinates: not managed by the Spring Boot BOM. -->
-        <jjwt.version>0.13.0</jjwt.version>
-        <google-cloud-language.version>2.96.0</google-cloud-language.version>
-        <openai-java.version>4.49.0</openai-java.version>
     </properties>
 
     <dependencies>
-        <!-- ==================================================================
-             Web surface: @RestController endpoints, embedded Tomcat, Jackson and
-             org.springframework.web.client.RestClient (used by the Notion adapter,
-             so no extra HTTP-client dependency is required).
-             ================================================================== -->
+        <!-- Replaces PyPI Flask (backend/app/main.py:L1,
+             backend/app/api/tweets.py:L1) and Flask-Cors
+             (backend/app/main.py:L2). Supplies
+             org.springframework.web.client.RestClient, used by the Notion
+             adapter - see docs/DECISION_LOG.md DL-013. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
-        <!-- WebClient, for the long-lived X (Twitter) API v2 filtered stream.
-             The application itself remains a servlet application; see
-             spring.main.web-application-type in application.yml. -->
+        <!-- Replaces PyPI tweepy (backend/app/services/twitter_service.py:L1,
+             backend/app/tasks/tweet_monitoring.py:L1). Supplies WebClient for
+             the X API v2 filtered stream - see docs/DECISION_LOG.md DL-012. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webflux</artifactId>
         </dependency>
 
-        <!-- Persistence: Spring Data JPA, Hibernate ORM and HikariCP pooling. -->
+        <!-- Replaces PyPI SQLAlchemy (backend/app/db/database.py:L1-2,
+             backend/app/db/models.py:L1-3). -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-jpa</artifactId>
         </dependency>
 
-        <!-- Security: SecurityFilterChain, BCryptPasswordEncoder,
-             InMemoryUserDetailsManager. -->
+        <!-- Replaces PyPI Flask-JWT-Extended (backend/app/main.py:L3,
+             backend/app/api/tweets.py:L2) and passlib
+             (backend/app/core/security.py:L3). -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-security</artifactId>
         </dependency>
 
-        <!-- Bean Validation (Hibernate Validator). -->
+        <!-- Replaces the declarative typing of PyPI pydantic
+             (backend/app/schema/tweet.py:L1,
+             backend/app/schema/response.py:L1) - see docs/DECISION_LOG.md
+             DL-050. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
-        <!-- @ConfigurationProperties metadata generation. -->
+        <!-- Metadata for the @ConfigurationProperties port of
+             backend/app/core/config.py:L4-15. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-configuration-processor</artifactId>
             <optional>true</optional>
         </dependency>
 
-        <!-- ==================================================================
-             JWT minting and parsing (explicit pins - not BOM-managed).
-             ================================================================== -->
+        <!-- Replaces PyPI PyJWT (backend/app/core/security.py:L1). Explicitly
+             pinned - see docs/DECISION_LOG.md DL-014. -->
         <dependency>
             <groupId>io.jsonwebtoken</groupId>
             <artifactId>jjwt-api</artifactId>
-            <version>${jjwt.version}</version>
+            <version>0.13.0</version>
         </dependency>
         <dependency>
             <groupId>io.jsonwebtoken</groupId>
             <artifactId>jjwt-impl</artifactId>
-            <version>${jjwt.version}</version>
+            <version>0.13.0</version>
             <scope>runtime</scope>
         </dependency>
         <dependency>
             <groupId>io.jsonwebtoken</groupId>
             <artifactId>jjwt-jackson</artifactId>
-            <version>${jjwt.version}</version>
+            <version>0.13.0</version>
             <scope>runtime</scope>
         </dependency>
 
-        <!-- ==================================================================
-             External integrations (explicit pins - not BOM-managed).
-             ================================================================== -->
-
-        <!-- Google Cloud Natural Language: sentiment analysis. Authenticates with
-             Application Default Credentials, so no API-key property is required. -->
+        <!-- Replaces PyPI google-cloud-language
+             (backend/app/services/sentiment_analysis.py:L1). Explicitly
+             pinned - see docs/DECISION_LOG.md DL-010. -->
         <dependency>
             <groupId>com.google.cloud</groupId>
             <artifactId>google-cloud-language</artifactId>
-            <version>${google-cloud-language.version}</version>
+            <version>2.96.0</version>
         </dependency>
 
-        <!-- OpenAI: response generation. Official client; replaces the removed
-             openai-python 0.x Completion API. -->
+        <!-- Replaces PyPI openai (backend/app/services/llm_service.py:L1).
+             Explicitly pinned - see docs/DECISION_LOG.md DL-011. -->
         <dependency>
             <groupId>com.openai</groupId>
             <artifactId>openai-java</artifactId>
-            <version>${openai-java.version}</version>
+            <version>4.49.0</version>
         </dependency>
 
-        <!-- ==================================================================
-             JDBC drivers. DATABASE_URL is a single opaque string that does not
-             name a vendor at compile time, so both drivers sit on the runtime
-             classpath and Hibernate detects the dialect from connection metadata.
-             ================================================================== -->
+        <!-- JDBC drivers for DATABASE_URL (backend/app/core/config.py:L9) -
+             see docs/DECISION_LOG.md DL-027 and DL-028. -->
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
@@ -147,22 +141,27 @@
             <scope>runtime</scope>
         </dependency>
 
-        <!-- In-memory database used by @DataJpaTest and the integration tests, so
-             that `mvn clean verify` needs no external service. -->
+        <!-- Test-time database for @DataJpaTest and the integration tests -
+             see docs/DECISION_LOG.md DL-009. -->
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
             <scope>runtime</scope>
         </dependency>
 
-        <!-- ==================================================================
-             Test scope: JUnit Jupiter, Mockito, AssertJ, MockMvc, WebTestClient.
-             ================================================================== -->
+        <!-- Replaces PyPI pytest (backend/tests/test_api.py:L1,
+             backend/tests/test_tasks.py:L1), unittest and unittest.mock
+             (backend/tests/test_services.py:L1-2) and the fastapi.testclient
+             import at backend/tests/test_api.py:L2. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+
+        <!-- Security-aware MockMvc support for the @WebMvcTest classes,
+             replacing the unauthenticated fastapi TestClient calls in
+             backend/tests/test_api.py. -->
         <dependency>
             <groupId>org.springframework.security</groupId>
             <artifactId>spring-security-test</artifactId>
@@ -172,19 +171,12 @@
 
     <build>
         <plugins>
-            <!-- Produces the executable jar that the container runs, and backs
-                 `mvn spring-boot:run`. Version inherited from the parent. -->
+            <!-- Produces the executable jar and backs `mvn spring-boot:run`.
+                 Version inherited from the parent - see docs/DECISION_LOG.md
+                 DL-004. -->
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
-                <configuration>
-                    <excludes>
-                        <exclude>
-                            <groupId>org.springframework.boot</groupId>
-                            <artifactId>spring-boot-configuration-processor</artifactId>
-                        </exclude>
-                    </excludes>
-                </configuration>
             </plugin>
         </plugins>
     </build>

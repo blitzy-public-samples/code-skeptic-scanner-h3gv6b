@@ -54,8 +54,8 @@ All twenty files under `backend/app/**` and `backend/tests/**` were deleted in c
 | 15 | `backend/app/services/llm_service.py` | `service/LlmService.generateResponse` — Chat Completions replacing `Completion.create(engine="text-davinci-002", …)` at `:L19-26` (DL-032/DL-033), the three call literals at `:L22-25` preserved as configuration defaults, the prompt template at `:L16` preserved verbatim (DL-035) | Delivered |
 | 16 | `backend/app/tasks/tweet_monitoring.py` | `task/TweetStreamClient` and `task/TweetStreamListener` — **PLANNED** (DL-044/DL-045/DL-046). Delivered already: `config/WebClientConfig`, the `WebClient` bean replacing the tweepy `Stream` construction at `:L45-51` | Partly delivered |
 | 17 | `backend/app/tasks/response_generation.py` | `task/ResponseGenerationScheduler` — **PLANNED** (DL-047). Delivered already: `config/AsyncSchedulingConfig` carrying `@EnableScheduling` and the task scheduler that replaces the broker-less Celery application at `:L8` | Partly delivered |
-| 18 | `backend/tests/test_api.py` | `api/GlobalExceptionHandlerTest` (delivered, covering the two error envelopes at `main.py:L31-37`). `api/TweetControllerTest`, `api/ResponseControllerTest`, `api/SettingControllerTest`, `api/AnalyticsControllerTest`, `api/AuthControllerTest` and `ScannerApplicationTests` — **PLANNED**. The `fastapi.testclient` import at `:L2` is retired outright | Partly delivered |
-| 19 | `backend/tests/test_services.py` | `service/SentimentAnalysisServiceTest`, `service/NotionServiceTest`, `service/LlmServiceTest`, `service/SettingsServiceTest` and `service/SettingsServiceSeedingIntegrationTest` (delivered). `service/TwitterServiceTest`, `service/ResponseServiceTest`, `service/AnalyticsServiceTest` — **PLANNED**. The wrong-package-root imports at `:L3-6` and the two `pass` stubs at `:L12-22` are retired | Partly delivered |
+| 18 | `backend/tests/test_api.py` | `api/GlobalExceptionHandlerTest` (delivered, covering the two error envelopes at `main.py:L31-37`), `api/SettingControllerTest` and `api/AuthControllerTest` (delivered). `api/TweetControllerTest`, `api/ResponseControllerTest`, `api/AnalyticsControllerTest` and `ScannerApplicationTests` — **PLANNED**. The `fastapi.testclient` import at `:L2` is retired outright | Partly delivered |
+| 19 | `backend/tests/test_services.py` | `service/SentimentAnalysisServiceTest`, `service/NotionServiceTest`, `service/LlmServiceTest`, `service/SettingsServiceTest`, `service/SettingsServiceSeedingIntegrationTest`, `service/TwitterServiceTest`, `service/ResponseServiceTest` and `service/AnalyticsServiceTest` — all delivered. The wrong-package-root imports at `:L3-6` and the two `pass` stubs at `:L12-22` are retired | Delivered |
 | 20 | `backend/tests/test_tasks.py` | `task/ResponseGenerationSchedulerTest` and `task/TweetStreamListenerTest` — **PLANNED**. The import at `:L3` names neither a module nor symbols that exist, so nothing carries forward from it | PLANNED |
 
 ### 1.2 HTTP routes
@@ -264,22 +264,27 @@ name under `backend/` therefore returns these rows and nothing that marks unfini
 ### 1.10 Python test files
 
 Three files, 183 lines, none of which can import. The Agent Action Plan names nineteen JUnit classes
-as their replacement; nine are delivered.
+as their replacement; fifteen are delivered.
 
 | Source test file | Source defect | JUnit replacements | Status |
 |------------------|---------------|--------------------|--------|
-| `backend/tests/test_api.py` | Imports `fastapi.testclient.TestClient` at `:L2` and points it at a Flask application; `test_get_settings` at `:L37-39` requests `/settings/` with a trailing slash and expects a key-to-value map; `test_update_settings` at `:L41-44` `PUT`s to `/settings/`, which is not a registered route; `:L50-51` names `total_tweets` and `total_responses`, which is the one piece of usable evidence in the file | Delivered: `api/GlobalExceptionHandlerTest` (30 cases over both error envelopes). PLANNED: `api/TweetControllerTest`, `api/ResponseControllerTest`, `api/SettingControllerTest`, `api/AnalyticsControllerTest`, `api/AuthControllerTest`, `ScannerApplicationTests`. The two settings expectations are deliberately discounted (DL-039) and the summary key names are honoured (DL-041) | Partly delivered |
-| `backend/tests/test_services.py` | Wrong package root at `:L3-6` (`from services.…`); two `pass` stubs at `:L12-22`; tests for `create_page`, `update_page` and `generate_text` at `:L28-38,L44-48`, none of which exist; asserts sentiment analysis returns `'positive'`/`'negative'`/`'neutral'` at `:L58-65` where the implementation returns a float | Delivered: `service/SentimentAnalysisServiceTest` (52 cases), `service/NotionServiceTest` (85), `service/LlmServiceTest` (70), `service/SettingsServiceTest` (63), `service/SettingsServiceSeedingIntegrationTest` (9). PLANNED: `service/TwitterServiceTest`, `service/ResponseServiceTest`, `service/AnalyticsServiceTest` | Partly delivered |
+| `backend/tests/test_api.py` | Imports `fastapi.testclient.TestClient` at `:L2` and points it at a Flask application; `test_get_settings` at `:L37-39` requests `/settings/` with a trailing slash and expects a key-to-value map; `test_update_settings` at `:L41-44` `PUT`s to `/settings/`, which is not a registered route; `:L50-51` names `total_tweets` and `total_responses`, which is the one piece of usable evidence in the file | Delivered: `api/GlobalExceptionHandlerTest` (46 cases over both error envelopes), `api/SettingControllerTest` (33) and `api/AuthControllerTest` (44). PLANNED: `api/TweetControllerTest`, `api/ResponseControllerTest`, `api/AnalyticsControllerTest`, `ScannerApplicationTests`. The two settings expectations are deliberately discounted (DL-039) and the summary key names are honoured (DL-041) | Partly delivered |
+| `backend/tests/test_services.py` | Wrong package root at `:L3-6` (`from services.…`); two `pass` stubs at `:L12-22`; tests for `create_page`, `update_page` and `generate_text` at `:L28-38,L44-48`, none of which exist; asserts sentiment analysis returns `'positive'`/`'negative'`/`'neutral'` at `:L58-65` where the implementation returns a float | Delivered: `service/SentimentAnalysisServiceTest` (45 cases), `service/NotionServiceTest` (47), `service/LlmServiceTest` (61), `service/SettingsServiceTest` (56), `service/SettingsServiceSeedingIntegrationTest` (11), `service/TwitterServiceTest` (29), `service/ResponseServiceTest` (3), `service/AnalyticsServiceTest` (9). The two `pass` stubs at `:L12-22` are replaced by the popularity-gate matrix of `service/TwitterServiceTest` | Delivered |
 | `backend/tests/test_tasks.py` | `from backend.tasks import monitor_tweets, generate_response` at `:L3` — neither the module path nor either symbol exists | PLANNED: `task/ResponseGenerationSchedulerTest`, `task/TweetStreamListenerTest` | PLANNED |
 
-Five delivered test classes descend from none of the three retired test files, because the Python suite
-tested none of what they cover. Three of the five have no source construct of any kind and are net-new:
-`config/DatabaseUrlTranslatorTest` (108 cases, DL-027/DL-064/DL-071/DL-072),
-`service/SettingsServiceSeedingIntegrationTest` (9 cases, DL-040) and
-`api/ErrorDispatchControllerTest` (60 cases, DL-183). The other two test production
+Six delivered test classes descend from none of the three retired test files, because the Python suite
+tested none of what they cover. Four of the six have no source construct of any kind and are net-new:
+`config/DatabaseUrlTranslatorTest` (42 cases, DL-027/DL-064/DL-071/DL-072),
+`service/SettingsServiceSeedingIntegrationTest` (11 cases, DL-040),
+`api/ErrorDispatchControllerTest` (60 cases, DL-183) and
+`api/AuthControllerTest` (44 cases, DL-019 — also counted against `test_api.py` above, since it tests a
+route that file could not know about). The other two test production
 constructs that do have a source origin, recorded in §2.7 rather than here:
-`security/JwtServiceTest` (57 cases) covers `core/security.py:L6-12`, and
-`repository/JpaMappingIntegrationTest` (30 cases) covers `db/models.py`.
+`security/JwtServiceTest` (64 cases) covers `core/security.py:L6-12`, and
+`repository/JpaMappingIntegrationTest` (38 cases) covers `db/models.py`.
+
+`backend/tests/test_tasks.py` remains the one retired test file with no delivered replacement, because
+the two task classes it maps onto are themselves undelivered (§3).
 
 
 ---
@@ -390,18 +395,26 @@ signature; it is still net-new code, not a port.
 
 ### 2.7 Tests
 
+The `Cases` column records the number of tests Surefire executes for the class, measured on the
+delivered suite rather than estimated.
+
 | Target file | Source construct | Cases | Notes |
 |-------------|------------------|-------|-------|
-| `api/GlobalExceptionHandlerTest.java` | `main.py:L31-37` and `tests/test_api.py` | 30 | Both error envelopes byte-for-byte, plus every per-route literal |
+| `api/AuthControllerTest.java` | *No source construct — net-new* — DL-019 | 44 | The token route end to end through `@WebMvcTest` with the real `SecurityConfig` imported: issuance without an `Authorization` header, the credential-length ceiling, the empty 401 for every rejection, the bearer challenge, scheme casing, the body-size limit, and the bcrypt configuration matrix including the unresolved-placeholder guard (DL-116/DL-118/DL-189) |
+| `api/GlobalExceptionHandlerTest.java` | `main.py:L31-37` and `tests/test_api.py` | 46 | Both error envelopes byte-for-byte, every per-route literal, and the three-way split of the `HttpMessageConversionException` hierarchy driven through the framework's own converter and resolver (DL-092/DL-188) |
 | `api/ErrorDispatchControllerTest.java` | *No source construct — net-new* — DL-183 | 60 | The whole status-to-message map by direct invocation, plus a `@WebMvcTest` slice asserting that `BasicErrorController` is withdrawn, that a direct request answers 404 `Not found`, that an `Accept: text/html` request receives JSON rather than the Whitelabel page, and that no dispatched path reaches a body |
-| `config/DatabaseUrlTranslatorTest.java` | *No source construct — net-new* — DL-027/DL-064/DL-071/DL-072 | 108 | 49 methods: translation, credential extraction and rejection, six look-alike properties, ports, schemes, redaction |
-| `repository/JpaMappingIntegrationTest.java` | `db/models.py` | 30 | `@DataJpaTest` over table names, column names, physical JDBC metadata, unbounded round trips and association ordering (DL-061/DL-068/DL-069) |
-| `security/JwtServiceTest.java` | `core/security.py:L6-12` | 57 | Mint/parse round trip, expiry offset, algorithm matrix and HMAC key-length boundary (DL-014 … DL-018) |
-| `service/LlmServiceTest.java` | `tests/test_services.py:L44-48` | 70 | The delivered Chat Completions call, the generation-failure matrix and lazy-client behaviour (DL-167/DL-168) |
-| `service/NotionServiceTest.java` | `tests/test_services.py:L28-38` | 85 | All three operations plus transport failures, unconfigured database id, null bodies and cursor handling |
-| `service/SentimentAnalysisServiceTest.java` | `tests/test_services.py:L58-65` | 52 | Finite and clamping vectors, NaN and both infinities, null input, propagated client failure and client lifecycle |
-| `service/SettingsServiceTest.java` | `tests/test_api.py:L36-44` and `tests/test_services.py` | 63 | Both operations through the real `SettingMapper`, plus the seeding-normalisation matrix |
-| `service/SettingsServiceSeedingIntegrationTest.java` | *No source construct — net-new* — DL-040 | 9 | A real Boot context over H2 publishing a real `ApplicationReadyEvent`; idempotence and no-overwrite |
+| `api/SettingControllerTest.java` | `tests/test_api.py:L36-44` and `api/settings.py:L7-24` | 33 | A `@WebMvcTest` slice over both routes: the array shape of `GET /settings`, the three-member element, the empty table, the 200 update, the `No value provided` 400, the `Setting not found` 404, validation before lookup, the falsy values the source guard accepts, the `Bad request` 400 for an unbindable or repeated-member body, 415, 405 with `Allow`, 406, and the absence of any prefixed path (DL-039/DL-050/DL-092/DL-188) |
+| `config/DatabaseUrlTranslatorTest.java` | *No source construct — net-new* — DL-027/DL-064/DL-071/DL-072 | 42 | Translation, credential extraction and rejection, six look-alike properties, ports, schemes, redaction |
+| `repository/JpaMappingIntegrationTest.java` | `db/models.py` | 38 | `@DataJpaTest` over table names, column names, physical JDBC metadata, unbounded round trips and association ordering (DL-061/DL-068/DL-069) |
+| `security/JwtServiceTest.java` | `core/security.py:L6-12` | 64 | Mint/parse round trip, expiry offset, algorithm matrix and HMAC key-length boundary (DL-014 … DL-018) |
+| `service/AnalyticsServiceTest.java` | *No source construct — net-new* — DL-041/DL-042 | 9 | The summary metric set and the day-bucketed trend series over the four existing tables |
+| `service/LlmServiceTest.java` | `tests/test_services.py:L44-48` | 61 | The delivered Chat Completions call, the generation-failure matrix and lazy-client behaviour (DL-167/DL-168) |
+| `service/NotionServiceTest.java` | `tests/test_services.py:L28-38` | 47 | All three operations plus transport failures, unconfigured database id, null bodies and cursor handling |
+| `service/ResponseServiceTest.java` | *No source construct — net-new* | 3 | The four operations the call sites at `api/responses.py:L15,L26,L44,L60` dictate, and the absence of any publish path |
+| `service/SentimentAnalysisServiceTest.java` | `tests/test_services.py:L58-65` | 45 | Finite and clamping vectors, NaN and both infinities, null input, propagated client failure and client lifecycle |
+| `service/SettingsServiceTest.java` | `tests/test_api.py:L36-44` and `tests/test_services.py` | 56 | Both operations through the real `SettingMapper`, plus the seeding-normalisation matrix |
+| `service/SettingsServiceSeedingIntegrationTest.java` | *No source construct — net-new* — DL-040 | 11 | A real Boot context over H2 publishing a real `ApplicationReadyEvent`; idempotence and no-overwrite |
+| `service/TwitterServiceTest.java` | `services/twitter_service.py:L42-50` and `tests/test_services.py:L12-22` | 29 | The popularity gate: the inclusive boundary at 99/100/101 against the configured default, the same boundary at two other thresholds, the `settings` row overriding configuration, the configured fallback for a row holding no integer, whitespace discarded, a threshold at or below zero honoured as stored, and an absent like count answered without reading the table (DL-040) |
 
 ### 2.8 Operations files edited outside `backend/`
 
@@ -435,15 +448,10 @@ is the inverse of section 2: it lists targets that section 2 cannot yet contain.
 | 6 | `task/ResponseGenerationScheduler.java` | `tasks/response_generation.py:L35-50` | §1.1 #17, §1.8 D2/A2/A9, §1.9 #12/#13 |
 | 7 | `api/TweetControllerTest.java` | `tests/test_api.py` | §1.1 #18, §1.10 |
 | 8 | `api/ResponseControllerTest.java` | `tests/test_api.py` | §1.1 #18, §1.10 |
-| 9 | `api/SettingControllerTest.java` | `tests/test_api.py:L36-44` | §1.1 #18, §1.10 |
-| 10 | `api/AnalyticsControllerTest.java` | `tests/test_api.py:L47-59` | §1.1 #18, §1.10 |
-| 11 | `api/AuthControllerTest.java` | *net-new* — DL-019 | §1.1 #18, §1.10 |
-| 12 | `ScannerApplicationTests.java` | `tests/test_api.py` — context-load smoke | §1.1 #18, §1.10 |
-| 13 | `service/TwitterServiceTest.java` | `tests/test_services.py:L12-22` | §1.4 #2, §1.9 #20/#21, §1.10 |
-| 14 | `service/ResponseServiceTest.java` | *net-new* | §1.1 #19, §1.10 |
-| 15 | `service/AnalyticsServiceTest.java` | *net-new* | §1.1 #19, §1.10 |
-| 16 | `task/ResponseGenerationSchedulerTest.java` | `tests/test_tasks.py` | §1.1 #20, §1.9 #23, §1.10 |
-| 17 | `task/TweetStreamListenerTest.java` | `tests/test_tasks.py` | §1.1 #20, §1.9 #23, §1.10 |
+| 9 | `api/AnalyticsControllerTest.java` | `tests/test_api.py:L47-59` | §1.1 #18, §1.10 |
+| 10 | `ScannerApplicationTests.java` | `tests/test_api.py` — context-load smoke | §1.1 #18, §1.10 |
+| 11 | `task/ResponseGenerationSchedulerTest.java` | `tests/test_tasks.py` | §1.1 #20, §1.9 #23, §1.10 |
+| 12 | `task/TweetStreamListenerTest.java` | `tests/test_tasks.py` | §1.1 #20, §1.9 #23, §1.10 |
 
 Two consequences follow and are recorded so they are not mistaken for defects in what is delivered.
 The three undelivered controllers mean the eight routes they carry return 404 at runtime even though
@@ -469,16 +477,16 @@ and no scheduled generation fires, so the `tweets` table is populated only throu
 | Named defects D1–D6 (§1.8) | 6 | 6 | 4 | 2 |
 | Additional defects A1–A15 (§1.8) | 15 | 15 | 12 fully, 2 partly, 1 retired by decision | 0 |
 | Scaffolding markers (§1.9) | 23 | 23 | 12 fully, 1 partly | 10 |
-| Python test files (§1.10) | 3 | 3 | 2 partly | 1 |
-| Delivered main Java classes (§2.2–§2.6) | 52 | 52 | 52 | — |
-| Delivered test Java classes (§2.7) | 9 | 9 | 9 | — |
+| Python test files (§1.10) | 3 | 3 | 1 fully, 1 partly | 1 |
+| Delivered main Java classes (§2.2–§2.6) | 54 | 54 | 54 | — |
+| Delivered test Java classes (§2.7) | 15 | 15 | 15 | — |
 | Delivered resources and build files (§2.1) | 7 | 7 | 7 | — |
 | Operations files edited (§2.8) | 4 | 4 | 4 | — |
-| Planned targets (§3) | 17 | 17 | 0 | 17 |
+| Planned targets (§3) | 12 | 12 | 0 | 12 |
 
-Every construct in every required coverage set has a row. Sixty-eight files under `backend/` and four
+Every construct in every required coverage set has a row. Seventy-six files under `backend/` and four
 operations files outside it are mapped back to a source construct or marked net-new with the decision
-that authorises them. Seventeen planned targets are named rather than omitted, so the difference
+that authorises them. Twelve planned targets are named rather than omitted, so the difference
 between "mapped" and "delivered" is visible in every row rather than inferred.
 
 Marker count check: `backend/src/**` and `backend/pom.xml` contain zero `HUMAN ASSISTANCE NEEDED` and

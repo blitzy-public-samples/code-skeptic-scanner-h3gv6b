@@ -1,8 +1,10 @@
 package com.codeskeptic.scanner.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
@@ -26,7 +28,10 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageConversionException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.http.converter.HttpMessageNotWritableException;
+import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.mock.http.MockHttpInputMessage;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
@@ -40,18 +45,22 @@ import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.ExceptionHandlerMethodResolver;
 import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import com.codeskeptic.scanner.dto.ErrorResponse;
+import com.codeskeptic.scanner.dto.LoginRequest;
+import com.codeskeptic.scanner.dto.UpdateSettingRequest;
 import com.codeskeptic.scanner.exception.BadRequestException;
 import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.exception.ResponseGenerationException;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.exc.InvalidDefinitionException;
 
 // Ported from backend/app/main.py:L31-37 (faithful port) — see docs/DECISION_LOG.md
 class GlobalExceptionHandlerTest {
@@ -325,6 +334,118 @@ class GlobalExceptionHandlerTest {
                         "a request value the target type cannot hold"));
     }
 
+    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("returns 400 with the Bad request envelope for a message-conversion failure")
+    void returns400WithBadRequestForAMessageConversionFailure() throws JsonProcessingException {
+        ResponseEntity<ErrorResponse> response = handler.handleMessageConversionFailure(
+                new HttpMessageConversionException(CAUSE_MESSAGE));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(400);
+        assertErrorEnvelope(response, BAD_REQUEST);
+        assertThat(envelopeOf(response).toString()).doesNotContain(CAUSE_MESSAGE);
+    }
+
+    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {1}")
+    @MethodSource("bodiesRepeatingARecordComponent")
+    @DisplayName("answers a body repeating a record component with 400 and never 500")
+    void answersABodyRepeatingARecordComponentWith400AndNever500(
+            Class<?> targetType, String body) throws JsonProcessingException {
+
+        HttpMessageConversionException raised = conversionFailureReadingBody(targetType, body);
+
+        assertThat(raised).isExactlyInstanceOf(HttpMessageConversionException.class);
+        assertThat(raised).isNotInstanceOf(HttpMessageNotReadableException.class);
+        assertThat(raised.getCause()).isInstanceOf(InvalidDefinitionException.class);
+
+        Method resolved = resolverForTheAdvice().resolveMethod(raised);
+        assertThat(resolved)
+                .isNotNull()
+                .isEqualTo(handlerMethodFor(HttpMessageConversionException.class));
+
+        ResponseEntity<ErrorResponse> response = handler.handleMessageConversionFailure(raised);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(400);
+        assertErrorEnvelope(response, BAD_REQUEST);
+        assertThat(envelopeOf(response).toString()).doesNotContain("password");
+    }
+
+    private static Stream<Arguments> bodiesRepeatingARecordComponent() {
+        return Stream.of(
+                Arguments.of(UpdateSettingRequest.class, "{\"value\":\"first\",\"value\":\"second\"}"),
+                Arguments.of(UpdateSettingRequest.class, "{\"value\":\"same\",\"value\":\"same\"}"),
+                Arguments.of(UpdateSettingRequest.class, "{\"value\":null,\"value\":\"x\"}"),
+                Arguments.of(UpdateSettingRequest.class,
+                        "{\"value\":\"a\",\"value\":\"b\",\"value\":\"c\"}"),
+                Arguments.of(LoginRequest.class,
+                        "{\"username\":\"admin\",\"password\":\"a\",\"password\":\"b\"}"));
+    }
+
+    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("returns 500 with the Internal server error envelope for a response-write failure")
+    void returns500WithInternalServerErrorForAResponseWriteFailure() throws JsonProcessingException {
+        HttpMessageNotWritableException raised = new HttpMessageNotWritableException(CAUSE_MESSAGE);
+
+        Method resolved = resolverForTheAdvice().resolveMethod(raised);
+        assertThat(resolved)
+                .isNotNull()
+                .isEqualTo(handlerMethodFor(HttpMessageNotWritableException.class));
+
+        ResponseEntity<ErrorResponse> response = handler.handleResponseWriteFailure(raised);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(500);
+        assertErrorEnvelope(response, INTERNAL_SERVER_ERROR);
+        assertThat(envelopeOf(response).toString()).doesNotContain(CAUSE_MESSAGE);
+    }
+
+    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("routes each type of the conversion hierarchy to its own handler by direction")
+    void routesEachTypeOfTheConversionHierarchyToItsOwnHandler() {
+        ExceptionHandlerMethodResolver resolver = resolverForTheAdvice();
+
+        assertThat(resolver.resolveMethod(malformedBody()))
+                .isEqualTo(handlerMethodFor(HttpMessageNotReadableException.class));
+        assertThat(resolver.resolveMethod(new HttpMessageConversionException(CAUSE_MESSAGE)))
+                .isEqualTo(handlerMethodFor(HttpMessageConversionException.class));
+        assertThat(resolver.resolveMethod(new HttpMessageNotWritableException(CAUSE_MESSAGE)))
+                .isEqualTo(handlerMethodFor(HttpMessageNotWritableException.class));
+
+        Method readable = handlerMethodFor(HttpMessageNotReadableException.class);
+        Method supertype = handlerMethodFor(HttpMessageConversionException.class);
+        Method writable = handlerMethodFor(HttpMessageNotWritableException.class);
+        assertThat(Set.of(readable, supertype, writable)).hasSize(3);
+        assertThat(writable).isNotEqualTo(handlerMethodFor(Exception.class));
+    }
+
+    /**
+     * Reads {@code body} onto {@code targetType} through the framework's own Jackson converter and
+     * returns the conversion failure it raises.
+     *
+     * @param targetType the record the body is bound onto
+     * @param body       the request body, as received
+     * @return the raised exception
+     */
+    private static HttpMessageConversionException conversionFailureReadingBody(
+            Class<?> targetType, String body) {
+
+        MappingJackson2HttpMessageConverter converter = new MappingJackson2HttpMessageConverter();
+        MockHttpInputMessage message =
+                new MockHttpInputMessage(body.getBytes(StandardCharsets.UTF_8));
+        message.getHeaders().setContentType(MediaType.APPLICATION_JSON);
+
+        return (HttpMessageConversionException) assertThatThrownBy(
+                () -> converter.read(targetType, null, message))
+                        .isInstanceOf(HttpMessageConversionException.class)
+                        .actual();
+    }
+
+    private static ExceptionHandlerMethodResolver resolverForTheAdvice() {
+        return new ExceptionHandlerMethodResolver(GlobalExceptionHandler.class);
+    }
+
     @Test
     @DisplayName("returns 405 with the allowed methods for an unsupported request method")
     void returns405WithTheAllowedMethodsForAnUnsupportedRequestMethod() throws JsonProcessingException {
@@ -461,6 +582,8 @@ class GlobalExceptionHandlerTest {
                 NoHandlerFoundException.class,
                 NoResourceFoundException.class,
                 HttpMessageNotReadableException.class,
+                HttpMessageConversionException.class,
+                HttpMessageNotWritableException.class,
                 ServletRequestBindingException.class,
                 MissingServletRequestPartException.class,
                 TypeMismatchException.class,
@@ -538,6 +661,12 @@ class GlobalExceptionHandlerTest {
         invocations.add(handler.handleNoHandlerFound());
         invocations.add(handler.handleClientRequestFailure(malformedBody()));
         invocations.add(handler.handleClientRequestFailure(missingParameter()));
+        invocations.add(handler.handleMessageConversionFailure(
+                new HttpMessageConversionException(CAUSE_MESSAGE)));
+        invocations.add(handler.handleMessageConversionFailure(conversionFailureReadingBody(
+                UpdateSettingRequest.class, "{\"value\":\"first\",\"value\":\"second\"}")));
+        invocations.add(handler.handleResponseWriteFailure(
+                new HttpMessageNotWritableException(CAUSE_MESSAGE)));
         invocations.add(handler.handleMethodNotSupported(methodNotSupported()));
         invocations.add(handler.handleUnsupportedMediaType(unsupportedMediaType()));
         invocations.add(handler.handleNotAcceptable(new HttpMediaTypeNotAcceptableException("none")));

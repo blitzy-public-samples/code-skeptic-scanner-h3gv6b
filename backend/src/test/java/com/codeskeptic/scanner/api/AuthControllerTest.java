@@ -388,6 +388,59 @@ class AuthControllerTest {
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("scanner.auth.password-hash");
         }
+
+        // Net-new (no Python counterpart) — DL-189 — see docs/DECISION_LOG.md
+        @ParameterizedTest(name = "[{index}] [{0}]")
+        @ValueSource(strings = {
+            "${AUTH_PASSWORD_HASH}",
+            "   ${AUTH_PASSWORD_HASH}   ",
+            "${SOMETHING_ELSE}",
+            "${}"
+        })
+        @DisplayName("reads an unresolved property placeholder as an unsupplied bcrypt hash")
+        void readsAnUnresolvedPlaceholderAsAnUnsuppliedBcryptHash(String passwordHash) {
+            assertThatThrownBy(() -> securityConfig(passwordHash).userDetailsService())
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("scanner.auth.password-hash")
+                    .hasMessageContaining("is not configured")
+                    .hasMessageContaining("AUTH_PASSWORD_HASH")
+                    .satisfies(failure -> {
+                        assertThat(failure.getMessage()).doesNotContain("does not carry a bcrypt hash");
+                        assertThat(failure.getMessage()).doesNotContain(passwordHash.trim());
+                    });
+        }
+
+        // Net-new (no Python counterpart) — DL-189 — see docs/DECISION_LOG.md
+        @Test
+        @DisplayName("separates an unsupplied bcrypt hash from a malformed one by message")
+        void separatesAnUnsuppliedBcryptHashFromAMalformedOneByMessage() {
+            for (String unsupplied : new String[] {null, "", "   ", "${AUTH_PASSWORD_HASH}"}) {
+                assertThatThrownBy(() -> securityConfig(unsupplied).userDetailsService())
+                        .as("unsupplied value [%s]", unsupplied)
+                        .hasMessageContaining("is not configured")
+                        .satisfies(failure -> assertThat(failure.getMessage())
+                                .doesNotContain("does not carry a bcrypt hash"));
+            }
+
+            assertThatThrownBy(() -> securityConfig("not-a-bcrypt-hash").userDetailsService())
+                    .hasMessageContaining("does not carry a bcrypt hash")
+                    .satisfies(failure ->
+                            assertThat(failure.getMessage()).doesNotContain("is not configured"));
+        }
+
+        // Net-new (no Python counterpart) — DL-189 — see docs/DECISION_LOG.md
+        @ParameterizedTest(name = "[{index}] [{0}]")
+        @ValueSource(strings = {"${AUTH_PASSWORD_HASH", "AUTH_PASSWORD_HASH}", "pre${X}post", "$2a$10$"})
+        @DisplayName("leaves a value that is not wholly a placeholder to the bcrypt format check")
+        void leavesAValueThatIsNotWhollyAPlaceholderToTheFormatCheck(String passwordHash) {
+            assertThatThrownBy(() -> securityConfig(passwordHash).userDetailsService())
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("does not carry a bcrypt hash")
+                    .satisfies(failure -> {
+                        assertThat(failure.getMessage()).doesNotContain("is not configured");
+                        assertThat(failure.getMessage()).doesNotContain(passwordHash);
+                    });
+        }
     }
 
     private SecurityConfig securityConfig(String passwordHash) {

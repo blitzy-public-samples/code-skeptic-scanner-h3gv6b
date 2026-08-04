@@ -103,8 +103,9 @@ import jakarta.servlet.http.HttpServletResponse;
  * {@code scanner.auth.password-hash} and holding no authority. No table backs it, and the schema this
  * service creates stays the four tables of {@code backend/app/db/models.py} — DL-020. Neither the
  * principal name nor the password hash is written to the log, and construction fails with
- * {@link IllegalStateException} when {@code scanner.auth.password-hash} is absent, blank, or not a
- * bcrypt hash of the shape and cost this service accepts — DL-116.
+ * {@link IllegalStateException} when {@code scanner.auth.password-hash} is absent, blank, still an
+ * unresolved {@code ${AUTH_PASSWORD_HASH}} placeholder, or not a bcrypt hash of the shape and cost
+ * this service accepts — DL-116, DL-189.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-019, DL-020,
  * DL-021, DL-051, DL-112, DL-114, DL-115, DL-116 and DL-118; construct-level provenance is
@@ -142,6 +143,14 @@ public class SecurityConfig {
      */
     private static final Pattern BCRYPT_HASH =
             Pattern.compile("^\\$2[aby]\\$(\\d{2})\\$[./A-Za-z0-9]{53}$");
+
+    /**
+     * Shape of a Spring property placeholder that resolved to nothing. Configuration binding leaves
+     * such a placeholder in place as literal text when the environment variable behind it is absent,
+     * so the bound value is neither {@code null} nor blank — DL-189.
+     */
+    private static final Pattern UNRESOLVED_PLACEHOLDER =
+            Pattern.compile("^\\$\\{.*}$", Pattern.DOTALL);
 
     /** Smallest bcrypt cost {@link #userDetailsService()} accepts — DL-116. */
     private static final int MINIMUM_BCRYPT_COST = 10;
@@ -397,10 +406,15 @@ public class SecurityConfig {
     /**
      * Reads and validates the principal's bcrypt password hash from the {@code scanner.auth} group.
      *
-     * <p>An unbound group, an absent value and a blank value are read alike, as an unsupplied hash.
-     * A value present but not matching {@link #BCRYPT_HASH}, or carrying a cost outside
+     * <p>Four values are read alike, as an unsupplied hash, and all four raise
+     * {@link #MISSING_PASSWORD_HASH_MESSAGE}: an unbound group, an absent value, a blank value and an
+     * unresolved {@code ${AUTH_PASSWORD_HASH}} placeholder. The fourth arrives when the environment
+     * variable behind the placeholder is absent, because configuration binding leaves the placeholder
+     * in place as literal text rather than failing — DL-189.
+     *
+     * <p>A value present but not matching {@link #BCRYPT_HASH}, or carrying a cost outside
      * {@value #MINIMUM_BCRYPT_COST}..{@value #MAXIMUM_BCRYPT_COST}, is rejected as malformed. Each
-     * outcome fails context refresh, and neither reproduces the configured value — DL-116.
+     * outcome fails context refresh, and none reproduces the configured value — DL-116.
      *
      * @return the value of {@code scanner.auth.password-hash}, trimmed and validated
      * @throws IllegalStateException if that value carries nothing or is not an accepted bcrypt hash
@@ -408,7 +422,9 @@ public class SecurityConfig {
     private String configuredPasswordHash() {
         ScannerProperties.Auth auth = properties.auth();
         String passwordHash = (auth == null) ? null : auth.passwordHash();
-        if (passwordHash == null || passwordHash.isBlank()) {
+        if (passwordHash == null
+                || passwordHash.isBlank()
+                || isUnresolvedPlaceholder(passwordHash)) {
             throw new IllegalStateException(MISSING_PASSWORD_HASH_MESSAGE);
         }
         String trimmed = passwordHash.trim();
@@ -424,6 +440,28 @@ public class SecurityConfig {
 
         log.info("scanner.auth.password-hash accepted: a bcrypt hash at cost {}", cost);
         return trimmed;
+    }
+
+    // Applies to scanner.auth.password-hash the guard security/JwtService already applies to
+    // scanner.jwt.secret — DL-185, DL-186, DL-189 — see docs/DECISION_LOG.md
+    /**
+     * Reports whether a configured value still holds the property placeholder that should have
+     * supplied it.
+     *
+     * <p>{@code scanner.auth.password-hash} is declared as {@code ${AUTH_PASSWORD_HASH}} with no
+     * default. The {@code @ConfigurationProperties} binder resolves placeholders through a resolver
+     * that leaves an unresolvable one in place rather than failing, so an unset
+     * {@code AUTH_PASSWORD_HASH} binds the literal twenty-two-character text
+     * {@code ${AUTH_PASSWORD_HASH}} — a value that is neither {@code null} nor blank. Recognising that
+     * shape, ignoring surrounding whitespace, is what keeps
+     * {@link #MISSING_PASSWORD_HASH_MESSAGE} reachable — DL-189.
+     *
+     * @param value the bound value, never {@code null} when this is called
+     * @return {@code true} when the value, ignoring surrounding whitespace, opens with a dollar sign
+     *     followed by an opening brace and closes with a closing brace
+     */
+    private static boolean isUnresolvedPlaceholder(String value) {
+        return UNRESOLVED_PLACEHOLDER.matcher(value.trim()).matches();
     }
 
     /**

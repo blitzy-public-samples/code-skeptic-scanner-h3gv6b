@@ -10,7 +10,9 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageConversionException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.http.converter.HttpMessageNotWritableException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.HttpMediaTypeNotAcceptableException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
@@ -101,6 +103,14 @@ import com.codeskeptic.scanner.exception.ResponseGenerationException;
  *   <td>{@code Bad request}</td><td>net-new — see docs/DECISION_LOG.md DL-092</td>
  * </tr>
  * <tr>
+ *   <td>{@link #handleMessageConversionFailure(HttpMessageConversionException)}</td><td>400</td>
+ *   <td>{@code Bad request}</td><td>net-new — see docs/DECISION_LOG.md DL-188</td>
+ * </tr>
+ * <tr>
+ *   <td>{@link #handleResponseWriteFailure(HttpMessageNotWritableException)}</td><td>500</td>
+ *   <td>{@code Internal server error}</td><td>net-new — see docs/DECISION_LOG.md DL-188</td>
+ * </tr>
+ * <tr>
  *   <td>{@link #handleMethodNotSupported(HttpRequestMethodNotSupportedException)}</td><td>405</td>
  *   <td>{@code Method not allowed}</td><td>net-new — see docs/DECISION_LOG.md DL-092</td>
  * </tr>
@@ -123,10 +133,17 @@ import com.codeskeptic.scanner.exception.ResponseGenerationException;
  * unaltered, so each of the eight per-route literals round-trips character-for-character.
  *
  * <p>Spring selects a handler by exception type, most specific match first. A client failure Spring
- * MVC raises — a malformed body, a missing or unconvertible request value, an unsupported method, an
- * unsupported media type or an unsatisfiable {@code Accept} header — is matched by one of the four
- * framework handlers and keeps the status the framework assigns it;
- * {@link #handleUnexpectedException(Exception)} receives what no earlier handler matches — DL-092.
+ * MVC raises — a malformed or unbindable body, a missing or unconvertible request value, an
+ * unsupported method, an unsupported media type or an unsatisfiable {@code Accept} header — is matched
+ * by one of the five framework handlers and keeps the status the framework assigns it;
+ * {@link #handleUnexpectedException(Exception)} receives what no earlier handler matches — DL-092,
+ * DL-188.
+ *
+ * <p>Three of those handlers divide the {@link HttpMessageConversionException} hierarchy by the
+ * direction of the failure: {@link HttpMessageNotReadableException} and
+ * {@link HttpMessageNotWritableException} are each declared on a handler of their own, and the
+ * supertype is declared on a third, so a request the converter could not read answers 400 while a
+ * response it could not write answers 500 — DL-188.
  *
  * <p>Authentication and authorisation failures are answered by the security filter chain, which runs
  * ahead of the {@code DispatcherServlet}; no exception from them reaches this class. A request the
@@ -304,6 +321,66 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * Reports a request body the converter could not bind onto the handler's parameter type with HTTP
+     * 400 and the message {@value #BAD_REQUEST}.
+     *
+     * <p>{@link HttpMessageConversionException} is the supertype of both
+     * {@link HttpMessageNotReadableException} and {@link HttpMessageNotWritableException}, and each of
+     * those is matched by a handler declaring it directly — this method therefore receives the
+     * supertype alone. {@code AbstractJackson2HttpMessageConverter.readJavaType} raises it, in place of
+     * the readable subtype, for every {@code com.fasterxml.jackson.databind.exc.InvalidDefinitionException}
+     * the binding of a request body produces. One such body is a JSON object repeating a member that
+     * binds to a record component, which the record has no fallback setter or field to accept: the
+     * bodies {@code {"value":"first","value":"second"}} on {@code PUT /settings/{key}} and
+     * {@code {"username":"admin","password":"a","password":"b"}} on {@code POST /auth/token} each
+     * reach this method — DL-188.
+     *
+     * <p>The status and the message are the ones
+     * {@link #handleClientRequestFailure(Exception)} serves, so a client reads one status and one
+     * literal for every unbindable body. The exception's class and message are written to the log at
+     * {@code WARN}; no part of either, and no part of the request body, reaches the response.
+     *
+     * @param ex the raised exception; neither its type nor its message reaches the response body
+     * @return HTTP 400 carrying {@code {"error": "Bad request"}}
+     */
+    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
+    @ExceptionHandler(HttpMessageConversionException.class)
+    public ResponseEntity<ErrorResponse> handleMessageConversionFailure(
+            HttpMessageConversionException ex) {
+
+        log.warn("Rejecting a request body the converter could not bind with HTTP 400: {}: {}",
+                ex.getClass().getSimpleName(), ex.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(new ErrorResponse(BAD_REQUEST));
+    }
+
+    /**
+     * Reports a response body the converter could not write with HTTP 500 and the message
+     * {@value #INTERNAL_SERVER_ERROR}.
+     *
+     * <p>{@link HttpMessageNotWritableException} is raised after a handler has returned, while its
+     * return value is being serialised, so it reports a failure of this service rather than of the
+     * request. Declaring it here keeps it on the status and the message
+     * {@link #handleUnexpectedException(Exception)} serves, which is where it was matched before
+     * {@link #handleMessageConversionFailure(HttpMessageConversionException)} claimed its supertype —
+     * DL-188.
+     *
+     * <p>The exception is written to the log at {@code ERROR} with its stack trace; neither its type
+     * nor its message reaches the response body.
+     *
+     * @param ex the raised exception, recorded in the log
+     * @return HTTP 500 carrying {@code {"error": "Internal server error"}}
+     */
+    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
+    @ExceptionHandler(HttpMessageNotWritableException.class)
+    public ResponseEntity<ErrorResponse> handleResponseWriteFailure(
+            HttpMessageNotWritableException ex) {
+
+        log.error("A response body could not be written; responding HTTP 500", ex);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(new ErrorResponse(INTERNAL_SERVER_ERROR));
+    }
+
+    /**
      * Reports a request whose method the matched path does not support with HTTP 405 and the message
      * {@value #METHOD_NOT_ALLOWED}.
      *
@@ -371,8 +448,9 @@ public class GlobalExceptionHandler {
      * {@value #INTERNAL_SERVER_ERROR}.
      *
      * <p>Reproduces {@code backend/app/main.py:L35-37}. A client failure the framework raises is
-     * matched by an earlier handler — DL-092. The exception is written to the log at {@code ERROR}
-     * with its stack trace; neither its type nor its message reaches the response body.
+     * matched by an earlier handler — DL-092, DL-188 — so what reaches this method is a failure of
+     * this service. The exception is written to the log at {@code ERROR} with its stack trace; neither
+     * its type nor its message reaches the response body.
      *
      * @param ex the raised exception, recorded in the log
      * @return HTTP 500 carrying {@code {"error": "Internal server error"}}

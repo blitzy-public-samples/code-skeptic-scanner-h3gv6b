@@ -54,7 +54,6 @@ import java.util.stream.Collectors;
 @Converter
 public class DelimitedStringListConverter implements AttributeConverter<List<String>, String> {
 
-    /** Delimiter placed between consecutive elements within the column value. */
     private static final String DELIMITER = ",";
 
     /**
@@ -70,8 +69,7 @@ public class DelimitedStringListConverter implements AttributeConverter<List<Str
         if (attribute == null) {
             return null;
         }
-        // A retained element is never empty after trimming. An empty join result identifies
-        // an attribute that retained no element.
+        // An empty join result identifies an attribute that retained no element.
         String columnValue = attribute.stream()
                 .filter(Objects::nonNull)
                 .map(String::trim)

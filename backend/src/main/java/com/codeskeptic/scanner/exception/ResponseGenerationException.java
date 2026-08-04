@@ -1,45 +1,43 @@
 package com.codeskeptic.scanner.exception;
 
 /**
- * Signals that generation of a reply for a tweet did not complete.
+ * Signals that generation of a reply for a tweet did not complete, and is reported with HTTP 500.
  *
- * <p>Materialises the HTTP 500 branch of {@code backend/app/api/responses.py:L49}. In that
- * source construct the {@code POST /responses} route declared at {@code :L33} evaluated the
- * result of {@code response_service.generate_response(tweet_id)} from {@code :L44} in the
- * guard at {@code :L46}, and on a falsey result returned the literal
- * {@code Failed to generate response} with status 500.
+ * <p>{@link #getMessage()} always returns {@value #FAILED_TO_GENERATE_RESPONSE}, the literal at the
+ * source call site ({@code backend/app/api/responses.py:L49}). The message is fixed by this type and
+ * cannot be supplied, extended or replaced by a caller, so no OpenAI, database or other
+ * infrastructure text can reach the client through it.
  *
- * <p>Contract: {@link #getMessage()} returns the message supplied at construction unchanged,
- * and {@code api/GlobalExceptionHandler} maps this type to HTTP 500, emitting that message
- * verbatim as the {@code error} value of the response body. A cause passed to the
- * two-argument constructor is returned by {@link #getCause()} and does not appear in
- * {@link #getMessage()}.
+ * <p>A throwable passed to {@link #ResponseGenerationException(Throwable)} is returned by
+ * {@link #getCause()} and does not appear in {@link #getMessage()}.
  *
- * <p>See docs/DECISION_LOG.md.
+ * <p>Serialization: no instance crosses a serialization boundary — an instance is created, thrown,
+ * caught by the error-handling advice in the same JVM and rendered as JSON. The type is serializable
+ * through {@link RuntimeException} and declares a fixed {@code serialVersionUID}.
  */
-public class ResponseGenerationException extends RuntimeException {
+// Ported from the inline HTTP 500 branch at backend/app/api/responses.py:L46,L49 (faithful port) —
+// see docs/DECISION_LOG.md
+public final class ResponseGenerationException extends RuntimeException {
+
+    private static final long serialVersionUID = 1L;
+
+    /** Wire literal of {@code backend/app/api/responses.py:L49}; the only message this type emits. */
+    public static final String FAILED_TO_GENERATE_RESPONSE = "Failed to generate response";
 
     /**
-     * Creates an exception whose message is emitted verbatim as the {@code error} value of the
-     * HTTP 500 response body.
-     *
-     * @param message the error text; {@code Failed to generate response} at the
-     *                {@code POST /responses} call site
+     * Creates the exception carrying the wire literal for the reporting branch.
      */
-    public ResponseGenerationException(String message) {
-        super(message);
+    public ResponseGenerationException() {
+        super(FAILED_TO_GENERATE_RESPONSE);
     }
 
     /**
-     * Creates an exception whose message is emitted verbatim as the {@code error} value of the
-     * HTTP 500 response body, retaining the throwable that triggered it.
+     * Creates the exception carrying the wire literal and the throwable that triggered it.
      *
-     * @param message the error text; {@code Failed to generate response} at the
-     *                {@code POST /responses} call site
-     * @param cause   the underlying throwable; it is returned by {@link #getCause()} and is
-     *                absent from {@link #getMessage()}
+     * @param cause the underlying throwable; it is returned by {@link #getCause()} and is absent
+     *              from {@link #getMessage()}
      */
-    public ResponseGenerationException(String message, Throwable cause) {
-        super(message, cause);
+    public ResponseGenerationException(Throwable cause) {
+        super(FAILED_TO_GENERATE_RESPONSE, cause);
     }
 }

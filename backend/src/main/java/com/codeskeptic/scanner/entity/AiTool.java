@@ -12,43 +12,34 @@ import jakarta.persistence.Table;
  *
  * <p>Columns: {@code id}, {@code name}, {@code description}. The table has no association.
  * Schema generation is driven from these annotations (see docs/DECISION_LOG.md DL-026).
+ * {@code id} is carried as a {@link String} at the wire boundary (see docs/DECISION_LOG.md DL-023).
  */
 // Ported from backend/app/db/models.py:L32-37 (faithful port) — see docs/DECISION_LOG.md
+// equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see
+// docs/DECISION_LOG.md
 @Entity
 @Table(name = "ai_tools")
 public class AiTool {
 
-    /**
-     * Column {@code ai_tools.id}, the generated primary key.
-     *
-     * <p>Ported from backend/app/db/models.py:L35 — see docs/DECISION_LOG.md DL-023.
-     */
+    // backend/app/db/models.py:L35
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     @Column(name = "id")
     private Long id;
 
-    /**
-     * Column {@code ai_tools.name}.
-     *
-     * <p>Ported from backend/app/db/models.py:L36 — see docs/DECISION_LOG.md.
-     */
+    // backend/app/db/models.py:L36
     @Column(name = "name")
     private String name;
 
-    /**
-     * Column {@code ai_tools.description}.
-     *
-     * <p>Ported from backend/app/db/models.py:L37 — see docs/DECISION_LOG.md.
-     */
+    // backend/app/db/models.py:L37
     @Column(name = "description")
     private String description;
 
     /**
-     * No-argument constructor mandated by the JPA specification.
+     * No-argument constructor mandated by the JPA specification. Field values are populated by the
+     * persistence provider or by the accessors below.
      */
     public AiTool() {
-        // Field values are populated by the persistence provider or by the accessors below.
     }
 
     /**
@@ -63,68 +54,40 @@ public class AiTool {
         this.description = description;
     }
 
-    /**
-     * Returns the generated primary key, or {@code null} for an instance that has not been
-     * persisted.
-     *
-     * @return the value of column {@code ai_tools.id}
-     */
     public Long getId() {
         return id;
     }
 
-    /**
-     * Sets the primary key.
-     *
-     * @param id value for column {@code ai_tools.id}
-     */
     public void setId(Long id) {
         this.id = id;
     }
 
-    /**
-     * Returns the tool name.
-     *
-     * @return the value of column {@code ai_tools.name}
-     */
     public String getName() {
         return name;
     }
 
-    /**
-     * Sets the tool name.
-     *
-     * @param name value for column {@code ai_tools.name}
-     */
     public void setName(String name) {
         this.name = name;
     }
 
-    /**
-     * Returns the tool description.
-     *
-     * @return the value of column {@code ai_tools.description}
-     */
     public String getDescription() {
         return description;
     }
 
-    /**
-     * Sets the tool description.
-     *
-     * @param description value for column {@code ai_tools.description}
-     */
     public void setDescription(String description) {
         this.description = description;
     }
 
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
+    // docs/DECISION_LOG.md
     /**
      * Compares two instances on the persistent identifier.
      *
-     * <p>Yields {@code true} for the same reference, and for an argument of this exact type whose
-     * identifier is non-{@code null} and equal to this identifier. Yields {@code false} whenever
-     * either identifier is {@code null} and the two references differ; two instances that have not
-     * yet been persisted never compare equal.
+     * <p>Yields {@code true} for the same reference, and for any instance of this type — a
+     * persistence-provider proxy included — whose identifier is non-{@code null} and equal to this
+     * identifier. Yields {@code false} whenever either identifier is {@code null} and the two
+     * references differ; two instances that have not yet been persisted never compare equal. The
+     * identifier is read through {@link #getId()} on both sides.
      *
      * @param other the object to compare with
      * @return {@code true} when both instances denote the same {@code ai_tools} row
@@ -134,21 +97,24 @@ public class AiTool {
         if (this == other) {
             return true;
         }
-        if (other == null || getClass() != other.getClass()) {
+        if (!(other instanceof AiTool that)) {
             return false;
         }
-        AiTool that = (AiTool) other;
-        return id != null && that.id != null && id.equals(that.id);
+        Long thisId = this.getId();
+        return thisId != null && thisId.equals(that.getId());
     }
 
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
+    // docs/DECISION_LOG.md
     /**
-     * Returns a hash code derived from the entity type. The value is constant for every instance
-     * and is unchanged by assignment of the identifier on insert.
+     * Returns a hash code derived from the entity type. The value is identical for every instance of
+     * this type and for every proxy of it, and is unchanged by assignment of the identifier on
+     * insert.
      *
-     * @return the hash code of this entity's class
+     * @return the hash code of this entity's type
      */
     @Override
     public int hashCode() {
-        return getClass().hashCode();
+        return AiTool.class.hashCode();
     }
 }

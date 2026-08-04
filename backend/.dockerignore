@@ -1,1 +1,5 @@
+# Net-new (no Python counterpart): the retired Python tree carried no ignore
+# file, and Maven build output is new to the ./backend build context used by
+# infrastructure/docker/Dockerfile.backend.
+# See docs/DECISION_LOG.md DL-055.
 target/

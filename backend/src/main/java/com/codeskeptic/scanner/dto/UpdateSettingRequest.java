@@ -7,25 +7,17 @@ import jakarta.validation.constraints.NotNull;
 /**
  * Inbound request body for {@code PUT /settings/{key}}.
  *
- * <p>The route reads a single member, {@code value}, from the request body
- * (backend/app/api/settings.py:L16), and updates the value only (:L20). The setting being
- * addressed is identified by the {@code key} path variable on the route
- * {@code '/settings/<key>'} (:L13); this body carries neither {@code key} nor
- * {@code description}.
+ * <p>One component, {@code value} — the single member the source route read from the body
+ * ({@code backend/app/api/settings.py:L16}). The addressed setting is identified by the {@code key}
+ * path variable, so this body carries neither {@code key} nor {@code description}.
  *
- * <p>Wire shape:
+ * <p>{@code @NotNull} on {@link #value()} is the only constraint declared and corresponds to the
+ * {@code if new_value is None:} guard at {@code backend/app/api/settings.py:L17} and its
+ * {@code {"error": "No value provided"}} 400 response at {@code :L18}.
  *
- * <pre>{@code
- * {"value": "100"}
- * }</pre>
+ * <p>Wire shape: {@code {"value": "100"}}
  *
- * <p>The {@code @NotNull} on {@link #value()} corresponds to the {@code if new_value is None:}
- * guard at :L17 and the {@code {"error": "No value provided"}} 400 response at :L18. It is the
- * only constraint declared on this record.
- *
- * @param value new value for the addressed setting, carried on the JSON key {@code value};
- *              the stored column is {@code value = Column(String)} at
- *              backend/app/db/models.py:L43
+ * @param value new value for the addressed setting, carried on the JSON key {@code value}; required
  */
 public record UpdateSettingRequest(
         @NotNull

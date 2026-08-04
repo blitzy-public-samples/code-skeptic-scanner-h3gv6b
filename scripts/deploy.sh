@@ -13,6 +13,8 @@ echo "Running tests..."
 npm test
 
 # Package backend application
+# Net-new command (no Python counterpart; the retired line here was
+# `npm run build`) - see docs/DECISION_LOG.md DL-004 and DL-053.
 echo "Packaging backend application..."
 cd backend
 mvn clean package

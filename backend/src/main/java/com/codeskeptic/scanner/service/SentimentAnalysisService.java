@@ -1,19 +1,30 @@
 package com.codeskeptic.scanner.service;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import com.google.api.gax.retrying.RetrySettings;
+import com.google.api.gax.rpc.UnaryCallSettings;
+import com.google.cloud.language.v1.AnalyzeSentimentRequest;
 import com.google.cloud.language.v1.AnalyzeSentimentResponse;
 import com.google.cloud.language.v1.Document;
 import com.google.cloud.language.v1.LanguageServiceClient;
+import com.google.cloud.language.v1.LanguageServiceSettings;
 
 import jakarta.annotation.PreDestroy;
 
-// Ported from backend/app/services/sentiment_analysis.py:L5-35 (faithful port) — see docs/DECISION_LOG.md
+// The two public operations are ported from backend/app/services/sentiment_analysis.py:L12-24 and
+// :L26-35 (faithful port) — see docs/DECISION_LOG.md DL-036, DL-037. The client lifecycle below is
+// net-new: the source constructed the client eagerly at :L8 and closed it nowhere — see
+// docs/DECISION_LOG.md DL-010.
 /**
  * Adapter for the Google Cloud Natural Language API and the single home of the
  * doubt-rating calculation.
@@ -26,16 +37,64 @@ import jakarta.annotation.PreDestroy;
  *
  * <p>The underlying {@link LanguageServiceClient} authenticates with Application
  * Default Credentials and is created on first use by {@link #languageClient()};
- * constructing this bean resolves no credential and opens no connection.
+ * constructing this bean resolves no credential and opens no connection. Every
+ * {@code AnalyzeSentiment} call the client issues carries a bounded deadline.
  *
- * <p>The bean is a singleton reached from request threads, the response
- * generation scheduler and the tweet stream, and every member declared here is
- * safe for concurrent use.
+ * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md}
+ * DL-010, DL-036, DL-037 and DL-052; construct-level provenance is recorded in
+ * {@code docs/TRACEABILITY_MATRIX.md}.
+ *
+ * <p>This is a singleton bean and every member declared here is safe for
+ * concurrent use. Client acquisition, client use and client release are
+ * coordinated by a read/write lock and a destroyed flag:
+ *
+ * <ul>
+ *   <li>{@link #analyzeSentiment(String)} holds the read lock for the whole
+ *       acquisition-and-call sequence, so the client it obtains cannot be closed
+ *       while the call is in flight.</li>
+ *   <li>{@link #closeLanguageClient()} takes the write lock, so it waits for
+ *       every in-flight call to return, for at most
+ *       {@value #AWAIT_ACTIVE_USE_SECONDS} seconds, before releasing the
+ *       client.</li>
+ *   <li>Once the bean is destroyed, {@link #languageClient()} and
+ *       {@link #analyzeSentiment(String)} both throw
+ *       {@link IllegalStateException}: no client is created and no request is
+ *       issued after shutdown.</li>
+ * </ul>
  */
 @Service
 public class SentimentAnalysisService {
 
+    // Logging baseline — DL-052 — see docs/DECISION_LOG.md
     private static final Logger log = LoggerFactory.getLogger(SentimentAnalysisService.class);
+
+    /**
+     * Deadline applied to a single {@code AnalyzeSentiment} RPC attempt. An attempt that has not
+     * completed within this window fails with {@code DEADLINE_EXCEEDED}.
+     */
+    private static final Duration RPC_TIMEOUT = Duration.ofSeconds(10);
+
+    /**
+     * Ceiling on the wall-clock time one {@link #analyzeSentiment(String)} call may occupy its
+     * calling thread, retries included. No further attempt starts once this window has elapsed.
+     */
+    private static final Duration TOTAL_TIMEOUT = Duration.ofSeconds(30);
+
+    /**
+     * Seconds {@link #closeLanguageClient()} waits for in-flight calls to return before releasing
+     * the client regardless.
+     */
+    private static final int AWAIT_ACTIVE_USE_SECONDS = 30;
+
+    /** Message of the {@link IllegalStateException} raised once the bean has been destroyed. */
+    private static final String DESTROYED_MESSAGE =
+            "SentimentAnalysisService has been destroyed; the Natural Language API client is closed";
+
+    /**
+     * Guards the client against release while it is in use. Callers hold the read lock for the
+     * duration of a request; {@link #closeLanguageClient()} holds the write lock.
+     */
+    private final ReentrantReadWriteLock lifecycleLock = new ReentrantReadWriteLock();
 
     /**
      * Natural Language client, created on first use by {@link #languageClient()}
@@ -46,15 +105,16 @@ public class SentimentAnalysisService {
     private volatile LanguageServiceClient client;
 
     /**
-     * Creates the service.
-     *
-     * <p>Takes no argument. The Python constructor at
-     * backend/app/services/sentiment_analysis.py:L6-8 assigned a settings object
-     * that neither of its two methods ever read. This adapter holds no
-     * collaborator, reads no configuration key and touches no repository.
+     * Set once when the bean is destroyed. Written only inside a {@code synchronized (this)} block
+     * and read through a {@code volatile} field access.
+     */
+    private volatile boolean destroyed;
+
+    /**
+     * Creates the service. It holds no collaborator, reads no configuration key and touches no
+     * repository; the Natural Language client is created later by {@link #languageClient()}.
      */
     public SentimentAnalysisService() {
-        // Intentionally empty; the Natural Language client is created lazily by languageClient().
     }
 
     /**
@@ -63,21 +123,29 @@ public class SentimentAnalysisService {
      *
      * <p>The request carries the text as {@code PLAIN_TEXT} with language
      * {@code en}. The score is returned exactly as received — unrounded,
-     * unscaled and unclamped — and is the value carried by the
-     * {@code analysis_result} field of the tweet analyze endpoint. A failure
-     * reported by the API propagates to the caller unchanged; no substitute score
-     * is returned.
+     * unscaled and unclamped. A failure reported by the API propagates to the
+     * caller unchanged; no substitute score is returned.
+     *
+     * <p>The call is bounded. One RPC attempt may take at most {@link #RPC_TIMEOUT} and
+     * the call as a whole at most {@link #TOTAL_TIMEOUT}, retries included; past
+     * that the call fails and the calling thread is released. Such a failure is
+     * logged at {@code ERROR} and rethrown unchanged like any other.
+     *
+     * <p>The read lock of {@link #lifecycleLock} is held for the whole
+     * acquisition-and-call sequence, so the client cannot be released mid-call.
      *
      * @param text the tweet text to analyse; must not be {@code null}
      * @return the document sentiment score, conventionally between {@code -1.0}
      *         (negative) and {@code 1.0} (positive)
      * @throws NullPointerException  if {@code text} is {@code null}
-     * @throws IllegalStateException if the Natural Language client cannot be
-     *                               created from Application Default Credentials
+     * @throws IllegalStateException if the bean has been destroyed, or if the
+     *                               Natural Language client cannot be created
+     *                               from Application Default Credentials
      */
-    // Ported from backend/app/services/sentiment_analysis.py:L12-24 (faithful port). Parameter is the tweet
-    // text, reconciling api/tweets.py:L46 with sentiment_analysis.py:L14 — see docs/DECISION_LOG.md DL-036.
-    // Return value is the bare document score — see docs/DECISION_LOG.md DL-037.
+    // Ported from backend/app/services/sentiment_analysis.py:L12-24 (faithful port). The parameter is
+    // the tweet text, reconciling backend/app/api/tweets.py:L46 with
+    // backend/app/services/sentiment_analysis.py:L14 — see docs/DECISION_LOG.md DL-036. The return
+    // value is the bare document score — see docs/DECISION_LOG.md DL-037.
     public double analyzeSentiment(String text) {
         Objects.requireNonNull(text, "text must not be null");
         if (text.isBlank()) {
@@ -91,7 +159,12 @@ public class SentimentAnalysisService {
                 .setLanguage("en")
                 .build();
 
+        Lock activeUse = lifecycleLock.readLock();
+        activeUse.lock();
         try {
+            if (destroyed) {
+                throw new IllegalStateException(DESTROYED_MESSAGE);
+            }
             AnalyzeSentimentResponse response = languageClient().analyzeSentiment(document);
             // getScore() is declared float; the widening to double is lossless.
             double score = response.getDocumentSentiment().getScore();
@@ -100,6 +173,8 @@ public class SentimentAnalysisService {
         } catch (RuntimeException e) {
             log.error("Sentiment analysis failed for {} character(s) of text", text.length(), e);
             throw e;
+        } finally {
+            activeUse.unlock();
         }
     }
 
@@ -114,6 +189,13 @@ public class SentimentAnalysisService {
      * {@code 0.0} to {@code 10.0} before the bound is applied: a score of
      * {@code -2.0} yields {@code 10.0} and {@code 2.0} yields {@code 0.0}.
      *
+     * <p>Non-finite scores are bounded to the same range as the source
+     * expression bounds them: {@link Double#NaN} yields {@code 10.0},
+     * {@link Double#NEGATIVE_INFINITY} yields {@code 10.0} and
+     * {@link Double#POSITIVE_INFINITY} yields {@code 0.0}. The returned value is
+     * always finite; the value written to {@code tweets.doubt_rating} is always a
+     * number.
+     *
      * @param sentimentScore a document sentiment score, such as one returned by
      *                       {@link #analyzeSentiment(String)}
      * @return the doubt rating, always between {@code 0.0} and {@code 10.0}
@@ -121,38 +203,46 @@ public class SentimentAnalysisService {
      */
     // Ported from backend/app/services/sentiment_analysis.py:L26-35 (faithful port) — see docs/DECISION_LOG.md
     public double calculateDoubtRating(double sentimentScore) {
-        double doubtRating = (1 - sentimentScore) * 5;          // sentiment_analysis.py:L29
-        return Math.max(0.0d, Math.min(10.0d, doubtRating));    // sentiment_analysis.py:L32
+        if (Double.isNaN(sentimentScore)) {
+            // backend/app/services/sentiment_analysis.py:L32 — max(0, min(10, nan)) evaluates to 10 in Python.
+            return 10.0d;
+        }
+        double doubtRating = (1 - sentimentScore) * 5;          // backend/app/services/sentiment_analysis.py:L29
+        return Math.max(0.0d, Math.min(10.0d, doubtRating));    // backend/app/services/sentiment_analysis.py:L32
     }
 
     /**
      * Returns the Natural Language client, creating it from Application Default
      * Credentials on first use and reusing it thereafter.
      *
-     * <p>Creation happens on first use rather than during bean construction.
-     * Access uses double-checked locking over the {@code volatile} field. At most
-     * one client is created however many threads call this method concurrently.
+     * <p>Access uses double-checked locking over the {@code volatile} field. At
+     * most one client is created however many threads call this method
+     * concurrently, and no client is created once the bean has been destroyed.
+     * The client carries the bounded {@code AnalyzeSentiment} call settings built
+     * by {@link #languageServiceSettings()}.
      *
-     * <p>This method is the seam tests override: a Mockito spy stubs it, or a
-     * subclass returns a stub. It is declared neither {@code private} nor
-     * {@code final}.
+     * <p>Declared neither {@code private} nor {@code final}, so a subclass can supply the client.
      *
      * @return the Natural Language client, never {@code null}
-     * @throws IllegalStateException if the client cannot be created, including
-     *                               when no Application Default Credentials are
-     *                               available
+     * @throws IllegalStateException if the bean has been destroyed, or if the
+     *                               client cannot be created, including when no
+     *                               Application Default Credentials are available
      */
     // Replaces the eager `self.client = LanguageServiceClient()` at
-    // backend/app/services/sentiment_analysis.py:L8 — see docs/DECISION_LOG.md
+    // backend/app/services/sentiment_analysis.py:L8 (net-new lifecycle) — see docs/DECISION_LOG.md
+    // DL-010
     protected LanguageServiceClient languageClient() {
         LanguageServiceClient local = this.client;
         if (local == null) {
             synchronized (this) {
+                if (destroyed) {
+                    throw new IllegalStateException(DESTROYED_MESSAGE);
+                }
                 local = this.client;
                 if (local == null) {
                     log.info("Creating the Natural Language API client from Application Default Credentials");
                     try {
-                        local = LanguageServiceClient.create();
+                        local = LanguageServiceClient.create(languageServiceSettings());
                         this.client = local;
                     } catch (IOException e) {
                         throw new IllegalStateException(
@@ -166,15 +256,91 @@ public class SentimentAnalysisService {
     }
 
     /**
-     * Releases the Natural Language client when the bean is destroyed, and only
+     * Builds the client settings, bounding how long one {@link #analyzeSentiment(String)} call may
+     * occupy its calling thread.
+     *
+     * <p>The generated client defaults every {@code AnalyzeSentiment} timeout — initial RPC, maximum
+     * RPC and total — to ten minutes and sets no attempt limit. This method replaces those three
+     * values with {@link #RPC_TIMEOUT} per attempt and {@link #TOTAL_TIMEOUT} across all attempts.
+     * Every other setting is left as the client declares it: the retryable status codes stay
+     * {@code DEADLINE_EXCEEDED} and {@code UNAVAILABLE} and the retry delays are unchanged. Only
+     * {@code AnalyzeSentiment} is narrowed; the settings of every other operation are untouched.
+     *
+     * <p>No credential is resolved here; that happens inside
+     * {@link LanguageServiceClient#create(LanguageServiceSettings)}.
+     *
+     * @return the settings used to create the Natural Language client, never {@code null}
+     * @throws IOException if the settings cannot be built
+     */
+    // Net-new (no Python counterpart: backend/app/services/sentiment_analysis.py:L8 created the
+    // client with no call settings) — see docs/DECISION_LOG.md DL-010
+    private LanguageServiceSettings languageServiceSettings() throws IOException {
+        LanguageServiceSettings.Builder builder = LanguageServiceSettings.newBuilder();
+        UnaryCallSettings.Builder<AnalyzeSentimentRequest, AnalyzeSentimentResponse> callSettings =
+                builder.analyzeSentimentSettings();
+
+        RetrySettings boundedRetrySettings = callSettings.getRetrySettings().toBuilder()
+                .setInitialRpcTimeoutDuration(RPC_TIMEOUT)
+                .setMaxRpcTimeoutDuration(RPC_TIMEOUT)
+                .setTotalTimeoutDuration(TOTAL_TIMEOUT)
+                .build();
+        callSettings.setRetrySettings(boundedRetrySettings);
+
+        log.info(
+                "Natural Language client bounded to {} per AnalyzeSentiment attempt and {} in total",
+                RPC_TIMEOUT,
+                TOTAL_TIMEOUT);
+
+        return builder.build();
+    }
+
+    /**
+     * Marks the bean destroyed and releases the Natural Language client, and only
      * if {@link #languageClient()} ever created one.
      *
-     * <p>A failure to close is logged at {@code WARN} and not propagated.
+     * <p>The write lock of {@link #lifecycleLock} is acquired first, so the method
+     * waits up to {@value #AWAIT_ACTIVE_USE_SECONDS} seconds for in-flight calls
+     * to return; if the wait elapses the client is released anyway and the wait is
+     * reported at {@code WARN}. A failure to close is logged at {@code WARN} and
+     * not propagated. Calling this method more than once has no further effect.
      */
+    // Net-new (the source closed the client nowhere) — see docs/DECISION_LOG.md DL-010; the
+    // log-and-suppress close policy is the logging baseline — see docs/DECISION_LOG.md DL-052
     @PreDestroy
     void closeLanguageClient() {
+        Lock exclusive = lifecycleLock.writeLock();
+        boolean acquired = false;
+        try {
+            acquired = exclusive.tryLock(AWAIT_ACTIVE_USE_SECONDS, TimeUnit.SECONDS);
+            if (!acquired) {
+                log.warn("Sentiment analysis still in flight after {}s; releasing the Natural "
+                        + "Language API client anyway", AWAIT_ACTIVE_USE_SECONDS);
+            }
+            releaseClient();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Interrupted while waiting for sentiment analysis to finish; releasing the "
+                    + "Natural Language API client");
+            releaseClient();
+        } finally {
+            if (acquired) {
+                exclusive.unlock();
+            }
+        }
+    }
+
+    /**
+     * Sets the destroyed flag and closes the client if one was created.
+     *
+     * <p>The flag and the field are read and written together inside a
+     * {@code synchronized (this)} block, so a concurrent {@link #languageClient()}
+     * either creates the client before the flag is set or observes the flag and
+     * creates nothing.
+     */
+    private void releaseClient() {
         LanguageServiceClient local;
         synchronized (this) {
+            destroyed = true;
             local = this.client;
             this.client = null;
         }

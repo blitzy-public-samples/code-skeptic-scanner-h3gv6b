@@ -7,70 +7,35 @@ import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
-// Ported from backend/app/core/config.py:L4-15 (faithful port) — see docs/DECISION_LOG.md
+// Ported from backend/app/core/config.py:L4-15 (faithful port) — see docs/DECISION_LOG.md.
+// Seven keys were declared by the source Settings class at :L5-11; the other eight were read by the
+// source without ever being declared — see docs/DECISION_LOG.md DL-031.
 /**
  * Bound configuration root for the backend service, replacing the Pydantic
  * {@code Settings(BaseSettings)} class declared at {@code backend/app/core/config.py:L4-15}.
- *
- * <p>Fifteen keys carried over from the retired Python tree are declared here. Seven were declared
- * by {@code Settings} itself at {@code backend/app/core/config.py:L5-11}. The remaining eight were
- * read by the Python code without ever being declared: {@code SECRET_KEY} and {@code ALGORITHM}
- * ({@code backend/app/core/security.py:L11}), {@code NOTION_DATABASE_ID}
- * ({@code backend/app/services/notion_service.py:L24} and {@code :L35}),
- * {@code TWITTER_API_SECRET_KEY} ({@code backend/app/services/twitter_service.py:L12}),
- * {@code TWITTER_ACCESS_TOKEN} and {@code TWITTER_ACCESS_TOKEN_SECRET}
- * ({@code backend/app/services/twitter_service.py:L13}), {@code TWITTER_CONSUMER_KEY} and
- * {@code TWITTER_CONSUMER_SECRET} ({@code backend/app/tasks/tweet_monitoring.py:L46-47}). Nine
- * further keys are declared under the decision-log identifiers named below.
  *
  * <p>Values bind from {@code src/main/resources/application.yml} under the {@code scanner} prefix.
  * Spring's relaxed binding maps each kebab-case key onto the matching camelCase component of this
  * record and accepts the {@code SCREAMING_SNAKE} environment-variable form of the same key, which
  * replaces the {@code env_file = ".env"} convention at {@code backend/app/core/config.py:L13-15}.
+ * This type carries no stereotype annotation and is reached by constructor injection, replacing the
+ * {@code get_settings()} factory at {@code backend/app/core/config.py:L17-18}.
  *
- * <p>Registration comes from the {@code ConfigurationPropertiesScan} declared on
- * {@code com.codeskeptic.scanner.ScannerApplication}; this type carries no stereotype annotation.
- * The single bound instance is reached by constructor injection and replaces the
- * {@code get_settings()} factory at {@code backend/app/core/config.py:L17-18}, which returned a new
- * {@code Settings} object on every call.
- *
- * <p>Two property families are absent from this record. No Google Cloud credential key of any kind
- * is declared: {@code LanguageServiceClient()} at
- * {@code backend/app/services/sentiment_analysis.py:L8} takes no argument and authenticates with
- * Application Default Credentials. No {@code spring}-prefixed or {@code server}-prefixed key is
- * declared: those are declared by {@code application.yml} alone.
- *
- * <p>Usage, in a collaborator that needs the popularity gate's configured default and the OpenAI
- * model identifier:
- *
- * <pre>{@code
- * public class ExampleService {
- *
- *     private final ScannerProperties properties;
- *
- *     public ExampleService(ScannerProperties properties) {
- *         this.properties = properties;
- *     }
- *
- *     public boolean meetsThreshold(int likeCount) {
- *         return likeCount >= properties.popularityThreshold();
- *     }
- *
- *     public String model() {
- *         return properties.openai().model();
- *     }
- * }
- * }</pre>
+ * <p>No Google Cloud credential key is declared, matching {@code LanguageServiceClient()} at
+ * {@code backend/app/services/sentiment_analysis.py:L8}, which takes no argument. No
+ * {@code spring}-prefixed or {@code server}-prefixed key is declared; those live in
+ * {@code application.yml}.
  *
  * <p>This record and every nested group are immutable, hold no reference to mutable state and are
  * safe for concurrent use. {@link #toString()} and the {@code toString()} of every nested group
- * that carries a credential render that credential as {@code ***REDACTED***}; only
- * {@link Analytics} and {@link Ingestion} keep the compiler-generated form, neither carrying a
- * credential.
+ * render every credential, principal name and external resource identifier as
+ * {@code ***REDACTED***} — DL-052 — using the same marker whether the underlying value is
+ * {@code null}, empty or populated. {@link Analytics} and {@link Ingestion} keep the
+ * compiler-generated form.
  *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-015, DL-016,
- * DL-017, DL-020, DL-027, DL-031, DL-033, DL-034, DL-042, DL-044 and DL-058; construct-level
- * provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * <p>See {@code docs/DECISION_LOG.md} DL-015, DL-016, DL-017, DL-020, DL-027, DL-031, DL-033,
+ * DL-034, DL-042, DL-044, DL-046 and DL-052; construct-level provenance is recorded in
+ * {@code docs/TRACEABILITY_MATRIX.md}.
  *
  * @param databaseUrl value of {@code scanner.database-url}, carried verbatim under the
  *     {@code scanner} prefix and consumed by {@link DatabaseUrlTranslator}
@@ -114,43 +79,20 @@ public record ScannerProperties(
 
         @DefaultValue Ingestion ingestion) {
 
-    /** Rendered in place of any non-empty credential value. */
+    // Credential redaction in toString() — DL-052 — see docs/DECISION_LOG.md
+    /** Rendered in place of every credential, principal name and resource identifier. */
     private static final String REDACTED = "***REDACTED***";
 
-    /** Rendered in place of a {@code null} value. */
-    private static final String NULL_TEXT = "null";
-
-    /** Rendered in place of an empty value. */
-    private static final String EMPTY_TEXT = "\"\"";
-
     /**
-     * Renders a credential-bearing value for {@code toString()}.
+     * Renders this record with {@code databaseUrl} redacted and each nested group rendering itself —
+     * DL-052.
      *
-     * @param value the configured value, which may be {@code null}
-     * @return {@code null} for a {@code null} value, {@code ""} for an empty value, and
-     *     {@code ***REDACTED***} for any other value
-     */
-    private static String redact(String value) {
-        if (value == null) {
-            return NULL_TEXT;
-        }
-        if (value.isEmpty()) {
-            return EMPTY_TEXT;
-        }
-        return REDACTED;
-    }
-
-    /**
-     * Renders this record with {@code databaseUrl} redacted and each nested group rendering itself.
-     *
-     * <p>A SQLAlchemy-style {@code DATABASE_URL} carries its credentials in its user-info component.
-     * The nested groups that carry credentials redact them.
-     *
-     * @return the record's components, with every credential redacted
+     * @return the record's components, with every credential, principal name and resource
+     *     identifier redacted
      */
     @Override
     public String toString() {
-        return "ScannerProperties[databaseUrl=" + redact(databaseUrl)
+        return "ScannerProperties[databaseUrl=" + REDACTED
                 + ", popularityThreshold=" + popularityThreshold
                 + ", responseGenerationDelaySeconds=" + responseGenerationDelaySeconds
                 + ", twitter=" + twitter
@@ -167,12 +109,13 @@ public record ScannerProperties(
     // backend/app/services/twitter_service.py:L12-13 and
     // backend/app/tasks/tweet_monitoring.py:L46-49 (faithful port) — see docs/DECISION_LOG.md
     /**
-     * The {@code scanner.twitter} group: the X (Twitter) credential set.
+     * The {@code scanner.twitter} group: the X (Twitter) credential set. Per-component provenance is
+     * recorded inline below.
      *
-     * <p>Two components carry keys {@code Settings} declared at
-     * {@code backend/app/core/config.py:L5-6}. Five carry keys the Python code read without
-     * declaring. {@code application.yml} resolves {@code api-secret-key}, {@code consumer-key} and
+     * <p>{@code application.yml} resolves {@code api-secret-key}, {@code consumer-key} and
      * {@code consumer-secret} from the canonical pair through nested placeholder defaults — DL-031.
+     * {@code access-token} and {@code access-token-secret} are the retained OAuth 1.0a user-context
+     * components, declared with empty defaults in {@code application.yml} — DL-046.
      *
      * <p>Every component of this group is a credential and every one is redacted by
      * {@link #toString()}.
@@ -218,19 +161,19 @@ public record ScannerProperties(
             String accessTokenSecret) {
 
         /**
-         * Renders this group with all seven credentials redacted.
+         * Renders this group with all seven credentials redacted — DL-052.
          *
          * @return the group's components, every value redacted
          */
         @Override
         public String toString() {
-            return "Twitter[apiKey=" + redact(apiKey)
-                    + ", apiSecret=" + redact(apiSecret)
-                    + ", apiSecretKey=" + redact(apiSecretKey)
-                    + ", consumerKey=" + redact(consumerKey)
-                    + ", consumerSecret=" + redact(consumerSecret)
-                    + ", accessToken=" + redact(accessToken)
-                    + ", accessTokenSecret=" + redact(accessTokenSecret)
+            return "Twitter[apiKey=" + REDACTED
+                    + ", apiSecret=" + REDACTED
+                    + ", apiSecretKey=" + REDACTED
+                    + ", consumerKey=" + REDACTED
+                    + ", consumerSecret=" + REDACTED
+                    + ", accessToken=" + REDACTED
+                    + ", accessTokenSecret=" + REDACTED
                     + "]";
         }
     }
@@ -239,13 +182,11 @@ public record ScannerProperties(
     // backend/app/services/notion_service.py:L8,L24,L35 (faithful port) — see docs/DECISION_LOG.md
     /**
      * The {@code scanner.notion} group: the Notion API credential and the target database
-     * identifier.
+     * identifier. Per-component provenance is recorded inline below.
      *
-     * <p>{@code api-key} carries the key {@code Settings} declared at
-     * {@code backend/app/core/config.py:L7}. {@code database-id} carries a key the Python code read
-     * at two sites without ever declaring.
+     * <p>Both components are redacted by {@link #toString()}.
      *
-     * @param apiKey value of {@code scanner.notion.api-key}, redacted by {@link #toString()}
+     * @param apiKey value of {@code scanner.notion.api-key}
      * @param databaseId value of {@code scanner.notion.database-id}
      */
     public record Notion(
@@ -259,14 +200,14 @@ public record ScannerProperties(
             String databaseId) {
 
         /**
-         * Renders this group with {@code apiKey} redacted.
+         * Renders this group with the credential and the database identifier redacted — DL-052.
          *
-         * @return the group's components, with the credential redacted
+         * @return the group's components, both values redacted
          */
         @Override
         public String toString() {
-            return "Notion[apiKey=" + redact(apiKey)
-                    + ", databaseId=" + databaseId
+            return "Notion[apiKey=" + REDACTED
+                    + ", databaseId=" + REDACTED
                     + "]";
         }
     }
@@ -274,17 +215,12 @@ public record ScannerProperties(
     // Ported from backend/app/core/config.py:L8 and
     // backend/app/services/llm_service.py:L9,L20-26 (faithful port) — see docs/DECISION_LOG.md
     /**
-     * The {@code scanner.openai} group: the OpenAI credential and the four call parameters.
-     *
-     * <p>{@code api-key} carries the key {@code Settings} declared at
-     * {@code backend/app/core/config.py:L8}, which the Python constructor read under the lowercase
-     * name {@code settings.openai_api_key} at {@code backend/app/services/llm_service.py:L9}.
+     * The {@code scanner.openai} group: the OpenAI credential and the four call parameters. Per-component
+     * provenance is recorded inline below.
      *
      * <p>The three numeric components transcribe the literals passed to
      * {@code Completion.create(...)} at {@code backend/app/services/llm_service.py:L22-25}:
-     * {@code max_tokens=150}, {@code n=1} and {@code temperature=0.7}. The {@code model} component
-     * replaces the {@code engine="text-davinci-002"} literal at
-     * {@code backend/app/services/llm_service.py:L20} — DL-033.
+     * {@code max_tokens=150}, {@code n=1} and {@code temperature=0.7}.
      *
      * @param apiKey value of {@code scanner.openai.api-key}, redacted by {@link #toString()}
      * @param model value of {@code scanner.openai.model}
@@ -315,13 +251,13 @@ public record ScannerProperties(
             @DefaultValue("1") long n) {
 
         /**
-         * Renders this group with {@code apiKey} redacted.
+         * Renders this group with {@code apiKey} redacted — DL-052.
          *
          * @return the group's components, with the credential redacted
          */
         @Override
         public String toString() {
-            return "Openai[apiKey=" + redact(apiKey)
+            return "Openai[apiKey=" + REDACTED
                     + ", model=" + model
                     + ", maxCompletionTokens=" + maxCompletionTokens
                     + ", temperature=" + temperature
@@ -333,16 +269,10 @@ public record ScannerProperties(
     // Ported from backend/app/core/security.py:L6-12 (faithful port) — see docs/DECISION_LOG.md
     /**
      * The {@code scanner.jwt} group: the signing secret, the algorithm name and the token lifetime.
+     * Per-component provenance is recorded inline below.
      *
-     * <p>{@code secret} and {@code algorithm} carry the two keys
-     * {@code encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)} read at
-     * {@code backend/app/core/security.py:L11} without either ever being declared.
-     * {@code application.yml} declares {@code secret} as a placeholder with no default — DL-016 —
+     * <p>{@code application.yml} declares {@code secret} as a placeholder with no default — DL-016 —
      * and {@code algorithm} with the default {@code HS256} — DL-015.
-     *
-     * <p>{@code expiration-minutes} replaces the {@code expires_delta} argument of
-     * {@code create_access_token(data, expires_delta)} at {@code backend/app/core/security.py:L6},
-     * which {@code backend/app/core/security.py:L9-10} added to {@code datetime.utcnow()} — DL-017.
      *
      * @param secret value of {@code scanner.jwt.secret}, redacted by {@link #toString()}
      * @param algorithm value of {@code scanner.jwt.algorithm}
@@ -363,13 +293,13 @@ public record ScannerProperties(
             @DefaultValue("60") long expirationMinutes) {
 
         /**
-         * Renders this group with {@code secret} redacted.
+         * Renders this group with {@code secret} redacted — DL-052.
          *
          * @return the group's components, with the credential redacted
          */
         @Override
         public String toString() {
-            return "Jwt[secret=" + redact(secret)
+            return "Jwt[secret=" + REDACTED
                     + ", algorithm=" + algorithm
                     + ", expirationMinutes=" + expirationMinutes
                     + "]";
@@ -380,15 +310,13 @@ public record ScannerProperties(
     /**
      * The {@code scanner.auth} group: the single application principal.
      *
-     * <p>No Python counterpart declared either key. The bcrypt helpers at
-     * {@code backend/app/core/security.py:L14-18} were the only credential-verification code in the
-     * retired tree and had no call site and no credential store — DL-020.
+     * <p>{@code password-hash} holds a bcrypt hash, never a plaintext password. The hashing
+     * counterpart in the retired tree was {@code backend/app/core/security.py:L14-18}.
      *
-     * <p>{@code password-hash} holds a bcrypt hash, never a plaintext password.
+     * <p>Both components are redacted by {@link #toString()}.
      *
      * @param username value of {@code scanner.auth.username}
-     * @param passwordHash value of {@code scanner.auth.password-hash}, redacted by
-     *     {@link #toString()}
+     * @param passwordHash value of {@code scanner.auth.password-hash}
      */
     public record Auth(
 
@@ -400,25 +328,22 @@ public record ScannerProperties(
             String passwordHash) {
 
         /**
-         * Renders this group with {@code passwordHash} redacted.
+         * Renders this group with the principal name and the password hash redacted — DL-052.
          *
-         * @return the group's components, with the credential redacted
+         * @return the group's components, both values redacted
          */
         @Override
         public String toString() {
-            return "Auth[username=" + username
-                    + ", passwordHash=" + redact(passwordHash)
+            return "Auth[username=" + REDACTED
+                    + ", passwordHash=" + REDACTED
                     + "]";
         }
     }
 
     // Net-new (no Python counterpart) — DL-042 — see docs/DECISION_LOG.md
     /**
-     * The {@code scanner.analytics} group: the observation window of the trend series.
-     *
-     * <p>No Python counterpart declared this key. {@code get_trends()} at
-     * {@code backend/app/api/analytics.py:L14} takes no argument, and this group is where the window
-     * it spans is configured — DL-042.
+     * The {@code scanner.analytics} group: the observation window of the trend series, whose producing
+     * method {@code get_trends()} at {@code backend/app/api/analytics.py:L14} takes no argument.
      *
      * <p>This group carries no credential and keeps the compiler-generated {@code toString()}.
      *
@@ -434,16 +359,11 @@ public record ScannerProperties(
 
     // Net-new (no Python counterpart) — DL-044 — see docs/DECISION_LOG.md
     /**
-     * The {@code scanner.ingestion} group: the base terms of the stream rule set.
+     * The {@code scanner.ingestion} group: the base terms of the stream rule set. The retired task
+     * passed an empty list to {@code stream.filter(track=keywords)} at
+     * {@code backend/app/tasks/tweet_monitoring.py:L53-55}.
      *
-     * <p>No Python counterpart declared this key. {@code stream_tweets} is documented in
-     * {@code documentation/Code Structure.md} as taking a {@code List[str] keywords} parameter, and
-     * the Python task passed an empty list to {@code stream.filter(track=keywords)} at
-     * {@code backend/app/tasks/tweet_monitoring.py:L53-55} — DL-044.
-     *
-     * <p>The four terms {@code application.yml} configures are the base of the rule set only. The
-     * union with the {@code ai_tools.name} rows and the {@code stream_keywords} setting-row override
-     * belong to {@code com.codeskeptic.scanner.task.TweetStreamClient}.
+     * <p>The terms {@code application.yml} configures are the base of the rule set only.
      *
      * <p>This group carries no credential and keeps the compiler-generated {@code toString()}.
      *
@@ -458,7 +378,7 @@ public record ScannerProperties(
             @DefaultValue List<String> streamBaseKeywords) {
 
         /**
-         * Normalises the bound sequence into an unmodifiable copy.
+         * Normalises the bound sequence into an unmodifiable copy — DL-044.
          *
          * <p>A {@code null} sequence becomes an empty list. A bound sequence is copied element by
          * element, the copy tolerates {@code null} elements, and a later change to the source

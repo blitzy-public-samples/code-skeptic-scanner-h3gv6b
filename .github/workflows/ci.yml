@@ -13,8 +13,10 @@ jobs:
     steps:
     - uses: actions/checkout@v2
 
+    # Replaces the retired Python 3.9 toolchain step - see backend/docs/DECISION_LOG.md DL-004,
+    # DL-005
     - name: Set up JDK 21
-      uses: actions/setup-java@v4
+      uses: actions/setup-java@d7793b545071e98d581d3bf084a51c3213318a07 # v4.9.0
       with:
         distribution: 'temurin'
         java-version: '21'
@@ -23,10 +25,7 @@ jobs:
     - name: Set up Node.js
       uses: actions/setup-node@v2
       with:
-        # Raised from '14' to satisfy the mandatory Node.js floor
-        # (>= 20.20.2 on the 20.x line, >= 22.12.0 on the 22.x line).
-        # Matches the Node.js version installed on the development host.
-        node-version: '22.23.2'
+        node-version: '14'
 
     - name: Install frontend dependencies
       working-directory: ./frontend
@@ -38,6 +37,8 @@ jobs:
         npm run lint
         npm run type-check
 
+    # Replaces the retired Python dependency-install, lint, type-check, test and packaging steps
+    # of the pre-refactor backend job - see backend/docs/DECISION_LOG.md DL-004, DL-057
     - name: Build and test backend
       working-directory: ./backend
       run: mvn -B clean verify

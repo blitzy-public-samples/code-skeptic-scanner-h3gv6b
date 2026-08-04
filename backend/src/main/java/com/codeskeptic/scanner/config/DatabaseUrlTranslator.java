@@ -21,11 +21,17 @@ import org.slf4j.LoggerFactory;
  * {@code create_engine(settings.DATABASE_URL)} at backend/app/db/database.py:L7 - see
  * docs/DECISION_LOG.md DL-027.
  *
+ * <p>Every value is consumed exactly as supplied. No value is trimmed, case-folded or otherwise
+ * normalised at any point. A value padded with leading or trailing whitespace is not a parseable
+ * URL and raises {@link IllegalStateException}.
+ *
  * <p>Behaviour contract, applied in this order:
  * <ol>
  *   <li>A {@code null}, empty or whitespace-only value raises {@link IllegalStateException}.</li>
- *   <li>A value already beginning with {@code jdbc:} is returned unchanged, with a {@code null}
- *       username and a {@code null} password. It is not parsed, normalised or stripped.</li>
+ *   <li>A value beginning with the literal lower-case {@code jdbc:} is returned exactly as
+ *       supplied, character for character, with a {@code null} username and a {@code null}
+ *       password. It is not parsed, normalised, trimmed or stripped, and its scheme is matched
+ *       case-sensitively.</li>
  *   <li>Any other value is parsed as a {@link URI}. Everything from the first {@code '+'} of the
  *       scheme onward is discarded, the remaining scheme is mapped case-insensitively to a JDBC
  *       vendor token, the user-info component is split on its first {@code ':'} into the username
@@ -72,13 +78,15 @@ public final class DatabaseUrlTranslator {
     private static final int NO_PORT = -1;
     private static final int MAX_PORT = 65535;
 
+    /** Rendered by {@link TranslatedDatabaseUrl#toString()} in place of each of its values. */
+    private static final String REDACTED = "***REDACTED***";
+
     /** The grammar named by every failure message. */
     private static final String EXPECTED_FORM = "<scheme>://[username[:password]@]host[:port]/database";
 
     /**
      * Maps a URL scheme, lower-cased and with any {@code +driver} suffix removed, to the JDBC
-     * vendor token used in the reassembled URL. Insertion-ordered; {@link #SUPPORTED_SCHEMES} is
-     * derived from its key set.
+     * vendor token used in the reassembled URL.
      */
     private static final Map<String, String> JDBC_VENDOR_BY_SCHEME;
 
@@ -92,15 +100,18 @@ public final class DatabaseUrlTranslator {
         JDBC_VENDOR_BY_SCHEME = Collections.unmodifiableMap(vendors);
     }
 
-    /** Derived from the key set of {@link #JDBC_VENDOR_BY_SCHEME}. */
     private static final String SUPPORTED_SCHEMES = String.join(", ", JDBC_VENDOR_BY_SCHEME.keySet());
 
     private DatabaseUrlTranslator() {
-        // Utility type; every member is static.
     }
 
     /**
      * The outcome of a translation.
+     *
+     * <p>Every component can carry credential material: a value that arrived as a JDBC URL is
+     * passed through as supplied, and such a URL may embed credentials in its user-info component
+     * or in a query-string property. {@link TranslatedDatabaseUrl#toString()} renders all three
+     * components as the same fixed marker and reproduces none of them.
      *
      * @param jdbcUrl  the JDBC URL, never {@code null}, never blank and never carrying the
      *                 user-info component of the value it was translated from
@@ -112,6 +123,8 @@ public final class DatabaseUrlTranslator {
     public record TranslatedDatabaseUrl(String jdbcUrl, String username, String password) {
 
         /**
+         * Rejects an absent or blank JDBC URL.
+         *
          * @throws IllegalArgumentException if {@code jdbcUrl} is {@code null} or blank
          */
         public TranslatedDatabaseUrl {
@@ -121,16 +134,21 @@ public final class DatabaseUrlTranslator {
         }
 
         /**
-         * Returns a description of this outcome in which the password is replaced by a fixed
-         * marker.
+         * Returns a fixed description of this outcome that carries none of its three values.
          *
-         * @return a description of this outcome carrying no password material
+         * <p>The same text is returned for every instance, so no JDBC URL, host, database name,
+         * query parameter, username or password can reach diagnostic output through this method.
+         * That holds for a reassembled {@code jdbcUrl} and equally for a value that already began
+         * with {@code jdbc:} and was passed through unchanged.
+         *
+         * @return the fixed text {@code TranslatedDatabaseUrl[jdbcUrl=***REDACTED***,
+         *     username=***REDACTED***, password=***REDACTED***]}
          */
         @Override
         public String toString() {
-            return "TranslatedDatabaseUrl[jdbcUrl=" + jdbcUrl
-                    + ", username=" + username
-                    + ", password=" + (password == null ? "null" : "<redacted>")
+            return "TranslatedDatabaseUrl[jdbcUrl=" + REDACTED
+                    + ", username=" + REDACTED
+                    + ", password=" + REDACTED
                     + "]";
         }
     }
@@ -138,11 +156,12 @@ public final class DatabaseUrlTranslator {
     /**
      * Translates a {@code DATABASE_URL} value into a JDBC URL and separate credentials.
      *
-     * @param databaseUrl the configured {@code DATABASE_URL} value; a value already beginning with
-     *                    {@code jdbc:} is returned unchanged
+     * @param databaseUrl the configured {@code DATABASE_URL} value, consumed exactly as supplied; a
+     *                    value beginning with the literal {@code jdbc:} is returned unchanged
      * @return the translated JDBC URL and the credentials taken from the value, never {@code null}
      * @throws IllegalStateException if the value is {@code null}, empty or whitespace-only; if it
-     *                               cannot be parsed as a URL; if it declares no scheme or no
+     *                               cannot be parsed as a URL, which includes a value padded with
+     *                               leading or trailing whitespace; if it declares no scheme or no
      *                               host; if its port is not an integer in
      *                               {@code 0..}{@value #MAX_PORT}; or if its scheme is not one of
      *                               the supported schemes
@@ -153,26 +172,23 @@ public final class DatabaseUrlTranslator {
             throw new IllegalStateException("DATABASE_URL must be set: no database URL was supplied.");
         }
 
-        final String value = databaseUrl.trim();
-
-        if (value.regionMatches(true, 0, JDBC_SCHEME_PREFIX, 0, JDBC_SCHEME_PREFIX.length())) {
-            LOG.info("DATABASE_URL already holds a JDBC URL; it is used unchanged and no credentials "
-                    + "are extracted from it.");
-            return new TranslatedDatabaseUrl(value, null, null);
+        if (databaseUrl.startsWith(JDBC_SCHEME_PREFIX)) {
+            LOG.info("DATABASE_URL already holds a JDBC URL; it is used exactly as supplied and no "
+                    + "credentials are extracted from it.");
+            return new TranslatedDatabaseUrl(databaseUrl, null, null);
         }
 
-        final URI uri = parseUri(value);
+        final URI uri = parseUri(databaseUrl);
         final String vendor = resolveVendor(uri.getScheme());
 
         String host = uri.getHost();
         int port = uri.getPort();
-        String userInfo = uri.getUserInfo();
+        String rawUserInfo = uri.getRawUserInfo();
 
         if (host == null || host.isEmpty()) {
-            // java.net.URI leaves host, port and user-info unset for a registry-based authority,
-            // which includes any authority whose host name contains '_'.
+            // Registry-based authority: java.net.URI leaves host, port and user-info unset.
             final Authority authority = splitAuthority(uri.getRawAuthority());
-            userInfo = decodeUriComponent(authority.userInfo());
+            rawUserInfo = authority.userInfo();
             host = authority.host();
             port = authority.port();
         }
@@ -184,7 +200,7 @@ public final class DatabaseUrlTranslator {
 
         port = validatePort(port);
 
-        final UserInfo credentials = splitUserInfo(userInfo);
+        final UserInfo credentials = splitUserInfo(rawUserInfo);
         final String path = uri.getRawPath() == null ? "" : uri.getRawPath();
         final String query = uri.getRawQuery();
 
@@ -197,23 +213,19 @@ public final class DatabaseUrlTranslator {
         }
         jdbcUrl.append(path);
 
-        // Captured before the query segment is appended; the log record below excludes the query.
-        final String loggableUrl = jdbcUrl.toString();
-
         if (query != null && !query.isEmpty()) {
             jdbcUrl.append(QUERY_MARKER).append(query);
         }
 
-        // Logging baseline - see docs/DECISION_LOG.md DL-052.
-        LOG.info("Translated DATABASE_URL to JDBC vendor '{}': {}", vendor, loggableUrl);
+        // Logging baseline - see docs/DECISION_LOG.md DL-052. The record names the resolved vendor
+        // only; host, port, database path, query and user-info are omitted.
+        LOG.info("Translated DATABASE_URL to a JDBC URL for vendor '{}'", vendor);
         return new TranslatedDatabaseUrl(jdbcUrl.toString(), credentials.username(), credentials.password());
     }
 
     /**
-     * Parses a value as a URI.
+     * Parses the {@code DATABASE_URL} value exactly as supplied.
      *
-     * @param value the trimmed {@code DATABASE_URL} value
-     * @return the parsed URI
      * @throws IllegalStateException if the value is not a parseable URI
      */
     private static URI parseUri(String value) {
@@ -228,11 +240,8 @@ public final class DatabaseUrlTranslator {
     }
 
     /**
-     * Maps a URL scheme to a JDBC vendor token, discarding any {@code +driver} suffix and matching
-     * case-insensitively.
+     * Discards any {@code +driver} suffix and matches the remaining scheme case-insensitively.
      *
-     * @param rawScheme the scheme exactly as the URI reported it
-     * @return the JDBC vendor token
      * @throws IllegalStateException if the scheme is absent or unsupported
      */
     private static String resolveVendor(String rawScheme) {
@@ -257,28 +266,27 @@ public final class DatabaseUrlTranslator {
     }
 
     /**
-     * Splits a user-info component on its first {@code ':'}.
-     *
-     * @param userInfo the decoded user-info component, or {@code null}
-     * @return the username and the password, either or both of which may be {@code null}
+     * Splits a raw user-info component on its first literal {@code ':'} and percent-decodes each half
+     * separately; either part may be absent. Splitting before decoding keeps an encoded {@code ':'}
+     * inside a username or password out of the separator search.
      */
-    private static UserInfo splitUserInfo(String userInfo) {
-        if (userInfo == null || userInfo.isEmpty()) {
+    private static UserInfo splitUserInfo(String rawUserInfo) {
+        if (rawUserInfo == null || rawUserInfo.isEmpty()) {
             return new UserInfo(null, null);
         }
-        final int separator = userInfo.indexOf(COLON);
+        final int separator = rawUserInfo.indexOf(COLON);
         if (separator < 0) {
-            return new UserInfo(userInfo, null);
+            return new UserInfo(decodeUriComponent(rawUserInfo), null);
         }
-        return new UserInfo(userInfo.substring(0, separator), userInfo.substring(separator + 1));
+        return new UserInfo(
+                decodeUriComponent(rawUserInfo.substring(0, separator)),
+                decodeUriComponent(rawUserInfo.substring(separator + 1)));
     }
 
     /**
-     * Splits a raw authority component into its user-info, host and port parts.
+     * Splits a raw authority component into its user-info, host and port parts. Applied only when
+     * {@link URI} reported no host, which happens for a registry-based authority.
      *
-     * @param rawAuthority the authority exactly as the URI reported it, or {@code null}
-     * @return the parts of the authority; the user-info and host are {@code null} when absent and
-     *         the port is {@value #NO_PORT} when absent
      * @throws IllegalStateException if the port is not an integer
      */
     private static Authority splitAuthority(String rawAuthority) {
@@ -308,10 +316,8 @@ public final class DatabaseUrlTranslator {
     }
 
     /**
-     * Parses a port token.
+     * Parses a port token, yielding {@value #NO_PORT} when the authority declared none.
      *
-     * @param portToken the port text, or {@code null} when the authority declared none
-     * @return the port, or {@value #NO_PORT} when the authority declared none
      * @throws IllegalStateException if the token is not an integer
      */
     private static int parsePort(String portToken) {
@@ -328,10 +334,8 @@ public final class DatabaseUrlTranslator {
     }
 
     /**
-     * Checks that a resolved port is usable. Applied to the port however it was resolved.
+     * Checks a resolved port, however it was resolved, and passes {@value #NO_PORT} through.
      *
-     * @param port the resolved port, or {@value #NO_PORT} when the value declared none
-     * @return the port, or {@value #NO_PORT} when the value declared none
      * @throws IllegalStateException if the port is outside {@code 0..}{@value #MAX_PORT}
      */
     private static int validatePort(int port) {
@@ -347,10 +351,9 @@ public final class DatabaseUrlTranslator {
     }
 
     /**
-     * Percent-decodes a URI component.
+     * Percent-decodes a URI component, passing {@code null} and the empty string through unchanged. A
+     * literal {@code '+'} is preserved as {@code '+'} and is not decoded to a space.
      *
-     * @param value the raw component, or {@code null}
-     * @return the decoded component, or {@code null} when the component was {@code null}
      * @throws IllegalStateException if the component carries a malformed percent-escape
      */
     private static String decodeUriComponent(String value) {
@@ -358,7 +361,6 @@ public final class DatabaseUrlTranslator {
             return value;
         }
         try {
-            // URLDecoder maps '+' to a space; the literal '+' is escaped before decoding.
             return URLDecoder.decode(value.replace(PLUS_SIGN, ENCODED_PLUS), StandardCharsets.UTF_8);
         } catch (IllegalArgumentException e) {
             LOG.error("DATABASE_URL carries a malformed percent-escape in its user-info component.");
@@ -368,21 +370,13 @@ public final class DatabaseUrlTranslator {
     }
 
     /**
-     * The username and password taken from a user-info component.
-     *
-     * @param username the text before the first {@code ':'}, or {@code null} when absent
-     * @param password the text after the first {@code ':'}, or {@code null} when absent
+     * The percent-decoded text before and after the first literal {@code ':'} of a raw user-info
+     * component; either may be null.
      */
     private record UserInfo(String username, String password) {
     }
 
-    /**
-     * The parts of an authority component.
-     *
-     * @param userInfo the raw user-info component, or {@code null} when absent
-     * @param host     the host, or {@code null} when absent
-     * @param port     the port, or {@value #NO_PORT} when absent
-     */
+    /** The parts of an authority component; {@code port} is {@value #NO_PORT} when absent. */
     private record Authority(String userInfo, String host, int port) {
     }
 }

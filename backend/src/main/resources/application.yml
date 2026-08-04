@@ -15,8 +15,14 @@ spring:
     hibernate:
       # Net-new (no Python counterpart) — DL-026 — see docs/DECISION_LOG.md
       ddl-auto: update
-    # spring.jpa.database-platform — deliberately absent — DL-028 — see docs/DECISION_LOG.md
+    # Net-new (no Python counterpart) — DL-026 — see docs/DECISION_LOG.md
     open-in-view: false
+    # spring.jpa.database-platform — deliberately absent — DL-027 — see docs/DECISION_LOG.md
+    properties:
+      hibernate:
+        # Net-new (no Python counterpart) — column names at
+        # backend/app/db/models.py:L42-43 — DL-026 — see docs/DECISION_LOG.md
+        auto_quote_keyword: true
 
 scanner:
   # Ported from backend/app/core/config.py:L9 and backend/app/db/database.py:L7 (faithful port) — DL-027 — see docs/DECISION_LOG.md
@@ -28,26 +34,26 @@ scanner:
 
   twitter:
     # Ported from backend/app/core/config.py:L5-6 (faithful port) — see docs/DECISION_LOG.md
-    api-key: ${TWITTER_API_KEY}
-    api-secret: ${TWITTER_API_SECRET}
+    api-key: ${TWITTER_API_KEY:}
+    api-secret: ${TWITTER_API_SECRET:}
     # Ported from backend/app/services/twitter_service.py:L12 (faithful port) — DL-031 — see docs/DECISION_LOG.md
-    api-secret-key: ${TWITTER_API_SECRET_KEY:${TWITTER_API_SECRET}}
+    api-secret-key: ${TWITTER_API_SECRET_KEY:${TWITTER_API_SECRET:}}
     # Ported from backend/app/tasks/tweet_monitoring.py:L46-47 (faithful port) — DL-031 — see docs/DECISION_LOG.md
-    consumer-key: ${TWITTER_CONSUMER_KEY:${TWITTER_API_KEY}}
-    consumer-secret: ${TWITTER_CONSUMER_SECRET:${TWITTER_API_SECRET}}
+    consumer-key: ${TWITTER_CONSUMER_KEY:${TWITTER_API_KEY:}}
+    consumer-secret: ${TWITTER_CONSUMER_SECRET:${TWITTER_API_SECRET:}}
     # Ported from backend/app/services/twitter_service.py:L13 and backend/app/tasks/tweet_monitoring.py:L48-49 (faithful port) — DL-046 — see docs/DECISION_LOG.md
     access-token: ${TWITTER_ACCESS_TOKEN:}
     access-token-secret: ${TWITTER_ACCESS_TOKEN_SECRET:}
 
   notion:
     # Ported from backend/app/core/config.py:L7 and backend/app/services/notion_service.py:L8 (faithful port) — see docs/DECISION_LOG.md
-    api-key: ${NOTION_API_KEY}
+    api-key: ${NOTION_API_KEY:}
     # Ported from backend/app/services/notion_service.py:L24,L35 (faithful port) — see docs/DECISION_LOG.md
-    database-id: ${NOTION_DATABASE_ID}
+    database-id: ${NOTION_DATABASE_ID:}
 
   openai:
     # Ported from backend/app/core/config.py:L8 and backend/app/services/llm_service.py:L9 (faithful port) — see docs/DECISION_LOG.md
-    api-key: ${OPENAI_API_KEY}
+    api-key: ${OPENAI_API_KEY:}
     # Net-new (no Python counterpart) — DL-033 — see docs/DECISION_LOG.md
     model: gpt-5.6-terra
     # Ported from backend/app/services/llm_service.py:L22 (faithful port) — DL-034 — see docs/DECISION_LOG.md
@@ -67,9 +73,10 @@ scanner:
 
   auth:
     # Net-new (no Python counterpart) — DL-020 — see docs/DECISION_LOG.md
-    username: admin
+    username: ${AUTH_USERNAME:admin}
     # Net-new (no Python counterpart) — DL-020 — see docs/DECISION_LOG.md
-    password-hash: ""
+    # bcrypt hash, declared with no default: AUTH_PASSWORD_HASH must be supplied.
+    password-hash: ${AUTH_PASSWORD_HASH}
 
   analytics:
     # Net-new (no Python counterpart) — DL-042 — see docs/DECISION_LOG.md

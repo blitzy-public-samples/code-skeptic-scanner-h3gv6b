@@ -1,1 +1,4 @@
+# Net-new (no Python counterpart): the retired Python tree carried no ignore
+# file, and Maven build output is new to this repository.
+# See docs/DECISION_LOG.md DL-055.
 target/

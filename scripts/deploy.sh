@@ -15,7 +15,7 @@ npm test
 # Package backend application
 echo "Packaging backend application..."
 cd backend
-npm run build
+mvn clean package
 gcloud builds submit --tag gcr.io/code-skeptic-scanner/backend
 
 # Deploy backend to Google Cloud Run

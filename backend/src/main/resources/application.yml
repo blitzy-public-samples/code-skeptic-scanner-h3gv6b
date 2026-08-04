@@ -1,164 +1,84 @@
-# ---------------------------------------------------------------------------
-# Code Skeptic Scanner - externalised configuration.
-#
-# Replaces the Pydantic BaseSettings class that previously lived at
-# backend/app/core/config.py, which declared seven keys while the rest of the
-# Python tree read eight further keys that were never declared at all. Every key
-# any code path reads is declared here, so nothing resolves to AttributeError.
-#
-# Spring's relaxed binding maps the SCREAMING_SNAKE environment-variable names
-# already used by the project onto these relaxed property names unchanged.
-# ---------------------------------------------------------------------------
----
+# Ported from backend/app/core/config.py:L4-15 (faithful port) — see docs/DECISION_LOG.md
+
+# Ported from backend/app/main.py:L53 (faithful port) — DL-029 — see docs/DECISION_LOG.md
 server:
-  # Flask defaulted to 5000 and infrastructure/docker/Dockerfile.backend exposes
-  # 5000, so the port is pinned rather than left at Spring Boot's 8080 default.
-  # PORT is honoured first because Cloud Run injects it.
   port: ${PORT:5000}
 
+# Ported from backend/app/main.py:L15-39 and backend/app/db/database.py:L5-13 (faithful port) — see docs/DECISION_LOG.md
 spring:
-  application:
-    name: code-skeptic-scanner-backend
   main:
-    # Both spring-boot-starter-web and spring-boot-starter-webflux are on the
-    # classpath (WebClient is needed for the X API v2 filtered stream). Spring
-    # would resolve this to SERVLET implicitly; declaring it removes the
-    # implicitness.
+    # Net-new (no Python counterpart) — DL-030 — see docs/DECISION_LOG.md
     web-application-type: servlet
-  # NOTE: spring.datasource.* is intentionally NOT set here. DATABASE_URL is a
-  # single opaque SQLAlchemy-style URL, which is not a JDBC URL, so it is bound
-  # to scanner.database-url and translated at runtime. The database vendor stays
-  # unresolved at compile time.
+  # spring.datasource.url / .username / .password / .driver-class-name — deliberately absent — DL-027 — see docs/DECISION_LOG.md
+  # spring.jackson.property-naming-strategy — deliberately absent — DL-022 — see docs/DECISION_LOG.md
   jpa:
     hibernate:
-      # The Python code never created the schema: there was no
-      # Base.metadata.create_all() call, no migrations directory and no CLI.
-      # This is the minimal equivalent of that implicit expectation. No
-      # migration tool is introduced.
+      # Net-new (no Python counterpart) — DL-026 — see docs/DECISION_LOG.md
       ddl-auto: update
+    # spring.jpa.database-platform — deliberately absent — DL-028 — see docs/DECISION_LOG.md
     open-in-view: false
-    properties:
-      hibernate:
-        # Dialect is deliberately NOT pinned: Hibernate detects it from JDBC
-        # connection metadata, which is how vendor-agnosticism is honoured.
-        format_sql: false
-        # REQUIRED, not cosmetic. The `settings` table has columns named
-        # `key` and `value`, both reserved SQL keywords. Without this,
-        # Hibernate emits unquoted DDL and the table cannot be created:
-        #   create table settings (description varchar(255),
-        #     key varchar(255) not null, value varchar(255),
-        #     primary key (key))
-        #   -> Syntax error ... expected "identifier" [42001]
-        # Quoting is the only fix that preserves the original column
-        # names, which data-model parity mandates. Applies to every vendor.
-        auto_quote_keyword: true
-        jdbc:
-          time_zone: UTC
-
-logging:
-  level:
-    root: INFO
-    com.codeskeptic.scanner: INFO
 
 scanner:
-  # ---------------------------------------------------------------------------
-  # Datastore. The relational database is the system of record.
-  # ---------------------------------------------------------------------------
-  database-url: ${DATABASE_URL:}
-
-  # ---------------------------------------------------------------------------
-  # Business rules - transcribed, not adjusted.
-  # ---------------------------------------------------------------------------
-  # likeCount >= threshold, default 100.
+  # Ported from backend/app/core/config.py:L9 and backend/app/db/database.py:L7 (faithful port) — DL-027 — see docs/DECISION_LOG.md
+  database-url: ${DATABASE_URL}
+  # Ported from backend/app/core/config.py:L10 and backend/app/services/twitter_service.py:L43,L46 (faithful port) — see docs/DECISION_LOG.md
   popularity-threshold: ${TWEET_POPULARITY_THRESHOLD:100}
-  # Fixed DELAY (end-of-run to start-of-next-run), mirroring the Python
-  # work-then-sleep loop. Not a fixed rate.
+  # Ported from backend/app/core/config.py:L11 and backend/app/tasks/response_generation.py:L50 (faithful port) — see docs/DECISION_LOG.md
   response-generation-delay-seconds: ${RESPONSE_GENERATION_DELAY:60}
 
-  # ---------------------------------------------------------------------------
-  # X (Twitter). The canonical credential pair is api-key / api-secret. The
-  # three alias keys exist because other Python modules read those names; they
-  # are the same credentials under the labels X's own developer portal uses
-  # ("API Key (Consumer Key)" / "API Secret Key (Consumer Secret)"), so they
-  # default to the canonical pair via nested placeholders rather than demanding
-  # duplicate secrets.
-  # ---------------------------------------------------------------------------
   twitter:
-    api-key: ${TWITTER_API_KEY:}
-    api-secret: ${TWITTER_API_SECRET:}
-    api-secret-key: ${TWITTER_API_SECRET_KEY:${TWITTER_API_SECRET:}}
-    consumer-key: ${TWITTER_CONSUMER_KEY:${TWITTER_API_KEY:}}
-    consumer-secret: ${TWITTER_CONSUMER_SECRET:${TWITTER_API_SECRET:}}
-    # OAuth 1.0a user-context tokens. Declared so every referenced key resolves;
-    # the read/stream path uses an app-only bearer token derived from the
-    # consumer key and secret, and there is no publish path at all.
+    # Ported from backend/app/core/config.py:L5-6 (faithful port) — see docs/DECISION_LOG.md
+    api-key: ${TWITTER_API_KEY}
+    api-secret: ${TWITTER_API_SECRET}
+    # Ported from backend/app/services/twitter_service.py:L12 (faithful port) — DL-031 — see docs/DECISION_LOG.md
+    api-secret-key: ${TWITTER_API_SECRET_KEY:${TWITTER_API_SECRET}}
+    # Ported from backend/app/tasks/tweet_monitoring.py:L46-47 (faithful port) — DL-031 — see docs/DECISION_LOG.md
+    consumer-key: ${TWITTER_CONSUMER_KEY:${TWITTER_API_KEY}}
+    consumer-secret: ${TWITTER_CONSUMER_SECRET:${TWITTER_API_SECRET}}
+    # Ported from backend/app/services/twitter_service.py:L13 and backend/app/tasks/tweet_monitoring.py:L48-49 (faithful port) — DL-046 — see docs/DECISION_LOG.md
     access-token: ${TWITTER_ACCESS_TOKEN:}
     access-token-secret: ${TWITTER_ACCESS_TOKEN_SECRET:}
-    api-base-url: https://api.twitter.com
-    stream-url: https://api.twitter.com/2/tweets/search/stream
-    stream-rules-url: https://api.twitter.com/2/tweets/search/stream/rules
-    oauth2-token-url: https://api.twitter.com/oauth2/token
-    # Guarantees a non-empty rule set: the Python code left `keywords = []` and
-    # then called stream.filter(track=keywords), which can never start. The
-    # effective set is these base terms unioned with every ai_tools.name row,
-    # overridable by the `stream_keywords` setting row.
-    base-keywords:
-      - "AI coding tool"
-      - "AI code assistant"
-      - "AI generated code"
-      - "GPT-4"
-    reconnect-initial-backoff-seconds: 5
-    reconnect-max-backoff-seconds: 320
-    enabled: ${TWITTER_STREAM_ENABLED:false}
 
-  # ---------------------------------------------------------------------------
-  # Notion - a secondary mirror only; never the system of record.
-  # ---------------------------------------------------------------------------
   notion:
-    api-key: ${NOTION_API_KEY:}
-    # Read by the Python NotionService but never declared in config.py.
-    database-id: ${NOTION_DATABASE_ID:}
-    base-url: https://api.notion.com/v1
-    version: "2022-06-28"
+    # Ported from backend/app/core/config.py:L7 and backend/app/services/notion_service.py:L8 (faithful port) — see docs/DECISION_LOG.md
+    api-key: ${NOTION_API_KEY}
+    # Ported from backend/app/services/notion_service.py:L24,L35 (faithful port) — see docs/DECISION_LOG.md
+    database-id: ${NOTION_DATABASE_ID}
 
-  # ---------------------------------------------------------------------------
-  # OpenAI. max-completion-tokens 150, temperature 0.7 and n 1 are transcribed
-  # verbatim from the Python call. The model identifier is configuration because
-  # OpenAI retires models in dated waves; the legacy Completions endpoint and
-  # engine="text-davinci-002" no longer exist.
-  # ---------------------------------------------------------------------------
   openai:
-    api-key: ${OPENAI_API_KEY:}
-    model: ${OPENAI_MODEL:gpt-5.6-terra}
+    # Ported from backend/app/core/config.py:L8 and backend/app/services/llm_service.py:L9 (faithful port) — see docs/DECISION_LOG.md
+    api-key: ${OPENAI_API_KEY}
+    # Net-new (no Python counterpart) — DL-033 — see docs/DECISION_LOG.md
+    model: gpt-5.6-terra
+    # Ported from backend/app/services/llm_service.py:L22 (faithful port) — DL-034 — see docs/DECISION_LOG.md
     max-completion-tokens: 150
+    # Ported from backend/app/services/llm_service.py:L25 (faithful port) — see docs/DECISION_LOG.md
     temperature: 0.7
+    # Ported from backend/app/services/llm_service.py:L23 (faithful port) — see docs/DECISION_LOG.md
     n: 1
 
-  # ---------------------------------------------------------------------------
-  # Security. SECRET_KEY and ALGORITHM were read by
-  # backend/app/core/security.py but declared nowhere.
-  # ---------------------------------------------------------------------------
   jwt:
-    # No default on purpose: a hardcoded development secret is a security smell,
-    # and jjwt enforces a minimum 256-bit key for HS256. Startup fails fast when
-    # this is absent. src/test/resources/application-test.yml supplies a test
-    # key so `mvn clean verify` still needs no manual step.
-    secret: ${SECRET_KEY:}
-    # The HS family only; declared so the referenced key resolves.
+    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-016 — see docs/DECISION_LOG.md
+    secret: ${SECRET_KEY}
+    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-015 — see docs/DECISION_LOG.md
     algorithm: ${ALGORITHM:HS256}
-    # Matches the one-hour maximum lifespan the project specification documents.
-    expiration-minutes: ${JWT_EXPIRATION_MINUTES:60}
-  auth:
-    # Configuration-backed single principal registered through an
-    # InMemoryUserDetailsManager - deliberately NOT a new database table, so the
-    # schema keeps exactly the four tables the Python model declared.
-    username: ${AUTH_USERNAME:admin}
-    # BCrypt hash, no default: startup fails fast when absent.
-    password-hash: ${AUTH_PASSWORD_HASH:}
+    # Ported from backend/app/core/security.py:L9-10 (faithful port) — DL-017 — see docs/DECISION_LOG.md
+    expiration-minutes: 60
 
-  # ---------------------------------------------------------------------------
-  # Analytics. get_trends() takes no arguments, so the observation window has to
-  # be configuration rather than a query parameter.
-  # ---------------------------------------------------------------------------
+  auth:
+    # Net-new (no Python counterpart) — DL-020 — see docs/DECISION_LOG.md
+    username: admin
+    # Net-new (no Python counterpart) — DL-020 — see docs/DECISION_LOG.md
+    password-hash: ""
+
   analytics:
-    trend-window-days: ${ANALYTICS_TREND_WINDOW_DAYS:30}
+    # Net-new (no Python counterpart) — DL-042 — see docs/DECISION_LOG.md
+    trend-window-days: 30
+
+  ingestion:
+    # Net-new (no Python counterpart) — DL-044 — see docs/DECISION_LOG.md
+    stream-base-keywords:
+      - AI coding tool
+      - AI code assistant
+      - AI generated code
+      - GPT-4

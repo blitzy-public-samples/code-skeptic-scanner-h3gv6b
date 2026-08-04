@@ -13,6 +13,14 @@ import jakarta.persistence.Table;
  * <p>Columns: {@code id}, {@code name}, {@code description}. The table has no association.
  * Schema generation is driven from these annotations (see docs/DECISION_LOG.md DL-026).
  * {@code id} is carried as a {@link String} at the wire boundary (see docs/DECISION_LOG.md DL-023).
+ *
+ * <p>{@code id} is persisted as {@link Integer}, the type declared at
+ * backend/app/db/models.py:L35, and generated DDL therefore declares the column {@code integer} on
+ * every supported vendor — DL-070 — see docs/DECISION_LOG.md.
+ *
+ * <p>{@code name} and {@code description} declare {@code length = Integer.MAX_VALUE}, which renders
+ * each vendor's unbounded character type and reproduces the unbounded {@code Column(String)} at
+ * backend/app/db/models.py:L36-37 — DL-068 — see docs/DECISION_LOG.md.
  */
 // Ported from backend/app/db/models.py:L32-37 (faithful port) — see docs/DECISION_LOG.md
 // equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see
@@ -22,17 +30,20 @@ import jakarta.persistence.Table;
 public class AiTool {
 
     // backend/app/db/models.py:L35
+    // Integer persistence type — DL-070 — see docs/DECISION_LOG.md
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     @Column(name = "id")
-    private Long id;
+    private Integer id;
 
     // backend/app/db/models.py:L36
-    @Column(name = "name")
+    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
+    @Column(name = "name", length = Integer.MAX_VALUE)
     private String name;
 
     // backend/app/db/models.py:L37
-    @Column(name = "description")
+    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
+    @Column(name = "description", length = Integer.MAX_VALUE)
     private String description;
 
     /**
@@ -54,11 +65,11 @@ public class AiTool {
         this.description = description;
     }
 
-    public Long getId() {
+    public Integer getId() {
         return id;
     }
 
-    public void setId(Long id) {
+    public void setId(Integer id) {
         this.id = id;
     }
 
@@ -100,7 +111,7 @@ public class AiTool {
         if (!(other instanceof AiTool that)) {
             return false;
         }
-        Long thisId = this.getId();
+        Integer thisId = this.getId();
         return thisId != null && thisId.equals(that.getId());
     }
 

@@ -14,11 +14,13 @@ import jakarta.validation.constraints.NotNull;
  * guard at {@code backend/app/api/responses.py:L40-41}, which answered an absent {@code tweet_id} with
  * HTTP 400 and the body {@code {"error": "Tweet ID is required"}} — see docs/DECISION_LOG.md DL-050.
  *
- * <p>A conforming body is:
+ * <p>The value is the stringified {@code tweets.id} primary key — the generated surrogate declared at
+ * {@code backend/app/db/models.py:L10} and referenced by {@code responses.tweet_id} at
+ * {@code backend/app/db/models.py:L27} — not an X post identifier. A conforming body is:
  *
- * <pre>{@code {"tweet_id": "1889999999999999999"}}</pre>
+ * <pre>{@code {"tweet_id": "7"}}</pre>
  *
- * @param tweetId identifier of the tweet a response is generated for, bound
+ * @param tweetId stringified {@code tweets.id} of the tweet a response is generated for, bound
  *                from the JSON key {@code tweet_id}; required
  */
 // Ported from backend/app/api/responses.py:L38,L40-41 (faithful port) — see docs/DECISION_LOG.md DL-050

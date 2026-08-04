@@ -4,10 +4,14 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,32 +35,45 @@ import org.slf4j.LoggerFactory;
  *   <li>A value beginning with the literal lower-case {@code jdbc:} is returned exactly as
  *       supplied, character for character, with a {@code null} username and a {@code null}
  *       password. It is not parsed, normalised, trimmed or stripped, and its scheme is matched
- *       case-sensitively.</li>
+ *       case-sensitively. Such a value carrying credential material is rejected; it is never
+ *       altered — DL-072 — see docs/DECISION_LOG.md.</li>
  *   <li>Any other value is parsed as a {@link URI}. Everything from the first {@code '+'} of the
  *       scheme onward is discarded, the remaining scheme is mapped case-insensitively to a JDBC
- *       vendor token, the user-info component is split on its first {@code ':'} into the username
- *       and the password, and the URL is reassembled as
- *       {@code jdbc:<vendor>://<host>[:<port>]<path>[?<query>]}. The {@code :<port>} segment is
- *       present only when the value declares a port, the {@code ?<query>} segment only when the
- *       value declares a query, and the user-info component is omitted from the reassembled
- *       URL.</li>
+ *       vendor, the user-info component is split on its first {@code ':'} into the username and the
+ *       password, any recognised credential property is taken out of the query, and the URL is
+ *       reassembled as {@code <jdbc-authority-prefix><host>[:<port>]<path>[?<query>]}. The
+ *       {@code :<port>} segment is present only when the value declares a port, the
+ *       {@code ?<query>} segment only when at least one property is retained, and neither the
+ *       user-info component nor any credential property appears in the reassembled URL.</li>
  *   <li>An unrecognised scheme raises {@link IllegalStateException} naming the supported
  *       schemes.</li>
  * </ol>
  *
- * <p>Supported schemes and the JDBC vendor token each maps to: {@code postgresql} and
- * {@code postgres} map to {@code postgresql}; {@code mysql} and {@code mariadb} map to
- * {@code mysql}; {@code h2} maps to {@code h2}. The set matches the runtime-scope JDBC drivers
- * declared in backend/pom.xml: {@code org.postgresql:postgresql},
- * {@code com.mysql:mysql-connector-j} and {@code com.h2database:h2}.
+ * <p>{@link TranslatedDatabaseUrl#jdbcUrl()} never carries a username or a password, on either
+ * path — DL-072 — see docs/DECISION_LOG.md. Credential material is recognised in the user-info
+ * component of an authority and in a {@code ?}, {@code &} or {@code ;} separated property named
+ * {@code user}, {@code username}, {@code password}, {@code passwd}, {@code pwd},
+ * {@code password1}, {@code password2} or {@code password3}, matched case-insensitively. On the
+ * parse path such a property is removed and fills whichever credential the user-info component left
+ * unset; every other property is retained verbatim and in order.
  *
- * <p>Example, in which {@code USERNAME} and {@code PASSWORD} stand for the configured credentials:
+ * <p>Supported schemes and the JDBC authority prefix each maps to: {@code postgresql} and
+ * {@code postgres} map to {@code jdbc:postgresql://}; {@code mysql} and {@code mariadb} map to
+ * {@code jdbc:mysql://}; {@code h2} maps to {@code jdbc:h2:tcp://} — DL-071 — see
+ * docs/DECISION_LOG.md. The set matches the runtime-scope JDBC drivers declared in
+ * backend/pom.xml: {@code org.postgresql:postgresql}, {@code com.mysql:mysql-connector-j} and
+ * {@code com.h2database:h2}.
+ *
+ * <p>Examples, in which {@code USERNAME} and {@code PASSWORD} stand for the configured credentials:
  * <pre>{@code
  * var translated = DatabaseUrlTranslator.translate(
  *         "postgresql://USERNAME:PASSWORD@db.internal:5432/codeskeptic");
  * translated.jdbcUrl();   // jdbc:postgresql://db.internal:5432/codeskeptic
  * translated.username();  // USERNAME
  * translated.password();  // PASSWORD
+ *
+ * DatabaseUrlTranslator.translate("h2://db.internal:9092/codeskeptic")
+ *         .jdbcUrl();     // jdbc:h2:tcp://db.internal:9092/codeskeptic
  * }</pre>
  *
  * <p>Every member is static, the type holds no state and is not instantiable, and translation
@@ -74,6 +91,8 @@ public final class DatabaseUrlTranslator {
     private static final char COLON = ':';
     private static final char AT_SIGN = '@';
     private static final char QUERY_MARKER = '?';
+    private static final char FRAGMENT_MARKER = '#';
+    private static final char EQUALS_SIGN = '=';
     private static final char IPV6_TERMINATOR = ']';
     private static final int NO_PORT = -1;
     private static final int MAX_PORT = 65535;
@@ -86,21 +105,66 @@ public final class DatabaseUrlTranslator {
 
     /**
      * Maps a URL scheme, lower-cased and with any {@code +driver} suffix removed, to the JDBC
-     * vendor token used in the reassembled URL.
+     * vendor it resolves to.
      */
-    private static final Map<String, String> JDBC_VENDOR_BY_SCHEME;
+    private static final Map<String, Vendor> VENDOR_BY_SCHEME;
 
     static {
-        final Map<String, String> vendors = new LinkedHashMap<>();
-        vendors.put("postgresql", "postgresql");
-        vendors.put("postgres", "postgresql");
-        vendors.put("mysql", "mysql");
-        vendors.put("mariadb", "mysql");
-        vendors.put("h2", "h2");
-        JDBC_VENDOR_BY_SCHEME = Collections.unmodifiableMap(vendors);
+        final Map<String, Vendor> vendors = new LinkedHashMap<>();
+        vendors.put("postgresql", Vendor.POSTGRESQL);
+        vendors.put("postgres", Vendor.POSTGRESQL);
+        vendors.put("mysql", Vendor.MYSQL);
+        vendors.put("mariadb", Vendor.MYSQL);
+        vendors.put("h2", Vendor.H2);
+        VENDOR_BY_SCHEME = Collections.unmodifiableMap(vendors);
     }
 
-    private static final String SUPPORTED_SCHEMES = String.join(", ", JDBC_VENDOR_BY_SCHEME.keySet());
+    private static final String SUPPORTED_SCHEMES = String.join(", ", VENDOR_BY_SCHEME.keySet());
+
+    /**
+     * The JDBC property names treated as credential material wherever they appear in a URL. Matched
+     * case-insensitively against the text before a property's {@code '='} — DL-072 — see
+     * docs/DECISION_LOG.md.
+     */
+    private static final Set<String> CREDENTIAL_PROPERTY_NAMES = Set.of(
+            "user", "username", "password", "passwd", "pwd", "password1", "password2", "password3");
+
+    /** Separates properties inside the query or property section of a URL. */
+    private static final Pattern PROPERTY_SEPARATOR = Pattern.compile("[?&;]");
+
+    /** Separates properties inside the query component of a parsed, non-JDBC URL. */
+    private static final String QUERY_PROPERTY_SEPARATOR = "&";
+
+    /**
+     * A supported JDBC vendor and the exact URL prefix its driver requires ahead of the authority.
+     *
+     * <p>{@code H2} carries the {@code tcp:} connection mode — DL-071 — see
+     * docs/DECISION_LOG.md.
+     */
+    private enum Vendor {
+
+        POSTGRESQL("postgresql", "jdbc:postgresql://"),
+        MYSQL("mysql", "jdbc:mysql://"),
+        H2("h2", "jdbc:h2:tcp://");
+
+        private final String token;
+        private final String jdbcAuthorityPrefix;
+
+        Vendor(String token, String jdbcAuthorityPrefix) {
+            this.token = token;
+            this.jdbcAuthorityPrefix = jdbcAuthorityPrefix;
+        }
+
+        /** Returns the vendor token named in log records and failure messages. */
+        String token() {
+            return token;
+        }
+
+        /** Returns everything the reassembled URL carries before the host. */
+        String jdbcAuthorityPrefix() {
+            return jdbcAuthorityPrefix;
+        }
+    }
 
     private DatabaseUrlTranslator() {
     }
@@ -108,17 +172,18 @@ public final class DatabaseUrlTranslator {
     /**
      * The outcome of a translation.
      *
-     * <p>Every component can carry credential material: a value that arrived as a JDBC URL is
-     * passed through as supplied, and such a URL may embed credentials in its user-info component
-     * or in a query-string property. {@link TranslatedDatabaseUrl#toString()} renders all three
-     * components as the same fixed marker and reproduces none of them.
+     * <p>{@code username} and {@code password} carry credential material, and
+     * {@link TranslatedDatabaseUrl#toString()} renders all three components as the same fixed marker
+     * and reproduces none of them. {@code jdbcUrl} never carries credential material: a value that
+     * would have embedded a credential in it is rejected by
+     * {@link DatabaseUrlTranslator#translate(String)} — DL-072 — see docs/DECISION_LOG.md.
      *
-     * @param jdbcUrl  the JDBC URL, never {@code null}, never blank and never carrying the
-     *                 user-info component of the value it was translated from
-     * @param username the username taken from the user-info component, or {@code null} when the
-     *                 value carried none
-     * @param password the password taken from the user-info component, or {@code null} when the
-     *                 value carried none
+     * @param jdbcUrl  the JDBC URL, never {@code null}, never blank, and never carrying a username
+     *                 or a password in its user-info component or in a property
+     * @param username the username taken from the user-info component or from a recognised
+     *                 credential property, or {@code null} when the value carried none
+     * @param password the password taken from the user-info component or from a recognised
+     *                 credential property, or {@code null} when the value carried none
      */
     public record TranslatedDatabaseUrl(String jdbcUrl, String username, String password) {
 
@@ -163,8 +228,9 @@ public final class DatabaseUrlTranslator {
      *                               cannot be parsed as a URL, which includes a value padded with
      *                               leading or trailing whitespace; if it declares no scheme or no
      *                               host; if its port is not an integer in
-     *                               {@code 0..}{@value #MAX_PORT}; or if its scheme is not one of
-     *                               the supported schemes
+     *                               {@code 0..}{@value #MAX_PORT}; if its scheme is not one of the
+     *                               supported schemes; or if credential material would otherwise
+     *                               remain inside the JDBC URL
      */
     public static TranslatedDatabaseUrl translate(String databaseUrl) {
         if (databaseUrl == null || databaseUrl.isBlank()) {
@@ -173,13 +239,14 @@ public final class DatabaseUrlTranslator {
         }
 
         if (databaseUrl.startsWith(JDBC_SCHEME_PREFIX)) {
+            rejectCredentialMaterial(databaseUrl, "DATABASE_URL holds a JDBC URL that carries credential material");
             LOG.info("DATABASE_URL already holds a JDBC URL; it is used exactly as supplied and no "
                     + "credentials are extracted from it.");
             return new TranslatedDatabaseUrl(databaseUrl, null, null);
         }
 
         final URI uri = parseUri(databaseUrl);
-        final String vendor = resolveVendor(uri.getScheme());
+        final Vendor vendor = resolveVendor(uri.getScheme());
 
         String host = uri.getHost();
         int port = uri.getPort();
@@ -200,27 +267,136 @@ public final class DatabaseUrlTranslator {
 
         port = validatePort(port);
 
-        final UserInfo credentials = splitUserInfo(rawUserInfo);
+        final UserInfo userInfoCredentials = splitUserInfo(rawUserInfo);
         final String path = uri.getRawPath() == null ? "" : uri.getRawPath();
-        final String query = uri.getRawQuery();
+        final Query query = partitionQuery(uri.getRawQuery(), userInfoCredentials);
 
-        final StringBuilder jdbcUrl = new StringBuilder(JDBC_SCHEME_PREFIX)
-                .append(vendor)
-                .append(AUTHORITY_SEPARATOR)
-                .append(host);
+        final StringBuilder jdbcUrl = new StringBuilder(vendor.jdbcAuthorityPrefix()).append(host);
         if (port != NO_PORT) {
             jdbcUrl.append(COLON).append(port);
         }
         jdbcUrl.append(path);
 
-        if (query != null && !query.isEmpty()) {
-            jdbcUrl.append(QUERY_MARKER).append(query);
+        if (!query.retained().isEmpty()) {
+            jdbcUrl.append(QUERY_MARKER).append(String.join(QUERY_PROPERTY_SEPARATOR, query.retained()));
         }
+
+        final String assembled = jdbcUrl.toString();
+        rejectCredentialMaterial(assembled, "DATABASE_URL carries credential material that cannot be "
+                + "separated from its JDBC URL");
 
         // Logging baseline - see docs/DECISION_LOG.md DL-052. The record names the resolved vendor
         // only; host, port, database path, query and user-info are omitted.
-        LOG.info("Translated DATABASE_URL to a JDBC URL for vendor '{}'", vendor);
-        return new TranslatedDatabaseUrl(jdbcUrl.toString(), credentials.username(), credentials.password());
+        LOG.info("Translated DATABASE_URL to a JDBC URL for vendor '{}'", vendor.token());
+        return new TranslatedDatabaseUrl(assembled, query.credentials().username(), query.credentials().password());
+    }
+
+    /**
+     * Rejects a URL that carries credential material, so that {@link TranslatedDatabaseUrl#jdbcUrl()}
+     * never holds a username or a password.
+     *
+     * @param url     the URL to test
+     * @param summary the leading clause of the failure message
+     * @throws IllegalStateException if {@link #carriesCredentialMaterial(String)} holds for the URL
+     */
+    private static void rejectCredentialMaterial(String url, String summary) {
+        if (!carriesCredentialMaterial(url)) {
+            return;
+        }
+        LOG.error("{}. Supply the credentials through the user-info component of a non-JDBC "
+                + "DATABASE_URL instead.", summary);
+        throw new IllegalStateException(summary + ": a username or a password must not appear in the "
+                + "JDBC URL. Supply them through the user-info component of " + EXPECTED_FORM + " so "
+                + "they are held apart from the URL.");
+    }
+
+    /**
+     * Reports whether a URL carries credential material, in either of the two places a JDBC URL can
+     * hold it: the user-info component of an authority, and a recognised credential property.
+     *
+     * <p>The property scan covers every {@code ?}, {@code &} and {@code ;} separated property of the
+     * whole URL, so it applies to a query string and to the semicolon-separated property list some
+     * drivers accept. The text before a property's {@code '='} is compared, lower-cased, against
+     * {@link #CREDENTIAL_PROPERTY_NAMES}.
+     *
+     * @param url the URL to inspect; never {@code null}
+     * @return {@code true} when the URL carries a username or a password
+     */
+    private static boolean carriesCredentialMaterial(String url) {
+        final int authorityStart = url.indexOf(AUTHORITY_SEPARATOR);
+        if (authorityStart >= 0) {
+            final int from = authorityStart + AUTHORITY_SEPARATOR.length();
+            int end = url.length();
+            for (int i = from; i < url.length(); i++) {
+                final char c = url.charAt(i);
+                if (c == '/' || c == QUERY_MARKER || c == FRAGMENT_MARKER) {
+                    end = i;
+                    break;
+                }
+            }
+            if (url.lastIndexOf(AT_SIGN, end - 1) >= from) {
+                return true;
+            }
+        }
+
+        final String[] tokens = PROPERTY_SEPARATOR.split(url, -1);
+        for (int i = 1; i < tokens.length; i++) {
+            if (isCredentialProperty(tokens[i])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Reports whether a {@code name=value} token names a credential property. */
+    private static boolean isCredentialProperty(String token) {
+        final int equals = token.indexOf(EQUALS_SIGN);
+        final String name = equals < 0 ? token : token.substring(0, equals);
+        return CREDENTIAL_PROPERTY_NAMES.contains(name.strip().toLowerCase(Locale.ROOT));
+    }
+
+    /**
+     * Splits a raw query component into the properties the reassembled URL retains and the
+     * credentials taken out of it.
+     *
+     * <p>Properties are separated on {@code '&'}. A property whose name is recognised by
+     * {@link #CREDENTIAL_PROPERTY_NAMES} is removed from the query and, when the user-info component
+     * did not already supply that half of the credentials, its percent-decoded value becomes the
+     * username or the password. Every other property is retained verbatim and in its original order.
+     *
+     * @param rawQuery      the raw query component, or {@code null} when the value declared none
+     * @param fromUserInfo  the credentials already taken from the user-info component
+     * @return the retained properties and the resolved credentials, never {@code null}
+     */
+    private static Query partitionQuery(String rawQuery, UserInfo fromUserInfo) {
+        String username = fromUserInfo.username();
+        String password = fromUserInfo.password();
+
+        if (rawQuery == null || rawQuery.isEmpty()) {
+            return new Query(List.of(), new UserInfo(username, password));
+        }
+
+        final List<String> retained = new ArrayList<>();
+        for (String token : rawQuery.split(QUERY_PROPERTY_SEPARATOR, -1)) {
+            if (token.isEmpty()) {
+                continue;
+            }
+            final int equals = token.indexOf(EQUALS_SIGN);
+            final String name = (equals < 0 ? token : token.substring(0, equals)).strip().toLowerCase(Locale.ROOT);
+            if (!CREDENTIAL_PROPERTY_NAMES.contains(name)) {
+                retained.add(token);
+                continue;
+            }
+            final String value = equals < 0 ? "" : decodeUriComponent(token.substring(equals + 1));
+            if (name.equals("user") || name.equals("username")) {
+                if (username == null) {
+                    username = value;
+                }
+            } else if (password == null) {
+                password = value;
+            }
+        }
+        return new Query(Collections.unmodifiableList(retained), new UserInfo(username, password));
     }
 
     /**
@@ -244,7 +420,7 @@ public final class DatabaseUrlTranslator {
      *
      * @throws IllegalStateException if the scheme is absent or unsupported
      */
-    private static String resolveVendor(String rawScheme) {
+    private static Vendor resolveVendor(String rawScheme) {
         if (rawScheme == null || rawScheme.isBlank()) {
             LOG.error("DATABASE_URL declares no scheme. Supported schemes: {}.", SUPPORTED_SCHEMES);
             throw new IllegalStateException("DATABASE_URL declares no scheme: expected " + EXPECTED_FORM
@@ -255,7 +431,7 @@ public final class DatabaseUrlTranslator {
         final String scheme = (driverSuffix < 0 ? rawScheme : rawScheme.substring(0, driverSuffix))
                 .toLowerCase(Locale.ROOT);
 
-        final String vendor = JDBC_VENDOR_BY_SCHEME.get(scheme);
+        final Vendor vendor = VENDOR_BY_SCHEME.get(scheme);
         if (vendor == null) {
             LOG.error("DATABASE_URL declares the unsupported scheme '{}'. Supported schemes: {}.",
                     scheme, SUPPORTED_SCHEMES);
@@ -374,6 +550,14 @@ public final class DatabaseUrlTranslator {
      * component; either may be null.
      */
     private record UserInfo(String username, String password) {
+    }
+
+    /**
+     * The outcome of partitioning a query component: the properties the reassembled URL keeps, in
+     * their original order and raw form, and the credentials resolved from the user-info component
+     * and from any recognised credential property.
+     */
+    private record Query(List<String> retained, UserInfo credentials) {
     }
 
     /** The parts of an authority component; {@code port} is {@value #NO_PORT} when absent. */

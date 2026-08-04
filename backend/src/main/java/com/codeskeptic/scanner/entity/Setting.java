@@ -13,30 +13,47 @@ import jakarta.persistence.Table;
  * are exactly {@code key} and {@code value}. The primary key is assigned by the caller; it is never
  * generated. The table is created from these annotations by
  * {@code spring.jpa.hibernate.ddl-auto} — see docs/DECISION_LOG.md DL-026.
+ *
+ * <p>{@code value} and {@code description} declare {@code length = Integer.MAX_VALUE}, which renders
+ * each vendor's unbounded character type and reproduces the unbounded {@code Column(String)} at
+ * backend/app/db/models.py:L43-44 — DL-068 — see docs/DECISION_LOG.md. {@code key} declares
+ * {@code length = 255}: it is the primary key, and an unbounded character column cannot be indexed
+ * on every supported vendor — DL-069 — see docs/DECISION_LOG.md.
  */
 // Ported from backend/app/db/models.py:L39-44 (faithful port) — see docs/DECISION_LOG.md
 // Deviation from the literal @Column(name = "key") / @Column(name = "value") mapping: both are
-// declared as JPA quoted identifiers, so the physical column names stay key and value — DL-026 —
+// declared as JPA quoted identifiers, so the physical column names stay key and value — DL-061 —
 // see docs/DECISION_LOG.md
+// Deviation from an unbounded primary-key column: key declares an explicit length — DL-069 — see
+// docs/DECISION_LOG.md
 // equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see
 // docs/DECISION_LOG.md
 @Entity
 @Table(name = "settings")
 public class Setting {
 
+    /**
+     * Declared character length of the {@code settings.key} primary-key column — DL-069 — see
+     * docs/DECISION_LOG.md.
+     */
+    private static final int KEY_LENGTH = 255;
+
     // backend/app/db/models.py:L42
-    // Quoted-identifier deviation — DL-026 — see docs/DECISION_LOG.md
+    // Quoted-identifier deviation — DL-061 — see docs/DECISION_LOG.md
+    // Explicit primary-key length — DL-069 — see docs/DECISION_LOG.md
     @Id
-    @Column(name = "\"key\"")
+    @Column(name = "\"key\"", length = KEY_LENGTH)
     private String key;
 
     // backend/app/db/models.py:L43
-    // Quoted-identifier deviation — DL-026 — see docs/DECISION_LOG.md
-    @Column(name = "\"value\"")
+    // Quoted-identifier deviation — DL-061 — see docs/DECISION_LOG.md
+    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
+    @Column(name = "\"value\"", length = Integer.MAX_VALUE)
     private String value;
 
     // backend/app/db/models.py:L44
-    @Column(name = "description")
+    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
+    @Column(name = "description", length = Integer.MAX_VALUE)
     private String description;
 
     /**

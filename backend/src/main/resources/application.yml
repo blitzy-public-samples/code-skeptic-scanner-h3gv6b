@@ -21,7 +21,7 @@ spring:
     properties:
       hibernate:
         # Net-new (no Python counterpart) — column names at
-        # backend/app/db/models.py:L42-43 — DL-026 — see docs/DECISION_LOG.md
+        # backend/app/db/models.py:L42-43 — DL-061 — see docs/DECISION_LOG.md
         auto_quote_keyword: true
 
 scanner:

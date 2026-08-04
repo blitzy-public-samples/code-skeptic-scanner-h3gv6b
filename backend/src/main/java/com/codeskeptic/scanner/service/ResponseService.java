@@ -11,6 +11,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.codeskeptic.scanner.dto.PaginatedResponsesDto;
 import com.codeskeptic.scanner.dto.PaginationDto;
@@ -39,12 +40,11 @@ import com.codeskeptic.scanner.service.mapper.TweetMapper;
  * {@link #updateResponse(String, UpdateResponseRequest)} for {@code PUT /responses/{responseId}}.
  * Each signature is fixed by the call site the blueprint already declared, at
  * {@code backend/app/api/responses.py:L15}, {@code :L26}, {@code :L44} and {@code :L60}; the module
- * those call sites imported at {@code :L3} defined none of them. This class declares no further
- * operation and no static method reachable from outside it.
+ * those call sites imported at {@code :L3} defined none of them.
  *
  * <p>The source constructed the service once per request, at
  * {@code backend/app/api/responses.py:L14}, {@code :L25}, {@code :L43} and {@code :L59}. This is one
- * singleton bean holding its five collaborators in final fields.
+ * singleton bean holding its five collaborators in final fields — DL-043.
  *
  * <p>The set of client-visible messages this class can produce is closed at five, each a wire literal
  * of the source:
@@ -62,38 +62,33 @@ import com.codeskeptic.scanner.service.mapper.TweetMapper;
  *       {@link NotFoundException#responseNotFoundOrUpdateFailed()}, rendered as 404.
  * </ul>
  *
- * <p>None of the five is minted here. Each is held as a constant on its exception type and reached
- * through that type's factory, and no identifier, driver text or stack detail is appended to any of
- * them. This class selects no HTTP status; {@code api.GlobalExceptionHandler} does.
+ * <p>Each literal is held as a constant on its exception type and reached through that type's factory;
+ * no identifier, driver text or stack detail is appended to any of them. This class selects no HTTP
+ * status; {@code api.GlobalExceptionHandler} does — DL-076.
  *
- * <p>The two 404 messages are different strings. {@code GET /responses/{responseId}} carries the
- * literal of {@code :L31}; {@code PUT /responses/{responseId}} carries the literal of {@code :L65}.
+ * <p>The two 404 messages are different strings: {@code GET /responses/{responseId}} carries the
+ * literal of {@code :L31} and {@code PUT /responses/{responseId}} the literal of {@code :L65} —
+ * DL-076.
  *
  * <p>{@code POST /responses} reports the two outcomes of {@code :L46-49}: a stored draft, or the
- * single 500 literal. Every failure on that path is reported as that one literal — an identifier that
- * parses to no number, an identifier naming no {@code tweets} row, a generation failure and a
- * persistence failure alike. That path reports no 404.
+ * single 500 literal, which covers an identifier that parses to no number, an identifier naming no
+ * {@code tweets} row, a generation failure and a persistence failure alike — DL-076.
  *
- * <p>Every entity is converted to its wire form inside the transaction that loaded it. Neither a
- * detached entity nor an uninitialised proxy leaves this class; {@code spring.jpa.open-in-view} is
- * {@code false}.
+ * <p>Every entity is converted to its wire form inside the transaction that loaded it;
+ * {@code spring.jpa.open-in-view} is {@code false}.
  *
- * <p>A generated reply is stored with {@code is_approved} {@code false} and is sent nowhere. This
- * class opens no connection to X, holds no HTTP client, and declares no operation that publishes,
- * posts, replies, retweets or sends. {@code is_approved} is written on request by
- * {@link #updateResponse(String, UpdateResponseRequest)} and read by a human reviewer; no branch here
- * reads it to emit anything outward.
+ * <p>A generated reply is stored with {@code is_approved} {@code false}.
+ * {@link #updateResponse(String, UpdateResponseRequest)} writes that flag on request and a human
+ * reviewer reads it.
  *
- * <p>Rows are the only thing this class adds. It contributes no column, table, index or constraint.
+ * <p>Rows are the only thing this class adds; it contributes no column, table, index or constraint.
  * The {@code tweets}-to-{@code responses} association declared at
  * {@code backend/app/db/models.py:L27-28,L30} is the only association it writes.
  *
  * <p>The {@code responses} and {@code tweets} tables are reached through {@link ResponseRepository}
- * and {@link TweetRepository} only. This class declares no JPQL and no native query, memoises
- * nothing, and retries nothing.
+ * and {@link TweetRepository} only.
  *
- * <p>Text generation is delegated to {@link LlmService}, which returns a {@link ResponseDto}. No
- * vendor type appears in this class.
+ * <p>Text generation is delegated to {@link LlmService}, which returns the generated text — DL-081.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md}; construct-level
  * provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
@@ -121,6 +116,13 @@ public class ResponseService {
      */
     private static final int DEFAULT_PER_PAGE = 10;
 
+    /**
+     * The largest page size this service materialises, applied to any larger {@code per_page} value.
+     *
+     * <p>See docs/DECISION_LOG.md DL-149.
+     */
+    private static final int MAXIMUM_PER_PAGE = 100;
+
     /** Data access for the {@code responses} table. */
     private final ResponseRepository responseRepository;
 
@@ -136,6 +138,9 @@ public class ResponseService {
     /** Converts a {@link Tweet} into the {@link TweetDto} the generator reads. */
     private final TweetMapper tweetMapper;
 
+    /** Demarcates the short transactional unit that stores a generated row — DL-086. */
+    private final TransactionTemplate transactionTemplate;
+
     /**
      * Creates the bean with its collaborators, replacing the per-request construction at
      * {@code backend/app/api/responses.py:L14,L25,L43,L59}.
@@ -145,13 +150,16 @@ public class ResponseService {
      * @param llmService         reply-text generator, must not be {@code null}
      * @param responseMapper     {@link Response}-to-wire converter, must not be {@code null}
      * @param tweetMapper        {@link Tweet}-to-wire converter, must not be {@code null}
+     * @param transactionTemplate demarcates the unit that stores a generated row, must not be
+     *                           {@code null}
      * @throws NullPointerException when any argument is {@code null}
      */
     public ResponseService(ResponseRepository responseRepository,
             TweetRepository tweetRepository,
             LlmService llmService,
             ResponseMapper responseMapper,
-            TweetMapper tweetMapper) {
+            TweetMapper tweetMapper,
+            TransactionTemplate transactionTemplate) {
         this.responseRepository = Objects.requireNonNull(responseRepository,
                 "responseRepository must not be null.");
         this.tweetRepository = Objects.requireNonNull(tweetRepository,
@@ -159,6 +167,8 @@ public class ResponseService {
         this.llmService = Objects.requireNonNull(llmService, "llmService must not be null.");
         this.responseMapper = Objects.requireNonNull(responseMapper, "responseMapper must not be null.");
         this.tweetMapper = Objects.requireNonNull(tweetMapper, "tweetMapper must not be null.");
+        this.transactionTemplate = Objects.requireNonNull(transactionTemplate,
+                "transactionTemplate must not be null.");
     }
 
     // Call site backend/app/api/responses.py:L15; envelope :L17-20; parameter defaults :L11-12 — see
@@ -175,8 +185,8 @@ public class ResponseService {
      *
      * <p>The pagination block carries {@code page} as the 1-based number of the page returned,
      * {@code per_page} as its size, {@code total} as the number of rows in the table and
-     * {@code total_pages} as the number of pages that size divides the table into. The rows are
-     * converted inside this method's transaction.
+     * {@code total_pages} as the number of pages that size divides the table into — DL-038. The rows
+     * are converted inside this method's transaction.
      *
      * @param page    the 1-based page number to return; a value below {@value #DEFAULT_PAGE} is read
      *                as {@value #DEFAULT_PAGE}
@@ -190,7 +200,7 @@ public class ResponseService {
         // Out-of-range values are read as the defaults of backend/app/api/responses.py:L11-12 —
         // DL-077 — see docs/DECISION_LOG.md
         int requestedPage = (page < DEFAULT_PAGE) ? DEFAULT_PAGE : page;
-        int requestedPerPage = (perPage < 1) ? DEFAULT_PER_PAGE : perPage;
+        int requestedPerPage = (perPage < 1) ? DEFAULT_PER_PAGE : Math.min(perPage, MAXIMUM_PER_PAGE);
 
         // The wire page of backend/app/api/responses.py:L11 is 1-based; PageRequest is 0-based —
         // DL-038 — see docs/DECISION_LOG.md
@@ -253,11 +263,11 @@ public class ResponseService {
      * the {@code if not tweet_id} guard at {@code backend/app/api/responses.py:L40}. A whitespace-only
      * value passes that guard.
      *
-     * <p>Past the guard this method reports the two outcomes of {@code :L46-49}. The stored row is
-     * returned, or the single literal of {@code :L49} is reported. That one literal covers every
-     * failure on this path: a {@code tweetId} carrying no number, a {@code tweetId} naming no
-     * {@code tweets} row, a failure raised by {@link LlmService#generateResponse(TweetDto)}, and a
-     * failure raised while storing the row. No 404 is reported here.
+     * <p>Past the guard this method reports the two outcomes of {@code :L46-49}: the stored row, or the
+     * single literal of {@code :L49}, which covers a {@code tweetId} carrying no number, a
+     * {@code tweetId} naming no {@code tweets} row, a failure raised by
+     * {@link LlmService#generateResponse(TweetDto)} and a failure raised while storing the row — see
+     * docs/DECISION_LOG.md DL-076.
      *
      * <p>The stored row carries the generated text as {@code content}, {@code is_approved}
      * {@code false}, {@code generated_at} as the current local time, and the loaded {@link Tweet} as
@@ -266,7 +276,11 @@ public class ResponseService {
      * {@code backend/app/tasks/response_generation.py:L25-26}. The row is converted inside this
      * method's transaction.
      *
-     * <p>The stored row is a draft. It is sent nowhere, and nothing here publishes to X.
+     * <p>No database transaction spans the generation request. Reading the subject row and storing the
+     * generated row are separate units of work and the call to
+     * {@link LlmService#generateResponse(TweetDto)} runs between them with no transaction open — see
+     * docs/DECISION_LOG.md DL-086. The subject row is read again inside the storing unit, so a row
+     * deleted while the model was answering is reported as the literal of {@code :L49}.
      *
      * @param tweetId the raw identifier of the {@code tweets} row to reply to; must be neither
      *                {@code null} nor empty
@@ -278,7 +292,6 @@ public class ResponseService {
      *                                      fails, carrying the wire literal of
      *                                      {@code backend/app/api/responses.py:L49}
      */
-    @Transactional
     public ResponseDto generateResponse(String tweetId) {
         // backend/app/api/responses.py:L40-41 — the guard tests null and the empty string
         if (tweetId == null || tweetId.isEmpty()) {
@@ -288,33 +301,11 @@ public class ResponseService {
 
         log.info("Generating a response for tweet '{}'.", tweetId);
 
+        Long identifier = parseIdentifier(tweetId);
         try {
-            Long identifier = parseIdentifier(tweetId);
-            Optional<Tweet> found = (identifier == null)
-                    ? Optional.empty()
-                    : tweetRepository.findById(identifier);
-            if (found.isEmpty()) {
-                log.error("Response generation failed for tweet '{}': the identifier names no row.",
-                        tweetId);
-                throw new ResponseGenerationException();
-            }
-
-            // Replaces Tweet.get(tweet_id) at backend/app/tasks/response_generation.py:L16
-            Tweet tweet = found.get();
-            TweetDto subject = tweetMapper.toDto(tweet);
-            ResponseDto generated = llmService.generateResponse(subject);
-
-            Response response = new Response();
-            response.setContent(generated.content());
-            // A flag a human reads; never a trigger.
-            response.setIsApproved(false);
-            // Minted where the row is built — DL-077 — see docs/DECISION_LOG.md
-            response.setGeneratedAt(LocalDateTime.now());
-            // backend/app/db/models.py:L27-28 — the association owns the tweet_id column
-            response.setTweet(tweet);
-
-            // Replaces response.save() at backend/app/tasks/response_generation.py:L25-26
-            ResponseDto stored = responseMapper.toDto(responseRepository.save(response));
+            TweetDto subject = readSubject(identifier);
+            String generatedText = llmService.generateResponse(subject);
+            ResponseDto stored = store(identifier, generatedText);
 
             log.info("Stored response {} for tweet '{}' awaiting review.", stored.id(), tweetId);
             return stored;
@@ -322,9 +313,78 @@ public class ResponseService {
             // The failure already carrying the wire literal of :L49 passes through unchanged.
             throw e;
         } catch (RuntimeException e) {
-            log.error("Response generation failed for tweet '{}'.", tweetId, e);
+            // Single sanitized error log for this path — DL-084 — see docs/DECISION_LOG.md
+            log.error("Response generation failed for tweet '{}': {}.",
+                    tweetId, e.getClass().getSimpleName());
             throw new ResponseGenerationException(e);
         }
+    }
+
+    /**
+     * Reads the {@code tweets} row a generation request names and returns its wire form.
+     *
+     * <p>The row is converted inside the transaction the repository operation demarcates; the
+     * {@code responses} association is not read.
+     *
+     * @param identifier the parsed identifier, or {@code null} when the request carried no number
+     * @return the subject row in its wire form, never {@code null}
+     * @throws ResponseGenerationException when {@code identifier} is {@code null} or names no row,
+     *                                     carrying the wire literal of
+     *                                     {@code backend/app/api/responses.py:L49}
+     */
+    // Replaces Tweet.get(tweet_id) at backend/app/tasks/response_generation.py:L16 — DL-086 — see
+    // docs/DECISION_LOG.md
+    private TweetDto readSubject(Long identifier) {
+        Optional<Tweet> found = (identifier == null)
+                ? Optional.empty()
+                : tweetRepository.findById(identifier);
+        if (found.isEmpty()) {
+            log.error("Response generation failed: identifier {} names no tweets row.", identifier);
+            throw new ResponseGenerationException();
+        }
+        return tweetMapper.toDto(found.get());
+    }
+
+    /**
+     * Stores the generated reply as a new {@code responses} row and returns the stored row.
+     *
+     * <p>The row carries the generated text as {@code content}, {@code is_approved} {@code false},
+     * {@code generated_at} as the current local time, and the re-read {@link Tweet} as its
+     * association. Its {@code id} is assigned by the database on insert and is read back from the
+     * stored row, replacing the {@code response.save()} call at
+     * {@code backend/app/tasks/response_generation.py:L25-26}.
+     *
+     * @param identifier the parsed identifier of the parent row
+     * @param generatedText the text to store; neither {@code null} nor blank
+     * @return the stored row in its wire form, never {@code null}
+     * @throws ResponseGenerationException when {@code identifier} names no row at this point,
+     *                                     carrying the wire literal of
+     *                                     {@code backend/app/api/responses.py:L49}
+     */
+    // Replaces response.save() at backend/app/tasks/response_generation.py:L25-26 — DL-086 — see
+    // docs/DECISION_LOG.md
+    private ResponseDto store(Long identifier, String generatedText) {
+        return transactionTemplate.execute(status -> {
+            Optional<Tweet> found = (identifier == null)
+                    ? Optional.empty()
+                    : tweetRepository.findById(identifier);
+            if (found.isEmpty()) {
+                log.error("Response generation failed: identifier {} names no tweets row.",
+                        identifier);
+                throw new ResponseGenerationException();
+            }
+
+            Response response = new Response();
+            response.setContent(generatedText);
+            // backend/app/db/models.py:L26 — the flag a human reviewer reads
+            response.setIsApproved(false);
+            // Minted where the row is built — DL-077 — see docs/DECISION_LOG.md
+            response.setGeneratedAt(LocalDateTime.now());
+            // backend/app/db/models.py:L27-28 — the association owns the tweet_id column
+            response.setTweet(found.get());
+
+            return responseMapper.toDto(responseRepository.save(response));
+        });
     }
 
     // Call site backend/app/api/responses.py:L60; 400 literal :L57; 404 literal :L65 — see
@@ -333,30 +393,30 @@ public class ResponseService {
      * Applies a partial update to the {@code responses} row identified by {@code responseId} and
      * returns the stored row.
      *
-     * <p>The request is rejected when it is {@code null} and when it carries neither {@code content}
-     * nor {@code is_approved}, matching the {@code if not update_data} guard at
-     * {@code backend/app/api/responses.py:L56}: an empty JSON object reaches this method as a request
-     * whose two components are both {@code null}. The request is tested before the row is read, in the
-     * order of {@code :L56-60}. Nothing is stored when the request is rejected.
+     * <p>The request is rejected when it is {@code null} and when it carries neither the
+     * {@code content} key nor the {@code is_approved} key, matching the {@code if not update_data}
+     * guard at {@code backend/app/api/responses.py:L56}. A key the body carries as JSON {@code null}
+     * counts as carried, so a body such as {@code {"is_approved":null}} passes the guard — DL-082. The
+     * request is tested before the row is read, in the order of {@code :L56-60}.
      *
      * <p>{@code responseId} arrives as the raw path segment. An identifier carrying no number, a
      * {@code null} identifier and an identifier naming no row are all reported with the literal of
      * {@code :L65}, which is a different string from the one {@link #getResponseById(String)} reports.
      *
-     * <p>Two columns are writable here. {@code content} is written when the request carries it, and
-     * {@code is_approved} is written when the request carries it; a component that is {@code null} is
-     * not written, and {@code is_approved} {@code false} is written like any other value.
-     * {@code id}, {@code generated_at} and {@code tweet_id} are not written by this method, and no
-     * value is trimmed or normalised on the way in.
+     * <p>Two columns are writable here, and each is written exactly when the request body carried its
+     * key: presence, not value, decides. A key carried as JSON {@code null} clears the column, which
+     * both columns accept, and a key the body omits leaves its column untouched — see
+     * docs/DECISION_LOG.md DL-082. {@code id}, {@code generated_at} and {@code tweet_id} are not
+     * written by this method, and no value is trimmed or normalised on the way in.
      *
-     * <p>{@code is_approved} is a flag a human reviewer reads. Writing it sends nothing anywhere.
+     * <p>{@code is_approved} is the flag a human reviewer reads.
      *
      * @param responseId the raw path segment identifying the row; an unparseable and a {@code null}
      *                   value are both reported as absent
-     * @param request    the columns to write; {@code null}, and a request carrying neither component,
-     *                   are both rejected
+     * @param request    the columns to write; {@code null}, and a request carrying neither key, are
+     *                   both rejected
      * @return the stored row in its wire form, never {@code null}
-     * @throws BadRequestException when {@code request} is {@code null} or carries neither component,
+     * @throws BadRequestException when {@code request} is {@code null} or carries neither key,
      *                             carrying the wire literal of
      *                             {@code backend/app/api/responses.py:L57}
      * @throws NotFoundException   when {@code responseId} names no row, carrying the wire literal of
@@ -364,8 +424,8 @@ public class ResponseService {
      */
     @Transactional
     public ResponseDto updateResponse(String responseId, UpdateResponseRequest request) {
-        // backend/app/api/responses.py:L56-57 — the guard tests null and a body carrying no field
-        if (request == null || (request.content() == null && request.isApproved() == null)) {
+        // backend/app/api/responses.py:L56-57 — the guard tests null and a body carrying no key
+        if (request == null || request.carriesNoUpdatableField()) {
             log.warn("Rejected the update of response '{}': the request carried no updatable field.",
                     responseId);
             throw BadRequestException.updateDataRequired();
@@ -380,19 +440,20 @@ public class ResponseService {
         }
 
         Response response = existing.get();
-        if (request.content() != null) {
-            response.setContent(request.content());
+        // Presence decides, not value — DL-082 — see docs/DECISION_LOG.md
+        if (request.contentPresent()) {
+            response.setContent(request.contentValue());
         }
-        if (request.isApproved() != null) {
-            response.setIsApproved(request.isApproved());
+        if (request.approvalPresent()) {
+            response.setIsApproved(request.approvalValue());
         }
 
         ResponseDto stored = responseMapper.toDto(responseRepository.save(response));
 
         log.info("Updated response '{}': content {}, approval {}.",
                 responseId,
-                request.content() == null ? "unchanged" : "replaced",
-                request.isApproved() == null ? "unchanged" : request.isApproved());
+                request.contentPresent() ? "written" : "unchanged",
+                request.approvalPresent() ? "written" : "unchanged");
 
         return stored;
     }

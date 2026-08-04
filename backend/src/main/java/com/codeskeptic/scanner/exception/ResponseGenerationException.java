@@ -5,8 +5,8 @@ package com.codeskeptic.scanner.exception;
  *
  * <p>{@link #getMessage()} always returns {@value #FAILED_TO_GENERATE_RESPONSE}, the literal at the
  * source call site ({@code backend/app/api/responses.py:L49}). The message is fixed by this type and
- * cannot be supplied, extended or replaced by a caller, so no OpenAI, database or other
- * infrastructure text can reach the client through it.
+ * cannot be supplied, extended or replaced by a caller. No OpenAI, database or other infrastructure
+ * text is rendered by it.
  *
  * <p>A throwable passed to {@link #ResponseGenerationException(Throwable)} is returned by
  * {@link #getCause()} and does not appear in {@link #getMessage()}.

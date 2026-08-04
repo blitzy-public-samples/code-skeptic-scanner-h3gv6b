@@ -5,13 +5,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.codeskeptic.scanner.config.DatabaseUrlTranslator.TranslatedDatabaseUrl;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Modifier;
+
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /**
  * Exercises the {@link DatabaseUrlTranslator#translate(String)} contract: the {@code jdbc:}
- * pass-through, the supported scheme set, driver-suffix stripping, credential extraction and
- * omission, query-string preservation, and the rejected values.
+ * pass-through and the credential material it rejects, the supported scheme set, driver-suffix
+ * stripping, credential extraction from the user-info component and from the query string,
+ * percent-escape decoding, query-string preservation, host and port validation, and the rejected
+ * values.
  *
  * <p>Net-new (no Python counterpart) - see docs/DECISION_LOG.md DL-027.
  */
@@ -92,7 +97,7 @@ class DatabaseUrlTranslatorTest {
     void mapsTheH2SchemeOntoH2() {
         TranslatedDatabaseUrl translated = DatabaseUrlTranslator.translate("h2://localhost/scanner");
 
-        // H2 has no `//` connection mode, so the vendor prefix is `jdbc:h2:tcp://` — DL-071 — see
+        // The vendor prefix for the h2 scheme is `jdbc:h2:tcp://` — DL-071 — see
         // docs/DECISION_LOG.md
         assertThat(translated.jdbcUrl()).isEqualTo("jdbc:h2:tcp://localhost/scanner");
         assertThat(translated.username()).isNull();
@@ -127,5 +132,264 @@ class DatabaseUrlTranslatorTest {
     void rejectsAWhitespaceOnlyValue() {
         assertThatThrownBy(() -> DatabaseUrlTranslator.translate("   "))
                 .isInstanceOf(IllegalStateException.class);
+    }
+
+    // -----------------------------------------------------------------------
+    // The jdbc: pass-through rejects credential material
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("rejects a jdbc url whose authority carries user-info")
+    void rejectsAJdbcUrlCarryingUserInfo() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("jdbc:postgresql://u:p@host/db"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("must not appear in the JDBC URL")
+                .hasMessageNotContaining("u:p");
+    }
+
+    @Test
+    @DisplayName("rejects a jdbc url carrying a user property")
+    void rejectsAJdbcUrlCarryingAUserProperty() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("jdbc:mysql://host/db?user=root"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("must not appear in the JDBC URL")
+                .hasMessageNotContaining("root");
+    }
+
+    @Test
+    @DisplayName("rejects a jdbc url carrying a password property")
+    void rejectsAJdbcUrlCarryingAPasswordProperty() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("jdbc:postgresql://host/db?password=s3cret"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("must not appear in the JDBC URL")
+                .hasMessageNotContaining("s3cret");
+    }
+
+    @Test
+    @DisplayName("rejects a jdbc url whose credential property is separated by a semicolon")
+    void rejectsAJdbcUrlCarryingASemicolonSeparatedCredentialProperty() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("jdbc:mysql://host/db;user=root"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("must not appear in the JDBC URL");
+    }
+
+    // -----------------------------------------------------------------------
+    // Credentials carried in the query string
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("extracts the credentials from the query string and retains the remaining properties")
+    void extractsCredentialsFromTheQueryStringAndRetainsTheRemainingProperties() {
+        TranslatedDatabaseUrl translated = DatabaseUrlTranslator
+                .translate("mysql://host/db?user=root&password=secret&useSSL=true");
+
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:mysql://host/db?useSSL=true");
+        assertThat(translated.username()).isEqualTo("root");
+        assertThat(translated.password()).isEqualTo("secret");
+        assertThat(translated.jdbcUrl()).doesNotContain("user=", "password=", "secret");
+    }
+
+    @Test
+    @DisplayName("takes the user-info credentials in preference to the query-string ones")
+    void takesTheUserInfoCredentialsInPreferenceToTheQueryStringOnes() {
+        TranslatedDatabaseUrl translated = DatabaseUrlTranslator
+                .translate("postgresql://u:p@host/db?user=other&password=another");
+
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:postgresql://host/db");
+        assertThat(translated.username()).isEqualTo("u");
+        assertThat(translated.password()).isEqualTo("p");
+        assertThat(translated.jdbcUrl()).doesNotContain("other", "another");
+    }
+
+    @Test
+    @DisplayName("keeps the first credential property when the same name is repeated in another case")
+    void keepsTheFirstCredentialPropertyWhenTheNameIsRepeated() {
+        TranslatedDatabaseUrl translated =
+                DatabaseUrlTranslator.translate("mysql://host/db?password=a&PASSWORD=b");
+
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:mysql://host/db");
+        assertThat(translated.password()).isEqualTo("a");
+    }
+
+    // -----------------------------------------------------------------------
+    // The user-info component
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("decodes the percent-escapes of the user-info component")
+    void decodesThePercentEscapesOfTheUserInfoComponent() {
+        TranslatedDatabaseUrl translated =
+                DatabaseUrlTranslator.translate("postgresql://us%40er:p%40ss@host/db");
+
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:postgresql://host/db");
+        assertThat(translated.username()).isEqualTo("us@er");
+        assertThat(translated.password()).isEqualTo("p@ss");
+    }
+
+    @Test
+    @DisplayName("carries a plus sign in the user-info component through as a plus sign")
+    void carriesAPlusSignInTheUserInfoComponentThroughLiterally() {
+        TranslatedDatabaseUrl translated =
+                DatabaseUrlTranslator.translate("postgresql://u:a+b@host/db");
+
+        assertThat(translated.password()).isEqualTo("a+b");
+    }
+
+    @Test
+    @DisplayName("rejects a malformed percent-escape")
+    void rejectsAMalformedPercentEscape() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("postgresql://u:p%ZZ@host/db"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not a parseable URL");
+    }
+
+    @Test
+    @DisplayName("reports no password when the user-info component carries only a username")
+    void reportsNoPasswordWhenTheUserInfoCarriesOnlyAUsername() {
+        TranslatedDatabaseUrl translated =
+                DatabaseUrlTranslator.translate("postgresql://scanner@host/db");
+
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:postgresql://host/db");
+        assertThat(translated.username()).isEqualTo("scanner");
+        assertThat(translated.password()).isNull();
+    }
+
+    @Test
+    @DisplayName("reports an empty password when the user-info component ends with the separator")
+    void reportsAnEmptyPasswordWhenTheUserInfoEndsWithTheSeparator() {
+        TranslatedDatabaseUrl translated =
+                DatabaseUrlTranslator.translate("postgresql://scanner:@host/db");
+
+        assertThat(translated.username()).isEqualTo("scanner");
+        assertThat(translated.password()).isEmpty();
+    }
+
+    // -----------------------------------------------------------------------
+    // Scheme, host and port
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("accepts a scheme written in upper case")
+    void acceptsASchemeWrittenInUpperCase() {
+        assertThat(DatabaseUrlTranslator.translate("POSTGRESQL://host/db").jdbcUrl())
+                .isEqualTo("jdbc:postgresql://host/db");
+    }
+
+    @Test
+    @DisplayName("rejects a url that declares no host")
+    void rejectsAUrlThatDeclaresNoHost() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("postgresql:///db"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("declares no host");
+    }
+
+    @Test
+    @DisplayName("rejects a url that declares no scheme and names the supported schemes")
+    void rejectsAUrlThatDeclaresNoScheme() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("//host/db"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("declares no scheme")
+                .hasMessageContaining("postgresql")
+                .hasMessageContaining("h2");
+    }
+
+    @Test
+    @DisplayName("rejects a non-numeric port")
+    void rejectsANonNumericPort() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("postgresql://host:abc/db"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("non-numeric port");
+    }
+
+    @Test
+    @DisplayName("rejects a port above the highest valid port number")
+    void rejectsAPortAboveTheHighestValidPortNumber() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("postgresql://host:99999/db"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("out-of-range port")
+                .hasMessageContaining("65535");
+    }
+
+    @Test
+    @DisplayName("accepts an ipv6 host and keeps its brackets")
+    void acceptsAnIpv6HostAndKeepsItsBrackets() {
+        assertThat(DatabaseUrlTranslator.translate("postgresql://[::1]:5432/db").jdbcUrl())
+                .isEqualTo("jdbc:postgresql://[::1]:5432/db");
+    }
+
+    @Test
+    @DisplayName("accepts a host carrying an underscore")
+    void acceptsAHostCarryingAnUnderscore() {
+        assertThat(DatabaseUrlTranslator.translate("postgresql://my_host:5432/db").jdbcUrl())
+                .isEqualTo("jdbc:postgresql://my_host:5432/db");
+    }
+
+    @Test
+    @DisplayName("omits the port and the path when the url declares neither")
+    void omitsThePortAndThePathWhenTheUrlDeclaresNeither() {
+        TranslatedDatabaseUrl translated = DatabaseUrlTranslator.translate("postgresql://host");
+
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:postgresql://host");
+        assertThat(translated.username()).isNull();
+        assertThat(translated.password()).isNull();
+    }
+
+    @Test
+    @DisplayName("rejects a url that cannot be parsed")
+    void rejectsAUrlThatCannotBeParsed() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("postgresql://ho st/db"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not a parseable URL");
+    }
+
+    // -----------------------------------------------------------------------
+    // The reassembled query and fragment
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("appends no question mark when the query is empty")
+    void appendsNoQuestionMarkWhenTheQueryIsEmpty() {
+        assertThat(DatabaseUrlTranslator.translate("postgresql://host/db?").jdbcUrl())
+                .isEqualTo("jdbc:postgresql://host/db");
+    }
+
+    @Test
+    @DisplayName("carries no fragment into the reassembled url")
+    void carriesNoFragmentIntoTheReassembledUrl() {
+        assertThat(DatabaseUrlTranslator.translate("postgresql://host/db#frag").jdbcUrl())
+                .isEqualTo("jdbc:postgresql://host/db");
+    }
+
+    // -----------------------------------------------------------------------
+    // The returned record
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("redacts the url the username and the password in its string form")
+    void redactsEveryComponentInItsStringForm() {
+        TranslatedDatabaseUrl translated =
+                DatabaseUrlTranslator.translate("postgresql://scanner:s3cret@db.internal:5432/codeskeptic");
+
+        assertThat(translated).hasToString(
+                "TranslatedDatabaseUrl[jdbcUrl=***REDACTED***, username=***REDACTED***, password=***REDACTED***]");
+        assertThat(translated.toString()).doesNotContain("s3cret", "scanner", "db.internal", "codeskeptic");
+    }
+
+    @Test
+    @DisplayName("rejects a blank jdbc url")
+    void rejectsABlankJdbcUrl() {
+        assertThatThrownBy(() -> new TranslatedDatabaseUrl("   ", null, null))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new TranslatedDatabaseUrl(null, null, null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("declares only a private constructor")
+    void declaresOnlyAPrivateConstructor() {
+        Constructor<?>[] constructors = DatabaseUrlTranslator.class.getDeclaredConstructors();
+
+        assertThat(constructors).hasSize(1);
+        assertThat(Modifier.isPrivate(constructors[0].getModifiers())).isTrue();
     }
 }

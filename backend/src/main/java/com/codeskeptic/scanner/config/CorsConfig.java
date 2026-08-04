@@ -34,7 +34,7 @@ public class CorsConfig {
      * {@code expose_headers=None} defaults in force at {@code backend/app/main.py:L20}.
      *
      * <p>The returned source is fully populated before it is published and is never mutated
-     * afterwards, so it is safe to share across concurrent requests.
+     * afterwards. It is shared across concurrent requests.
      *
      * @return the {@link CorsConfigurationSource} for all paths; never {@code null}
      */

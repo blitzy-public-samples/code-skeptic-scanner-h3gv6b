@@ -22,8 +22,8 @@ import jakarta.persistence.Table;
  */
 // Ported from backend/app/db/models.py:L39-44 (faithful port) — see docs/DECISION_LOG.md
 // Deviation from the literal @Column(name = "key") / @Column(name = "value") mapping: both are
-// declared as JPA quoted identifiers, so the physical column names stay key and value — DL-061 —
-// see docs/DECISION_LOG.md
+// declared as JPA quoted identifiers; the physical column names are key and value — DL-061 — see
+// docs/DECISION_LOG.md
 // Deviation from an unbounded primary-key column: key declares an explicit length — DL-069 — see
 // docs/DECISION_LOG.md
 // equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see

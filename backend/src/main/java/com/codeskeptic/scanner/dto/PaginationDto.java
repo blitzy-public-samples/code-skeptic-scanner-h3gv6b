@@ -6,7 +6,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * Wire shape of the {@code pagination} sub-object of the two list envelopes.
  *
  * <p>The serialised keys are {@code page}, {@code per_page}, {@code total} and {@code total_pages}.
- * {@code page} is 1-based on the wire and 0-based in Spring Data, so the outbound value is
+ * {@code page} is 1-based on the wire and 0-based in Spring Data. The outbound value is
  * {@code Page#getNumber() + 1} and the inbound request is {@code PageRequest.of(page - 1, perPage)}.
  * The source handlers read {@code page} with a default of 1 and {@code per_page} with a default of 10
  * ({@code backend/app/api/tweets.py:L12-13}, {@code backend/app/api/responses.py:L11-12}).

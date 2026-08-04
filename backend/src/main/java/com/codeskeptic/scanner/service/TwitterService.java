@@ -38,30 +38,25 @@ import com.codeskeptic.scanner.service.mapper.TweetMapper;
  * </ul>
  *
  * <p>Every operation is a repository read, a repository write, or a comparison against a configured
- * threshold. No operation reaches the X API and this class holds no HTTP client: the entire X
- * protocol surface belongs to {@code task.TweetStreamClient}. {@code entity.Response} and its
- * {@code is_approved} column are not read here, and no method of this class transmits anything
- * outward.
+ * threshold. The X protocol surface belongs to {@code task.TweetStreamClient} — DL-045.
  *
- * <p>{@code spring.jpa.open-in-view} is {@code false}. Every {@link Tweet} loaded here is converted
- * to its wire form by {@link TweetMapper} inside the transaction that loaded it. No operation
- * returns an entity, and the lazy {@link Tweet#getResponses()} collection is never traversed.
+ * <p>{@code spring.jpa.open-in-view} is {@code false}. Every {@link Tweet} loaded here is converted to
+ * its wire form by {@link TweetMapper} inside the transaction that loaded it, no operation returns an
+ * entity, and the lazy {@link Tweet#getResponses()} collection is never traversed.
  *
- * <p>This class holds no arithmetic of its own. The doubt rating written by
- * {@link #updateTweetAnalysis(String, double)} is produced by
- * {@link SentimentAnalysisService#calculateDoubtRating(double)}, which is the single implementation
- * of that conversion.
+ * <p>The doubt rating written by {@link #updateTweetAnalysis(String, double)} is produced by
+ * {@link SentimentAnalysisService#calculateDoubtRating(double)} — DL-036.
  *
- * <p>Collaborators arrive through the constructor and are held for the lifetime of the singleton,
- * replacing the {@code TwitterService()} instantiation performed inside each request handler at
+ * <p>Collaborators arrive through the constructor and are held for the lifetime of the singleton, in
+ * place of the {@code TwitterService()} instantiation performed inside each request handler at
  * {@code backend/app/api/tweets.py:L14,L26,L39} and the {@code get_settings()} call performed inside
- * the constructor at {@code backend/app/services/twitter_service.py:L11}. Every method is safe for
- * concurrent use: the class carries no mutable state.
+ * the constructor at {@code backend/app/services/twitter_service.py:L11}. The class carries no mutable
+ * state, so every method is safe for concurrent use.
  *
- * <p>The retired class declared two further methods that are implemented elsewhere.
- * {@code stream_tweets} at {@code backend/app/services/twitter_service.py:L19-23} is implemented by
- * {@code task.TweetStreamClient}, and {@code process_tweet} at {@code :L25-40} is implemented by
- * {@link TweetMapper} together with {@code task.TweetStreamListener}. Neither appears on this class.
+ * <p>Two further methods of the retired class are implemented elsewhere:
+ * {@code stream_tweets} at {@code backend/app/services/twitter_service.py:L19-23} by
+ * {@code task.TweetStreamClient}, and {@code process_tweet} at {@code :L25-40} by {@link TweetMapper}
+ * together with {@code task.TweetStreamListener}.
  *
  * @see TweetRepository
  * @see TweetMapper
@@ -89,6 +84,13 @@ public class TwitterService {
 
     /** Lowest {@code per_page} a page request accepts. */
     private static final int MINIMUM_PER_PAGE = 1;
+
+    /**
+     * The largest page size this service materialises, applied to any larger {@code per_page} value.
+     *
+     * <p>See docs/DECISION_LOG.md DL-149.
+     */
+    private static final int MAXIMUM_PER_PAGE = 100;
 
     /** Data access for the {@code tweets} table. */
     private final TweetRepository tweetRepository;
@@ -150,16 +152,15 @@ public class TwitterService {
      * <p>Arguments outside the accepted range are replaced by the documented defaults and the
      * replacement is logged at {@code WARN}: a {@code page} below {@value #DEFAULT_PAGE} is read as
      * {@value #DEFAULT_PAGE}, and a {@code perPage} below {@value #MINIMUM_PER_PAGE} is read as
-     * {@value #DEFAULT_PER_PAGE}. No argument value makes this method throw. No upper bound is
-     * applied to {@code perPage}.
+     * {@value #DEFAULT_PER_PAGE} — DL-077. No upper bound is applied to {@code perPage}.
      *
      * <p>A {@code page} beyond the last populated page yields an empty {@link
      * PaginatedTweetsDto#tweets()} list while {@link PaginationDto#total()} and
      * {@link PaginationDto#totalPages()} continue to describe the whole table. An empty table yields
      * an empty list, a {@code total} of {@code 0} and a {@code totalPages} of {@code 0}.
      *
-     * <p>The rows are converted inside this method's transaction. The returned lists are
-     * unmodifiable and neither the returned object nor any element is {@code null}.
+     * <p>The rows are converted inside this method's transaction and the returned lists are
+     * unmodifiable.
      *
      * @param page    the 1-based page number requested through the {@code page} query parameter
      * @param perPage the page size requested through the {@code per_page} query parameter
@@ -169,7 +170,8 @@ public class TwitterService {
     @Transactional(readOnly = true)
     public PaginatedTweetsDto getPaginatedTweets(int page, int perPage) {
         int effectivePage = (page < DEFAULT_PAGE) ? DEFAULT_PAGE : page;
-        int effectivePerPage = (perPage < MINIMUM_PER_PAGE) ? DEFAULT_PER_PAGE : perPage;
+        int effectivePerPage = (perPage < MINIMUM_PER_PAGE) ? DEFAULT_PER_PAGE
+                : Math.min(perPage, MAXIMUM_PER_PAGE);
         if (effectivePage != page || effectivePerPage != perPage) {
             log.warn("Read requested page {} size {} as page {} size {}.",
                     page, perPage, effectivePage, effectivePerPage);
@@ -196,14 +198,13 @@ public class TwitterService {
     /**
      * Renders the {@code tweets} row carrying the given identifier.
      *
-     * <p>The identifier is the path value exactly as the route received it. A value that does not
-     * parse as a {@code long}, and a value that parses but matches no row, are both reported the same
-     * way: a {@link NotFoundException} carrying {@link NotFoundException#TWEET_NOT_FOUND}, which the
-     * error-handling advice renders as HTTP 404 with the body {@code {"error": "Tweet not found"}}.
-     * A {@code null} identifier is reported the same way. This method never reports a malformed
-     * identifier as a client-side syntax fault.
+     * <p>The identifier is the path value exactly as the route received it. A value that does not parse
+     * as a {@code long}, a {@code null} value, and a value that parses but matches no row are all
+     * reported as a {@link NotFoundException} carrying {@link NotFoundException#TWEET_NOT_FOUND}, which
+     * the error-handling advice renders as HTTP 404 with the body
+     * {@code {"error": "Tweet not found"}} — DL-048.
      *
-     * <p>The row is converted inside this method's transaction and no entity leaves it.
+     * <p>The row is converted inside this method's transaction.
      *
      * @param tweetId the {@code tweetId} path value, as received
      * @return the wire form of the addressed row, never {@code null}
@@ -224,21 +225,17 @@ public class TwitterService {
      * Writes the doubt rating derived from a document sentiment score onto the addressed
      * {@code tweets} row.
      *
-     * <p>The rating is obtained from
-     * {@link SentimentAnalysisService#calculateDoubtRating(double)} and stored in the
-     * {@code doubt_rating} column. That column is the only one this method writes: {@code content},
-     * {@code like_count}, {@code created_at}, {@code media}, {@code quoted_tweet_id},
-     * {@code user_id} and {@code ai_tools_mentioned} are all left as they are, as is the associated
-     * {@code responses} collection.
+     * <p>The rating is obtained from {@link SentimentAnalysisService#calculateDoubtRating(double)} and
+     * stored in the {@code doubt_rating} column, which is the only column this method writes.
      *
-     * <p>The identifier is handled exactly as {@link #getTweet(String)} handles it: a value that does
-     * not parse, a {@code null} value, and a value addressing no row all raise a
-     * {@link NotFoundException} carrying {@link NotFoundException#TWEET_NOT_FOUND}. Nothing is
+     * <p>The identifier is handled as {@link #getTweet(String)} handles it: a value that does not
+     * parse, a {@code null} value, and a value addressing no row all raise a
+     * {@link NotFoundException} carrying {@link NotFoundException#TWEET_NOT_FOUND} — DL-048. Nothing is
      * written when the row is not found.
      *
-     * <p>Nothing is returned. The caller of {@code POST /tweets/{tweetId}/analyze} builds its
-     * response body from the path value and the score it already holds, which is what the handler at
-     * {@code backend/app/api/tweets.py:L52-55} does.
+     * <p>Nothing is returned. The caller of {@code POST /tweets/{tweetId}/analyze} builds its response
+     * body from the path value and the score it already holds, as the handler at
+     * {@code backend/app/api/tweets.py:L52-55} does — DL-037.
      *
      * @param tweetId        the {@code tweetId} path value, as received
      * @param analysisResult a document sentiment score, such as one returned by
@@ -265,19 +262,17 @@ public class TwitterService {
     /**
      * Reports whether a like count reaches the popularity threshold.
      *
-     * <p>The comparison is inclusive: a like count equal to the threshold reaches it. Against the
-     * default threshold of {@code 100}, a count of {@code 99} does not reach it while {@code 100} and
-     * {@code 101} do. The like count is the only quantity compared; no follower count, weighting or
-     * scaling participates.
+     * <p>The comparison is inclusive, reproducing {@code backend/app/services/twitter_service.py:L46}:
+     * against the default threshold of {@code 100}, a count of {@code 99} does not reach it while
+     * {@code 100} and {@code 101} do. The like count is the only quantity compared.
      *
-     * <p>The threshold is resolved on every call, so a threshold edited through
-     * {@code PUT /settings/tweet_popularity_threshold} takes effect without a restart. The
-     * {@code settings} row named {@value #POPULARITY_THRESHOLD_SETTING_KEY} takes precedence when it
-     * is present and holds an integer; otherwise {@code scanner.popularity-threshold} applies, whose
-     * default is declared at {@code backend/app/core/config.py:L10}. A row that does not hold an
-     * integer is logged at {@code WARN} and the configured value applies.
+     * <p>The threshold is resolved on every call. The {@code settings} row named
+     * {@value #POPULARITY_THRESHOLD_SETTING_KEY} takes precedence when it is present and holds an
+     * integer; otherwise {@code scanner.popularity-threshold} applies, whose default is declared at
+     * {@code backend/app/core/config.py:L10} — DL-040. A row that does not hold an integer is logged at
+     * {@code WARN} and the configured value applies.
      *
-     * <p>A {@code null} like count reports {@code false}. This method never throws.
+     * <p>A {@code null} like count reports {@code false}.
      *
      * @param likeCount the value of the {@code like_count} column, or of the equivalent field of an
      *                  ingested payload; may be {@code null}
@@ -308,9 +303,9 @@ public class TwitterService {
      * Parses a path identifier into the repository identifier type.
      *
      * <p>A {@code null} value, a blank value and a value that is not a {@code long} all raise a
-     * {@link NotFoundException} carrying {@link NotFoundException#TWEET_NOT_FOUND}. The triggering
-     * {@link NumberFormatException} is attached as the cause and is reachable through
-     * {@link Throwable#getCause()}; it never reaches the client-visible message.
+     * {@link NotFoundException} carrying {@link NotFoundException#TWEET_NOT_FOUND} — DL-048. The
+     * triggering {@link NumberFormatException} is attached as the cause and never reaches the
+     * client-visible message.
      *
      * @param tweetId the path value, as received
      * @return the parsed identifier
@@ -341,8 +336,7 @@ public class TwitterService {
      * absent, holds {@code null}, or holds a value that does not parse; the last of those cases is
      * logged once at {@code WARN} and names the key without recording the stored value.
      *
-     * <p>A negative stored threshold is honoured as stored; no bound is imposed on the resolved
-     * value.
+     * <p>A negative stored threshold is honoured as stored — DL-040.
      *
      * @return the threshold to compare a like count against
      */

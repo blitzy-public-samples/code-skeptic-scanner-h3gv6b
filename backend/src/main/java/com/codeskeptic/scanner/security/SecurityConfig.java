@@ -1,12 +1,21 @@
 package com.codeskeptic.scanner.security;
 
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.Objects;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -21,18 +30,29 @@ import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
+import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.web.context.RequestAttributeSecurityContextRepository;
+import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.filter.OncePerRequestFilter;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
 
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ReadListener;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletInputStream;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletRequestWrapper;
+import jakarta.servlet.http.HttpServletResponse;
+
 // Ported from backend/app/main.py:L22 (JWTManager) + backend/app/core/security.py:L14-18 (passlib
 // bcrypt) + the eleven bare @jwt_required guards in backend/app/api/*.py (faithful port) — see
-// docs/DECISION_LOG.md DL-019, DL-020, DL-021, DL-051
+// docs/DECISION_LOG.md DL-019, DL-020, DL-021, DL-051, DL-112, DL-114, DL-115
 /**
- * Security composition root of the backend service: the one servlet filter chain and the three
+ * Security composition root of the backend service: the one servlet filter chain and the four
  * collaborators that authenticate a request.
  *
  * <p>The single {@link SecurityFilterChain} declared here replaces {@code jwt = JWTManager(app)} at
@@ -42,13 +62,15 @@ import com.codeskeptic.scanner.config.ScannerProperties;
  * form, applied without parentheses, registers the decorator factory in {@code flask-jwt-extended}
  * 4.x and leaves the route unguarded. The chain declared here authenticates all eleven — DL-021.
  *
- * <p>Four beans are published, and no other:
+ * <p>Five beans are published, and no other:
  *
  * <ul>
  *   <li>{@link #securityFilterChain(HttpSecurity)} — the chain, carrying the authorization rules,
  *       the unauthenticated-request entry point and {@link JwtAuthenticationFilter}.
+ *   <li>{@link #securityContextRepository()} — the request-scoped context store the chain reads and
+ *       {@link JwtAuthenticationFilter} writes — DL-112.
  *   <li>{@link #passwordEncoder()} — successor of the passlib bcrypt helpers at
- *       {@code backend/app/core/security.py:L14-18}, which no call site in the retired tree invoked.
+ *       {@code backend/app/core/security.py:L14-18}.
  *   <li>{@link #userDetailsService()} — the {@code scanner.auth} credential store — DL-020.
  *   <li>{@link #authenticationManager(AuthenticationConfiguration)} — consumed by
  *       {@code com.codeskeptic.scanner.api.AuthController} to authenticate a
@@ -67,12 +89,12 @@ import com.codeskeptic.scanner.config.ScannerProperties;
  * <p>Cross-origin policy is not declared in this class. The single {@code CorsConfigurationSource}
  * bean of {@code com.codeskeptic.scanner.config.CorsConfig}, which reproduces the argument-free
  * {@code CORS(app)} at {@code backend/app/main.py:L20}, is injected here and handed to the chain's
- * CORS configurer, ahead of the authorization rules — DL-051. The ordering matches
- * {@code backend/app/main.py:L20,L22}.
+ * CORS configurer, ahead of the authorization rules — DL-051.
  *
- * <p>The chain is stateless: no HTTP session is created, CSRF protection is off, and HTTP Basic and
- * form login are both off. A request that reaches the authorization stage carrying no authentication
- * is answered by {@link HttpStatusEntryPoint} with status {@code 401} and an empty body.
+ * <p>The chain is stateless: no HTTP session is created, CSRF protection is off, and HTTP Basic,
+ * form login and logout are all off — DL-114. A request that reaches the authorization stage carrying
+ * no authentication is answered with status {@code 401}, an empty body and a
+ * {@code WWW-Authenticate: Bearer} challenge — DL-115.
  * {@code com.codeskeptic.scanner.api.GlobalExceptionHandler} owns the {@code {"error": <string>}}
  * envelopes of {@code backend/app/main.py:L31-37} and is reached only by exceptions raised inside the
  * {@code DispatcherServlet}.
@@ -81,12 +103,14 @@ import com.codeskeptic.scanner.config.ScannerProperties;
  * {@code scanner.auth.password-hash} and holding no authority. No table backs it, and the schema this
  * service creates stays the four tables of {@code backend/app/db/models.py} — DL-020. Neither the
  * principal name nor the password hash is written to the log, and construction fails with
- * {@link IllegalStateException} when {@code scanner.auth.password-hash} is absent or blank.
+ * {@link IllegalStateException} when {@code scanner.auth.password-hash} is absent, blank, or not a
+ * bcrypt hash of the shape and cost this service accepts — DL-116.
  *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-019, DL-020, DL-021
- * and DL-051; construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-019, DL-020,
+ * DL-021, DL-051, DL-112, DL-114, DL-115, DL-116 and DL-118; construct-level provenance is
+ * recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  *
- * <p>This is a singleton configuration class. All three fields are {@code final} and hold singleton
+ * <p>This is a singleton configuration class. All four fields are {@code final} and hold singleton
  * collaborators, and every bean published here is fully built before it is returned and never mutated
  * afterwards, so every member declared here is safe for concurrent use.
  */
@@ -106,6 +130,25 @@ public class SecurityConfig {
      */
     private static final String DEFAULT_USERNAME = "admin";
 
+    /** Challenge returned with every {@code 401} this chain produces — DL-115. */
+    private static final String BEARER_CHALLENGE = "Bearer";
+
+    /** Maximum encoded size of the JSON body accepted by {@code POST /auth/token} — DL-118. */
+    private static final int MAXIMUM_LOGIN_REQUEST_BYTES = 4_096;
+
+    /**
+     * Shape a value of {@code scanner.auth.password-hash} must match: the modular-crypt bcrypt form,
+     * a two-digit cost, and a 53-character radix-64 salt-and-digest tail — DL-116.
+     */
+    private static final Pattern BCRYPT_HASH =
+            Pattern.compile("^\\$2[aby]\\$(\\d{2})\\$[./A-Za-z0-9]{53}$");
+
+    /** Smallest bcrypt cost {@link #userDetailsService()} accepts — DL-116. */
+    private static final int MINIMUM_BCRYPT_COST = 10;
+
+    /** Largest bcrypt cost {@link #userDetailsService()} accepts — DL-116. */
+    private static final int MAXIMUM_BCRYPT_COST = 14;
+
     /**
      * Message of the {@link IllegalStateException} raised when {@code scanner.auth.password-hash}
      * carries no value — DL-020.
@@ -114,6 +157,18 @@ public class SecurityConfig {
             "scanner.auth.password-hash is not configured; supply a bcrypt hash of the application "
                     + "principal's password through the AUTH_PASSWORD_HASH environment variable. It "
                     + "has no default value.";
+
+    /**
+     * Message of the {@link IllegalStateException} raised when {@code scanner.auth.password-hash}
+     * carries a value that is not a bcrypt hash of an accepted shape — DL-116. The rejected value is
+     * never named.
+     */
+    private static final String MALFORMED_PASSWORD_HASH_MESSAGE =
+            "scanner.auth.password-hash does not carry a bcrypt hash of the expected form: "
+                    + "$2a$, $2b$ or $2y$, a two-digit cost between " + MINIMUM_BCRYPT_COST
+                    + " and " + MAXIMUM_BCRYPT_COST + ", then a 53-character salt and digest. "
+                    + "Regenerate it with BCryptPasswordEncoder and set AUTH_PASSWORD_HASH to the "
+                    + "result. The configured value is not reproduced here.";
 
     /** Supplies the {@code scanner.auth} group that {@link #userDetailsService()} reads. */
     private final ScannerProperties properties;
@@ -125,11 +180,15 @@ public class SecurityConfig {
      * The permissive policy published by {@code com.codeskeptic.scanner.config.CorsConfig} — DL-051.
      *
      * <p>The parameter name of the constructor argument that populates this field matches that bean's
-     * name, {@code corsConfigurationSource}. Spring MVC publishes
-     * {@code mvcHandlerMappingIntrospector}, a second bean implementing this same interface, in a
-     * running servlet context.
+     * name, {@code corsConfigurationSource}.
      */
     private final CorsConfigurationSource corsConfigurationSource;
+
+    /**
+     * The one context store shared by the chain and by {@link JwtAuthenticationFilter} — DL-112.
+     */
+    private final SecurityContextRepository securityContextRepository =
+            new RequestAttributeSecurityContextRepository();
 
     /**
      * Retains the three collaborators the beans below consume.
@@ -151,20 +210,26 @@ public class SecurityConfig {
     }
 
     // Ported from backend/app/main.py:L20,L22 and the eleven bare @jwt_required guards in
-    // backend/app/api/*.py (faithful port) — see docs/DECISION_LOG.md DL-019, DL-021, DL-051
+    // backend/app/api/*.py (faithful port) — see docs/DECISION_LOG.md DL-019, DL-021, DL-051,
+    // DL-112, DL-114, DL-115
     /**
      * Builds the application's only security filter chain.
      *
      * <p>The chain applies, in this order: the CORS policy injected from
      * {@code com.codeskeptic.scanner.config.CorsConfig}; CSRF protection off; stateless session
-     * management; HTTP Basic and form login off; two authorization rules —
-     * {@code POST /auth/token} permitted and every other request authenticated; a
-     * {@link HttpStatusEntryPoint} answering {@code 401} with an empty body; and
+     * management; the request-attribute context repository; HTTP Basic, form login and logout all
+     * off; two authorization rules — {@code POST /auth/token} permitted and every other request
+     * authenticated; the bearer-aware {@code 401} entry point; and
      * {@link JwtAuthenticationFilter} positioned ahead of
      * {@link UsernamePasswordAuthenticationFilter}.
      *
+     * <p>Disabling logout removes the {@code /logout} route Spring Security otherwise installs and
+     * permits for every method — DL-114. With logout off, {@code POST /auth/token} is the only route
+     * this chain serves without authentication.
+     *
      * <p>{@link JwtAuthenticationFilter} is constructed here and is not a bean, so it is registered
-     * in this chain alone and never in the servlet container's own filter list.
+     * in this chain alone and never in the servlet container's own filter list. It receives the same
+     * {@link SecurityContextRepository} instance the chain is configured with — DL-112.
      *
      * @param http the builder Spring Security supplies for this chain
      * @return the built chain; never {@code null}
@@ -177,21 +242,43 @@ public class SecurityConfig {
                 .csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .securityContext(context -> context
+                        .securityContextRepository(securityContextRepository))
                 .httpBasic(AbstractHttpConfigurer::disable)
                 .formLogin(AbstractHttpConfigurer::disable)
+                .logout(AbstractHttpConfigurer::disable)
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(HttpMethod.POST, TOKEN_ENDPOINT).permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(ex -> ex
-                        .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
-                .addFilterBefore(new JwtAuthenticationFilter(jwtService),
+                        .authenticationEntryPoint(bearerAuthenticationEntryPoint()))
+                .addFilterBefore(
+                        new LoginRequestBodyLimitFilter(),
+                        UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(
+                        new JwtAuthenticationFilter(jwtService, securityContextRepository),
                         UsernamePasswordAuthenticationFilter.class);
 
-        log.info("Security filter chain built: POST {} is permitted unauthenticated; every other "
-                + "request requires an authenticated principal, answered with {} when it carries "
-                + "none", TOKEN_ENDPOINT, HttpStatus.UNAUTHORIZED.value());
+        log.info("Security filter chain built: POST {} is permitted unauthenticated; logout is "
+                + "disabled; every other request requires an authenticated principal, answered with "
+                + "{} and a {} challenge when it carries none",
+                TOKEN_ENDPOINT, HttpStatus.UNAUTHORIZED.value(), BEARER_CHALLENGE);
 
         return http.build();
+    }
+
+    // Net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-112
+    /**
+     * Publishes the context store the chain reads and {@link JwtAuthenticationFilter} writes.
+     *
+     * <p>The store is request-scoped: a context survives a dispatch boundary within one request and
+     * nothing is written to an HTTP session. The chain remains stateless — DL-112.
+     *
+     * @return the shared repository instance; never {@code null}
+     */
+    @Bean
+    public SecurityContextRepository securityContextRepository() {
+        return securityContextRepository;
     }
 
     // Ported from backend/app/core/security.py:L14-18 (faithful port) — see docs/DECISION_LOG.md
@@ -214,30 +301,27 @@ public class SecurityConfig {
         return new BCryptPasswordEncoder();
     }
 
-    // Net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-020
+    // Net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-020, DL-116
     /**
      * Publishes the credential store: one principal, read from the {@code scanner.auth} group.
      *
      * <p>{@code scanner.auth.username} supplies the principal name and falls back to {@code admin}
      * when it is absent or blank. {@code scanner.auth.password-hash} supplies a bcrypt hash of that
-     * principal's password and has no fallback of any kind.
+     * principal's password, has no fallback of any kind, and is validated here against the shape
+     * {@link BCryptPasswordEncoder} produces and a cost between {@value #MINIMUM_BCRYPT_COST} and
+     * {@value #MAXIMUM_BCRYPT_COST} — DL-116. A value failing either check fails context refresh and
+     * is never reproduced in the failure message or the log.
      *
      * <p>The principal holds an empty authority collection. The service declares no role, no scope
      * and no authority anywhere, and the chain's {@code anyRequest().authenticated()} rule reads
      * none — DL-020.
      *
-     * <p>Publishing this bean displaces Spring Boot's {@code UserDetailsServiceAutoConfiguration},
-     * whose {@code user} principal carries a generated password written to the log at startup.
-     *
-     * <p>The only {@code User} entity the project documents,
-     * {@code documentation/Technical Specifications.md:L322-331}, models a monitored X account —
-     * {@code id}, {@code handle}, {@code followerCount}, {@code lastTweetDate} — and no application
-     * principal. The schema this service creates is the four tables of
-     * {@code backend/app/db/models.py}: {@code tweets}, {@code responses}, {@code ai_tools} and
-     * {@code settings} — DL-020.
+     * <p>This bean replaces Spring Boot's {@code UserDetailsServiceAutoConfiguration}. The schema
+     * remains the four tables of {@code backend/app/db/models.py} — DL-020.
      *
      * @return an {@link InMemoryUserDetailsManager} holding exactly one principal; never {@code null}
-     * @throws IllegalStateException if {@code scanner.auth.password-hash} is absent or blank
+     * @throws IllegalStateException if {@code scanner.auth.password-hash} is absent, blank, or not a
+     *     bcrypt hash of an accepted shape and cost
      */
     @Bean
     public UserDetailsService userDetailsService() {
@@ -274,6 +358,23 @@ public class SecurityConfig {
         return configuration.getAuthenticationManager();
     }
 
+    // Net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-115
+    /**
+     * Builds the entry point that answers a request reaching the authorization stage with no
+     * authentication.
+     *
+     * <p>The response carries status {@code 401}, a {@code WWW-Authenticate: Bearer} challenge and an
+     * empty body. It renders no container error page or JSON error envelope — DL-115.
+     *
+     * @return the entry point handed to the chain's exception-handling configurer; never {@code null}
+     */
+    private static AuthenticationEntryPoint bearerAuthenticationEntryPoint() {
+        return (request, response, authenticationException) -> {
+            response.setHeader(HttpHeaders.WWW_AUTHENTICATE, BEARER_CHALLENGE);
+            response.setStatus(HttpStatus.UNAUTHORIZED.value());
+        };
+    }
+
     /**
      * Reads the principal name from the {@code scanner.auth} group.
      *
@@ -294,13 +395,15 @@ public class SecurityConfig {
     }
 
     /**
-     * Reads the principal's bcrypt password hash from the {@code scanner.auth} group.
+     * Reads and validates the principal's bcrypt password hash from the {@code scanner.auth} group.
      *
-     * <p>An unbound group, an absent value and a blank value are read alike, as an unsupplied hash,
-     * and each fails context refresh — DL-020.
+     * <p>An unbound group, an absent value and a blank value are read alike, as an unsupplied hash.
+     * A value present but not matching {@link #BCRYPT_HASH}, or carrying a cost outside
+     * {@value #MINIMUM_BCRYPT_COST}..{@value #MAXIMUM_BCRYPT_COST}, is rejected as malformed. Each
+     * outcome fails context refresh, and neither reproduces the configured value — DL-116.
      *
-     * @return the value of {@code scanner.auth.password-hash}, trimmed
-     * @throws IllegalStateException if that value carries nothing
+     * @return the value of {@code scanner.auth.password-hash}, trimmed and validated
+     * @throws IllegalStateException if that value carries nothing or is not an accepted bcrypt hash
      */
     private String configuredPasswordHash() {
         ScannerProperties.Auth auth = properties.auth();
@@ -308,6 +411,148 @@ public class SecurityConfig {
         if (passwordHash == null || passwordHash.isBlank()) {
             throw new IllegalStateException(MISSING_PASSWORD_HASH_MESSAGE);
         }
-        return passwordHash.trim();
+        String trimmed = passwordHash.trim();
+
+        Matcher matcher = BCRYPT_HASH.matcher(trimmed);
+        if (!matcher.matches()) {
+            throw new IllegalStateException(MALFORMED_PASSWORD_HASH_MESSAGE);
+        }
+        int cost = Integer.parseInt(matcher.group(1));
+        if (cost < MINIMUM_BCRYPT_COST || cost > MAXIMUM_BCRYPT_COST) {
+            throw new IllegalStateException(MALFORMED_PASSWORD_HASH_MESSAGE);
+        }
+
+        log.info("scanner.auth.password-hash accepted: a bcrypt hash at cost {}", cost);
+        return trimmed;
+    }
+
+    /**
+     * Bounds the encoded login body before Jackson allocates or deserializes it — DL-118.
+     *
+     * <p>The filter applies only to {@code POST /auth/token}. It reads at most
+     * {@value #MAXIMUM_LOGIN_REQUEST_BYTES} plus one bytes, rejects a larger body with the route's
+     * empty 401 response, and replays an accepted body to Spring MVC.
+     */
+    private static final class LoginRequestBodyLimitFilter extends OncePerRequestFilter {
+
+        @Override
+        protected boolean shouldNotFilter(HttpServletRequest request) {
+            if (!HttpMethod.POST.name().equals(request.getMethod())) {
+                return true;
+            }
+            String requestPath = request.getRequestURI();
+            String contextPath = request.getContextPath();
+            if (!contextPath.isEmpty() && requestPath.startsWith(contextPath)) {
+                requestPath = requestPath.substring(contextPath.length());
+            }
+            return !TOKEN_ENDPOINT.equals(requestPath);
+        }
+
+        @Override
+        protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
+                FilterChain filterChain) throws ServletException, IOException {
+            if (request.getContentLengthLong() > MAXIMUM_LOGIN_REQUEST_BYTES) {
+                rejectOversizedLoginRequest(response);
+                return;
+            }
+
+            byte[] body = request.getInputStream().readNBytes(MAXIMUM_LOGIN_REQUEST_BYTES + 1);
+            if (body.length > MAXIMUM_LOGIN_REQUEST_BYTES) {
+                rejectOversizedLoginRequest(response);
+                return;
+            }
+
+            filterChain.doFilter(new CachedBodyRequest(request, body), response);
+        }
+
+        private static void rejectOversizedLoginRequest(HttpServletResponse response) {
+            response.setStatus(HttpStatus.UNAUTHORIZED.value());
+            response.setContentLength(0);
+        }
+    }
+
+    /** Request wrapper that replays the bounded login body consumed by the size filter. */
+    private static final class CachedBodyRequest extends HttpServletRequestWrapper {
+
+        private final byte[] body;
+
+        private CachedBodyRequest(HttpServletRequest request, byte[] body) {
+            super(request);
+            this.body = body.clone();
+        }
+
+        @Override
+        public ServletInputStream getInputStream() {
+            return new CachedBodyServletInputStream(body);
+        }
+
+        @Override
+        public BufferedReader getReader() {
+            String encoding = getCharacterEncoding();
+            Charset charset = (encoding == null)
+                    ? StandardCharsets.UTF_8
+                    : Charset.forName(encoding);
+            return new BufferedReader(new InputStreamReader(getInputStream(), charset));
+        }
+
+        @Override
+        public int getContentLength() {
+            return body.length;
+        }
+
+        @Override
+        public long getContentLengthLong() {
+            return body.length;
+        }
+    }
+
+    /** Blocking servlet input stream over an immutable in-memory request body. */
+    private static final class CachedBodyServletInputStream extends ServletInputStream {
+
+        private final ByteArrayInputStream input;
+
+        private CachedBodyServletInputStream(byte[] body) {
+            this.input = new ByteArrayInputStream(body);
+        }
+
+        @Override
+        public int read() {
+            return input.read();
+        }
+
+        @Override
+        public int read(byte[] bytes, int offset, int length) {
+            return input.read(bytes, offset, length);
+        }
+
+        @Override
+        public int available() {
+            return input.available();
+        }
+
+        @Override
+        public boolean isFinished() {
+            return input.available() == 0;
+        }
+
+        @Override
+        public boolean isReady() {
+            return true;
+        }
+
+        @Override
+        public void setReadListener(ReadListener readListener) {
+            Objects.requireNonNull(readListener, "readListener must not be null");
+            try {
+                if (!isFinished()) {
+                    readListener.onDataAvailable();
+                }
+                if (isFinished()) {
+                    readListener.onAllDataRead();
+                }
+            } catch (IOException ex) {
+                readListener.onError(ex);
+            }
+        }
     }
 }

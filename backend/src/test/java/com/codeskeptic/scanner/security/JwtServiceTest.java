@@ -7,8 +7,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.Date;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.crypto.SecretKey;
 
@@ -51,8 +54,6 @@ class JwtServiceTest {
     /** Value bound to {@code scanner.jwt.algorithm} by every service this class constructs. */
     private static final String HS256 = "HS256";
 
-    /** A JWS algorithm name outside the HS family. */
-    private static final String RS256 = "RS256";
 
     /**
      * Value bound to {@code scanner.jwt.expiration-minutes}; the value
@@ -73,6 +74,14 @@ class JwtServiceTest {
     private static final String FOREIGN_SECRET =
             "jwt-service-test-foreign-signing-secret-fedcba9876543210";
 
+    /**
+     * A 64-byte value bound to {@code scanner.jwt.secret} by the HS512 rejection test only; 512 bits
+     * is the floor jjwt 0.13.0 enforces for HS512, so a token can be signed with HS512 using the
+     * very key the service under test verifies with.
+     */
+    private static final String LONG_SECRET =
+            "jwt-service-test-signing-secret-that-is-sixty-four-bytes-00000000";
+
     /** Key derived from {@link #SECRET}, matching the key every service under test derives. */
     private static final SecretKey SIGNING_KEY =
             Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8));
@@ -80,6 +89,10 @@ class JwtServiceTest {
     /** Key derived from {@link #FOREIGN_SECRET}. */
     private static final SecretKey FOREIGN_KEY =
             Keys.hmacShaKeyFor(FOREIGN_SECRET.getBytes(StandardCharsets.UTF_8));
+
+    /** Key derived from {@link #LONG_SECRET}. */
+    private static final SecretKey LONG_SIGNING_KEY =
+            Keys.hmacShaKeyFor(LONG_SECRET.getBytes(StandardCharsets.UTF_8));
 
     /**
      * Margin applied to both wall-clock bounds of the expiration window assertion. The {@code iat}
@@ -267,15 +280,202 @@ class JwtServiceTest {
                 .hasMessageContaining("scanner.jwt.secret");
     }
 
-    @Test
-    @DisplayName("rejects an algorithm outside the HS family at construction")
-    void rejectsAnAlgorithmOutsideTheHsFamilyAtConstruction() {
-        ScannerProperties properties =
-                propertiesWith(new ScannerProperties.Jwt(SECRET, RS256, EXPIRATION_MINUTES));
+    @ParameterizedTest(name = "an algorithm of {0} is rejected at construction")
+    @CsvSource({"RS256", "HS384", "HS512", "ES256", "none", "hs384"})
+    @DisplayName("rejects every configured algorithm other than HS256 at construction")
+    void rejectsEveryConfiguredAlgorithmOtherThanHs256AtConstruction(String configuredAlgorithm) {
+        ScannerProperties properties = propertiesWith(
+                new ScannerProperties.Jwt(SECRET, configuredAlgorithm, EXPIRATION_MINUTES));
 
         assertThatThrownBy(() -> new JwtService(properties))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("scanner.jwt.algorithm");
+    }
+
+    @Test
+    @DisplayName("accepts an absent algorithm at construction and still signs with HS256")
+    void acceptsAnAbsentAlgorithmAtConstructionAndStillSignsWithHs256() {
+        JwtService service = serviceWith(SECRET, null, EXPIRATION_MINUTES);
+
+        assertThat(headerAlgorithmOf(service.generateToken(USERNAME))).isEqualTo(HS256);
+    }
+
+    // ---------------------------------------------------------------------
+    // Adversarial verification policy — see docs/DECISION_LOG.md DL-108, DL-109, DL-110
+    // ---------------------------------------------------------------------
+
+    @Test
+    @DisplayName("rejects an HS384 token signed with the very key it verifies with")
+    void rejectsAnHs384TokenSignedWithTheVeryKeyItVerifiesWith() {
+        JwtService service = serviceWith(SECRET, HS256, EXPIRATION_MINUTES);
+        Instant issuedAt = Instant.now();
+        String hs384Token = Jwts.builder()
+                .subject(USERNAME)
+                .issuedAt(Date.from(issuedAt))
+                .expiration(Date.from(issuedAt.plus(LIFETIME)))
+                .signWith(SIGNING_KEY, Jwts.SIG.HS384)
+                .compact();
+
+        assertThat(headerAlgorithmOf(hs384Token)).isEqualTo("HS384");
+        assertThat(service.extractUsername(hs384Token)).isEmpty();
+        assertThat(service.extractExpiration(hs384Token)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("rejects an HS512 token signed with the very key it verifies with")
+    void rejectsAnHs512TokenSignedWithTheVeryKeyItVerifiesWith() {
+        JwtService service = serviceWith(LONG_SECRET, HS256, EXPIRATION_MINUTES);
+        Instant issuedAt = Instant.now();
+        String hs512Token = Jwts.builder()
+                .subject(USERNAME)
+                .issuedAt(Date.from(issuedAt))
+                .expiration(Date.from(issuedAt.plus(LIFETIME)))
+                .signWith(LONG_SIGNING_KEY, Jwts.SIG.HS512)
+                .compact();
+
+        assertThat(headerAlgorithmOf(hs512Token)).isEqualTo("HS512");
+        assertThat(service.extractUsername(hs512Token)).isEmpty();
+        assertThat(service.extractExpiration(hs512Token)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("rejects a correctly signed token carrying no expiration claim")
+    void rejectsACorrectlySignedTokenCarryingNoExpirationClaim() {
+        JwtService service = serviceWith(SECRET, HS256, EXPIRATION_MINUTES);
+        String noExpiry = Jwts.builder()
+                .subject(USERNAME)
+                .issuedAt(Date.from(Instant.now()))
+                .signWith(SIGNING_KEY, Jwts.SIG.HS256)
+                .compact();
+
+        assertThat(service.extractUsername(noExpiry)).isEmpty();
+        assertThat(service.extractExpiration(noExpiry)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("rejects a correctly signed token carrying no issued-at claim")
+    void rejectsACorrectlySignedTokenCarryingNoIssuedAtClaim() {
+        JwtService service = serviceWith(SECRET, HS256, EXPIRATION_MINUTES);
+        String noIssuedAt = Jwts.builder()
+                .subject(USERNAME)
+                .expiration(Date.from(Instant.now().plus(LIFETIME)))
+                .signWith(SIGNING_KEY, Jwts.SIG.HS256)
+                .compact();
+
+        assertThat(service.extractUsername(noIssuedAt)).isEmpty();
+        assertThat(service.extractExpiration(noIssuedAt)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("rejects a correctly signed token carrying no subject claim")
+    void rejectsACorrectlySignedTokenCarryingNoSubjectClaim() {
+        JwtService service = serviceWith(SECRET, HS256, EXPIRATION_MINUTES);
+        Instant issuedAt = Instant.now();
+        String noSubject = Jwts.builder()
+                .issuedAt(Date.from(issuedAt))
+                .expiration(Date.from(issuedAt.plus(LIFETIME)))
+                .signWith(SIGNING_KEY, Jwts.SIG.HS256)
+                .compact();
+
+        assertThat(service.extractUsername(noSubject)).isEmpty();
+        assertThat(service.extractExpiration(noSubject)).isEmpty();
+    }
+
+    @ParameterizedTest(name = "a subject of [{0}] is rejected")
+    @CsvSource({"''", "'   '", "'\t'"})
+    @DisplayName("rejects a correctly signed token carrying a blank subject")
+    void rejectsACorrectlySignedTokenCarryingABlankSubject(String blankSubject) {
+        JwtService service = serviceWith(SECRET, HS256, EXPIRATION_MINUTES);
+        Instant issuedAt = Instant.now();
+        String blankSubjectToken = Jwts.builder()
+                .subject(blankSubject)
+                .issuedAt(Date.from(issuedAt))
+                .expiration(Date.from(issuedAt.plus(LIFETIME)))
+                .signWith(SIGNING_KEY, Jwts.SIG.HS256)
+                .compact();
+
+        assertThat(service.extractUsername(blankSubjectToken)).isEmpty();
+        assertThat(service.extractExpiration(blankSubjectToken)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("rejects a correctly signed token carrying a claim beyond the accepted set")
+    void rejectsACorrectlySignedTokenCarryingAClaimBeyondTheAcceptedSet() {
+        JwtService service = serviceWith(SECRET, HS256, EXPIRATION_MINUTES);
+        Instant issuedAt = Instant.now();
+        String extraClaimToken = Jwts.builder()
+                .subject(USERNAME)
+                .issuedAt(Date.from(issuedAt))
+                .expiration(Date.from(issuedAt.plus(LIFETIME)))
+                .claim("roles", "ROLE_ADMIN")
+                .signWith(SIGNING_KEY, Jwts.SIG.HS256)
+                .compact();
+
+        assertThat(service.extractUsername(extraClaimToken)).isEmpty();
+        assertThat(service.extractExpiration(extraClaimToken)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("rejects a correctly signed token whose expiration does not follow its issued-at")
+    void rejectsACorrectlySignedTokenWhoseExpirationDoesNotFollowItsIssuedAt() {
+        JwtService service = serviceWith(SECRET, HS256, EXPIRATION_MINUTES);
+        Instant issuedAt = Instant.now().plus(LIFETIME);
+        String sameInstant = tokenSignedWith(SIGNING_KEY, issuedAt, issuedAt);
+
+        assertThat(service.extractUsername(sameInstant)).isEmpty();
+        assertThat(service.extractExpiration(sameInstant)).isEmpty();
+    }
+
+    @ParameterizedTest(name = "an expiration-minutes of {0} is rejected at construction")
+    @CsvSource({"0", "-1", "-60", "61", "1440", "9223372036854775807"})
+    @DisplayName("rejects a token lifetime outside one to sixty minutes at construction")
+    void rejectsATokenLifetimeOutsideOneToSixtyMinutesAtConstruction(long configuredMinutes) {
+        ScannerProperties properties =
+                propertiesWith(new ScannerProperties.Jwt(SECRET, HS256, configuredMinutes));
+
+        assertThatThrownBy(() -> new JwtService(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("scanner.jwt.expiration-minutes");
+    }
+
+    @ParameterizedTest(name = "an expiration-minutes of {0} is accepted at construction")
+    @CsvSource({"1, 60", "60, 3600"})
+    @DisplayName("accepts the boundary token lifetimes and reports them in seconds")
+    void acceptsTheBoundaryTokenLifetimesAndReportsThemInSeconds(long configuredMinutes,
+            long expectedSeconds) {
+
+        JwtService service = serviceWith(SECRET, HS256, configuredMinutes);
+
+        assertThat(service.getExpirationSeconds()).isEqualTo(expectedSeconds);
+    }
+
+    @ParameterizedTest(name = "a username of [{0}] is rejected")
+    @CsvSource({"''", "'   '"})
+    @DisplayName("rejects a blank principal name when minting")
+    void rejectsABlankPrincipalNameWhenMinting(String blankUsername) {
+        JwtService service = serviceWith(SECRET, HS256, EXPIRATION_MINUTES);
+
+        assertThatThrownBy(() -> service.generateToken(blankUsername))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("username");
+    }
+
+    @Test
+    @DisplayName("rejects a null principal name when minting")
+    void rejectsANullPrincipalNameWhenMinting() {
+        JwtService service = serviceWith(SECRET, HS256, EXPIRATION_MINUTES);
+
+        assertThatThrownBy(() -> service.generateToken(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("username");
+    }
+
+    @Test
+    @DisplayName("mints a token whose header names HS256")
+    void mintsATokenWhoseHeaderNamesHs256() {
+        JwtService service = serviceWith(SECRET, HS256, EXPIRATION_MINUTES);
+
+        assertThat(headerAlgorithmOf(service.generateToken(USERNAME))).isEqualTo(HS256);
     }
 
     /**
@@ -331,5 +531,20 @@ class JwtServiceTest {
                 .build()
                 .parseSignedClaims(token)
                 .getPayload();
+    }
+
+    /**
+     * Reads the {@code alg} header of a compact JWS without verifying its signature.
+     *
+     * @param token the compact JWS to inspect
+     * @return the value of the {@code alg} header
+     */
+    private static String headerAlgorithmOf(String token) {
+        String encodedHeader = token.substring(0, token.indexOf('.'));
+        String header = new String(Base64.getUrlDecoder().decode(encodedHeader),
+                StandardCharsets.UTF_8);
+        Matcher algorithm = Pattern.compile("\"alg\"\\s*:\\s*\"([^\"]+)\"").matcher(header);
+        assertThat(algorithm.find()).as("the compact JWS header declares an alg member").isTrue();
+        return algorithm.group(1);
     }
 }

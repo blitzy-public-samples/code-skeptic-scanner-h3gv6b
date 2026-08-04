@@ -14,9 +14,10 @@ import jakarta.persistence.Table;
  * Schema generation is driven from these annotations (see docs/DECISION_LOG.md DL-026).
  * {@code id} is carried as a {@link String} at the wire boundary (see docs/DECISION_LOG.md DL-023).
  *
- * <p>{@code id} is persisted as {@link Integer}, the type declared at
- * backend/app/db/models.py:L35, and generated DDL therefore declares the column {@code integer} on
- * every supported vendor — DL-070 — see docs/DECISION_LOG.md.
+ * <p>{@code id} is persisted as {@link Long}, the identifier type AAP §0.4.1.4 declares for
+ * {@code AiToolRepository} and the type {@link Tweet} and {@link Response} also carry. TR-3 maps the
+ * source {@code Column(Integer, primary_key=True)} of backend/app/db/models.py:L35 onto
+ * {@code Integer} or {@code Long} — DL-070 — see docs/DECISION_LOG.md.
  *
  * <p>{@code name} and {@code description} declare {@code length = Integer.MAX_VALUE}, which renders
  * each vendor's unbounded character type and reproduces the unbounded {@code Column(String)} at
@@ -30,11 +31,11 @@ import jakarta.persistence.Table;
 public class AiTool {
 
     // backend/app/db/models.py:L35
-    // Integer persistence type — DL-070 — see docs/DECISION_LOG.md
+    // Long persistence type, per AAP §0.4.1.4 and TR-3 — DL-070 — see docs/DECISION_LOG.md
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     @Column(name = "id")
-    private Integer id;
+    private Long id;
 
     // backend/app/db/models.py:L36
     // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
@@ -65,11 +66,11 @@ public class AiTool {
         this.description = description;
     }
 
-    public Integer getId() {
+    public Long getId() {
         return id;
     }
 
-    public void setId(Integer id) {
+    public void setId(Long id) {
         this.id = id;
     }
 
@@ -111,7 +112,7 @@ public class AiTool {
         if (!(other instanceof AiTool that)) {
             return false;
         }
-        Integer thisId = this.getId();
+        Long thisId = this.getId();
         return thisId != null && thisId.equals(that.getId());
     }
 

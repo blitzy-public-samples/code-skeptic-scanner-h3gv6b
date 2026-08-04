@@ -175,8 +175,8 @@ public final class DatabaseUrlTranslator {
      * <p>{@code username} and {@code password} carry credential material, and
      * {@link TranslatedDatabaseUrl#toString()} renders all three components as the same fixed marker
      * and reproduces none of them. {@code jdbcUrl} never carries credential material: a value that
-     * would have embedded a credential in it is rejected by
-     * {@link DatabaseUrlTranslator#translate(String)} — DL-072 — see docs/DECISION_LOG.md.
+     * embeds a credential in it is rejected by {@link DatabaseUrlTranslator#translate(String)} —
+     * DL-072 — see docs/DECISION_LOG.md.
      *
      * @param jdbcUrl  the JDBC URL, never {@code null}, never blank, and never carrying a username
      *                 or a password in its user-info component or in a property
@@ -201,8 +201,8 @@ public final class DatabaseUrlTranslator {
         /**
          * Returns a fixed description of this outcome that carries none of its three values.
          *
-         * <p>The same text is returned for every instance, so no JDBC URL, host, database name,
-         * query parameter, username or password can reach diagnostic output through this method.
+         * <p>The same text is returned for every instance. No JDBC URL, host, database name, query
+         * parameter, username or password reaches diagnostic output through this method.
          * That holds for a reassembled {@code jdbcUrl} and equally for a value that already began
          * with {@code jdbc:} and was passed through unchanged.
          *
@@ -229,8 +229,8 @@ public final class DatabaseUrlTranslator {
      *                               leading or trailing whitespace; if it declares no scheme or no
      *                               host; if its port is not an integer in
      *                               {@code 0..}{@value #MAX_PORT}; if its scheme is not one of the
-     *                               supported schemes; or if credential material would otherwise
-     *                               remain inside the JDBC URL
+     *                               supported schemes; or if credential material remains inside the
+     *                               assembled JDBC URL
      */
     public static TranslatedDatabaseUrl translate(String databaseUrl) {
         if (databaseUrl == null || databaseUrl.isBlank()) {
@@ -292,8 +292,8 @@ public final class DatabaseUrlTranslator {
     }
 
     /**
-     * Rejects a URL that carries credential material, so that {@link TranslatedDatabaseUrl#jdbcUrl()}
-     * never holds a username or a password.
+     * Rejects a URL that carries credential material. {@link TranslatedDatabaseUrl#jdbcUrl()} never
+     * holds a username or a password.
      *
      * @param url     the URL to test
      * @param summary the leading clause of the failure message
@@ -315,8 +315,8 @@ public final class DatabaseUrlTranslator {
      * hold it: the user-info component of an authority, and a recognised credential property.
      *
      * <p>The property scan covers every {@code ?}, {@code &} and {@code ;} separated property of the
-     * whole URL, so it applies to a query string and to the semicolon-separated property list some
-     * drivers accept. The text before a property's {@code '='} is compared, lower-cased, against
+     * whole URL, which is a query string and the semicolon-separated property list some drivers
+     * accept. The text before a property's {@code '='} is compared, lower-cased, against
      * {@link #CREDENTIAL_PROPERTY_NAMES}.
      *
      * @param url the URL to inspect; never {@code null}

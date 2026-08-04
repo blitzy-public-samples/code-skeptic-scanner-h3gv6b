@@ -40,17 +40,17 @@ public class AsyncSchedulingConfig {
      *
      * <p>The bean is named {@code taskScheduler}, which is both the name
      * {@code ScheduledAnnotationBeanPostProcessor} falls back to when resolving a scheduler and the
-     * name Spring Boot's auto-configured scheduler carries, so that auto-configuration backs off and
-     * the context holds exactly one scheduler.
+     * name Spring Boot's auto-configured scheduler carries. Auto-configuration backs off and the
+     * context holds exactly one scheduler.
      *
      * <p>The thread-name prefix is the only value set on the instance. Pool size, shutdown
      * behaviour, termination wait and cancellation policy are left at the
      * {@link ThreadPoolTaskScheduler} defaults - a pool of one thread, no wait for in-flight work at
      * shutdown, and no purge of cancelled tasks - which are the same values Spring Boot's
      * auto-configured scheduler carries. {@code spring.task.scheduling.*} is not read and no
-     * property placeholder is resolved. No {@code ErrorHandler} is set, so the framework default
-     * applies: an exception thrown by a scheduled run is logged and suppressed and the task stays
-     * scheduled. Nothing set here affects pacing.
+     * property placeholder is resolved. No {@code ErrorHandler} is set; the framework default
+     * applies, under which an exception thrown by a scheduled run is logged and suppressed and the
+     * task stays scheduled. Nothing set here affects pacing.
      *
      * <p>The container builds the underlying executor during bean initialisation and shuts it down
      * when the context closes; this method returns the configured instance without calling

@@ -10,8 +10,12 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * <p>Neither component declares a Bean Validation constraint, so a JSON member that is absent, or
  * present with a JSON {@code null}, binds to {@code null}.
  *
- * <p>{@link #toString()} is overridden to render both components as {@code ***REDACTED***}, so no
- * submitted credential can reach diagnostic output through it, whatever the components hold.
+ * <p>Each component is read up to a length ceiling of 256 characters. The ceiling is applied by
+ * {@code api.AuthController} after binding and before the credential check. A longer value receives
+ * the route's generic 401 and never reaches the password encoder. No Bean Validation constraint
+ * expresses this ceiling — see docs/DECISION_LOG.md DL-118.
+ *
+ * <p>{@link #toString()} renders both components as {@code ***REDACTED***}.
  * Deserialization is unaffected: Jackson uses the canonical constructor and the {@link JsonProperty}
  * names. The {@code password} member is bound write-only, so it is read during deserialisation and
  * omitted from any serialised form of this record.
@@ -21,7 +25,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * @param password the submitted plaintext credential, or {@code null} when the
  *                 JSON member is absent
  */
-// Net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-019
+// Net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-019, DL-118
 public record LoginRequest(
         @JsonProperty("username") String username,
         @JsonProperty(value = "password", access = JsonProperty.Access.WRITE_ONLY) String password) {

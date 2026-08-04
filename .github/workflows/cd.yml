@@ -2,10 +2,22 @@ name: Continuous Deployment
 
 on:
   workflow_run:
-    workflows: ["Continuous Integration"]
+    # CI workflow name reference - see backend/docs/DECISION_LOG.md DL-102
+    workflows: ["Code Skeptic Scanner CI"]
     branches: [main]
     types:
       - completed
+
+# Least-privilege default for every job in this workflow - see
+# backend/docs/DECISION_LOG.md DL-104
+permissions:
+  contents: read
+  id-token: write
+
+# Serialized production deployments - see backend/docs/DECISION_LOG.md DL-105
+concurrency:
+  group: cd-production
+  cancel-in-progress: false
 
 env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
@@ -18,28 +30,48 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
+    # Triggering CI commit - see backend/docs/DECISION_LOG.md DL-105
     - name: Checkout code
-      uses: actions/checkout@v2
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ github.event.workflow_run.head_sha }}
+        persist-credentials: false
 
-    - name: Set up Google Cloud SDK
-      uses: google-github-actions/setup-gcloud@v0.2.1
+    # Google Cloud authentication action - see backend/docs/DECISION_LOG.md DL-103, DL-104
+    - name: Authenticate with Google Cloud
+      uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
       with:
         project_id: ${{ secrets.GCP_PROJECT_ID }}
-        service_account_key: ${{ secrets.GCP_SA_KEY }}
-        export_default_credentials: true
+        workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+        service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+        create_credentials_file: true
 
-    - name: Authenticate with Google Cloud
-      run: gcloud auth configure-docker
+    - name: Set up Google Cloud SDK
+      uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
 
+    - name: Configure Docker for the image registry
+      run: gcloud auth configure-docker gcr.io --quiet
+
+    # Tested commit tag and immutable deploy digest - see backend/docs/DECISION_LOG.md DL-105
     - name: Build and push backend Docker image
+      id: backend_image
       run: |
-        docker build -t $BACKEND_IMAGE -f infrastructure/docker/Dockerfile.backend ./backend
-        docker push $BACKEND_IMAGE
+        set -euo pipefail
+        tag="${{ github.event.workflow_run.head_sha }}"
+        docker build -t "${BACKEND_IMAGE}:${tag}" -f infrastructure/docker/Dockerfile.backend ./backend
+        docker push "${BACKEND_IMAGE}:${tag}"
+        digest="$(gcloud container images describe "${BACKEND_IMAGE}:${tag}" \
+          --format='value(image_summary.fully_qualified_digest)')"
+        if [ -z "${digest}" ]; then
+          echo "Could not resolve the pushed image digest for ${BACKEND_IMAGE}:${tag}." >&2
+          exit 1
+        fi
+        echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
     - name: Deploy backend to Google Cloud Run
       run: |
         gcloud run deploy code-skeptic-backend \
-          --image $BACKEND_IMAGE \
+          --image ${{ steps.backend_image.outputs.digest }} \
           --platform managed \
           --region us-central1 \
           --allow-unauthenticated
@@ -50,14 +82,15 @@ jobs:
         npm install
         npm run build
 
+    # WIF-compatible Cloud Storage synchronization - see backend/docs/DECISION_LOG.md DL-136
     - name: Deploy frontend to Google Cloud Storage
       run: |
-        gsutil -m rsync -r frontend/build gs://$FRONTEND_BUCKET
+        gcloud storage rsync frontend/build "gs://${FRONTEND_BUCKET}" --recursive
 
     - name: Set up Cloud CDN
       run: |
         gcloud compute backend-buckets create code-skeptic-frontend \
-          --gcs-bucket-name=$FRONTEND_BUCKET \
+          --gcs-bucket-name="${FRONTEND_BUCKET}" \
           --enable-cdn
 
     - name: Run post-deployment tests
@@ -66,10 +99,18 @@ jobs:
         # Add post-deployment test commands here
         # Example: npm run test:e2e
 
+    # Direct deployment webhook notification - see backend/docs/DECISION_LOG.md DL-103
     - name: Notify team of successful deployment
-      uses: 8398a7/action-slack@v3
-      with:
-        status: ${{ job.status }}
-        text: Deployment to production completed successfully!
-        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
       if: success()
+      env:
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      run: |
+        set -euo pipefail
+        if [ -z "${SLACK_WEBHOOK:-}" ]; then
+          echo "SLACK_WEBHOOK is not configured; the deployment notification is skipped."
+          exit 0
+        fi
+        curl --silent --show-error --fail --max-time 30 \
+          --header 'Content-Type: application/json' \
+          --data '{"text":"Deployment to production completed successfully!"}' \
+          "${SLACK_WEBHOOK}"

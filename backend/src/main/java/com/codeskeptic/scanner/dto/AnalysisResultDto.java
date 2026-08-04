@@ -10,10 +10,8 @@ import java.util.Objects;
  *
  * <pre>{@code {"tweet_id":"1","analysis_result":-0.4}}</pre>
  *
- * @param tweetId        the {@code tweet_id} value: the request path segment
- *                       exactly as received, neither parsed nor normalised
- *                       (backend/app/api/tweets.py:L53). A non-numeric segment
- *                       is carried through unchanged.
+ * @param tweetId        the decimal {@code tweet_id} value of the row that was analysed; a
+ *                       non-numeric or unknown path value is rejected before this record is built
  * @param analysisResult the {@code analysis_result} value: the document
  *                       sentiment score
  *                       (backend/app/api/tweets.py:L54;

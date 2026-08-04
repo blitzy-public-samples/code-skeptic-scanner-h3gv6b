@@ -1,0 +1,260 @@
+package com.codeskeptic.scanner.service;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.Optional;
+
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.context.annotation.Import;
+import org.springframework.test.context.ActiveProfiles;
+
+import com.codeskeptic.scanner.config.ScannerProperties;
+import com.codeskeptic.scanner.dto.SettingDto;
+import com.codeskeptic.scanner.entity.Setting;
+import com.codeskeptic.scanner.repository.SettingRepository;
+import com.codeskeptic.scanner.service.mapper.SettingMapper;
+
+// Net-new (no Python counterpart; backend/app/api/settings.py:L3 imported a service that exists
+// nowhere in the retired tree) — DL-040 — see docs/DECISION_LOG.md
+/**
+ * Exercises {@link SettingsService#seedDefaultSettings()} against a real {@link SettingRepository}
+ * over the in-memory database of the {@code test} profile, driven by the real
+ * {@link ApplicationReadyEvent}.
+ *
+ * <p>Nothing here is mocked: the repository writes to H2, the mapper is the production bean, and the
+ * seeded values are the ones {@code src/test/resources/application-test.yml} declares. The companion
+ * {@code SettingsServiceTest} covers the same method over mocked collaborators; this class covers what
+ * a mock cannot show — that the listener is bound to the real event, runs inside a transaction, and
+ * writes to a real table.
+ *
+ * <p>A Spring Boot test context is started through {@code SpringApplication}, which publishes
+ * {@link ApplicationReadyEvent} once the context is refreshed. The three rows are therefore already
+ * present when the first test method runs, and they are committed rather than enrolled in any test
+ * transaction. Each test method's own writes are rolled back when it returns.
+ *
+ * <p>The three seeded keys are rows, never schema.
+ */
+@DataJpaTest
+@ActiveProfiles("test")
+@EnableConfigurationProperties(ScannerProperties.class)
+@Import({SettingsService.class, SettingMapper.class})
+@DisplayName("SettingsService seeding on ApplicationReadyEvent")
+class SettingsServiceSeedingIntegrationTest {
+
+    /** Primary key of the popularity-threshold row. */
+    private static final String TWEET_POPULARITY_THRESHOLD_KEY = "tweet_popularity_threshold";
+
+    /** Primary key of the sweep-spacing row. */
+    private static final String RESPONSE_GENERATION_DELAY_KEY = "response_generation_delay";
+
+    /** Primary key of the tracked-terms row. */
+    private static final String STREAM_KEYWORDS_KEY = "stream_keywords";
+
+    /** The three keys the seeding writes. */
+    private static final List<String> SEEDED_KEYS = List.of(TWEET_POPULARITY_THRESHOLD_KEY,
+            RESPONSE_GENERATION_DELAY_KEY, STREAM_KEYWORDS_KEY);
+
+    /** Value an operator write puts in a seeded row before a later event is published. */
+    private static final String OPERATOR_VALUE = "4242";
+
+    /** Description an operator write puts in a seeded row before a later event is published. */
+    private static final String OPERATOR_DESCRIPTION = "Edited through PUT /settings/{key}.";
+
+    /** Declared character length of {@code settings.key} — DL-069 — see docs/DECISION_LOG.md. */
+    private static final int SETTINGS_KEY_LENGTH = 255;
+
+    /** Delimiter joining the seeded stream keywords. */
+    private static final String KEYWORD_DELIMITER = ",";
+
+    /** Unit under test, imported as a bean so its event listener is registered. */
+    @Autowired
+    private SettingsService settingsService;
+
+    /** Real data access over the in-memory database. */
+    @Autowired
+    private SettingRepository settingRepository;
+
+    /** Bound configuration of the {@code test} profile, supplying the seeded values. */
+    @Autowired
+    private ScannerProperties properties;
+
+    /** Publisher a further real {@link ApplicationReadyEvent} is handed to. */
+    @Autowired
+    private ApplicationEventPublisher eventPublisher;
+
+    /** This test's own context, carried by every event this class publishes. */
+    @Autowired
+    private ConfigurableApplicationContext applicationContext;
+
+    @Test
+    @DisplayName("has seeded the three default rows by the time the context is ready")
+    void hasSeededTheThreeDefaultRowsByTheTimeTheContextIsReady() {
+        assertThat(settingRepository.findAll()).extracting(Setting::getKey)
+                .containsExactlyInAnyOrderElementsOf(SEEDED_KEYS);
+        assertThat(settingRepository.count()).isEqualTo(SEEDED_KEYS.size());
+    }
+
+    @Test
+    @DisplayName("carries the configured value and a description in every seeded row")
+    void carriesTheConfiguredValueAndADescriptionInEverySeededRow() {
+        Setting threshold = row(TWEET_POPULARITY_THRESHOLD_KEY);
+        Setting delay = row(RESPONSE_GENERATION_DELAY_KEY);
+        Setting keywords = row(STREAM_KEYWORDS_KEY);
+
+        assertThat(threshold.getValue())
+                .isEqualTo(Integer.toString(properties.popularityThreshold()));
+        assertThat(delay.getValue())
+                .isEqualTo(Long.toString(properties.responseGenerationDelaySeconds()));
+        assertThat(keywords.getValue()).isEqualTo(String.join(KEYWORD_DELIMITER,
+                properties.ingestion().streamBaseKeywords()));
+        assertThat(List.of(threshold, delay, keywords))
+                .allSatisfy(seeded -> assertThat(seeded.getDescription()).isNotBlank());
+    }
+
+    @Test
+    @DisplayName("adds nothing and changes nothing when the event is published again")
+    void addsNothingAndChangesNothingWhenTheEventIsPublishedAgain() {
+        List<Setting> before = snapshot();
+
+        publishApplicationReadyEvent();
+        publishApplicationReadyEvent();
+
+        assertThat(snapshot()).containsExactlyInAnyOrderElementsOf(before);
+        assertThat(settingRepository.count()).isEqualTo(SEEDED_KEYS.size());
+    }
+
+    @Test
+    @DisplayName("adds nothing and changes nothing when the method is invoked directly again")
+    void addsNothingAndChangesNothingWhenTheMethodIsInvokedDirectlyAgain() {
+        List<Setting> before = snapshot();
+
+        settingsService.seedDefaultSettings();
+        settingsService.seedDefaultSettings();
+
+        assertThat(snapshot()).containsExactlyInAnyOrderElementsOf(before);
+        assertThat(settingRepository.count()).isEqualTo(SEEDED_KEYS.size());
+    }
+
+    @Test
+    @DisplayName("leaves an operator-edited row exactly as it stands on a later event")
+    void leavesAnOperatorEditedRowExactlyAsItStandsOnALaterEvent() {
+        settingsService.updateSetting(TWEET_POPULARITY_THRESHOLD_KEY, OPERATOR_VALUE);
+        Setting edited = row(TWEET_POPULARITY_THRESHOLD_KEY);
+        edited.setDescription(OPERATOR_DESCRIPTION);
+        settingRepository.saveAndFlush(edited);
+
+        publishApplicationReadyEvent();
+
+        Setting afterTheEvent = row(TWEET_POPULARITY_THRESHOLD_KEY);
+        assertThat(afterTheEvent.getValue()).isEqualTo(OPERATOR_VALUE);
+        assertThat(afterTheEvent.getDescription()).isEqualTo(OPERATOR_DESCRIPTION);
+        assertThat(settingRepository.count()).isEqualTo(SEEDED_KEYS.size());
+    }
+
+    @Test
+    @DisplayName("writes only the row that is absent and leaves the two present ones untouched")
+    void writesOnlyTheRowThatIsAbsentAndLeavesTheTwoPresentOnesUntouched() {
+        settingRepository.deleteById(STREAM_KEYWORDS_KEY);
+        settingRepository.flush();
+        Setting presentBefore = detached(row(TWEET_POPULARITY_THRESHOLD_KEY));
+
+        publishApplicationReadyEvent();
+
+        assertThat(settingRepository.count()).isEqualTo(SEEDED_KEYS.size());
+        Setting reinserted = row(STREAM_KEYWORDS_KEY);
+        assertThat(reinserted.getValue()).isEqualTo(String.join(KEYWORD_DELIMITER,
+                properties.ingestion().streamBaseKeywords()));
+        assertThat(reinserted.getDescription()).isNotBlank();
+        Setting presentAfter = row(TWEET_POPULARITY_THRESHOLD_KEY);
+        assertThat(presentAfter.getValue()).isEqualTo(presentBefore.getValue());
+        assertThat(presentAfter.getDescription()).isEqualTo(presentBefore.getDescription());
+    }
+
+    @Test
+    @DisplayName("re-seeds every row when the table has been emptied")
+    void reSeedsEveryRowWhenTheTableHasBeenEmptied() {
+        settingRepository.deleteAll();
+        settingRepository.flush();
+        assertThat(settingRepository.count()).isZero();
+
+        publishApplicationReadyEvent();
+
+        assertThat(settingRepository.findAll()).extracting(Setting::getKey)
+                .containsExactlyInAnyOrderElementsOf(SEEDED_KEYS);
+    }
+
+    @Test
+    @DisplayName("renders every seeded row through the production mapper on a later read")
+    void rendersEverySeededRowThroughTheProductionMapperOnALaterRead() {
+        List<SettingDto> rendered = settingsService.getAllSettings();
+
+        assertThat(rendered).hasSize(SEEDED_KEYS.size());
+        assertThat(rendered).extracting(SettingDto::key)
+                .containsExactlyInAnyOrderElementsOf(SEEDED_KEYS);
+        assertThat(rendered).allSatisfy(setting -> {
+            assertThat(setting.value()).isNotNull();
+            assertThat(setting.description()).isNotBlank();
+        });
+    }
+
+    @Test
+    @DisplayName("contributes rows only, each carrying a key within the declared column width")
+    void contributesRowsOnlyEachCarryingAKeyWithinTheDeclaredColumnWidth() {
+        assertThat(settingRepository.findAll()).allSatisfy(seeded -> {
+            assertThat(seeded.getKey()).isIn(SEEDED_KEYS);
+            assertThat(seeded.getKey().length()).isLessThanOrEqualTo(SETTINGS_KEY_LENGTH);
+        });
+    }
+
+    /**
+     * Publishes a real {@link ApplicationReadyEvent} carrying this test's own context, which is what
+     * reaches the listener on {@link SettingsService#seedDefaultSettings()}.
+     */
+    private void publishApplicationReadyEvent() {
+        eventPublisher.publishEvent(new ApplicationReadyEvent(new SpringApplication(),
+                new String[0], applicationContext, Duration.ZERO));
+    }
+
+    /**
+     * Reads one stored row by its primary key.
+     *
+     * @param key the primary key of the row
+     * @return the stored row
+     */
+    private Setting row(String key) {
+        Optional<Setting> stored = settingRepository.findById(key);
+        assertThat(stored).as("stored row for the key %s", key).isPresent();
+        return stored.get();
+    }
+
+    /**
+     * Reads every stored row as values that no later write can change.
+     *
+     * @return one detached copy per stored row
+     */
+    private List<Setting> snapshot() {
+        return settingRepository.findAll().stream()
+                .map(SettingsServiceSeedingIntegrationTest::detached)
+                .toList();
+    }
+
+    /**
+     * Copies a row's three columns into an instance the persistence context does not manage.
+     *
+     * @param managed the row to copy
+     * @return the copy
+     */
+    private static Setting detached(Setting managed) {
+        return new Setting(managed.getKey(), managed.getValue(), managed.getDescription());
+    }
+}

@@ -89,6 +89,15 @@ class LlmServiceTest {
     /** Value bound to {@code scanner.openai.n}. */
     private static final long N = 1L;
 
+    /** The {@code scanner.openai.reasoning-effort} value the fixtures bind. */
+    private static final String REASONING_EFFORT = "minimal";
+
+    /** The {@code scanner.openai.request-timeout-seconds} value the fixtures bind. */
+    private static final long REQUEST_TIMEOUT_SECONDS = 30L;
+
+    /** The {@code scanner.openai.max-retries} value the fixtures bind. */
+    private static final int MAX_RETRIES = 2;
+
     /** Second value bound to {@code scanner.openai.model}. */
     private static final String OTHER_MODEL = "a-different-chat-model-identifier";
 
@@ -186,7 +195,8 @@ class LlmServiceTest {
     @DisplayName("constructing the service with an unset api key does not throw")
     void constructingTheServiceWithAnUnsetApiKeyDoesNotThrow() {
         ScannerProperties withoutApiKey = propertiesCarrying(
-                new ScannerProperties.Openai(null, MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N));
+                new ScannerProperties.Openai(null, MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N,
+                        REASONING_EFFORT, REQUEST_TIMEOUT_SECONDS, MAX_RETRIES));
 
         assertThatCode(() -> new LlmService(withoutApiKey)).doesNotThrowAnyException();
     }
@@ -195,7 +205,8 @@ class LlmServiceTest {
     @DisplayName("generating a reply with an unset api key reports the api key configuration key")
     void generatingAReplyWithAnUnsetApiKeyReportsTheApiKeyConfigurationKey() {
         LlmService withoutApiKey = new LlmService(propertiesCarrying(
-                new ScannerProperties.Openai(null, MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N)));
+                new ScannerProperties.Openai(null, MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N,
+                        REASONING_EFFORT, REQUEST_TIMEOUT_SECONDS, MAX_RETRIES)));
 
         assertThatIllegalStateException()
                 .isThrownBy(() -> withoutApiKey.generateResponse(tweet()))
@@ -463,23 +474,53 @@ class LlmServiceTest {
     }
 
     @Test
-    @DisplayName("carries a doubt rating as a primitive double on the post record")
-    void carriesADoubtRatingAsAPrimitiveDoubleOnThePostRecord() {
+    @DisplayName("carries a doubt rating as a boxed Double on the post record")
+    void carriesADoubtRatingAsABoxedDoubleOnThePostRecord() {
         RecordComponent doubtRating = recordComponent(TweetDto.class, "doubtRating");
 
-        assertThat(doubtRating.getType()).isEqualTo(double.class);
+        assertThat(doubtRating.getType()).isEqualTo(Double.class);
+        assertThat(recordComponent(TweetDto.class, "likeCount").getType()).isEqualTo(Integer.class);
     }
 
     @Test
-    @DisplayName("does not accept a post whose ai tool names are null")
-    void doesNotAcceptAPostWhoseAiToolNamesAreNull() {
-        assertThatNullPointerException()
-                .isThrownBy(() -> new TweetDto(TWEET_ID, TWEET_CONTENT, LIKE_COUNT, CREATED_AT,
-                        DOUBT_RATING, MEDIA, null, USER_ID, null))
-                .withMessageContaining("aiToolsMentioned");
+    @DisplayName("reads a post whose list components are null as a post carrying empty lists")
+    void readsAPostWhoseListComponentsAreNullAsAPostCarryingEmptyLists() {
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+        TweetDto withoutLists = new TweetDto(TWEET_ID, TWEET_CONTENT, LIKE_COUNT, CREATED_AT,
+                DOUBT_RATING, null, null, USER_ID, null);
 
-        assertThat(service.openAiClientAccessorCalls()).isZero();
-        verifyNoInteractions(openAiClient);
+        assertThat(withoutLists.media()).isEmpty();
+        assertThat(withoutLists.aiToolsMentioned()).isEmpty();
+        assertThatCode(() -> service.generateResponse(withoutLists)).doesNotThrowAnyException();
+        assertThat(promptOf(capturedRequest()))
+                .isEqualTo(expectedPrompt(TWEET_CONTENT, "AI tools mentioned: none; doubt rating: 7.5"));
+    }
+
+    @Test
+    @DisplayName("composes a context clause carrying an unknown doubt rating when the rating is absent")
+    void composesAContextClauseCarryingAnUnknownDoubtRatingWhenTheRatingIsAbsent() {
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+        TweetDto withoutARating = new TweetDto(TWEET_ID, TWEET_CONTENT, LIKE_COUNT, CREATED_AT,
+                null, MEDIA, null, USER_ID, AI_TOOLS_MENTIONED);
+
+        assertThat(withoutARating.doubtRating()).isNull();
+        assertThatCode(() -> service.generateResponse(withoutARating)).doesNotThrowAnyException();
+        assertThat(promptOf(capturedRequest())).isEqualTo(expectedPrompt(
+                TWEET_CONTENT, "AI tools mentioned: GitHub Copilot, Cursor; doubt rating: unknown"));
+    }
+
+    @Test
+    @DisplayName("reads a post whose scalar components are null without reaching the openai client")
+    void readsAPostWhoseScalarComponentsAreNullWithoutRejectingIt() {
+        TweetDto withoutScalars =
+                new TweetDto(null, null, null, null, null, MEDIA, null, null, AI_TOOLS_MENTIONED);
+
+        assertThat(withoutScalars.likeCount()).isNull();
+        assertThat(withoutScalars.doubtRating()).isNull();
+        assertThat(withoutScalars.content()).isNull();
+        assertThat(withoutScalars.createdAt()).isNull();
+        assertThat(withoutScalars.userId()).isNull();
+        assertThat(withoutScalars.id()).isNull();
     }
 
     @Test
@@ -538,7 +579,7 @@ class LlmServiceTest {
     }
 
     // -------------------------------------------------------------------------
-    // Returned response
+    // Returned generated text
     // -------------------------------------------------------------------------
 
     @Test
@@ -546,12 +587,12 @@ class LlmServiceTest {
     void returnsTheTrimmedTextOfTheFirstChoice() {
         stubGeneratedText(PADDED_GENERATED_TEXT);
 
-        ResponseDto response = service.generateResponse(tweet());
+        String generatedText = service.generateResponse(tweet());
 
-        assertThat(response.content()).isEqualTo(TRIMMED_GENERATED_TEXT);
-        assertThat(response.content()).isNotEqualTo(PADDED_GENERATED_TEXT);
-        assertThat(response.content()).doesNotStartWith(" ");
-        assertThat(response.content()).doesNotEndWith(" ");
+        assertThat(generatedText).isEqualTo(TRIMMED_GENERATED_TEXT);
+        assertThat(generatedText).isNotEqualTo(PADDED_GENERATED_TEXT);
+        assertThat(generatedText).doesNotStartWith(" ");
+        assertThat(generatedText).doesNotEndWith(" ");
     }
 
     @Test
@@ -561,79 +602,140 @@ class LlmServiceTest {
                 choiceCarrying(Optional.of("first choice text")),
                 choiceCarrying(Optional.of("second choice text"))));
 
-        ResponseDto response = service.generateResponse(tweet());
+        String generatedText = service.generateResponse(tweet());
 
-        assertThat(response.content()).isEqualTo("first choice text");
+        assertThat(generatedText).isEqualTo("first choice text");
     }
 
+    // -------------------------------------------------------------------------
+    // Absent model output is a generation failure — DL-083
+    // -------------------------------------------------------------------------
+
     @Test
-    @DisplayName("returns empty text when the response carries no choice")
-    void returnsEmptyTextWhenTheResponseCarriesNoChoice() {
+    @DisplayName("reports a generation failure when the response carries no choice")
+    void reportsAGenerationFailureWhenTheResponseCarriesNoChoice() {
         stubClientReturning(completionCarrying());
 
-        ResponseDto response = service.generateResponse(tweet());
+        Throwable thrown = catchThrowable(() -> service.generateResponse(tweet()));
 
-        assertThat(response.content()).isEmpty();
+        assertThat(thrown).isInstanceOf(ResponseGenerationException.class);
+        assertThat(thrown).hasMessage(ResponseGenerationException.FAILED_TO_GENERATE_RESPONSE);
     }
 
     @Test
-    @DisplayName("returns empty text when the first choice carries no content")
-    void returnsEmptyTextWhenTheFirstChoiceCarriesNoContent() {
+    @DisplayName("reports a generation failure when the first choice carries no content")
+    void reportsAGenerationFailureWhenTheFirstChoiceCarriesNoContent() {
         stubClientReturning(completionCarrying(choiceCarrying(Optional.empty())));
 
-        ResponseDto response = service.generateResponse(tweet());
+        Throwable thrown = catchThrowable(() -> service.generateResponse(tweet()));
 
-        assertThat(response.content()).isEmpty();
+        assertThat(thrown).isInstanceOf(ResponseGenerationException.class);
+        assertThat(thrown).hasMessage(ResponseGenerationException.FAILED_TO_GENERATE_RESPONSE);
+    }
+
+    @ParameterizedTest(name = "content {0} is reported as a generation failure")
+    @MethodSource("blankGeneratedText")
+    @DisplayName("reports a generation failure when the first choice carries blank content")
+    void reportsAGenerationFailureWhenTheFirstChoiceCarriesBlankContent(String content) {
+        stubGeneratedText(content);
+
+        Throwable thrown = catchThrowable(() -> service.generateResponse(tweet()));
+
+        assertThat(thrown).isInstanceOf(ResponseGenerationException.class);
+        assertThat(thrown).hasMessage(ResponseGenerationException.FAILED_TO_GENERATE_RESPONSE);
     }
 
     @Test
-    @DisplayName("returns a response whose generated at falls in the interval spanning the call")
-    void returnsAResponseWhoseGeneratedAtFallsInTheIntervalSpanningTheCall() {
+    @DisplayName("never returns blank generated text")
+    void neverReturnsBlankGeneratedText() {
         stubGeneratedText(PADDED_GENERATED_TEXT);
-        LocalDateTime beforeTheCall = LocalDateTime.now();
 
-        ResponseDto response = service.generateResponse(tweet());
+        String generatedText = service.generateResponse(tweet());
 
-        LocalDateTime afterTheCall = LocalDateTime.now();
-        assertThat(response.generatedAt()).isNotNull();
-        assertThat(response.generatedAt()).isInstanceOf(LocalDateTime.class);
-        assertThat(response.generatedAt()).isBetween(beforeTheCall, afterTheCall);
-        assertThat(recordComponent(ResponseDto.class, "generatedAt").getType())
-                .isEqualTo(LocalDateTime.class);
+        assertThat(generatedText).isNotBlank();
+    }
+
+    // -------------------------------------------------------------------------
+    // Client lifecycle — DL-085
+    // -------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("closes the cached openai client when the bean is destroyed")
+    void closesTheCachedOpenaiClientWhenTheBeanIsDestroyed() throws Exception {
+        LlmService plainService = plainServiceHolding(openAiClient);
+
+        plainService.closeOpenAiClient();
+
+        verify(openAiClient).close();
+        verifyNoMoreInteractions(openAiClient);
     }
 
     @Test
-    @DisplayName("returns a response that is not approved")
-    void returnsAResponseThatIsNotApproved() {
-        stubGeneratedText(PADDED_GENERATED_TEXT);
+    @DisplayName("closes the cached openai client once however many times destruction runs")
+    void closesTheCachedOpenaiClientOnceHoweverManyTimesDestructionRuns() throws Exception {
+        LlmService plainService = plainServiceHolding(openAiClient);
 
-        ResponseDto response = service.generateResponse(tweet());
+        plainService.closeOpenAiClient();
+        plainService.closeOpenAiClient();
 
-        assertThat(response.isApproved()).isFalse();
-        assertThat(recordComponent(ResponseDto.class, "isApproved").getType()).isEqualTo(boolean.class);
+        verify(openAiClient, times(1)).close();
     }
 
     @Test
-    @DisplayName("returns a response whose tweet id is the post identifier as a string")
-    void returnsAResponseWhoseTweetIdIsThePostIdentifierAsAString() {
-        stubGeneratedText(PADDED_GENERATED_TEXT);
+    @DisplayName("closes no client when none was created")
+    void closesNoClientWhenNoneWasCreated() {
+        LlmService plainService = new LlmService(propertiesCarrying(
+                openaiGroup(MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N)));
 
-        ResponseDto response = service.generateResponse(tweet());
+        assertThatCode(plainService::closeOpenAiClient).doesNotThrowAnyException();
 
-        assertThat(response.tweetId()).isEqualTo(TWEET_ID);
-        assertThat(response.tweetId()).isInstanceOf(String.class);
-        assertThat(recordComponent(ResponseDto.class, "tweetId").getType()).isEqualTo(String.class);
+        verifyNoInteractions(openAiClient);
     }
 
     @Test
-    @DisplayName("returns a response whose id is unset")
-    void returnsAResponseWhoseIdIsUnset() {
-        stubGeneratedText(PADDED_GENERATED_TEXT);
+    @DisplayName("reports a failure raised while closing without propagating it")
+    void reportsAFailureRaisedWhileClosingWithoutPropagatingIt() throws Exception {
+        LlmService plainService = plainServiceHolding(openAiClient);
+        org.mockito.Mockito.doThrow(new IllegalStateException("the client did not close"))
+                .when(openAiClient).close();
 
-        ResponseDto response = service.generateResponse(tweet());
+        assertThatCode(plainService::closeOpenAiClient).doesNotThrowAnyException();
 
-        assertThat(response.id()).isNull();
-        assertThat(recordComponent(ResponseDto.class, "id").getType()).isEqualTo(String.class);
+        verify(openAiClient).close();
+    }
+
+    @Test
+    @DisplayName("clears the cached client so no reference to it is retained after destruction")
+    void clearsTheCachedClientAfterDestruction() throws Exception {
+        LlmService plainService = plainServiceHolding(openAiClient);
+
+        plainService.closeOpenAiClient();
+
+        assertThat(cachedClientOf(plainService)).isNull();
+    }
+
+    @Test
+    @DisplayName("creates no replacement client after the bean is destroyed")
+    void createsNoReplacementClientAfterTheBeanIsDestroyed() throws Exception {
+        LlmService plainService = plainServiceHolding(openAiClient);
+        plainService.closeOpenAiClient();
+
+        assertThatIllegalStateException()
+                .isThrownBy(plainService::openAiClient)
+                .withMessageContaining("destroyed");
+        assertThat(cachedClientOf(plainService)).isNull();
+    }
+
+    @Test
+    @DisplayName("creates no client after destruction even when none was ever created")
+    void createsNoClientAfterDestructionEvenWhenNoneWasEverCreated() {
+        LlmService plainService = new LlmService(propertiesCarrying(
+                openaiGroup(MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N)));
+        plainService.closeOpenAiClient();
+
+        assertThatIllegalStateException()
+                .isThrownBy(plainService::openAiClient)
+                .withMessageContaining("destroyed");
     }
 
     // -------------------------------------------------------------------------
@@ -671,24 +773,69 @@ class LlmServiceTest {
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("declares generate response as its only public operation")
-    void declaresGenerateResponseAsItsOnlyPublicOperation() {
+    @DisplayName("declares generation and client release as its only public operations")
+    void declaresGenerationAndClientReleaseAsItsOnlyPublicOperations() {
         List<String> publicMethodNames = Arrays.stream(LlmService.class.getDeclaredMethods())
                 .filter(method -> !method.isSynthetic())
                 .filter(method -> Modifier.isPublic(method.getModifiers()))
                 .map(Method::getName)
                 .toList();
 
-        assertThat(publicMethodNames).containsExactly("generateResponse");
+        assertThat(publicMethodNames)
+                .containsExactlyInAnyOrder("generateResponse", "closeOpenAiClient");
     }
 
     @Test
-    @DisplayName("declares a single post parameter and a response return type on generate response")
-    void declaresASinglePostParameterAndAResponseReturnTypeOnGenerateResponse() throws NoSuchMethodException {
+    @DisplayName("declares a single post parameter and a text return type on generate response")
+    void declaresASinglePostParameterAndATextReturnTypeOnGenerateResponse() throws NoSuchMethodException {
         Method generateResponse = LlmService.class.getDeclaredMethod("generateResponse", TweetDto.class);
 
         assertThat(generateResponse.getParameterTypes()).containsExactly(TweetDto.class);
-        assertThat(generateResponse.getReturnType()).isEqualTo(ResponseDto.class);
+        assertThat(generateResponse.getReturnType()).isEqualTo(String.class);
+    }
+
+    @Test
+    @DisplayName("does not accept a wire record for a reply that carries no identifier")
+    void doesNotAcceptAWireRecordForAReplyThatCarriesNoIdentifier() {
+        assertThatNullPointerException()
+                .isThrownBy(() -> new ResponseDto(null, TRIMMED_GENERATED_TEXT,
+                        LocalDateTime.of(2026, 1, 31, 9, 15), false, TWEET_ID))
+                .withMessageContaining("id");
+    }
+
+    @Test
+    @DisplayName("accepts a wire record for a stored reply whose nullable columns are null")
+    void acceptsAWireRecordForAStoredReplyWhoseNullableColumnsAreNull() {
+        ResponseDto stored = new ResponseDto("12", null, null, null, null);
+
+        assertThat(stored.id()).isEqualTo("12");
+        assertThat(stored.content()).isNull();
+        assertThat(stored.generatedAt()).isNull();
+        assertThat(stored.isApproved()).isNull();
+        assertThat(stored.tweetId()).isNull();
+        assertThat(recordComponent(ResponseDto.class, "isApproved").getType())
+                .isEqualTo(Boolean.class);
+    }
+
+    @Test
+    @DisplayName("returns no wire record and reaches no dto type from its declared surface")
+    void returnsNoWireRecordFromItsDeclaredSurface() {
+        List<Class<?>> returnTypes = Arrays.stream(LlmService.class.getDeclaredMethods())
+                .filter(method -> !method.isSynthetic())
+                .map(Method::getReturnType)
+                .toList();
+
+        assertThat(returnTypes).doesNotContain(ResponseDto.class);
+    }
+
+    @Test
+    @DisplayName("declares the client release operation as a destruction callback")
+    void declaresTheClientReleaseOperationAsADestructionCallback() throws NoSuchMethodException {
+        Method release = LlmService.class.getDeclaredMethod("closeOpenAiClient");
+
+        assertThat(release.isAnnotationPresent(jakarta.annotation.PreDestroy.class)).isTrue();
+        assertThat(release.getParameterTypes()).isEmpty();
+        assertThat(release.getReturnType()).isEqualTo(void.class);
     }
 
     @Test
@@ -731,6 +878,15 @@ class LlmServiceTest {
      */
     private static DoubleStream doubtRatingsThatAreNotNumbers() {
         return DoubleStream.of(Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY);
+    }
+
+    /**
+     * Supplies the model outputs that carry no usable text.
+     *
+     * @return the empty, whitespace-only, tab and newline outputs
+     */
+    private static java.util.stream.Stream<String> blankGeneratedText() {
+        return java.util.stream.Stream.of("", " ", "   ", "\t", "\n", " \t\n ");
     }
 
     /**
@@ -784,7 +940,8 @@ class LlmServiceTest {
     private static ScannerProperties.Openai openaiGroup(String model, long maxCompletionTokens,
             double temperature, long n) {
 
-        return new ScannerProperties.Openai(API_KEY, model, maxCompletionTokens, temperature, n);
+        return new ScannerProperties.Openai(API_KEY, model, maxCompletionTokens, temperature, n,
+                REASONING_EFFORT, REQUEST_TIMEOUT_SECONDS, MAX_RETRIES);
     }
 
     /**
@@ -796,6 +953,51 @@ class LlmServiceTest {
      */
     private static ScannerProperties propertiesCarrying(ScannerProperties.Openai openai) {
         return new ScannerProperties(null, 100, 60L, null, null, openai, null, null, null, null);
+    }
+
+    /**
+     * Builds an unseamed {@link LlmService} whose cached client is the supplied one.
+     *
+     * <p>The cached field is written directly, which is the only way to place a stubbed client where
+     * {@link LlmService#closeOpenAiClient()} reads it: {@link SeamedService} overrides the accessor
+     * and therefore never populates that field.
+     *
+     * @param client the client to cache
+     * @return the service holding {@code client}
+     * @throws ReflectiveOperationException if the cached field cannot be written
+     */
+    private static LlmService plainServiceHolding(OpenAIClient client)
+            throws ReflectiveOperationException {
+
+        LlmService service = new LlmService(propertiesCarrying(
+                openaiGroup(MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N)));
+        cachedClientField().set(service, client);
+        return service;
+    }
+
+    /**
+     * Reads the client an unseamed {@link LlmService} has cached.
+     *
+     * @param service the service to read
+     * @return the cached client, or {@code null} when none is cached
+     * @throws ReflectiveOperationException if the cached field cannot be read
+     */
+    private static OpenAIClient cachedClientOf(LlmService service)
+            throws ReflectiveOperationException {
+
+        return (OpenAIClient) cachedClientField().get(service);
+    }
+
+    /**
+     * Returns the accessible field holding the cached OpenAI client.
+     *
+     * @return the cached-client field
+     * @throws ReflectiveOperationException if the field is not declared
+     */
+    private static Field cachedClientField() throws ReflectiveOperationException {
+        Field field = LlmService.class.getDeclaredField("client");
+        field.setAccessible(true);
+        return field;
     }
 
     /**

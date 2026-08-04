@@ -3,10 +3,10 @@ package com.codeskeptic.scanner.service;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -16,6 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientResponseException;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.TweetDto;
@@ -48,7 +49,7 @@ import com.fasterxml.jackson.databind.JsonNode;
  * {@code tweet.author}, {@code tweet.timestamp}, {@code tweet.sentiment} and
  * {@code tweet.engagement}; the last four name no field of the source model
  * ({@code backend/app/schema/tweet.py:L5-14}) and no component of {@link TweetDto}. The map written
- * here carries seven properties, each fed from a component that exists:
+ * here carries one property per component of {@link TweetDto} — DL-088:
  *
  * <table border="1">
  *   <caption>Notion property map</caption>
@@ -59,35 +60,41 @@ import com.fasterxml.jackson.databind.JsonNode;
  *   <tr><td>{@code Doubt Rating}</td><td>number</td><td>{@link TweetDto#doubtRating()}</td></tr>
  *   <tr><td>{@code Engagement}</td><td>number</td><td>{@link TweetDto#likeCount()}</td></tr>
  *   <tr><td>{@code Tweet Id}</td><td>rich_text</td><td>{@link TweetDto#id()}</td></tr>
+ *   <tr><td>{@code Media}</td><td>rich_text</td><td>{@link TweetDto#media()}, delimited</td></tr>
+ *   <tr><td>{@code Quoted Tweet Id}</td><td>rich_text</td>
+ *       <td>{@link TweetDto#quotedTweetId()}</td></tr>
+ *   <tr><td>{@code AI Tools Mentioned}</td><td>rich_text</td>
+ *       <td>{@link TweetDto#aiToolsMentioned()}, delimited</td></tr>
  *   <tr><td>{@code Response}</td><td>rich_text</td>
  *       <td>{@link #updateTweetResponse(String, String)} only</td></tr>
  * </table>
  *
  * <p>{@code Doubt Rating} replaces the {@code Sentiment} select of
- * {@code backend/app/services/notion_service.py:L18} and {@code Tweet Id} and {@code Response} are
- * additions; all three are deviations recorded in {@code docs/DECISION_LOG.md}. {@code media},
- * {@code aiToolsMentioned} and {@code quotedTweetId} are not mirrored. Notion is a secondary mirror;
- * the relational store remains the system of record.
+ * {@code backend/app/services/notion_service.py:L18}; {@code Tweet Id}, {@code Media},
+ * {@code Quoted Tweet Id}, {@code AI Tools Mentioned} and {@code Response} are additions — DL-088.
+ * Notion is a secondary mirror; the relational store remains the system of record.
  *
- * <p>Every read of a Notion response tolerates an absent property, an empty text array and a null
- * value, and yields a {@link TweetDto} in each case. The source indexed {@code [0]} directly at
+ * <p>A read returns what the page carries: an absent property yields a {@code null} component, and an
+ * absent delimited property yields an empty list — DL-090. A page whose {@code Tweet Id} property
+ * carries no text is left out of the result, and the Notion page identifier is never read into
+ * {@link TweetDto#id()}. A structurally invalid successful response — an empty body, an absent
+ * {@code results} array, or a created page carrying no identifier — is reported as a failure rather
+ * than read as an empty result — DL-089. The source indexed {@code [0]} directly at
  * {@code backend/app/services/notion_service.py:L45-49}.
  *
- * <p>This class reaches no repository, holds no entity and declares no operation that publishes to
- * X. No retry, backoff, rate-limiting or caching is applied, and no validation annotation is
- * declared. No credential is read at construction and no request is issued there, so the
- * application context loads with {@code NOTION_API_KEY} and {@code NOTION_DATABASE_ID} unset; the
- * absence of {@code scanner.notion.database-id} surfaces from each method as an
- * {@link IllegalStateException}. No credential or key material is logged at any level.
+ * <p>This class reaches no repository and holds no entity. No credential is read at construction and
+ * no request is issued there, so the application context loads with {@code NOTION_API_KEY} and
+ * {@code NOTION_DATABASE_ID} unset and the absence of {@code scanner.notion.database-id} surfaces from
+ * each method as an {@link IllegalStateException}. No credential or key material is logged at any
+ * level — DL-052.
  *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-013, DL-050,
- * DL-052 and DL-058; construct-level provenance is recorded in
+ * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-013, DL-050, DL-052,
+ * DL-088, DL-089 and DL-090; construct-level provenance is recorded in
  * {@code docs/TRACEABILITY_MATRIX.md}.
  *
- * <p>This is a singleton bean. Both fields are {@code final} and reference immutable or
- * thread-confined state, every remaining member is a constant or a stateless method, and the
- * injected {@link RestClient} is safe for concurrent use, so every operation declared here is safe
- * for concurrent use.
+ * <p>This is a singleton bean. Both fields are {@code final}, every remaining member is a constant or a
+ * stateless method, and the injected {@link RestClient} is safe for concurrent use, so every operation
+ * declared here is safe for concurrent use.
  *
  * @see ScannerProperties.Notion
  */
@@ -143,8 +150,27 @@ public class NotionService {
      * Addition — see docs/DECISION_LOG.md. */
     private static final String PROPERTY_TWEET_ID = "Tweet Id";
 
+    /** Rich-text property, carrying the media references. Addition — see docs/DECISION_LOG.md
+     * DL-088. */
+    private static final String PROPERTY_MEDIA = "Media";
+
+    /** Rich-text property, carrying the quoted-post identifier. Addition — see
+     * docs/DECISION_LOG.md DL-088. */
+    private static final String PROPERTY_QUOTED_TWEET_ID = "Quoted Tweet Id";
+
+    /** Rich-text property, carrying the AI tool names. Addition — see docs/DECISION_LOG.md
+     * DL-088. */
+    private static final String PROPERTY_AI_TOOLS_MENTIONED = "AI Tools Mentioned";
+
     /** Rich-text property, carrying the generated reply. Addition — see docs/DECISION_LOG.md. */
     private static final String PROPERTY_RESPONSE = "Response";
+
+    /**
+     * Separator joining a list component into the single delimited text one rich-text property
+     * carries. It is the separator {@code util.DelimitedStringListConverter} reads and writes for
+     * the same two columns — see docs/DECISION_LOG.md DL-024.
+     */
+    private static final String VALUE_DELIMITER = ",";
 
     // Notion JSON member names, transcribed from the payload shapes at
     // backend/app/services/notion_service.py:L14-20 and :L34-38.
@@ -224,13 +250,6 @@ public class NotionService {
     private static final String EMPTY_TEXT = "";
 
     /**
-     * Substituted for {@link TweetDto#createdAt()} when the {@code Timestamp} property is absent or
-     * unparseable. {@link TweetDto} rejects a null value for that component.
-     */
-    private static final LocalDateTime UNKNOWN_TIMESTAMP =
-            LocalDateTime.ofEpochSecond(0L, 0, ZoneOffset.UTC);
-
-    /**
      * Notion API transport, published by {@code config/RestClientConfig#notionRestClient}. Replaces
      * the {@code notion_client.Client} field assigned at
      * {@code backend/app/services/notion_service.py:L8}.
@@ -265,20 +284,20 @@ public class NotionService {
      * identifier.
      *
      * <p>The request carries the target database as its parent, matching the {@code parent} argument
-     * at {@code backend/app/services/notion_service.py:L24}, and the six-property map built by
+     * at {@code backend/app/services/notion_service.py:L24}, and the property map built by
      * {@link #buildProperties(TweetDto)}, matching the {@code properties} argument at
      * {@code backend/app/services/notion_service.py:L25}. {@code Response} is not written here.
      *
-     * <p>The returned value is the created page's identifier. The source returned the raw response
-     * object at {@code backend/app/services/notion_service.py:L28} and no call site consumed it;
-     * that change of return type is recorded in {@code docs/DECISION_LOG.md}. A response carrying no
-     * identifier yields an empty string and a warning; no exception is raised on that path.
+     * <p>The returned value is the created page's identifier, in place of the raw response object the
+     * source returned at {@code backend/app/services/notion_service.py:L28} — see
+     * {@code docs/DECISION_LOG.md}. An empty response body, and a created page carrying no identifier,
+     * are each reported as a failure — DL-089.
      *
      * @param tweet the post to mirror; must not be {@code null}
-     * @return the created Notion page's identifier, or an empty string when the response carries
-     *     none; never {@code null}
+     * @return the created Notion page's identifier, never {@code null} and never empty
      * @throws NullPointerException if {@code tweet} is {@code null}
-     * @throws IllegalStateException if {@code scanner.notion.database-id} is unset or blank
+     * @throws IllegalStateException if {@code scanner.notion.database-id} is unset or blank, if the
+     *     response body is empty, or if the created page carries no identifier
      * @throws org.springframework.web.client.RestClientException if the request fails or Notion
      *     answers with a client or server error status
      */
@@ -300,15 +319,19 @@ public class NotionService {
                     .retrieve()
                     .body(JsonNode.class);
 
-            String pageId = (response == null) ? EMPTY_TEXT : readString(response.path(KEY_ID));
-            if (pageId.isEmpty()) {
-                log.warn("Notion accepted tweet {} without returning a page identifier", tweet.id());
-            } else {
-                log.info("Tweet {} is mirrored as Notion page {}", tweet.id(), pageId);
+            if (response == null) {
+                throw new IllegalStateException(
+                        "The Notion page-creation request returned an empty body.");
             }
+            String pageId = readString(response.path(KEY_ID));
+            if (pageId.isEmpty()) {
+                throw new IllegalStateException(
+                        "The Notion page-creation response carried no page identifier.");
+            }
+            log.info("Tweet {} is mirrored to the Notion database", tweet.id());
             return pageId;
         } catch (RuntimeException e) {
-            log.error("Mirroring tweet {} to the Notion database failed", tweet.id(), e);
+            logFailure("Mirroring tweet " + tweet.id() + " to the Notion database", e);
             throw e;
         }
     }
@@ -323,9 +346,9 @@ public class NotionService {
      * transcribing the {@code limit: int = 10} default at
      * {@code backend/app/services/notion_service.py:L32}.
      *
-     * <p>Each returned page is mapped by {@link #toTweetDto(JsonNode)}. {@code media} and
-     * {@code aiToolsMentioned} are empty and {@code quotedTweetId} is {@code null} on every returned
-     * record; those three components are not mirrored.
+     * <p>Each returned page is mapped by {@link #toTweetDto(JsonNode)}, which reads back every
+     * mirrored component — DL-088. A page that carries no {@code Tweet Id} property is left out of the
+     * result — DL-090.
      *
      * @param limit maximum number of pages to read; a non-positive value is replaced by
      *     {@value #DEFAULT_PAGE_SIZE}
@@ -361,7 +384,7 @@ public class NotionService {
             log.info("The Notion database query returned {} mirrored tweet(s)", tweets.size());
             return tweets;
         } catch (RuntimeException e) {
-            log.error("Querying the Notion database for up to {} page(s) failed", pageSize, e);
+            logFailure("Querying the Notion database for up to " + pageSize + " page(s)", e);
             throw e;
         }
     }
@@ -373,27 +396,29 @@ public class NotionService {
      * and the first matching page's {@code Response} rich-text property is then replaced. A
      * {@code null} reply is written as an empty string.
      *
-     * <p>Three conditions produce a warning and a normal return, leaving Notion untouched and
-     * raising no exception: a {@code null} or blank post identifier, a query that matches no page,
-     * and a matching page that carries no identifier.
+     * <p>Two conditions produce a warning and a normal return, leaving Notion untouched: a
+     * {@code null} or blank post identifier, and a query that matches no page. A structurally invalid
+     * query response, and a matching page that carries no identifier, are each reported as a failure —
+     * DL-089.
      *
-     * <p>This operation writes to Notion only. It reaches no repository and publishes nothing to X.
+     * <p>This operation writes to Notion only and reaches no repository.
      *
      * @param tweetId identifier of the post whose page is updated; a {@code null} or blank value
      *     leaves Notion untouched
      * @param responseText the generated reply to write; {@code null} is written as an empty string
-     * @throws IllegalStateException if {@code scanner.notion.database-id} is unset or blank
+     * @throws IllegalStateException if {@code scanner.notion.database-id} is unset or blank, if the
+     *     query response is structurally invalid, or if the matched page carries no identifier
      * @throws org.springframework.web.client.RestClientException if either request fails or Notion
      *     answers with a client or server error status
      */
     // Net-new (no Python counterpart) — called at backend/app/tasks/response_generation.py:L30 —
     // see docs/DECISION_LOG.md
     public void updateTweetResponse(String tweetId, String responseText) {
-        String databaseId = requireDatabaseId();
         if (tweetId == null || tweetId.isBlank()) {
             log.warn("No tweet identifier was supplied; no Notion page is updated");
             return;
         }
+        String databaseId = requireDatabaseId();
         String content = (responseText == null) ? EMPTY_TEXT : responseText;
 
         try {
@@ -411,23 +436,41 @@ public class NotionService {
                     .retrieve()
                     .toBodilessEntity();
 
-            log.info("The generated response for tweet {} is mirrored to Notion page {}",
-                    tweetId, pageId);
+            log.info("The generated response for tweet {} is mirrored to Notion", tweetId);
         } catch (RuntimeException e) {
-            log.error("Mirroring the generated response for tweet {} to Notion failed", tweetId, e);
+            logFailure("Mirroring the generated response for tweet " + tweetId + " to Notion", e);
             throw e;
         }
     }
 
     /**
+     * Records a failed Notion operation with sanitized metadata only.
+     *
+     * <p>The record carries the operation, the failure's type and, when the failure reports one, the
+     * HTTP status code Notion answered with. It carries no exception message, no stack trace, no
+     * request URI, no response body and no Notion page or database identifier — see
+     * docs/DECISION_LOG.md DL-084. The failure itself is rethrown unchanged.
+     *
+     * @param operation the operation that failed, naming only this service's own identifiers
+     * @param failure   the failure to record
+     */
+    // DL-084 — see docs/DECISION_LOG.md
+    private static void logFailure(String operation, RuntimeException failure) {
+        if (failure instanceof RestClientResponseException answered) {
+            log.error("{} failed: {} after HTTP {}", operation,
+                    failure.getClass().getSimpleName(), answered.getStatusCode().value());
+            return;
+        }
+        log.error("{} failed: {}", operation, failure.getClass().getSimpleName());
+    }
+
+    /**
      * Returns the configured target database identifier, rejecting one that is absent or blank.
      *
-     * <p>The failure message names the configuration key only. No configured value reaches the
-     * message, the log or any caller. The key binds from an empty-safe placeholder in
-     * {@code src/main/resources/application.yml}: an unset {@code NOTION_DATABASE_ID} binds as a
-     * blank value, and this method rejects a blank value and an absent one alike. The
-     * {@code scanner.notion} group is non-{@code null} whenever it is bound from configuration; the
-     * guard covers a directly constructed {@link ScannerProperties}.
+     * <p>The failure message names the configuration key only — DL-052. The key binds from an
+     * empty-safe placeholder in {@code src/main/resources/application.yml}, so an unset
+     * {@code NOTION_DATABASE_ID} binds as a blank value, and a blank value and an absent one are
+     * rejected alike.
      *
      * @return the configured database identifier with surrounding whitespace removed, guaranteed
      *     neither {@code null} nor blank
@@ -468,31 +511,38 @@ public class NotionService {
                 .retrieve()
                 .body(JsonNode.class);
 
-        if (response == null) {
+        JsonNode results = requireResults(response);
+        if (results.isEmpty()) {
             return null;
         }
-        for (JsonNode page : response.path(KEY_RESULTS)) {
+        for (JsonNode page : results) {
             String pageId = readString(page.path(KEY_ID));
             if (!pageId.isEmpty()) {
                 return pageId;
             }
         }
-        return null;
+        throw new IllegalStateException(
+                "The Notion database query matched a page that carried no page identifier.");
     }
 
     /**
-     * Builds the six-property map written by {@link #storeTweet(TweetDto)}.
+     * Builds the property map written by {@link #storeTweet(TweetDto)}, one property per component
+     * of the mirrored post.
      *
-     * <p>A property whose value is absent, or whose numeric value is not finite, is omitted from the
-     * map; no property is ever written with a {@code null} value. {@code Response} is not written
-     * here.
+     * <p>All nine components of {@link TweetDto} are mirrored — see docs/DECISION_LOG.md DL-088. A
+     * property whose value is absent, or whose numeric value is not finite, is omitted from the map, and
+     * an omitted property reads back as a {@code null} component. {@code media} and
+     * {@code aiToolsMentioned} are written as one {@value #VALUE_DELIMITER}-delimited rich-text value
+     * each, the same form the columns hold ({@code backend/app/db/models.py:L15,L18}).
+     * {@code Response} is not written here.
      *
      * @param tweet the post to map; not {@code null}
      * @return the property map, in the declaration order of the table on this class; never
      *     {@code null}
      */
     // Rebuilt from the property map at backend/app/services/notion_service.py:L14-20, four of whose
-    // five reads named no field of backend/app/schema/tweet.py:L5-14 — see docs/DECISION_LOG.md
+    // five reads named no field of backend/app/schema/tweet.py:L5-14 — DL-088 — see
+    // docs/DECISION_LOG.md
     private static Map<String, Object> buildProperties(TweetDto tweet) {
         Map<String, Object> properties = new LinkedHashMap<>();
         putIfPresent(properties, PROPERTY_CONTENT, titleProperty(tweet.content()));
@@ -501,7 +551,29 @@ public class NotionService {
         putIfPresent(properties, PROPERTY_DOUBT_RATING, numberProperty(tweet.doubtRating()));
         putIfPresent(properties, PROPERTY_ENGAGEMENT, numberProperty(tweet.likeCount()));
         putIfPresent(properties, PROPERTY_TWEET_ID, richTextProperty(tweet.id()));
+        putIfPresent(properties, PROPERTY_MEDIA, richTextProperty(delimited(tweet.media())));
+        putIfPresent(properties, PROPERTY_QUOTED_TWEET_ID,
+                richTextProperty(tweet.quotedTweetId()));
+        putIfPresent(properties, PROPERTY_AI_TOOLS_MENTIONED,
+                richTextProperty(delimited(tweet.aiToolsMentioned())));
         return properties;
+    }
+
+    /**
+     * Joins a list component into the single delimited text one rich-text property carries.
+     *
+     * <p>Elements are joined with {@value #VALUE_DELIMITER} in list order. A {@code null} list and a
+     * list holding no element both yield {@code null}, which omits the property.
+     *
+     * @param values the list component; may be {@code null} and may be empty
+     * @return the delimited text, or {@code null} when the component carries no element
+     */
+    // DL-088 — see docs/DECISION_LOG.md
+    private static String delimited(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return null;
+        }
+        return String.join(VALUE_DELIMITER, values);
     }
 
     /**
@@ -583,63 +655,125 @@ public class NotionService {
     /**
      * Maps every page of a database query response.
      *
-     * <p>An empty body, an absent {@code results} member and an empty {@code results} array each
-     * yield an empty list. Replaces the loop at
-     * {@code backend/app/services/notion_service.py:L41-51}.
+     * <p>Replaces the loop at {@code backend/app/services/notion_service.py:L41-51}.
+     *
+     * <p>An empty body and a body whose {@code results} member is absent or is not an array are
+     * reported as an adapter failure; an empty {@code results} array yields an empty list — see
+     * docs/DECISION_LOG.md DL-089.
+     *
+     * <p>A page {@link #toTweetDto(JsonNode)} does not recognise as a mirrored post is reported at
+     * {@code WARN} and left out of the list.
      *
      * @param response the parsed query response, or {@code null} when the body was empty
      * @return the mapped posts; never {@code null} and never modifiable
+     * @throws IllegalStateException if the response carries no {@code results} array
      */
+    // DL-089 — see docs/DECISION_LOG.md
     private static List<TweetDto> readTweets(JsonNode response) {
-        if (response == null) {
-            log.warn("The Notion database query returned an empty body; no tweet is mirrored back");
-            return List.of();
-        }
+        JsonNode results = requireResults(response);
         List<TweetDto> tweets = new ArrayList<>();
-        for (JsonNode page : response.path(KEY_RESULTS)) {
-            tweets.add(toTweetDto(page));
+        int skipped = 0;
+        for (JsonNode page : results) {
+            TweetDto tweet = toTweetDto(page);
+            if (tweet == null) {
+                skipped++;
+                continue;
+            }
+            tweets.add(tweet);
+        }
+        if (skipped > 0) {
+            log.warn("{} Notion page(s) carried no mirrored tweet identifier and were skipped",
+                    skipped);
         }
         return List.copyOf(tweets);
+    }
+
+    /**
+     * Returns the {@code results} array of a successful database query response.
+     *
+     * <p>An empty body, and a response whose {@code results} member is absent or is not an array, are
+     * each reported as an adapter failure rather than read as "no match" — see docs/DECISION_LOG.md
+     * DL-089. The message names neither the request URI nor any part of the response — DL-052.
+     *
+     * @param response the parsed query response, or {@code null} when the body was empty
+     * @return the {@code results} array, possibly empty; never {@code null}
+     * @throws IllegalStateException if the response carries no {@code results} array
+     */
+    // DL-089 — see docs/DECISION_LOG.md
+    private static JsonNode requireResults(JsonNode response) {
+        if (response == null) {
+            throw new IllegalStateException(
+                    "The Notion database query returned an empty body.");
+        }
+        JsonNode results = response.path(KEY_RESULTS);
+        if (!results.isArray()) {
+            throw new IllegalStateException(
+                    "The Notion database query response carried no results array.");
+        }
+        return results;
     }
 
     /**
      * Maps one Notion page onto a {@link TweetDto}, reading the property map written by
      * {@link #buildProperties(TweetDto)} in reverse.
      *
-     * <p>Every read tolerates an absent property, an empty text array and a null value. {@code id}
-     * falls back to the Notion page identifier when {@code Tweet Id} carries no text, and then to an
-     * empty string; {@code content} and {@code userId} fall back to an empty string;
-     * {@code createdAt} falls back to {@link #UNKNOWN_TIMESTAMP}; {@code likeCount} and
-     * {@code doubtRating} fall back to zero. {@link TweetDto} rejects a {@code null} value for every
-     * component other than {@code quotedTweetId}.
+     * <p>All nine components are read back — see docs/DECISION_LOG.md DL-088. A property the page does
+     * not carry yields a {@code null} component, and the two list components yield an empty list — see
+     * docs/DECISION_LOG.md DL-090.
+     *
+     * <p>The {@code Tweet Id} property identifies a page as a mirrored post. A page whose
+     * {@code Tweet Id} carries no text yields {@code null} and the caller leaves it out, and the Notion
+     * page identifier is never read into {@link TweetDto#id()} — see docs/DECISION_LOG.md DL-090.
      *
      * @param page one element of a query response's {@code results} array; not {@code null}
-     * @return the mapped post; never {@code null}
+     * @return the mapped post, or {@code null} when the page carries no mirrored tweet identifier
      */
     // Replaces the reconstruction at backend/app/services/notion_service.py:L44-50, which indexed
-    // [0] directly and read four properties fed from fields the source model never declared — see
-    // docs/DECISION_LOG.md
+    // [0] directly and read four properties fed from fields the source model never declared —
+    // DL-088, DL-090 — see docs/DECISION_LOG.md
     private static TweetDto toTweetDto(JsonNode page) {
         JsonNode properties = page.path(KEY_PROPERTIES);
 
-        String tweetId = readText(properties, PROPERTY_TWEET_ID, KEY_RICH_TEXT);
-        String id = tweetId.isEmpty() ? readString(page.path(KEY_ID)) : tweetId;
-        String content = readText(properties, PROPERTY_CONTENT, KEY_TITLE);
-        String userId = readText(properties, PROPERTY_AUTHOR, KEY_RICH_TEXT);
-        LocalDateTime createdAt = readTimestamp(properties);
-        Double doubtRating = readNumber(properties, PROPERTY_DOUBT_RATING);
+        String id = readText(properties, PROPERTY_TWEET_ID, KEY_RICH_TEXT);
+        if (id == null) {
+            return null;
+        }
         Double engagement = readNumber(properties, PROPERTY_ENGAGEMENT);
 
         return new TweetDto(
                 id,
-                content,
-                (engagement == null) ? 0 : engagement.intValue(),
-                createdAt,
-                (doubtRating == null) ? 0.0d : doubtRating.doubleValue(),
-                List.of(),
-                null,
-                userId,
-                List.of());
+                readText(properties, PROPERTY_CONTENT, KEY_TITLE),
+                (engagement == null) ? null : Integer.valueOf(engagement.intValue()),
+                readTimestamp(properties),
+                readNumber(properties, PROPERTY_DOUBT_RATING),
+                readList(properties, PROPERTY_MEDIA),
+                readText(properties, PROPERTY_QUOTED_TWEET_ID, KEY_RICH_TEXT),
+                readText(properties, PROPERTY_AUTHOR, KEY_RICH_TEXT),
+                readList(properties, PROPERTY_AI_TOOLS_MENTIONED));
+    }
+
+    /**
+     * Reads one delimited rich-text property back into a list component.
+     *
+     * <p>The text is split on {@value #VALUE_DELIMITER}, each token is trimmed and empty tokens are
+     * dropped, which is how {@code util.DelimitedStringListConverter} reads the same form from the
+     * column — see docs/DECISION_LOG.md DL-024. An absent property yields an empty list.
+     *
+     * @param properties   the page's property map; not {@code null}
+     * @param propertyName the Notion property name; not {@code null}
+     * @return the list component, empty when the property is absent or holds no token; never
+     *     {@code null}
+     */
+    // DL-088 — see docs/DECISION_LOG.md
+    private static List<String> readList(JsonNode properties, String propertyName) {
+        String delimited = readText(properties, propertyName, KEY_RICH_TEXT);
+        if (delimited == null || delimited.isBlank()) {
+            return List.of();
+        }
+        return Arrays.stream(delimited.split(VALUE_DELIMITER))
+                .map(String::trim)
+                .filter(token -> !token.isEmpty())
+                .toList();
     }
 
     /**
@@ -647,13 +781,14 @@ public class NotionService {
      *
      * <p>Each item's {@code text.content} member is read first and its {@code plain_text} member
      * second. An absent property, a property carrying a container of another type and an empty item
-     * array each yield an empty string.
+     * array each yield {@code null} — see docs/DECISION_LOG.md DL-090.
      *
      * @param properties   the page's property map; not {@code null}
      * @param propertyName the Notion property name; not {@code null}
      * @param containerKey {@link #KEY_TITLE} or {@link #KEY_RICH_TEXT}
-     * @return the literal text, or an empty string when none is present; never {@code null}
+     * @return the literal text, or {@code null} when the property carries none
      */
+    // DL-090 — see docs/DECISION_LOG.md
     private static String readText(JsonNode properties, String propertyName, String containerKey) {
         for (JsonNode item : properties.path(propertyName).path(containerKey)) {
             String content = readString(item.path(KEY_TEXT).path(KEY_CONTENT));
@@ -665,7 +800,7 @@ public class NotionService {
                 return plainText;
             }
         }
-        return EMPTY_TEXT;
+        return null;
     }
 
     /**
@@ -696,20 +831,24 @@ public class NotionService {
     /**
      * Reads the {@code Timestamp} property's start endpoint.
      *
+     * <p>An absent property yields {@code null}, and so does a value no supported form parses — see
+     * docs/DECISION_LOG.md DL-090. An unparseable value is reported at {@code WARN} by property name
+     * alone.
+     *
      * @param properties the page's property map; not {@code null}
-     * @return the parsed date-time, or {@link #UNKNOWN_TIMESTAMP} when the property is absent or its
-     *     value cannot be parsed; never {@code null}
+     * @return the parsed date-time, or {@code null} when the property is absent or its value cannot
+     *     be parsed
      */
+    // DL-090 — see docs/DECISION_LOG.md
     private static LocalDateTime readTimestamp(JsonNode properties) {
         String raw = readString(properties.path(PROPERTY_TIMESTAMP).path(KEY_DATE).path(KEY_START));
         if (raw.isEmpty()) {
-            return UNKNOWN_TIMESTAMP;
+            return null;
         }
         LocalDateTime parsed = parseOffsetDateTime(raw);
         if (parsed == null) {
-            log.warn("The Notion {} property carried an unparseable value; substituting {}",
-                    PROPERTY_TIMESTAMP, UNKNOWN_TIMESTAMP);
-            return UNKNOWN_TIMESTAMP;
+            log.warn("The Notion {} property carried an unparseable value; the mirrored post carries "
+                    + "no creation time", PROPERTY_TIMESTAMP);
         }
         return parsed;
     }

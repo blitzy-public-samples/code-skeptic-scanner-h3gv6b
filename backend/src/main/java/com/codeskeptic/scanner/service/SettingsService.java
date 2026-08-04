@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -59,10 +60,9 @@ import com.codeskeptic.scanner.service.mapper.SettingMapper;
  * DL-043, DL-052 and DL-073; construct-level provenance is recorded in
  * {@code docs/TRACEABILITY_MATRIX.md}.
  *
- * <p>This is a singleton bean. Its three collaborators are held in final fields and are themselves
- * singletons, and this class holds no other state, so every member declared here is safe for
- * concurrent use. Two callers updating the same key concurrently both write and the later write
- * stands.
+ * <p>This class is thread-safe. It is a singleton bean, its three collaborators are held in final
+ * fields and are themselves singletons, and this class holds no other state. Two callers updating the
+ * same key concurrently both write and the later write stands.
  */
 @Service
 public class SettingsService {
@@ -219,18 +219,23 @@ public class SettingsService {
      * {@code scanner.popularity-threshold}, {@code scanner.response-generation-delay-seconds} and
      * {@code scanner.ingestion.stream-base-keywords} respectively.
      *
-     * <p>The operation inserts only. A key already present is left exactly as it stands: its
-     * {@code value} and its {@code description} are both untouched, whatever they hold and however
-     * they came to hold it. A repeated call against unchanged data writes nothing.
+     * <p>A key this operation observes as present is left exactly as it stands: its {@code value} and
+     * its {@code description} are both untouched, whatever they hold and however they came to hold
+     * it. A repeated call against unchanged data writes nothing.
      *
      * <p>Rows are the only thing added. No column, table or index is contributed here; the schema is
      * the four tables the source declared.
      *
-     * <p>This method runs on {@link ApplicationReadyEvent}, after the context is refreshed, and
-     * participates in a transaction. It is also directly invocable.
+     * <p>This method runs on {@link ApplicationReadyEvent}, after the context is refreshed, and is
+     * also directly invocable. It declares no transaction — DL-159 — see docs/DECISION_LOG.md. Each
+     * repository call it reaches demarcates its own; a rejected write is rolled back on its own and the
+     * remaining keys are still attempted. A key taken concurrently, by a second instance or by a second
+     * caller, is absorbed per key by {@link #seedIfAbsent(String, String, String)}.
+     *
+     * @throws org.springframework.dao.DataIntegrityViolationException when a write is rejected and the
+     *                                                                key it carried is still absent
      */
     @EventListener(ApplicationReadyEvent.class)
-    @Transactional
     public void seedDefaultSettings() {
         seedIfAbsent(TWEET_POPULARITY_THRESHOLD_KEY,
                 Integer.toString(properties.popularityThreshold()),
@@ -244,23 +249,53 @@ public class SettingsService {
     }
 
     /**
-     * Inserts one default row when its key is absent, and writes nothing when the key is present.
+     * Writes one default row when its key is absent, and writes nothing when the key is present.
      *
-     * <p>Presence is established with {@code existsById}, which loads no row. An insert is logged
-     * once at {@code INFO} and names the key; a key already present is logged at {@code DEBUG}. No
-     * stored value is written to the log.
+     * <p>Presence is established with {@code existsById}, which loads no row. The write is issued with
+     * {@code saveAndFlush} — DL-159 — see docs/DECISION_LOG.md. The row reaches the database before
+     * this method returns and a primary key already taken is reported here, not at a later commit.
+     *
+     * <p>{@code settings.key} is an assigned {@link String} primary key and the write is a JPA merge:
+     * it reads the row by key and then inserts or updates. Three concurrent outcomes are possible for
+     * one key, and each is reached without raising:
+     *
+     * <ul>
+     *   <li>the key is present when {@code existsById} runs — nothing is written;
+     *   <li>the key is taken between {@code existsById} and the insert the merge issues — the insert
+     *       is rejected, {@link DataIntegrityViolationException} is caught, presence is re-established
+     *       and the row the other writer stored is left as it stands;
+     *   <li>the key is taken between {@code existsById} and the read the merge issues — the merge
+     *       finds that row and updates it, storing the {@code value} and {@code description} this call
+     *       computed.
+     * </ul>
+     *
+     * <p>A {@link DataIntegrityViolationException} raised while the key is still absent afterwards is
+     * rethrown. Each repository call runs in its own transaction; the rejected write is rolled back on
+     * its own and the re-established presence is read outside it.
+     *
+     * <p>An insert is logged once at {@code INFO} and names the key; a key already present, and a key
+     * taken concurrently, are logged at {@code DEBUG}. No stored value is written to the log.
      *
      * @param key         the primary key of the default row
-     * @param value       the value to store when the row is inserted
-     * @param description the description to store when the row is inserted
+     * @param value       the value to store when the row is written
+     * @param description the description to store when the row is written
+     * @throws DataIntegrityViolationException when the write is rejected and the key is still absent
      */
+    // Concurrent seeding of one key — DL-159 — see docs/DECISION_LOG.md
     private void seedIfAbsent(String key, String value, String description) {
         if (settingRepository.existsById(key)) {
             log.debug("Default setting '{}' is already present and is left unchanged.", key);
             return;
         }
-        settingRepository.save(new Setting(key, value, description));
-        log.info("Seeded default setting '{}'.", key);
+        try {
+            settingRepository.saveAndFlush(new Setting(key, value, description));
+            log.info("Seeded default setting '{}'.", key);
+        } catch (DataIntegrityViolationException keyTaken) {
+            if (!settingRepository.existsById(key)) {
+                throw keyTaken;
+            }
+            log.debug("Default setting '{}' was stored concurrently and is left unchanged.", key);
+        }
     }
 
     /**

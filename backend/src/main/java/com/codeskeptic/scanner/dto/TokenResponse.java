@@ -11,7 +11,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * <pre>{@code {"access_token": "<compact-jws>", "token_type": "bearer", "expires_in": 3600}}</pre>
  *
  * <p>{@code expires_in} is expressed in <strong>seconds</strong>, while the configured lifetime
- * {@code scanner.jwt.expiration-minutes} (default 60) is expressed in minutes, so the 60-minute
+ * {@code scanner.jwt.expiration-minutes} (default 60) is expressed in minutes; the 60-minute
  * default reaches this record as {@code 3600L}. {@code token_type} carries the lowercase literal
  * {@code bearer}.
  *

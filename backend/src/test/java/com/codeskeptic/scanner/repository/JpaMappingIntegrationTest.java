@@ -8,9 +8,11 @@ import com.codeskeptic.scanner.entity.Response;
 import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.entity.Tweet;
 import jakarta.persistence.Column;
+import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.Table;
 import java.lang.reflect.Field;
+import java.sql.Clob;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
@@ -28,11 +30,16 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import javax.sql.DataSource;
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
 import org.junit.jupiter.api.DisplayName;
+import org.springframework.data.domain.Slice;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.test.context.ActiveProfiles;
 
 /**
@@ -120,6 +127,32 @@ class JpaMappingIntegrationTest {
     /** Value {@code jakarta.persistence.Column#length()} carries for an unbounded column. */
     private static final int UNBOUNDED_ANNOTATION_LENGTH = Integer.MAX_VALUE;
 
+    /**
+     * Every character column the source declares as a bare, unbounded {@code Column(String)} and
+     * that the port therefore maps unbounded — backend/app/db/models.py:L11,L15-18 (tweets),
+     * :L24 (responses) and :L36-37 (ai_tools) — DL-068 — see docs/DECISION_LOG.md.
+     */
+    private static final Map<String, List<String>> UNBOUNDED_CHARACTER_COLUMNS = Map.of(
+            TWEETS_TABLE,
+            List.of("content", "media", "quoted_tweet_id", "user_id", "ai_tools_mentioned"),
+            RESPONSES_TABLE, List.of("content"),
+            AI_TOOLS_TABLE, List.of("name", "description"),
+            SETTINGS_TABLE, List.of("value", "description"));
+
+    /**
+     * The single character column the port bounds: {@code settings.key} is the natural primary key
+     * and no supported vendor indexes an unbounded character type — DL-069 — see
+     * docs/DECISION_LOG.md.
+     */
+    private static final String BOUNDED_PRIMARY_KEY_COLUMN = "key";
+
+    /**
+     * Smallest physical capacity a column mapped unbounded may report. It is one character past the
+     * capacity an undeclared {@code @Column#length()} would render, so a column that silently
+     * acquired the annotation default fails.
+     */
+    private static final int SMALLEST_UNBOUNDED_COLUMN_SIZE = DEFAULT_ANNOTATION_LENGTH + 1;
+
     private static final List<Class<?>> MAPPED_ENTITIES =
             List.of(Tweet.class, Response.class, AiTool.class, Setting.class);
 
@@ -127,6 +160,7 @@ class JpaMappingIntegrationTest {
     private static final Set<String> BASE_TABLE_TYPES = Set.of("TABLE", "BASE TABLE");
 
     private static final String COLUMN_NAME = "COLUMN_NAME";
+    private static final String COLUMN_SIZE = "COLUMN_SIZE";
     private static final String DATA_TYPE = "DATA_TYPE";
     private static final String TYPE_NAME = "TYPE_NAME";
     private static final String NULLABLE = "NULLABLE";
@@ -162,7 +196,7 @@ class JpaMappingIntegrationTest {
                     "is_approved", BOOLEAN_TYPES,
                     "tweet_id", LONG_IDENTIFIER_TYPES),
             AI_TOOLS_TABLE, Map.of(
-                    "id", INTEGER_TYPES,
+                    "id", LONG_IDENTIFIER_TYPES,
                     "name", CHARACTER_TYPES,
                     "description", CHARACTER_TYPES),
             SETTINGS_TABLE, Map.of(
@@ -363,12 +397,12 @@ class JpaMappingIntegrationTest {
     // Ported from backend/app/db/models.py:L10-18,L23-28,L35-37,L42-44 (faithful port) — see
     // docs/DECISION_LOG.md
     // backend/app/db/models.py declares each of those columns as a bare Column(<Type>): none
-    // carries nullable=False, unique=True or a length argument. entity/AiTool and entity/Setting
-    // declare length = Integer.MAX_VALUE on four columns — DL-068 — and entity/Setting declares
-    // length = 255 on the primary key — DL-069 — see docs/DECISION_LOG.md
+    // carries nullable=False, unique=True or a length argument. Every character column declares
+    // length = Integer.MAX_VALUE — DL-068 — except the settings primary key, which declares
+    // length = 255 — DL-069 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("every mapped entity field leaves the column defaults for nullability, uniqueness "
-            + "and length in place")
+    @DisplayName("every mapped entity field leaves the column defaults for nullability and "
+            + "uniqueness in place and declares no narrowing length")
     void everyMappedEntityFieldLeavesTheColumnDefaultsInPlace() {
         int columnFields = 0;
         int joinColumnFields = 0;
@@ -377,12 +411,22 @@ class JpaMappingIntegrationTest {
             for (Field field : mappedFields(entityType, Column.class)) {
                 Column column = field.getAnnotation(Column.class);
                 String location = entityType.getSimpleName() + "#" + field.getName();
+                boolean characterColumn = field.getType().equals(String.class)
+                        || field.getType().equals(List.class);
+                boolean boundedPrimaryKey =
+                        normalise(BOUNDED_PRIMARY_KEY_COLUMN).equals(unquotedColumnName(column))
+                                && field.isAnnotationPresent(Id.class);
 
                 assertThat(column.nullable()).as("@Column#nullable of %s", location).isTrue();
                 assertThat(column.unique()).as("@Column#unique of %s", location).isFalse();
-                assertThat(column.length()).as("@Column#length of %s", location)
-                        .isGreaterThanOrEqualTo(DEFAULT_ANNOTATION_LENGTH)
-                        .isIn(DEFAULT_ANNOTATION_LENGTH, UNBOUNDED_ANNOTATION_LENGTH);
+                if (characterColumn && !boundedPrimaryKey) {
+                    assertThat(column.length()).as("@Column#length of %s", location)
+                            .isEqualTo(UNBOUNDED_ANNOTATION_LENGTH);
+                } else {
+                    assertThat(column.length()).as("@Column#length of %s", location)
+                            .isGreaterThanOrEqualTo(DEFAULT_ANNOTATION_LENGTH)
+                            .isIn(DEFAULT_ANNOTATION_LENGTH, UNBOUNDED_ANNOTATION_LENGTH);
+                }
                 columnFields++;
             }
 
@@ -403,6 +447,60 @@ class JpaMappingIntegrationTest {
                 .isEqualTo(JOIN_COLUMN_ANNOTATED_FIELD_COUNT);
         assertThat(columnFields + joinColumnFields).as("mapped columns across the four entities")
                 .isEqualTo(MAPPED_COLUMN_COUNT);
+    }
+
+    // Ported from backend/app/db/models.py:L11,L15-18,L24,L36-37,L43-44 (faithful port) — DL-068 —
+    // see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("every source-unbounded character column is generated with a capacity past the "
+            + "annotation default")
+    void everySourceUnboundedCharacterColumnIsGeneratedUnbounded() throws SQLException {
+        int assertedColumns = 0;
+
+        try (Connection connection = dataSource.getConnection()) {
+            DatabaseMetaData metaData = connection.getMetaData();
+
+            for (Map.Entry<String, List<String>> table : UNBOUNDED_CHARACTER_COLUMNS.entrySet()) {
+                for (String columnName : table.getValue()) {
+                    Map<String, Object> attributes =
+                            readColumn(metaData, table.getKey(), columnName);
+
+                    assertThat(attributes.get(DATA_TYPE))
+                            .as("java.sql.Types code of column %s.%s (reported as %s)",
+                                    table.getKey(), columnName, attributes.get(TYPE_NAME))
+                            .isIn(CHARACTER_TYPES);
+                    assertThat((int) attributes.get(COLUMN_SIZE))
+                            .as("generated capacity of column %s.%s (reported as %s)",
+                                    table.getKey(), columnName, attributes.get(TYPE_NAME))
+                            .isNotEqualTo(DEFAULT_ANNOTATION_LENGTH)
+                            .isGreaterThanOrEqualTo(SMALLEST_UNBOUNDED_COLUMN_SIZE);
+                    assertedColumns++;
+                }
+            }
+        }
+
+        assertThat(assertedColumns).as("source-unbounded character columns asserted").isEqualTo(10);
+    }
+
+    // The settings primary key is the single bounded character column — DL-069 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("the settings primary key is the only character column generated with a bound")
+    void theSettingsPrimaryKeyIsTheOnlyBoundedCharacterColumn() throws SQLException {
+        try (Connection connection = dataSource.getConnection()) {
+            DatabaseMetaData metaData = connection.getMetaData();
+            Map<String, Object> attributes =
+                    readColumn(metaData, SETTINGS_TABLE, BOUNDED_PRIMARY_KEY_COLUMN);
+
+            assertThat(attributes.get(DATA_TYPE))
+                    .as("java.sql.Types code of column %s.%s", SETTINGS_TABLE,
+                            BOUNDED_PRIMARY_KEY_COLUMN)
+                    .isIn(CHARACTER_TYPES);
+            assertThat((int) attributes.get(COLUMN_SIZE))
+                    .as("generated capacity of column %s.%s", SETTINGS_TABLE,
+                            BOUNDED_PRIMARY_KEY_COLUMN)
+                    .isEqualTo(DEFAULT_ANNOTATION_LENGTH);
+        }
     }
 
     // Ported from backend/app/db/models.py:L7-8,L20-21,L32-33,L39-40 (faithful port) — see
@@ -746,8 +844,8 @@ class JpaMappingIntegrationTest {
     // Ported from backend/app/tasks/response_generation.py:L43 (faithful port) — see
     // docs/DECISION_LOG.md
     @Test
-    @DisplayName("findByResponsesIsEmpty returns only the tweets that carry no response")
-    void findByResponsesIsEmptyReturnsOnlyTheTweetsWithoutResponses() {
+    @DisplayName("the backlog query returns one bounded ascending batch of unanswered tweets")
+    void theBacklogQueryReturnsOneBoundedAscendingBatchOfUnansweredTweets() {
         Tweet answered = saveTweet(LocalDateTime.of(2026, 1, 1, 9, 0), 7.0, 250);
         saveResponse(answered, "Already drafted", Boolean.FALSE);
         Tweet unanswered = saveTweet(LocalDateTime.of(2026, 1, 1, 10, 0), 8.0, 300);
@@ -755,8 +853,12 @@ class JpaMappingIntegrationTest {
         entityManager.flush();
         entityManager.clear();
 
-        assertThat(tweetRepository.findByResponsesIsEmpty()).extracting(Tweet::getId)
+        Slice<Tweet> backlog =
+                tweetRepository.findByResponsesIsEmptyOrderByIdAsc(PageRequest.of(0, 50));
+
+        assertThat(backlog.getContent()).extracting(Tweet::getId)
                 .as("tweets carrying no response").containsExactly(unanswered.getId());
+        assertThat(backlog.hasNext()).as("a 50-row bound over one unanswered row").isFalse();
     }
 
     // Net-new (no Python counterpart: the AnalyticsService imported at
@@ -862,6 +964,39 @@ class JpaMappingIntegrationTest {
         }
     }
 
+    // Net-new (no Python counterpart) — DL-087 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("a page of responses reads the tweet association without a per-row statement")
+    void aPageOfResponsesReadsTheTweetAssociationWithoutAPerRowStatement() {
+        Tweet first = saveTweet(LocalDateTime.of(2026, 1, 1, 12, 0), 6.5, 120);
+        Tweet second = saveTweet(LocalDateTime.of(2026, 1, 2, 12, 0), 7.5, 220);
+        Tweet third = saveTweet(LocalDateTime.of(2026, 1, 3, 12, 0), 8.5, 320);
+        saveResponse(first, "First drafted reply", Boolean.FALSE);
+        saveResponse(second, "Second drafted reply", Boolean.TRUE);
+        saveResponse(third, "Third drafted reply", null);
+        entityManager.flush();
+        entityManager.clear();
+
+        Statistics statistics = entityManager.getEntityManager()
+                .getEntityManagerFactory()
+                .unwrap(SessionFactory.class)
+                .getStatistics();
+        statistics.setStatisticsEnabled(true);
+        statistics.clear();
+
+        Page<Response> page = responseRepository.findAll(PageRequest.of(0, 10));
+        List<Long> parentIds = page.getContent().stream()
+                .map(response -> response.getTweet().getId())
+                .toList();
+
+        assertThat(page.getTotalElements()).as("rows the page reports").isEqualTo(3L);
+        assertThat(parentIds).as("parent identifier of every row on the page")
+                .containsExactly(first.getId(), second.getId(), third.getId());
+        assertThat(statistics.getPrepareStatementCount())
+                .as("statements issued to render one page of responses")
+                .isLessThanOrEqualTo(2L);
+    }
+
     // Ported from backend/app/db/models.py:L32-37 (faithful port) — see docs/DECISION_LOG.md
     @Test
     @DisplayName("ai_tools rows are stored, listed and counted through the inherited repository "
@@ -907,6 +1042,19 @@ class JpaMappingIntegrationTest {
      */
     private static String normalise(String identifier) {
         return identifier == null ? null : identifier.toUpperCase(Locale.ROOT);
+    }
+
+    /**
+     * Returns the normalised physical column name a mapping declares, with any quoting removed.
+     *
+     * <p>{@code Setting#key} declares the reserved word as a quoted identifier — DL-061 — see
+     * docs/DECISION_LOG.md.
+     *
+     * @param column the column mapping to read
+     * @return the uppercased column name, free of quote characters
+     */
+    private static String unquotedColumnName(Column column) {
+        return normalise(column.name()).replace("\"", "").replace("`", "");
     }
 
     /**
@@ -968,8 +1116,8 @@ class JpaMappingIntegrationTest {
      * @param metaData    the metadata of an open connection
      * @param storedTable the stored table name
      * @return one attribute map per column, keyed by the normalised column name; each attribute map
-     *         holds {@code COLUMN_NAME}, {@code DATA_TYPE}, {@code TYPE_NAME}, {@code NULLABLE},
-     *         {@code IS_NULLABLE} and {@code IS_AUTOINCREMENT}
+     *         holds {@code COLUMN_NAME}, {@code COLUMN_SIZE}, {@code DATA_TYPE}, {@code TYPE_NAME},
+     *         {@code NULLABLE}, {@code IS_NULLABLE} and {@code IS_AUTOINCREMENT}
      * @throws SQLException when the metadata cannot be read
      */
     private static Map<String, Map<String, Object>> readColumns(DatabaseMetaData metaData,
@@ -980,6 +1128,7 @@ class JpaMappingIntegrationTest {
                 Map<String, Object> attributes = new LinkedHashMap<>();
                 String columnName = columnRows.getString(COLUMN_NAME);
                 attributes.put(COLUMN_NAME, columnName);
+                attributes.put(COLUMN_SIZE, columnRows.getInt(COLUMN_SIZE));
                 attributes.put(DATA_TYPE, columnRows.getInt(DATA_TYPE));
                 attributes.put(TYPE_NAME, columnRows.getString(TYPE_NAME));
                 attributes.put(NULLABLE, columnRows.getInt(NULLABLE));
@@ -1183,9 +1332,39 @@ class JpaMappingIntegrationTest {
      */
     private Object[] readDelimitedColumns(Long tweetId) {
         entityManager.flush();
-        return (Object[]) entityManager.getEntityManager()
+        Object[] rawColumns = (Object[]) entityManager.getEntityManager()
                 .createNativeQuery("select media, ai_tools_mentioned from tweets where id = :tweetId")
                 .setParameter("tweetId", tweetId)
                 .getSingleResult();
+        return new Object[] {characterValueText(rawColumns[0]), characterValueText(rawColumns[1])};
+    }
+
+    /**
+     * Reads a character column value as text, whatever handle the driver reports it through.
+     *
+     * <p>The two delimited columns are mapped unbounded — DL-068 — and a vendor may report an
+     * unbounded character column either as a {@link String} or as a {@link Clob} handle. Both are
+     * read here so the surrounding assertions describe the stored text, not the driver's handle
+     * type.
+     *
+     * @param columnValue the raw value the driver reported; may be {@code null}
+     * @return the stored text, or {@code null} when the column holds SQL null
+     */
+    private static String characterValueText(Object columnValue) {
+        if (columnValue == null) {
+            return null;
+        }
+        if (columnValue instanceof String text) {
+            return text;
+        }
+        if (columnValue instanceof Clob clob) {
+            try {
+                return clob.getSubString(1L, (int) clob.length());
+            } catch (SQLException e) {
+                throw new AssertionError("The character column value could not be read.", e);
+            }
+        }
+        throw new AssertionError("A character column reported an unexpected handle type: "
+                + columnValue.getClass().getName());
     }
 }

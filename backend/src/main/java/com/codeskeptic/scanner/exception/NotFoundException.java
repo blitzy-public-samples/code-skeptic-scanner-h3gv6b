@@ -97,8 +97,7 @@ public final class NotFoundException extends RuntimeException {
     /**
      * Attaches a triggering throwable for server-side logging and returns this exception.
      *
-     * <p>The message is unchanged, so the cause cannot reach the client through
-     * {@link #getMessage()}.
+     * <p>The message is unchanged. The cause is not rendered by {@link #getMessage()}.
      *
      * @param cause the throwable that triggered this report; ignored when {@code null}
      * @return this exception

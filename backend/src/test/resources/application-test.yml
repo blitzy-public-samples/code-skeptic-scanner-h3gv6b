@@ -1,16 +1,11 @@
 # The Spring `test` profile of the code-skeptic-scanner-backend module.
 #
 # Net-new (no source construct): no Python test configuration existed under backend/ on the source
-# branch — no conftest.py, pytest.ini, setup.cfg, tox.ini, requirements.txt, pyproject.toml, Pipfile
-# and no setup.py. The retired suite was backend/tests/test_api.py, test_services.py and
-# test_tasks.py.
+# branch. The retired suite was backend/tests/test_api.py, test_services.py and test_tasks.py.
 #
-# This filename is profile-specific. Spring loads src/main/resources/application.yml first and layers
-# this document over it only while the `test` profile is active; a key this document omits keeps the
-# value application.yml gives it. A test class that starts a Spring context declares
-# @ActiveProfiles("test").
-#
-# @DataJpaTest replaces the DataSource by default. A @DataJpaTest class that reads the
+# This document is layered over src/main/resources/application.yml while the `test` profile is
+# active; a key omitted here keeps the value application.yml gives it. A test class that starts a
+# Spring context declares @ActiveProfiles("test"), and a @DataJpaTest class that reads the
 # scanner.database-url declared below also declares
 # @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE).
 #
@@ -21,15 +16,12 @@
 
 # Ported from backend/app/db/database.py:L5-13 (faithful port) — see docs/DECISION_LOG.md
 spring:
-  # spring.datasource.url / .username / .password / .driver-class-name — deliberately absent — DL-027 — see docs/DECISION_LOG.md
-  # spring.jackson.property-naming-strategy — deliberately absent — DL-022 — see docs/DECISION_LOG.md
   jpa:
     hibernate:
       # Net-new (no Python counterpart) — DL-026 — see docs/DECISION_LOG.md
       ddl-auto: create-drop
     # Net-new (no Python counterpart) — DL-026 — see docs/DECISION_LOG.md
     open-in-view: false
-    # spring.jpa.database-platform — deliberately absent — DL-027 — see docs/DECISION_LOG.md
     properties:
       hibernate:
         # Net-new (no Python counterpart) — column names at
@@ -39,9 +31,7 @@ spring:
 scanner:
   # Key ported from backend/app/core/config.py:L9 and backend/app/db/database.py:L7; test value is
   # net-new — DL-009, DL-026, DL-027 — see docs/DECISION_LOG.md
-  # DatabaseUrlTranslator passes a value beginning with `jdbc:` through unchanged and extracts no
-  # credentials from it. NON_KEYWORDS lists the `settings` column names at
-  # backend/app/db/models.py:L42-43.
+  # NON_KEYWORDS lists the `settings` column names at backend/app/db/models.py:L42-43.
   database-url: 'jdbc:h2:mem:scanner_test;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;NON_KEYWORDS=KEY,VALUE'
   # Ported from backend/app/core/config.py:L10 and backend/app/services/twitter_service.py:L43,L46 (faithful port) — see docs/DECISION_LOG.md
   popularity-threshold: 100

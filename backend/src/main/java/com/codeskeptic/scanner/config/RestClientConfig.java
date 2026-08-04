@@ -1,13 +1,17 @@
 package com.codeskeptic.scanner.config;
 
+import java.time.Duration;
 import java.util.Objects;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
+import org.springframework.boot.http.client.ClientHttpRequestFactorySettings;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.ClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
 
 /**
@@ -21,14 +25,11 @@ import org.springframework.web.client.RestClient;
  * <p>This class supplies transport only. The two operations the retired service performed —
  * {@code pages.create} at {@code backend/app/services/notion_service.py:L23-26} and
  * {@code databases.query} at {@code backend/app/services/notion_service.py:L34-38} — belong to
- * {@code service/NotionService}, as does {@code scanner.notion.database-id}, which those two call
- * sites read at {@code backend/app/services/notion_service.py:L24} and
- * {@code backend/app/services/notion_service.py:L35}. That identifier is a per-request payload
- * value; it is not a transport default and is not read here.
+ * {@code service/NotionService}, as does {@code scanner.notion.database-id}, read at
+ * {@code backend/app/services/notion_service.py:L24} and
+ * {@code backend/app/services/notion_service.py:L35}.
  *
- * <p>Notion is a secondary mirror; the relational store remains the system of record. No retry,
- * rate-limiting, circuit-breaker, caching or request-logging interceptor is registered and no timeout
- * is narrowed, so the framework defaults carried by the injected builder apply unchanged.
+ * <p>The framework defaults carried by the injected builder apply unchanged — DL-013.
  *
  * <p>The published {@link RestClient} is fully configured before it is returned and is never mutated
  * afterwards, so it is safe to share across concurrent requests.
@@ -78,16 +79,14 @@ public class RestClientConfig {
     /**
      * Publishes the Notion API transport.
      *
-     * <p>Four bean-level defaults are applied and nothing else: the base URL, the mandatory
-     * {@code Notion-Version} header, the {@code Authorization} header holding
-     * {@code scanner.notion.api-key} as a bearer credential, and JSON {@code Content-Type} and
-     * {@code Accept}. Payload construction, path selection, pagination and error translation belong
-     * to the consumer.
+     * <p>Four bean-level defaults are applied: the base URL, the mandatory {@code Notion-Version}
+     * header, the {@code Authorization} header holding {@code scanner.notion.api-key} as a bearer
+     * credential, and JSON {@code Content-Type} and {@code Accept}. Payload construction, path
+     * selection, pagination and error translation belong to the consumer.
      *
      * <p>{@code scanner.notion.api-key} resolves to an empty value when {@code NOTION_API_KEY} is
-     * absent, per {@code src/main/resources/application.yml}. The bean is still published in that
-     * state and a warning naming the key is logged; neither the application context nor startup
-     * fails. No key material is logged at any level.
+     * absent, per {@code src/main/resources/application.yml}. The bean is published in that state and
+     * a warning naming the key is logged. No key material is logged at any level — DL-052.
      *
      * @param builder the auto-configured, prototype-scoped builder, which supplies the default
      *     request factory and message converters
@@ -107,6 +106,7 @@ public class RestClientConfig {
                 NOTION_API_BASE_URL, NOTION_VERSION_HEADER, NOTION_API_VERSION);
 
         return builder
+                .requestFactory(boundedRequestFactory())
                 .baseUrl(NOTION_API_BASE_URL)
                 .defaultHeader(NOTION_VERSION_HEADER, NOTION_API_VERSION)
                 .defaultHeader(HttpHeaders.AUTHORIZATION, BEARER_PREFIX + apiKey)
@@ -119,10 +119,7 @@ public class RestClientConfig {
      * Reads {@code scanner.notion.api-key} and normalises it into a header-safe token.
      *
      * <p>A {@code null} {@code scanner.notion} group and a {@code null} key both yield an empty
-     * token, so the {@code Authorization} header value can never render the literal {@code "null"}.
-     * Surrounding whitespace is stripped. The {@code scanner.notion} group is non-{@code null}
-     * whenever it is bound from configuration; the guard covers a directly constructed
-     * {@link ScannerProperties}.
+     * token. Surrounding whitespace is stripped.
      *
      * @return the configured key with surrounding whitespace removed, or an empty string when no key
      *     is configured; never {@code null}
@@ -131,5 +128,22 @@ public class RestClientConfig {
         ScannerProperties.Notion notion = properties.notion();
         String apiKey = (notion == null) ? null : notion.apiKey();
         return (apiKey == null) ? "" : apiKey.strip();
+    }
+
+    /**
+     * Builds the request factory the Notion client uses, with finite connect and read timeouts taken
+     * from {@code scanner.notion.connect-timeout-seconds} and {@code scanner.notion.read-timeout-seconds}.
+     *
+     * <p>The transport implementation remains the one the framework detects on the classpath; only the
+     * two timeout bounds are supplied by this application - see docs/DECISION_LOG.md DL-150,
+     * DL-128.
+     *
+     * @return a request factory carrying application-owned finite timeouts
+     */
+    private ClientHttpRequestFactory boundedRequestFactory() {
+        ClientHttpRequestFactorySettings bounded = ClientHttpRequestFactorySettings.defaults()
+                .withConnectTimeout(Duration.ofSeconds(properties.notion().connectTimeoutSeconds()))
+                .withReadTimeout(Duration.ofSeconds(properties.notion().readTimeoutSeconds()));
+        return ClientHttpRequestFactoryBuilder.detect().build(bounded);
     }
 }

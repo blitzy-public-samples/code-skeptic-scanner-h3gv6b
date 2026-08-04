@@ -9,15 +9,15 @@ spring:
   main:
     # Net-new (no Python counterpart) — DL-030 — see docs/DECISION_LOG.md
     web-application-type: servlet
-  # spring.datasource.url / .username / .password / .driver-class-name — deliberately absent — DL-027 — see docs/DECISION_LOG.md
-  # spring.jackson.property-naming-strategy — deliberately absent — DL-022 — see docs/DECISION_LOG.md
+  # spring.datasource.url / .username / .password / .driver-class-name — not set — DL-027 — see docs/DECISION_LOG.md
+  # spring.jackson.property-naming-strategy — not set — DL-022 — see docs/DECISION_LOG.md
   jpa:
     hibernate:
       # Net-new (no Python counterpart) — DL-026 — see docs/DECISION_LOG.md
       ddl-auto: update
     # Net-new (no Python counterpart) — DL-026 — see docs/DECISION_LOG.md
     open-in-view: false
-    # spring.jpa.database-platform — deliberately absent — DL-027 — see docs/DECISION_LOG.md
+    # spring.jpa.database-platform — not set — DL-027 — see docs/DECISION_LOG.md
     properties:
       hibernate:
         # Net-new (no Python counterpart) — column names at
@@ -41,7 +41,7 @@ scanner:
     # Ported from backend/app/tasks/tweet_monitoring.py:L46-47 (faithful port) — DL-031 — see docs/DECISION_LOG.md
     consumer-key: ${TWITTER_CONSUMER_KEY:${TWITTER_API_KEY:}}
     consumer-secret: ${TWITTER_CONSUMER_SECRET:${TWITTER_API_SECRET:}}
-    # Ported from backend/app/services/twitter_service.py:L13 and backend/app/tasks/tweet_monitoring.py:L48-49 (faithful port) — DL-031 — see docs/DECISION_LOG.md
+    # Ported from backend/app/services/twitter_service.py:L13 and backend/app/tasks/tweet_monitoring.py:L48-49 (faithful port) — DL-046 — see docs/DECISION_LOG.md
     access-token: ${TWITTER_ACCESS_TOKEN:}
     access-token-secret: ${TWITTER_ACCESS_TOKEN_SECRET:}
 
@@ -50,6 +50,12 @@ scanner:
     api-key: ${NOTION_API_KEY:}
     # Ported from backend/app/services/notion_service.py:L24,L35 (faithful port) — see docs/DECISION_LOG.md
     database-id: ${NOTION_DATABASE_ID:}
+    # Net-new (no Python counterpart) — DL-151 — see docs/DECISION_LOG.md
+    api-version: ${NOTION_API_VERSION:2022-06-28}
+    # Net-new (no Python counterpart) — DL-150 — see docs/DECISION_LOG.md
+    connect-timeout-seconds: ${NOTION_CONNECT_TIMEOUT_SECONDS:5}
+    # Net-new (no Python counterpart) — DL-150 — see docs/DECISION_LOG.md
+    read-timeout-seconds: ${NOTION_READ_TIMEOUT_SECONDS:10}
 
   openai:
     # Ported from backend/app/core/config.py:L8 and backend/app/services/llm_service.py:L9 (faithful port) — see docs/DECISION_LOG.md
@@ -62,13 +68,23 @@ scanner:
     temperature: 0.7
     # Ported from backend/app/services/llm_service.py:L23 (faithful port) — see docs/DECISION_LOG.md
     n: 1
+    # Net-new (no Python counterpart) — DL-145 — see docs/DECISION_LOG.md
+    # Accepted values: none, minimal, low, medium, high, xhigh, max. Blank omits the parameter.
+    reasoning-effort: ${OPENAI_REASONING_EFFORT:minimal}
+    # Net-new (no Python counterpart) — DL-146 — see docs/DECISION_LOG.md
+    request-timeout-seconds: ${OPENAI_REQUEST_TIMEOUT_SECONDS:30}
+    # Net-new (no Python counterpart) — DL-146 — see docs/DECISION_LOG.md
+    max-retries: ${OPENAI_MAX_RETRIES:2}
 
   jwt:
-    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-016 — see docs/DECISION_LOG.md
+    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-016, DL-141 — see docs/DECISION_LOG.md
+    # Minimum length: 32 bytes for HS256, 48 for HS384, 64 for HS512. Startup fails below it.
     secret: ${SECRET_KEY}
-    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-015 — see docs/DECISION_LOG.md
+    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-015, DL-141 — see docs/DECISION_LOG.md
+    # Accepted values: HS256, HS384, HS512. The value signs every token and is the only one accepted.
     algorithm: ${ALGORITHM:HS256}
-    # Ported from backend/app/core/security.py:L9-10 (faithful port) — DL-017 — see docs/DECISION_LOG.md
+    # Ported from backend/app/core/security.py:L9-10 (faithful port) — DL-017, DL-142 — see docs/DECISION_LOG.md
+    # Accepted range: 1 to 60 minutes inclusive. Startup fails outside it.
     expiration-minutes: 60
 
   auth:

@@ -18,19 +18,29 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.TypeMismatchException;
 import org.springframework.core.MethodParameter;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.mock.http.MockHttpInputMessage;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.validation.BeanPropertyBindingResult;
+import org.springframework.web.HttpMediaTypeNotAcceptableException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
@@ -73,7 +83,16 @@ class GlobalExceptionHandlerTest {
     private static final List<String> KEYS_ABSENT_FROM_EVERY_BODY = List.of(
             "type", "title", "status", "detail", "instance", "timestamp", "path", "message", "errors");
 
-    private static final Set<Integer> STATUS_CODES_THIS_ADVICE_EMITS = Set.of(400, 404, 500);
+    private static final Set<Integer> STATUS_CODES_THIS_ADVICE_EMITS =
+            Set.of(400, 404, 405, 406, 415, 500);
+
+    private static final String BAD_REQUEST = "Bad request";
+
+    private static final String METHOD_NOT_ALLOWED = "Method not allowed";
+
+    private static final String UNSUPPORTED_MEDIA_TYPE = "Unsupported media type";
+
+    private static final String NOT_ACCEPTABLE = "Not acceptable";
 
     private static final int UNAUTHORIZED = 401;
 
@@ -283,6 +302,126 @@ class GlobalExceptionHandlerTest {
                 Arguments.of(new Exception(CAUSE_MESSAGE)));
     }
 
+    // Net-new (no Python counterpart) — DL-092 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {1}")
+    @MethodSource("clientRequestFailures")
+    @DisplayName("returns 400 and never 500 for a request the framework rejected")
+    void returns400AndNever500ForAClientRequestFailure(Exception reported, String description)
+            throws JsonProcessingException {
+
+        ResponseEntity<ErrorResponse> response = handler.handleClientRequestFailure(reported);
+
+        assertThat(response.getStatusCode().value()).as(description).isEqualTo(400);
+        assertErrorEnvelope(response, BAD_REQUEST);
+        assertThat(envelopeOf(response).toString()).doesNotContain(CAUSE_MESSAGE);
+    }
+
+    private static Stream<Arguments> clientRequestFailures() {
+        return Stream.of(
+                Arguments.of(malformedBody(), "a syntactically malformed request body"),
+                Arguments.of(missingParameter(), "a missing query parameter"),
+                Arguments.of(new MissingServletRequestPartException("part"), "a missing multipart part"),
+                Arguments.of(new TypeMismatchException(CAUSE_MESSAGE, Integer.class),
+                        "a request value the target type cannot hold"));
+    }
+
+    @Test
+    @DisplayName("returns 405 with the allowed methods for an unsupported request method")
+    void returns405WithTheAllowedMethodsForAnUnsupportedRequestMethod() throws JsonProcessingException {
+        ResponseEntity<ErrorResponse> response = handler.handleMethodNotSupported(methodNotSupported());
+
+        assertThat(response.getStatusCode().value()).isEqualTo(405);
+        assertErrorEnvelope(response, METHOD_NOT_ALLOWED);
+        assertThat(response.getHeaders().get(HttpHeaders.ALLOW))
+                .containsExactly(HttpMethod.GET.name());
+    }
+
+    @Test
+    @DisplayName("returns 405 without an allow header when no method is reported as supported")
+    void returns405WithoutAnAllowHeaderWhenNoMethodIsReportedAsSupported()
+            throws JsonProcessingException {
+
+        ResponseEntity<ErrorResponse> response = handler.handleMethodNotSupported(
+                new HttpRequestMethodNotSupportedException("PATCH"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(405);
+        assertErrorEnvelope(response, METHOD_NOT_ALLOWED);
+        assertThat(response.getHeaders().containsKey(HttpHeaders.ALLOW)).isFalse();
+    }
+
+    @Test
+    @DisplayName("returns 415 for a request body whose media type no handler consumes")
+    void returns415ForARequestBodyWhoseMediaTypeNoHandlerConsumes() throws JsonProcessingException {
+        ResponseEntity<ErrorResponse> response =
+                handler.handleUnsupportedMediaType(unsupportedMediaType());
+
+        assertThat(response.getStatusCode().value()).isEqualTo(415);
+        assertErrorEnvelope(response, UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    @Test
+    @DisplayName("returns 406 for a request whose accept header cannot be satisfied")
+    void returns406ForARequestWhoseAcceptHeaderCannotBeSatisfied() throws JsonProcessingException {
+        ResponseEntity<ErrorResponse> response =
+                handler.handleNotAcceptable(new HttpMediaTypeNotAcceptableException("none"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(406);
+        assertErrorEnvelope(response, NOT_ACCEPTABLE);
+    }
+
+    @Test
+    @DisplayName("keeps the per-route 400 and 404 literals distinct from the framework 400 literal")
+    void keepsThePerRouteLiteralsDistinctFromTheFrameworkLiteral() {
+        assertThat(BAD_REQUEST)
+                .isNotEqualTo(TWEET_ID_IS_REQUIRED)
+                .isNotEqualTo(UPDATE_DATA_IS_REQUIRED)
+                .isNotEqualTo(NO_VALUE_PROVIDED)
+                .isNotEqualTo(NOT_FOUND)
+                .isNotEqualTo(INTERNAL_SERVER_ERROR);
+        assertThat(handler.handleBadRequest(BadRequestException.tweetIdRequired()).getBody().error())
+                .isEqualTo(TWEET_ID_IS_REQUIRED);
+        assertThat(handler.handleNotFound(NotFoundException.tweetNotFound()).getBody().error())
+                .isEqualTo(TWEET_NOT_FOUND);
+    }
+
+    /**
+     * Builds the failure Spring MVC raises for a syntactically malformed request body.
+     *
+     * @return the failure
+     */
+    private static HttpMessageNotReadableException malformedBody() {
+        return new HttpMessageNotReadableException(CAUSE_MESSAGE,
+                new MockHttpInputMessage(new byte[0]));
+    }
+
+    /**
+     * Builds the failure Spring MVC raises for a missing query parameter.
+     *
+     * @return the failure
+     */
+    private static MissingServletRequestParameterException missingParameter() {
+        return new MissingServletRequestParameterException("page", "int");
+    }
+
+    /**
+     * Builds the failure Spring MVC raises for a request method the matched path does not support.
+     *
+     * @return the failure, reporting {@code GET} as the only supported method
+     */
+    private static HttpRequestMethodNotSupportedException methodNotSupported() {
+        return new HttpRequestMethodNotSupportedException("DELETE", List.of(HttpMethod.GET.name()));
+    }
+
+    /**
+     * Builds the failure Spring MVC raises for a request body whose media type no handler consumes.
+     *
+     * @return the failure
+     */
+    private static HttpMediaTypeNotSupportedException unsupportedMediaType() {
+        return new HttpMediaTypeNotSupportedException(MediaType.TEXT_PLAIN,
+                List.of(MediaType.APPLICATION_JSON));
+    }
+
     @Test
     @DisplayName("answers every handled exception with the single-key error object and no other key")
     void answersEveryHandledExceptionWithTheSingleKeyErrorObject() throws JsonProcessingException {
@@ -310,26 +449,25 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
-    @DisplayName("declares exactly six ExceptionHandler methods")
-    void declaresExactlySixExceptionHandlerMethods() {
-        assertThat(exceptionHandlerMethods()).hasSize(6);
-    }
-
-    @Test
-    @DisplayName("declares exactly seven handled exception types across those six methods")
-    void declaresExactlySevenHandledExceptionTypes() {
+    @DisplayName("handles every domain failure and every client failure Spring MVC raises")
+    void handlesEveryDomainFailureAndEveryClientFailureSpringMvcRaises() {
         Set<Class<?>> handled = handledExceptionTypes();
 
-        assertThat(handled).hasSize(7);
-        assertThat(handled)
-                .containsExactlyInAnyOrder(
-                        NotFoundException.class,
-                        BadRequestException.class,
-                        ResponseGenerationException.class,
-                        MethodArgumentNotValidException.class,
-                        NoHandlerFoundException.class,
-                        NoResourceFoundException.class,
-                        Exception.class);
+        assertThat(handled).contains(
+                NotFoundException.class,
+                BadRequestException.class,
+                ResponseGenerationException.class,
+                MethodArgumentNotValidException.class,
+                NoHandlerFoundException.class,
+                NoResourceFoundException.class,
+                HttpMessageNotReadableException.class,
+                ServletRequestBindingException.class,
+                MissingServletRequestPartException.class,
+                TypeMismatchException.class,
+                HttpRequestMethodNotSupportedException.class,
+                HttpMediaTypeNotSupportedException.class,
+                HttpMediaTypeNotAcceptableException.class,
+                Exception.class);
     }
 
     @Test
@@ -362,8 +500,8 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
-    @DisplayName("emits only 400, 404 and 500 and never 401 or 403")
-    void emitsOnly400And404And500() {
+    @DisplayName("emits only client and server statuses this advice declares and never 401 or 403")
+    void emitsOnlyTheStatusesThisAdviceDeclares() {
         List<ResponseEntity<ErrorResponse>> invocations = allHandlerInvocations();
 
         assertThat(invocations).isNotEmpty();
@@ -398,6 +536,11 @@ class GlobalExceptionHandlerTest {
         invocations.add(handler.handleMethodArgumentNotValid(validationFailureOn("somethingElse")));
         invocations.add(handler.handleMethodArgumentNotValid(validationFailureWithoutFieldErrors()));
         invocations.add(handler.handleNoHandlerFound());
+        invocations.add(handler.handleClientRequestFailure(malformedBody()));
+        invocations.add(handler.handleClientRequestFailure(missingParameter()));
+        invocations.add(handler.handleMethodNotSupported(methodNotSupported()));
+        invocations.add(handler.handleUnsupportedMediaType(unsupportedMediaType()));
+        invocations.add(handler.handleNotAcceptable(new HttpMediaTypeNotAcceptableException("none")));
         invocations.add(handler.handleUnexpectedException(new RuntimeException(CAUSE_MESSAGE)));
         invocations.add(handler.handleUnexpectedException(new Exception(CAUSE_MESSAGE)));
         return invocations;

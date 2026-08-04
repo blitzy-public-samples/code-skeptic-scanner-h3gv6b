@@ -22,8 +22,7 @@ import com.codeskeptic.scanner.service.SettingsService;
  *
  * <p>Replaces the Flask blueprint {@code settings_bp}, declared at
  * {@code backend/app/api/settings.py:L5} and registered on the application object at
- * {@code backend/app/main.py:L28}. The two routes declared here are the two the blueprint declared;
- * this class declares no third route.
+ * {@code backend/app/main.py:L28}. The two routes declared here are the two the blueprint declared.
  *
  * <table border="1">
  * <caption>Route surface</caption>
@@ -42,26 +41,25 @@ import com.codeskeptic.scanner.service.SettingsService;
  * </tr>
  * </table>
  *
- * <p>Both paths are spelled as the blueprint spelled them: unprefixed, carrying no {@code /api}
- * segment and no version segment. Each path is spelled in full on its own handler; no type-level
- * request mapping contributes a prefix.
+ * <p>Both paths are unprefixed, as the blueprint spelled them: no {@code /api} segment and no version
+ * segment. Each path is spelled in full on its own handler.
  *
  * <p>{@code GET /settings} renders a JSON array whose elements are {@link SettingDto} objects, each
- * carrying {@code key}, {@code value} and {@code description} — not an object keyed by setting name —
- * see docs/DECISION_LOG.md DL-039. The array is not wrapped in an envelope, matching the bare
- * {@code jsonify(settings)} at {@code backend/app/api/settings.py:L11}.
+ * carrying {@code key}, {@code value} and {@code description}, unwrapped, matching the bare
+ * {@code jsonify(settings)} at {@code backend/app/api/settings.py:L11} — see docs/DECISION_LOG.md
+ * DL-039.
  *
- * <p>{@code PUT /settings/{key}} addresses a row that already exists. It declares no insert; a
- * {@code key} naming no row is reported as absent and no row is created for it. The default rows the
- * route addresses are seeded by {@code service.SettingsService} — see docs/DECISION_LOG.md DL-040.
+ * <p>{@code PUT /settings/{key}} addresses a row that already exists: a {@code key} naming no row is
+ * reported as absent and no row is created for it. The default rows the route addresses are seeded by
+ * {@code service.SettingsService} — see docs/DECISION_LOG.md DL-040.
  *
  * <p>The guard at {@code backend/app/api/settings.py:L17} is {@code if new_value is None:}, a test for
- * {@code null} alone. An empty string, {@code "false"} and {@code "0"} are values: none is rejected
- * here, and {@code dto.UpdateSettingRequest} declares {@code @NotNull} and no other constraint — see
+ * {@code null} alone, so an empty string, {@code "false"} and {@code "0"} are all accepted;
+ * {@code dto.UpdateSettingRequest} declares {@code @NotNull} and no other constraint — see
  * docs/DECISION_LOG.md DL-050.
  *
- * <p>This class selects the status 200 and no other, and it builds no error body. The two error
- * statuses of the source route are produced away from here:
+ * <p>This class selects the status 200 and builds no error body. The two error statuses of the source
+ * route are produced away from here:
  *
  * <ul>
  *   <li>{@code BadRequestException} carrying {@code No value provided}, the wire literal of
@@ -75,18 +73,16 @@ import com.codeskeptic.scanner.service.SettingsService;
  *       {@link GlobalExceptionHandler} answers it with 404.</li>
  * </ul>
  *
- * <p>The source invoked {@code SettingsService.get_all_settings()} at
- * {@code backend/app/api/settings.py:L10} and {@code SettingsService.update_setting(key, new_value)}
- * at {@code :L20} statically on the class. Both are instance calls on the injected singleton here, and
- * this class declares no static member — see docs/DECISION_LOG.md DL-043.
+ * <p>{@code SettingsService.get_all_settings()} at {@code backend/app/api/settings.py:L10} and
+ * {@code SettingsService.update_setting(key, new_value)} at {@code :L20} were invoked statically on
+ * the class; both are instance calls on the injected singleton here — see docs/DECISION_LOG.md
+ * DL-043.
  *
  * <p>Authentication is enforced by the security filter chain, which runs ahead of the
- * {@code DispatcherServlet}. The source applied {@code @jwt_required} bare at
- * {@code backend/app/api/settings.py:L8} and {@code :L14}; this class declares no security annotation
- * — see docs/DECISION_LOG.md DL-021.
+ * {@code DispatcherServlet}, in place of the bare {@code @jwt_required} at
+ * {@code backend/app/api/settings.py:L8} and {@code :L14} — see docs/DECISION_LOG.md DL-021.
  *
- * <p>This class reaches the {@code settings} table only through {@code service.SettingsService}, holds
- * no repository, memoises nothing, and declares no operation that publishes to X.
+ * <p>This class reaches the {@code settings} table through {@code service.SettingsService} only.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-021, DL-039, DL-040,
  * DL-043, DL-048 and DL-050; construct-level provenance is recorded in
@@ -123,8 +119,7 @@ public class SettingController {
      * row. An empty table renders an empty array, and the status is 200 either way.
      *
      * <p>The route reads no query parameter and no header, as at
-     * {@code backend/app/api/settings.py:L9}. The rendering is neither paged nor filtered nor sorted
-     * by anything the caller supplies.
+     * {@code backend/app/api/settings.py:L9}.
      *
      * <p>Example response body:
      *
@@ -147,20 +142,17 @@ public class SettingController {
      * Replaces the {@code value} of one row of the {@code settings} table and renders the stored row.
      *
      * <p>Reproduces {@code PUT /settings/<key>} at {@code backend/app/api/settings.py:L13-24}. The
-     * path-variable name is {@code key}, as at {@code :L13}, and it is bound as a {@code String} — the
-     * type Flask's default path converter delivered. A key of any spelling reaches the service, no
-     * spelling produces a binding failure, and one naming no row yields 404 — see
-     * docs/DECISION_LOG.md DL-048.
+     * path-variable name is {@code key}, as at {@code :L13}, bound as a {@code String} — the type
+     * Flask's default path converter delivered. A key of any spelling reaches the service and one
+     * naming no row yields 404 — see docs/DECISION_LOG.md DL-048.
      *
-     * <p>The body carries one member, {@code value}, read at {@code :L16}. It is passed to the service
-     * verbatim: not trimmed, not defaulted, not coerced, and not narrowed to a subset of accepted
-     * strings. An empty string is a value and is stored, matching the {@code is None} test at
-     * {@code :L17}.
+     * <p>The body carries one member, {@code value}, read at {@code :L16}, and is passed to the service
+     * verbatim: not trimmed, defaulted or coerced. An empty string is stored, matching the
+     * {@code is None} test at {@code :L17}.
      *
-     * <p>A body absent altogether binds to {@code null} and reaches the service as a {@code null}
-     * value; a body present but carrying no {@code value} member fails the {@code @NotNull} constraint
-     * of {@link UpdateSettingRequest}. Both answer 400 with the literal of {@code :L18}, and neither
-     * status nor body is selected in this method.
+     * <p>An absent body binds to {@code null} and reaches the service as a {@code null} value; a body
+     * carrying no {@code value} member fails the {@code @NotNull} constraint of
+     * {@link UpdateSettingRequest}. Both answer 400 with the literal of {@code :L18}.
      *
      * <p>Example request body:
      *

@@ -25,8 +25,8 @@ import org.springframework.data.jpa.repository.JpaRepository;
  *
  * <p>Transactions are demarcated by the calling service method, and a {@link Setting} is mapped to
  * its wire representation inside that same boundary. The {@code settings} table is created from the
- * annotations on {@link Setting} by {@code spring.jpa.hibernate.ddl-auto}; this interface
- * contributes no schema.
+ * annotations on {@link Setting} by {@code spring.jpa.hibernate.ddl-auto} — see docs/DECISION_LOG.md
+ * DL-026.
  */
 // Ported from backend/app/db/database.py:L10-13 (faithful port) — see docs/DECISION_LOG.md
 public interface SettingRepository extends JpaRepository<Setting, String> {

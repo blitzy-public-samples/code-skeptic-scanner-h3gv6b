@@ -24,15 +24,17 @@ import java.util.List;
  * is created from these annotations by {@code spring.jpa.hibernate.ddl-auto} — see
  * docs/DECISION_LOG.md DL-026.
  *
- * <p>{@code id} is a generated surrogate key. The X post identifier is not carried in it and no
- * natural-key column is declared, so ingestion performs no de-duplication — see
- * docs/DECISION_LOG.md DL-049. {@code id} is carried as a {@link String} at the wire boundary — see
- * docs/DECISION_LOG.md DL-023.
+ * <p>{@code id} is a generated surrogate key; the X post identifier is not carried in it and no
+ * natural-key column is declared — see docs/DECISION_LOG.md DL-049. {@code id} is carried as a
+ * {@link String} at the wire boundary — see docs/DECISION_LOG.md DL-023.
  *
- * <p>{@code media} and {@code ai_tools_mentioned} remain single comma-delimited character columns
- * and are mapped to {@code List<String>} attributes by {@link DelimitedStringListConverter}, which
- * owns their null and empty semantics — see docs/DECISION_LOG.md DL-024. Neither list attribute is
- * pre-populated on construction.
+ * <p>{@code media} and {@code ai_tools_mentioned} remain single comma-delimited character columns and
+ * are mapped to {@code List<String>} attributes by {@link DelimitedStringListConverter}, which owns
+ * their null and empty semantics — see docs/DECISION_LOG.md DL-024.
+ *
+ * <p>The five character columns declare {@code length = Integer.MAX_VALUE}, which renders each
+ * vendor's unbounded character type and reproduces the unbounded {@code Column(String)} of
+ * backend/app/db/models.py:L11,L15-18 — see docs/DECISION_LOG.md DL-068.
  */
 // Ported from backend/app/db/models.py:L7-18 (faithful port) — see docs/DECISION_LOG.md
 // Deviations from the literal source declaration, each recorded in the decision log: id is Long
@@ -52,7 +54,8 @@ public class Tweet {
     private Long id;
 
     // backend/app/db/models.py:L11
-    @Column(name = "content")
+    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
+    @Column(name = "content", length = Integer.MAX_VALUE)
     private String content;
 
     // backend/app/db/models.py:L12
@@ -69,24 +72,28 @@ public class Tweet {
 
     // backend/app/db/models.py:L15
     // Single delimited column value carried as a list — DL-024 — see docs/DECISION_LOG.md
+    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
     @Convert(converter = DelimitedStringListConverter.class)
-    @Column(name = "media")
+    @Column(name = "media", length = Integer.MAX_VALUE)
     private List<String> media;
 
     // backend/app/db/models.py:L16
     // Sole Optional[str] field in the source (backend/app/schema/tweet.py:L12); may be null.
-    @Column(name = "quoted_tweet_id")
+    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
+    @Column(name = "quoted_tweet_id", length = Integer.MAX_VALUE)
     private String quotedTweetId;
 
     // backend/app/db/models.py:L17
     // Identifier of the post author, held as a plain column value; there is no user table.
-    @Column(name = "user_id")
+    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
+    @Column(name = "user_id", length = Integer.MAX_VALUE)
     private String userId;
 
     // backend/app/db/models.py:L18
     // Single delimited column value carried as a list — DL-024 — see docs/DECISION_LOG.md
+    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
     @Convert(converter = DelimitedStringListConverter.class)
-    @Column(name = "ai_tools_mentioned")
+    @Column(name = "ai_tools_mentioned", length = Integer.MAX_VALUE)
     private List<String> aiToolsMentioned;
 
     // Ported from backend/app/db/models.py:L30 (faithful port) — see docs/DECISION_LOG.md
@@ -190,9 +197,8 @@ public class Tweet {
      * <p>Yields {@code true} for the same reference, and for any instance of this type — a
      * persistence-provider proxy included — whose identifier is non-{@code null} and equal to this
      * identifier. Yields {@code false} whenever either identifier is {@code null} and the two
-     * references differ; two instances that have not yet been persisted never compare equal. The
-     * identifier is read through {@link #getId()} on both sides. The {@code responses} collection is
-     * not read, so the comparison triggers no lazy load.
+     * references differ. The identifier is read through {@link #getId()} on both sides and the
+     * {@code responses} collection is not read.
      *
      * @param other the object to compare with
      * @return {@code true} when both instances denote the same {@code tweets} row
@@ -213,8 +219,8 @@ public class Tweet {
     // docs/DECISION_LOG.md
     /**
      * Returns a hash code derived from the entity type. The value is identical for every instance of
-     * this type and for every proxy of it, and is unchanged by assignment of the identifier on
-     * insert. The {@code responses} collection is not read, so the computation triggers no lazy load.
+     * this type and for every proxy of it, and is unchanged by assignment of the identifier on insert.
+     * The {@code responses} collection is not read.
      *
      * @return the hash code of this entity's type
      */

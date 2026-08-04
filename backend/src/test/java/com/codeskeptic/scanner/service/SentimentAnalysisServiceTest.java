@@ -2,13 +2,18 @@ package com.codeskeptic.scanner.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import jakarta.annotation.PreDestroy;
+
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -48,6 +53,16 @@ class SentimentAnalysisServiceTest {
 
     /** Text passed to {@link SentimentAnalysisService#analyzeSentiment(String)}. */
     private static final String TWEET_TEXT = "AI coding tools still cannot get this right";
+
+    /** Message of the {@link IllegalStateException} raised once the bean has been destroyed. */
+    private static final String DESTROYED_MESSAGE =
+            "SentimentAnalysisService has been destroyed; the Natural Language API client is closed";
+
+    /** Message carried by the provider failure the stubbed client raises. */
+    private static final String PROVIDER_FAILURE_MESSAGE = "the provider rejected the request";
+
+    /** Operation names no method of the service may carry. */
+    private static final String[] PUBLISHING_NAMES = { "publish", "post", "send", "tweet", "reply" };
 
     /** Stubbed Natural Language client; reached only through the protected accessor. */
     @Mock
@@ -217,6 +232,187 @@ class SentimentAnalysisServiceTest {
 
         assertThat(calculateDoubtRating.getParameterTypes()).containsExactly(double.class);
         assertThat(calculateDoubtRating.getReturnType()).isEqualTo(double.class);
+    }
+
+
+    // ---------------------------------------------------------------------
+    // Rejected and unusual input
+    // ---------------------------------------------------------------------
+
+    @Test
+    @DisplayName("rejects null text and reaches the client zero times")
+    void rejectsNullTextAndReachesTheClientZeroTimes() {
+        assertThatThrownBy(() -> service.analyzeSentiment(null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("text must not be null");
+
+        verifyNoInteractions(languageServiceClient);
+        assertThat(service.languageClientAccessorCalls()).isZero();
+    }
+
+    @Test
+    @DisplayName("sends blank text to the client unchanged")
+    void sendsBlankTextToTheClientUnchanged() {
+        stubDocumentSentimentScore(0.0f);
+
+        double score = service.analyzeSentiment("   ");
+
+        ArgumentCaptor<Document> sent = ArgumentCaptor.forClass(Document.class);
+        verify(languageServiceClient).analyzeSentiment(sent.capture());
+        assertThat(sent.getValue().getContent()).isEqualTo("   ");
+        assertThat(score).isCloseTo(0.0d, within(TOLERANCE));
+    }
+
+    @Test
+    @DisplayName("sends empty text to the client unchanged")
+    void sendsEmptyTextToTheClientUnchanged() {
+        stubDocumentSentimentScore(0.0f);
+
+        service.analyzeSentiment("");
+
+        ArgumentCaptor<Document> sent = ArgumentCaptor.forClass(Document.class);
+        verify(languageServiceClient).analyzeSentiment(sent.capture());
+        assertThat(sent.getValue().getContent()).isEmpty();
+    }
+
+    // ---------------------------------------------------------------------
+    // A provider failure
+    // ---------------------------------------------------------------------
+
+    @Test
+    @DisplayName("propagates a provider failure unchanged")
+    void propagatesAProviderFailureUnchanged() {
+        IllegalStateException raised = new IllegalStateException(PROVIDER_FAILURE_MESSAGE);
+        when(languageServiceClient.analyzeSentiment(any(Document.class))).thenThrow(raised);
+
+        assertThatThrownBy(() -> service.analyzeSentiment(TWEET_TEXT)).isSameAs(raised);
+    }
+
+    @Test
+    @DisplayName("remains usable after a provider failure")
+    void remainsUsableAfterAProviderFailure() {
+        AnalyzeSentimentResponse response = AnalyzeSentimentResponse.newBuilder()
+                .setDocumentSentiment(Sentiment.newBuilder().setScore(-0.5f).build())
+                .build();
+        when(languageServiceClient.analyzeSentiment(any(Document.class)))
+                .thenThrow(new IllegalStateException(PROVIDER_FAILURE_MESSAGE))
+                .thenReturn(response);
+
+        assertThatThrownBy(() -> service.analyzeSentiment(TWEET_TEXT))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(service.analyzeSentiment(TWEET_TEXT)).isCloseTo(-0.5d, within(TOLERANCE));
+    }
+
+    // ---------------------------------------------------------------------
+    // The client lifecycle
+    // ---------------------------------------------------------------------
+
+    @Test
+    @DisplayName("rejects analysis once the bean has been destroyed")
+    void rejectsAnalysisOnceTheBeanHasBeenDestroyed() {
+        service.closeLanguageClient();
+
+        assertThatThrownBy(() -> service.analyzeSentiment(TWEET_TEXT))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage(DESTROYED_MESSAGE);
+
+        verifyNoInteractions(languageServiceClient);
+    }
+
+    @Test
+    @DisplayName("closing the client more than once raises nothing")
+    void closingTheClientMoreThanOnceRaisesNothing() {
+        assertThatCode(() -> {
+            service.closeLanguageClient();
+            service.closeLanguageClient();
+            service.closeLanguageClient();
+        }).doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("still converts a sentiment score to a doubt rating once the bean has been destroyed")
+    void stillConvertsASentimentScoreOnceTheBeanHasBeenDestroyed() {
+        service.closeLanguageClient();
+
+        assertThat(service.calculateDoubtRating(0.0d)).isCloseTo(5.0d, within(TOLERANCE));
+        verifyNoInteractions(languageServiceClient);
+    }
+
+    @Test
+    @DisplayName("declares the client release as its destruction callback")
+    void declaresTheClientReleaseAsItsDestructionCallback() throws NoSuchMethodException {
+        Method close = SentimentAnalysisService.class.getDeclaredMethod("closeLanguageClient");
+
+        assertThat(close.isAnnotationPresent(PreDestroy.class)).isTrue();
+        assertThat(close.getReturnType()).isEqualTo(void.class);
+        assertThat(close.getParameterCount()).isZero();
+    }
+
+    @Test
+    @DisplayName("leaves the client accessor open to a subclass")
+    void leavesTheClientAccessorOpenToASubclass() throws NoSuchMethodException {
+        Method accessor = SentimentAnalysisService.class.getDeclaredMethod("languageClient");
+
+        assertThat(Modifier.isPrivate(accessor.getModifiers())).isFalse();
+        assertThat(Modifier.isFinal(accessor.getModifiers())).isFalse();
+    }
+
+    // ---------------------------------------------------------------------
+    // Non-finite sentiment scores
+    // ---------------------------------------------------------------------
+
+    @ParameterizedTest(name = "a non-finite sentiment score of {0} yields a doubt rating of {1}")
+    @CsvSource({
+            "NaN,10.0",
+            "-Infinity,10.0",
+            "Infinity,0.0"
+    })
+    @DisplayName("bounds a non-finite sentiment score to the doubt rating range")
+    void boundsANonFiniteSentimentScoreToTheDoubtRatingRange(
+            double sentimentScore, double expectedDoubtRating) {
+
+        double doubtRating = service.calculateDoubtRating(sentimentScore);
+
+        assertThat(doubtRating).isCloseTo(expectedDoubtRating, within(TOLERANCE));
+        assertThat(Double.isFinite(doubtRating)).isTrue();
+    }
+
+    @ParameterizedTest(name = "a sentiment score of {0} yields a doubt rating inside 0.0 to 10.0")
+    @CsvSource({
+            "-1000.0", "-2.0", "-1.0", "-0.5", "0.0", "0.5", "1.0", "2.0", "1000.0",
+            "NaN", "-Infinity", "Infinity"
+    })
+    @DisplayName("returns a doubt rating inside the persisted range for every sentiment score")
+    void returnsADoubtRatingInsideThePersistedRangeForEverySentimentScore(double sentimentScore) {
+        double doubtRating = service.calculateDoubtRating(sentimentScore);
+
+        assertThat(doubtRating).isBetween(0.0d, 10.0d);
+        assertThat(Double.isFinite(doubtRating)).isTrue();
+    }
+
+    // ---------------------------------------------------------------------
+    // The reported score
+    // ---------------------------------------------------------------------
+
+    @Test
+    @DisplayName("widens the reported float score to a double without rounding it")
+    void widensTheReportedFloatScoreToADoubleWithoutRoundingIt() {
+        stubDocumentSentimentScore(0.1f);
+
+        double score = service.analyzeSentiment(TWEET_TEXT);
+
+        assertThat(score).isEqualTo((double) 0.1f);
+    }
+
+    @Test
+    @DisplayName("declares no operation that publishes to X")
+    void declaresNoOperationThatPublishesToX() {
+        assertThat(Arrays.stream(SentimentAnalysisService.class.getDeclaredMethods())
+                .map(Method::getName)
+                .toList())
+                .noneSatisfy(name -> assertThat(name.toLowerCase(java.util.Locale.ROOT))
+                        .containsAnyOf(PUBLISHING_NAMES));
     }
 
     // ---------------------------------------------------------------------

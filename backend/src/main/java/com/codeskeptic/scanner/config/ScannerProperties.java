@@ -181,13 +181,22 @@ public record ScannerProperties(
     // Ported from backend/app/core/config.py:L7 and
     // backend/app/services/notion_service.py:L8,L24,L35 (faithful port) — see docs/DECISION_LOG.md
     /**
-     * The {@code scanner.notion} group: the Notion API credential and the target database
-     * identifier. Per-component provenance is recorded inline below.
+     * The {@code scanner.notion} group: the Notion API credential, the target database identifier,
+     * the API version header value and the two transport timeouts. Per-component provenance is
+     * recorded inline below.
      *
-     * <p>Both components are redacted by {@link #toString()}.
+     * <p>The credential and the database identifier are redacted by {@link #toString()}.
+     *
+     * <p>{@code config/RestClientConfig} reads {@code apiVersion}, {@code connectTimeoutSeconds} and
+     * {@code readTimeoutSeconds} as it publishes the transport — DL-150, DL-151.
      *
      * @param apiKey value of {@code scanner.notion.api-key}
      * @param databaseId value of {@code scanner.notion.database-id}
+     * @param apiVersion value of {@code scanner.notion.api-version}, default {@code 2022-06-28}
+     * @param connectTimeoutSeconds value of {@code scanner.notion.connect-timeout-seconds}, default
+     *     {@code 5}
+     * @param readTimeoutSeconds value of {@code scanner.notion.read-timeout-seconds}, default
+     *     {@code 10}
      */
     public record Notion(
 
@@ -197,17 +206,30 @@ public record ScannerProperties(
 
             // scanner.notion.database-id — read at backend/app/services/notion_service.py:L24 and
             // backend/app/services/notion_service.py:L35, never declared
-            String databaseId) {
+            String databaseId,
+
+            // scanner.notion.api-version — net-new: notion_client carried its own pinned version
+            // (backend/app/services/notion_service.py:L8 set none) — DL-151
+            @DefaultValue("2022-06-28") String apiVersion,
+
+            // scanner.notion.connect-timeout-seconds — net-new: the source set no timeout — DL-150
+            @DefaultValue("5") long connectTimeoutSeconds,
+
+            // scanner.notion.read-timeout-seconds — net-new: the source set no timeout — DL-150
+            @DefaultValue("10") long readTimeoutSeconds) {
 
         /**
          * Renders this group with the credential and the database identifier redacted — DL-052.
          *
-         * @return the group's components, both values redacted
+         * @return the group's components, the credential and the database identifier redacted
          */
         @Override
         public String toString() {
             return "Notion[apiKey=" + REDACTED
                     + ", databaseId=" + REDACTED
+                    + ", apiVersion=" + apiVersion
+                    + ", connectTimeoutSeconds=" + connectTimeoutSeconds
+                    + ", readTimeoutSeconds=" + readTimeoutSeconds
                     + "]";
         }
     }
@@ -215,12 +237,16 @@ public record ScannerProperties(
     // Ported from backend/app/core/config.py:L8 and
     // backend/app/services/llm_service.py:L9,L20-26 (faithful port) — see docs/DECISION_LOG.md
     /**
-     * The {@code scanner.openai} group: the OpenAI credential and the four call parameters. Per-component
-     * provenance is recorded inline below.
+     * The {@code scanner.openai} group: the OpenAI credential, the four call parameters and the three
+     * transport and reasoning settings. Per-component provenance is recorded inline below.
      *
-     * <p>The three numeric components transcribe the literals passed to
+     * <p>The three numeric call parameters transcribe the literals passed to
      * {@code Completion.create(...)} at {@code backend/app/services/llm_service.py:L22-25}:
      * {@code max_tokens=150}, {@code n=1} and {@code temperature=0.7}.
+     *
+     * <p>{@code service/LlmService} validates {@code reasoningEffort},
+     * {@code requestTimeoutSeconds} and {@code maxRetries} on the path that creates the client and
+     * builds the request — DL-145, DL-146.
      *
      * @param apiKey value of {@code scanner.openai.api-key}, redacted by {@link #toString()}
      * @param model value of {@code scanner.openai.model}
@@ -228,6 +254,11 @@ public record ScannerProperties(
      *     {@code 150}
      * @param temperature value of {@code scanner.openai.temperature}, default {@code 0.7}
      * @param n value of {@code scanner.openai.n}, default {@code 1}
+     * @param reasoningEffort value of {@code scanner.openai.reasoning-effort}, default
+     *     {@code minimal}; blank omits the parameter from the request
+     * @param requestTimeoutSeconds value of {@code scanner.openai.request-timeout-seconds}, default
+     *     {@code 30}
+     * @param maxRetries value of {@code scanner.openai.max-retries}, default {@code 2}
      */
     public record Openai(
 
@@ -248,7 +279,17 @@ public record ScannerProperties(
             @DefaultValue("0.7") double temperature,
 
             // scanner.openai.n — n=1 at backend/app/services/llm_service.py:L23
-            @DefaultValue("1") long n) {
+            @DefaultValue("1") long n,
+
+            // scanner.openai.reasoning-effort — net-new: the source's completions call at
+            // backend/app/services/llm_service.py:L19-26 had no reasoning parameter — DL-145
+            @DefaultValue("minimal") String reasoningEffort,
+
+            // scanner.openai.request-timeout-seconds — net-new: the source set no timeout — DL-146
+            @DefaultValue("30") long requestTimeoutSeconds,
+
+            // scanner.openai.max-retries — net-new: the source set no retry policy — DL-146
+            @DefaultValue("2") int maxRetries) {
 
         /**
          * Renders this group with {@code apiKey} redacted — DL-052.
@@ -262,6 +303,9 @@ public record ScannerProperties(
                     + ", maxCompletionTokens=" + maxCompletionTokens
                     + ", temperature=" + temperature
                     + ", n=" + n
+                    + ", reasoningEffort=" + reasoningEffort
+                    + ", requestTimeoutSeconds=" + requestTimeoutSeconds
+                    + ", maxRetries=" + maxRetries
                     + "]";
         }
     }
@@ -274,9 +318,16 @@ public record ScannerProperties(
      * <p>{@code application.yml} declares {@code secret} as a placeholder with no default — DL-016 —
      * and {@code algorithm} with the default {@code HS256} — DL-015.
      *
+     * <p>Binding accepts any value each component's type admits; {@code security/JwtService}
+     * validates all three as it is constructed, so an unsupported algorithm — DL-015 — a secret
+     * shorter than that algorithm's key length — DL-141 — or a lifetime outside 1 … 60 minutes —
+     * DL-142 — fails startup.
+     *
      * @param secret value of {@code scanner.jwt.secret}, redacted by {@link #toString()}
-     * @param algorithm value of {@code scanner.jwt.algorithm}
-     * @param expirationMinutes value of {@code scanner.jwt.expiration-minutes}, default {@code 60}
+     * @param algorithm value of {@code scanner.jwt.algorithm}, one of {@code HS256}, {@code HS384}
+     *     and {@code HS512}
+     * @param expirationMinutes value of {@code scanner.jwt.expiration-minutes}, default {@code 60},
+     *     accepted range 1 … 60
      */
     public record Jwt(
 
@@ -345,7 +396,7 @@ public record ScannerProperties(
      * The {@code scanner.analytics} group: the observation window of the trend series, whose producing
      * method {@code get_trends()} at {@code backend/app/api/analytics.py:L14} takes no argument.
      *
-     * <p>This group carries no credential and keeps the compiler-generated {@code toString()}.
+     * <p>This group carries no credential. Its {@code toString()} is the compiler-generated one.
      *
      * @param trendWindowDays value of {@code scanner.analytics.trend-window-days}, default
      *     {@code 30}
@@ -365,7 +416,7 @@ public record ScannerProperties(
      *
      * <p>The terms {@code application.yml} configures are the base of the rule set only.
      *
-     * <p>This group carries no credential and keeps the compiler-generated {@code toString()}.
+     * <p>This group carries no credential. Its {@code toString()} is the compiler-generated one.
      *
      * @param streamBaseKeywords value of {@code scanner.ingestion.stream-base-keywords}; an
      *     unmodifiable copy of the configured sequence, empty when the key is absent, never

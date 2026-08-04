@@ -18,13 +18,13 @@ import java.util.Objects;
  *
  * <p>{@code trends} is never {@code null}: an empty series serialises as {@code {"trends":[]}}. The
  * canonical constructor rejects {@code null} and replaces the supplied list with an unmodifiable
- * copy, so a list the caller later mutates does not change this record.
+ * copy. A list the caller later mutates does not change this record.
  *
  * @param trends the day-bucketed series in ascending {@code date} order; an empty list when no tweet
  *               falls inside the observation window
  */
 // Net-new (the source imported AnalyticsService at backend/app/api/analytics.py:L3 but no such class
-// existed, so the body shape at :L13-15 was undeclared and the series shape is defined here) — see
+// existed; the body shape at :L13-15 was undeclared and the series shape is defined here) — see
 // docs/DECISION_LOG.md DL-042
 public record TrendsDto(@JsonProperty("trends") List<TrendPoint> trends) {
 

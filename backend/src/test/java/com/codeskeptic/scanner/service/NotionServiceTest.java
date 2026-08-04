@@ -1,6 +1,7 @@
 package com.codeskeptic.scanner.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mockingDetails;
@@ -192,6 +193,15 @@ class NotionServiceTest {
     private static final String PROPERTY_TWEET_ID = "Tweet Id";
 
     /** Rich-text property carrying the generated reply. */
+    /** Notion property carrying the mirrored media references. */
+    private static final String PROPERTY_MEDIA = "Media";
+
+    /** Notion property carrying the mirrored quoted-post identifier. */
+    private static final String PROPERTY_QUOTED_TWEET_ID = "Quoted Tweet Id";
+
+    /** Notion property carrying the mirrored AI tool names. */
+    private static final String PROPERTY_AI_TOOLS_MENTIONED = "AI Tools Mentioned";
+
     private static final String PROPERTY_RESPONSE = "Response";
 
     /** Select property named at {@code backend/app/services/notion_service.py:L18}. */
@@ -419,8 +429,8 @@ class NotionServiceTest {
     }
 
     @Test
-    @DisplayName("writes exactly the six named properties on a stored page")
-    void writesExactlyTheSixNamedPropertiesOnAStoredPage() {
+    @DisplayName("writes one property per mirrored post component on a stored page")
+    void writesOnePropertyPerMirroredPostComponentOnAStoredPage() {
         stubPost();
         stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
 
@@ -432,7 +442,63 @@ class NotionServiceTest {
                 PROPERTY_TIMESTAMP,
                 PROPERTY_DOUBT_RATING,
                 PROPERTY_ENGAGEMENT,
-                PROPERTY_TWEET_ID);
+                PROPERTY_TWEET_ID,
+                PROPERTY_MEDIA,
+                PROPERTY_QUOTED_TWEET_ID,
+                PROPERTY_AI_TOOLS_MENTIONED);
+    }
+
+    @Test
+    @DisplayName("writes the media property as one delimited rich-text value")
+    void writesTheMediaPropertyAsOneDelimitedRichTextValue() {
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+
+        service.storeTweet(tweet());
+
+        assertThat(storedProperty(PROPERTY_MEDIA).has(KEY_RICH_TEXT)).isTrue();
+        assertThat(textOf(storedProperty(PROPERTY_MEDIA), KEY_RICH_TEXT))
+                .isEqualTo(String.join(",", MEDIA));
+    }
+
+    @Test
+    @DisplayName("writes the ai tools mentioned property as one delimited rich-text value")
+    void writesTheAiToolsMentionedPropertyAsOneDelimitedRichTextValue() {
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+
+        service.storeTweet(tweet());
+
+        assertThat(storedProperty(PROPERTY_AI_TOOLS_MENTIONED).has(KEY_RICH_TEXT)).isTrue();
+        assertThat(textOf(storedProperty(PROPERTY_AI_TOOLS_MENTIONED), KEY_RICH_TEXT))
+                .isEqualTo(String.join(",", AI_TOOLS_MENTIONED));
+    }
+
+    @Test
+    @DisplayName("writes the quoted tweet id property as rich text carrying the quoted post id")
+    void writesTheQuotedTweetIdPropertyAsRichTextCarryingTheQuotedPostId() {
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+
+        service.storeTweet(tweet());
+
+        assertThat(storedProperty(PROPERTY_QUOTED_TWEET_ID).has(KEY_RICH_TEXT)).isTrue();
+        assertThat(textOf(storedProperty(PROPERTY_QUOTED_TWEET_ID), KEY_RICH_TEXT))
+                .isEqualTo(QUOTED_TWEET_ID);
+    }
+
+    @Test
+    @DisplayName("omits a property whose component the post does not carry")
+    void omitsAPropertyWhoseComponentThePostDoesNotCarry() {
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+        TweetDto sparse = new TweetDto(TWEET_ID, TWEET_CONTENT, null, null, null, List.of(), null,
+                null, List.of());
+
+        service.storeTweet(sparse);
+
+        assertThat(propertyNamesOf(storedProperties()))
+                .containsExactlyInAnyOrder(PROPERTY_CONTENT, PROPERTY_TWEET_ID);
     }
 
     @Test
@@ -609,7 +675,8 @@ class NotionServiceTest {
 
         assertThat(propertyNamesOf(written)).contains(
                 PROPERTY_CONTENT, PROPERTY_AUTHOR, PROPERTY_TIMESTAMP, PROPERTY_DOUBT_RATING,
-                PROPERTY_ENGAGEMENT, PROPERTY_TWEET_ID);
+                PROPERTY_ENGAGEMENT, PROPERTY_TWEET_ID, PROPERTY_MEDIA, PROPERTY_QUOTED_TWEET_ID,
+                PROPERTY_AI_TOOLS_MENTIONED);
         assertThat(mirrored).hasSize(1);
         TweetDto roundTripped = mirrored.get(0);
         assertThat(roundTripped.content()).isEqualTo(TWEET_CONTENT);
@@ -618,6 +685,117 @@ class NotionServiceTest {
         assertThat(roundTripped.doubtRating()).isEqualTo(DOUBT_RATING);
         assertThat(roundTripped.likeCount()).isEqualTo(LIKE_COUNT);
         assertThat(roundTripped.id()).isEqualTo(TWEET_ID);
+        assertThat(roundTripped.media()).containsExactlyElementsOf(MEDIA);
+        assertThat(roundTripped.quotedTweetId()).isEqualTo(QUOTED_TWEET_ID);
+        assertThat(roundTripped.aiToolsMentioned()).containsExactlyElementsOf(AI_TOOLS_MENTIONED);
+        assertThat(roundTripped).isEqualTo(tweet());
+    }
+
+    // -------------------------------------------------------------------------
+    // Malformed pages and structurally invalid responses — DL-089, DL-090
+    // -------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("skips a page that carries no mirrored tweet identifier")
+    void skipsAPageThatCarriesNoMirroredTweetIdentifier() {
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+        service.storeTweet(tweet());
+        JsonNode written = storedProperties();
+        ObjectNode withoutTweetId = ((ObjectNode) written.deepCopy()).without(PROPERTY_TWEET_ID);
+
+        stubDatabaseQueryReturning(queryResultCarrying(
+                pageCarrying(MATCHED_PAGE_ID, withoutTweetId)));
+        List<TweetDto> mirrored = service.getTweets(LIMIT, START_CURSOR);
+
+        assertThat(mirrored).isEmpty();
+    }
+
+    @Test
+    @DisplayName("never substitutes the notion page identifier for the tweet identifier")
+    void neverSubstitutesTheNotionPageIdentifierForTheTweetIdentifier() {
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+        service.storeTweet(tweet());
+        ObjectNode withoutTweetId =
+                ((ObjectNode) storedProperties().deepCopy()).without(PROPERTY_TWEET_ID);
+
+        stubDatabaseQueryReturning(queryResultCarrying(
+                pageCarrying(MATCHED_PAGE_ID, withoutTweetId),
+                pageCarrying(CREATED_PAGE_ID, storedProperties())));
+        List<TweetDto> mirrored = service.getTweets(LIMIT, START_CURSOR);
+
+        assertThat(mirrored).extracting(TweetDto::id)
+                .containsExactly(TWEET_ID)
+                .doesNotContain(MATCHED_PAGE_ID, CREATED_PAGE_ID);
+    }
+
+    @Test
+    @DisplayName("carries a null component for every property a mirrored page omits")
+    void carriesANullComponentForEveryPropertyAMirroredPageOmits() {
+        stubPost();
+        ObjectNode identifierOnly = MAPPER.createObjectNode();
+        identifierOnly.set(PROPERTY_TWEET_ID, richText(TWEET_ID));
+        stubDatabaseQueryReturning(queryResultCarrying(
+                pageCarrying(MATCHED_PAGE_ID, identifierOnly)));
+
+        List<TweetDto> mirrored = service.getTweets(LIMIT, START_CURSOR);
+
+        assertThat(mirrored).hasSize(1);
+        TweetDto sparse = mirrored.get(0);
+        assertThat(sparse.id()).isEqualTo(TWEET_ID);
+        assertThat(sparse.content()).isNull();
+        assertThat(sparse.userId()).isNull();
+        assertThat(sparse.createdAt()).isNull();
+        assertThat(sparse.likeCount()).isNull();
+        assertThat(sparse.doubtRating()).isNull();
+        assertThat(sparse.quotedTweetId()).isNull();
+        assertThat(sparse.media()).isEmpty();
+        assertThat(sparse.aiToolsMentioned()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("reports a failure when a successful query answers with an empty body")
+    void reportsAFailureWhenASuccessfulQueryAnswersWithAnEmptyBody() {
+        stubPost();
+        stubDatabaseQueryReturning(null);
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> service.getTweets(LIMIT, START_CURSOR))
+                .withMessageContaining("empty body");
+    }
+
+    @Test
+    @DisplayName("reports a failure when a successful query answers without a results array")
+    void reportsAFailureWhenASuccessfulQueryAnswersWithoutAResultsArray() {
+        stubPost();
+        stubDatabaseQueryReturning(MAPPER.createObjectNode());
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> service.getTweets(LIMIT, START_CURSOR))
+                .withMessageContaining("results array");
+    }
+
+    @Test
+    @DisplayName("reports a failure when a successful page creation answers with an empty body")
+    void reportsAFailureWhenASuccessfulPageCreationAnswersWithAnEmptyBody() {
+        stubPost();
+        stubPageCreationReturning(null);
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> service.storeTweet(tweet()))
+                .withMessageContaining("empty body");
+    }
+
+    @Test
+    @DisplayName("reports a failure when a successful page creation returns no page identifier")
+    void reportsAFailureWhenASuccessfulPageCreationReturnsNoPageIdentifier() {
+        stubPost();
+        stubPageCreationReturning(MAPPER.createObjectNode());
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> service.storeTweet(tweet()))
+                .withMessageContaining("page identifier");
     }
 
     @Test
@@ -858,7 +1036,7 @@ class NotionServiceTest {
      */
     private static ScannerProperties propertiesCarrying(String databaseId) {
         return new ScannerProperties(null, 100, 60L, null,
-                new ScannerProperties.Notion(API_KEY, databaseId), null, null, null, null, null);
+                new ScannerProperties.Notion(API_KEY, databaseId, "2022-06-28", 5L, 10L), null, null, null, null, null);
     }
 
     /**
@@ -949,6 +1127,19 @@ class NotionServiceTest {
             results.add(page);
         }
         return result;
+    }
+
+    /**
+     * Builds a rich-text property carrying one literal text item.
+     *
+     * @param value the literal text
+     * @return the rendered property
+     */
+    private static ObjectNode richText(String value) {
+        ObjectNode property = MAPPER.createObjectNode();
+        ObjectNode item = property.putArray(KEY_RICH_TEXT).addObject();
+        item.putObject(KEY_TEXT).put(KEY_CONTENT, value);
+        return property;
     }
 
     /**

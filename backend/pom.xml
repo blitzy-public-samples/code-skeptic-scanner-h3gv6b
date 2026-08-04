@@ -25,10 +25,19 @@
         <java.version>21</java.version>
 
         <!-- Version overrides applied to coordinates otherwise managed by
-             spring-boot-dependencies 3.5.16 - see docs/DECISION_LOG.md. -->
+             spring-boot-dependencies 3.5.16, whose values are 42.7.11 and
+             10.1.55. The Connector/J coordinate carries no override:
+             com.mysql:mysql-connector-j resolves to the BOM-managed 9.7.0
+             release - see docs/DECISION_LOG.md. -->
         <postgresql.version>42.7.13</postgresql.version>
-        <mysql.version>26.7.0</mysql.version>
         <tomcat.version>10.1.57</tomcat.version>
+        <!-- Arrives transitively through spring-boot-starter-webflux ->
+             reactor-netty-http - see docs/DECISION_LOG.md DL-100. -->
+        <netty.version>4.1.136.Final</netty.version>
+        <!-- Governs every com.fasterxml.jackson coordinate on the classpath,
+             including the modules openai-java and jjwt-jackson consume - see
+             docs/DECISION_LOG.md DL-101. -->
+        <jackson-bom.version>2.21.5</jackson-bom.version>
     </properties>
 
     <dependencies>
@@ -117,7 +126,8 @@
         </dependency>
 
         <!-- JDBC drivers for DATABASE_URL (backend/app/core/config.py:L9) -
-             see docs/DECISION_LOG.md DL-028. -->
+             see docs/DECISION_LOG.md DL-028. The PostgreSQL version is decided
+             by DL-169; Connector/J takes the BOM-managed version. -->
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
@@ -158,6 +168,18 @@
 
     <build>
         <plugins>
+            <!-- Requests annotation processing explicitly for the
+                 spring-boot-configuration-processor declared above, on both the
+                 main and the test compilation. Version and release level
+                 inherited from the parent - see docs/DECISION_LOG.md DL-174. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <proc>full</proc>
+                </configuration>
+            </plugin>
+
             <!-- Version inherited from the parent - see docs/DECISION_LOG.md
                  DL-004. -->
             <plugin>

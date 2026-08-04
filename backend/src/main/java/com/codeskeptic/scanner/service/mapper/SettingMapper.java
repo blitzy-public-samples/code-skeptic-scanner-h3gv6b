@@ -16,8 +16,8 @@ import com.codeskeptic.scanner.entity.Setting;
  * {@code description} — verbatim and in that order. No value is trimmed, re-cased, defaulted or
  * substituted, and a {@code null} field is carried through as a {@code null} component.
  *
- * <p>Conversion runs in one direction only: this mapper declares no entity-producing operation.
- * Instances hold no state and are thread-safe.
+ * <p>Conversion runs in one direction: this mapper declares no entity-producing operation. Instances
+ * hold no state and are thread-safe.
  */
 @Component
 public final class SettingMapper {

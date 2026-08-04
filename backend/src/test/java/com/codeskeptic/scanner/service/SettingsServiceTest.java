@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -20,7 +21,16 @@ import java.lang.reflect.Parameter;
 import java.lang.reflect.RecordComponent;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -30,6 +40,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.SettingDto;
@@ -131,6 +143,18 @@ class SettingsServiceTest {
 
     /** Key that names no stored row. */
     private static final String ABSENT_KEY = "no-such-setting";
+
+    /** Message carried by the rejection that stands in for the {@code settings} primary key. */
+    private static final String DUPLICATE_KEY_MESSAGE = "settings primary key already taken";
+
+    /** Message carried by the failure that is not an integrity violation. */
+    private static final String UNRELATED_FAILURE_MESSAGE = "the connection is closed";
+
+    /** Number of concurrent callers the threaded seeding test starts. */
+    private static final int CONCURRENT_SEEDERS = 8;
+
+    /** Bound on how long the threaded seeding test waits for its callers, in seconds. */
+    private static final long CONCURRENCY_TIMEOUT_SECONDS = 20L;
 
     /** Wire literal of {@code backend/app/api/settings.py:L18}. */
     private static final String NO_VALUE_PROVIDED = "No value provided";
@@ -608,7 +632,7 @@ class SettingsServiceTest {
 
         service.seedDefaultSettings();
 
-        assertThat(savedRows(3)).extracting(Setting::getKey)
+        assertThat(flushedRows(3)).extracting(Setting::getKey)
                 .containsExactlyElementsOf(SEEDED_KEYS);
     }
 
@@ -620,7 +644,7 @@ class SettingsServiceTest {
 
         service.seedDefaultSettings();
 
-        assertThat(savedRows(3)).allSatisfy(row ->
+        assertThat(flushedRows(3)).allSatisfy(row ->
                 assertThat(row.getDescription()).isNotNull().isNotBlank());
     }
 
@@ -632,7 +656,7 @@ class SettingsServiceTest {
 
         service.seedDefaultSettings();
 
-        Setting seeded = seededRow(savedRows(3), TWEET_POPULARITY_THRESHOLD_KEY);
+        Setting seeded = seededRow(flushedRows(3), TWEET_POPULARITY_THRESHOLD_KEY);
         assertThat(seeded.getValue()).isEqualTo(String.valueOf(CONFIGURED_POPULARITY_THRESHOLD));
         assertThat(seeded.getValue()).isNotEqualTo(SOURCE_DECLARED_POPULARITY_THRESHOLD);
         verify(properties).popularityThreshold();
@@ -646,7 +670,7 @@ class SettingsServiceTest {
 
         service.seedDefaultSettings();
 
-        Setting seeded = seededRow(savedRows(3), RESPONSE_GENERATION_DELAY_KEY);
+        Setting seeded = seededRow(flushedRows(3), RESPONSE_GENERATION_DELAY_KEY);
         assertThat(seeded.getValue()).isEqualTo(String.valueOf(CONFIGURED_RESPONSE_GENERATION_DELAY));
         assertThat(seeded.getValue()).isNotEqualTo(SOURCE_DECLARED_RESPONSE_GENERATION_DELAY);
         verify(properties).responseGenerationDelaySeconds();
@@ -660,7 +684,7 @@ class SettingsServiceTest {
 
         service.seedDefaultSettings();
 
-        Setting seeded = seededRow(savedRows(3), STREAM_KEYWORDS_KEY);
+        Setting seeded = seededRow(flushedRows(3), STREAM_KEYWORDS_KEY);
         assertThat(seeded.getValue()).isEqualTo(CONFIGURED_KEYWORDS_VALUE);
         assertThat(seeded.getValue()).contains(CONFIGURED_KEYWORD_ONE, CONFIGURED_KEYWORD_TWO);
         verify(properties).ingestion();
@@ -676,7 +700,7 @@ class SettingsServiceTest {
 
         service.seedDefaultSettings();
 
-        assertThat(seededRow(savedRows(3), STREAM_KEYWORDS_KEY).getValue()).isEmpty();
+        assertThat(seededRow(flushedRows(3), STREAM_KEYWORDS_KEY).getValue()).isEmpty();
     }
 
     // -----------------------------------------------------------------------
@@ -704,6 +728,7 @@ class SettingsServiceTest {
 
         service.seedDefaultSettings();
 
+        verify(settingRepository, never()).saveAndFlush(any(Setting.class));
         verify(settingRepository, never()).save(any(Setting.class));
         verify(settingRepository, times(3)).existsById(anyString());
         verifyNoMoreInteractions(settingRepository);
@@ -720,7 +745,7 @@ class SettingsServiceTest {
 
         service.seedDefaultSettings();
 
-        assertThat(savedRows(2)).extracting(Setting::getKey)
+        assertThat(flushedRows(2)).extracting(Setting::getKey)
                 .containsExactly(RESPONSE_GENERATION_DELAY_KEY, STREAM_KEYWORDS_KEY)
                 .doesNotContain(TWEET_POPULARITY_THRESHOLD_KEY);
     }
@@ -741,7 +766,7 @@ class SettingsServiceTest {
 
         assertThat(storedRows).hasSize(3);
         assertThat(storedRows).extracting(Setting::getKey).containsExactlyElementsOf(SEEDED_KEYS);
-        verify(settingRepository, times(3)).save(any(Setting.class));
+        verify(settingRepository, times(3)).saveAndFlush(any(Setting.class));
         verify(settingRepository, times(6)).existsById(anyString());
     }
 
@@ -780,9 +805,144 @@ class SettingsServiceTest {
         assertThat(storedRow.getValue()).isEqualTo(STORED_VALUE);
         assertThat(storedRow.getDescription()).isEqualTo(STORED_DESCRIPTION);
         assertThat(storedRows).hasSize(3);
-        assertThat(savedRows(2)).extracting(Setting::getKey)
+        assertThat(flushedRows(2)).extracting(Setting::getKey)
                 .containsExactly(RESPONSE_GENERATION_DELAY_KEY, STREAM_KEYWORDS_KEY)
                 .doesNotContain(TWEET_POPULARITY_THRESHOLD_KEY);
+    }
+
+    // -----------------------------------------------------------------------
+    // seedDefaultSettings() — a key taken concurrently — DL-159
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("writes each seeded row with a flushing write so a taken key is reported before the "
+            + "next key is reached")
+    void writesEachSeededRowWithAFlushingWrite() {
+        stubConfiguredSeedValues();
+        stubEveryKeyAbsent();
+        when(settingRepository.saveAndFlush(any(Setting.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        service.seedDefaultSettings();
+
+        verify(settingRepository, times(3)).saveAndFlush(any(Setting.class));
+        verify(settingRepository, never()).save(any(Setting.class));
+    }
+
+    @Test
+    @DisplayName("declares no transaction on the seeding entry point and one on each client "
+            + "operation")
+    void declaresNoTransactionOnTheSeedingEntryPoint() throws NoSuchMethodException {
+        Method seeding = SettingsService.class.getDeclaredMethod("seedDefaultSettings");
+        Method reading = SettingsService.class.getDeclaredMethod("getAllSettings");
+        Method updating = SettingsService.class
+                .getDeclaredMethod("updateSetting", String.class, String.class);
+
+        assertThat(seeding.isAnnotationPresent(Transactional.class))
+                .as("seedDefaultSettings declares a transaction").isFalse();
+        assertThat(SettingsService.class.isAnnotationPresent(Transactional.class))
+                .as("the class declares a transaction").isFalse();
+        assertThat(reading.isAnnotationPresent(Transactional.class))
+                .as("getAllSettings declares a transaction").isTrue();
+        assertThat(updating.isAnnotationPresent(Transactional.class))
+                .as("updateSetting declares a transaction").isTrue();
+    }
+
+    @Test
+    @DisplayName("tolerates a key taken between the presence check and the write")
+    void toleratesAKeyTakenBetweenThePresenceCheckAndTheWrite() {
+        stubConfiguredSeedValues();
+        when(settingRepository.existsById(TWEET_POPULARITY_THRESHOLD_KEY)).thenReturn(false, true);
+        when(settingRepository.existsById(RESPONSE_GENERATION_DELAY_KEY)).thenReturn(false);
+        when(settingRepository.existsById(STREAM_KEYWORDS_KEY)).thenReturn(false);
+        stubWriteRejectedFor(TWEET_POPULARITY_THRESHOLD_KEY);
+
+        service.seedDefaultSettings();
+
+        verify(settingRepository, times(2)).existsById(TWEET_POPULARITY_THRESHOLD_KEY);
+    }
+
+    @Test
+    @DisplayName("seeds the remaining keys after one key is taken concurrently")
+    void seedsTheRemainingKeysAfterOneKeyIsTakenConcurrently() {
+        stubConfiguredSeedValues();
+        when(settingRepository.existsById(TWEET_POPULARITY_THRESHOLD_KEY)).thenReturn(false, true);
+        when(settingRepository.existsById(RESPONSE_GENERATION_DELAY_KEY)).thenReturn(false);
+        when(settingRepository.existsById(STREAM_KEYWORDS_KEY)).thenReturn(false);
+        stubWriteRejectedFor(TWEET_POPULARITY_THRESHOLD_KEY);
+
+        service.seedDefaultSettings();
+
+        assertThat(flushedRows(3)).extracting(Setting::getKey)
+                .containsExactlyElementsOf(SEEDED_KEYS);
+    }
+
+    @Test
+    @DisplayName("rethrows the rejection when the key is still absent after the write fails")
+    void rethrowsTheRejectionWhenTheKeyIsStillAbsentAfterTheWriteFails() {
+        when(properties.popularityThreshold()).thenReturn(CONFIGURED_POPULARITY_THRESHOLD);
+        when(settingRepository.existsById(TWEET_POPULARITY_THRESHOLD_KEY)).thenReturn(false, false);
+        when(settingRepository.saveAndFlush(any(Setting.class)))
+                .thenThrow(new DataIntegrityViolationException(DUPLICATE_KEY_MESSAGE));
+
+        assertThatThrownBy(service::seedDefaultSettings)
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining(DUPLICATE_KEY_MESSAGE);
+
+        verify(settingRepository, times(2)).existsById(TWEET_POPULARITY_THRESHOLD_KEY);
+        verify(settingRepository, never()).existsById(RESPONSE_GENERATION_DELAY_KEY);
+    }
+
+    @Test
+    @DisplayName("propagates a write failure that is not an integrity violation without rechecking "
+            + "the key")
+    void propagatesAWriteFailureThatIsNotAnIntegrityViolation() {
+        when(properties.popularityThreshold()).thenReturn(CONFIGURED_POPULARITY_THRESHOLD);
+        when(settingRepository.existsById(TWEET_POPULARITY_THRESHOLD_KEY)).thenReturn(false);
+        when(settingRepository.saveAndFlush(any(Setting.class)))
+                .thenThrow(new IllegalStateException(UNRELATED_FAILURE_MESSAGE));
+
+        assertThatThrownBy(service::seedDefaultSettings)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage(UNRELATED_FAILURE_MESSAGE);
+
+        verify(settingRepository, times(1)).existsById(TWEET_POPULARITY_THRESHOLD_KEY);
+    }
+
+    @Test
+    @DisplayName("stores each default row exactly once when several callers seed the same database "
+            + "at the same time")
+    void storesEachDefaultRowExactlyOnceUnderConcurrentSeeding() throws InterruptedException {
+        Map<String, Setting> table = new ConcurrentHashMap<>();
+        AtomicInteger rejections = new AtomicInteger();
+        List<Throwable> raised = new CopyOnWriteArrayList<>();
+
+        stubConfiguredSeedValues();
+        when(settingRepository.existsById(anyString()))
+                .thenAnswer(invocation -> table.containsKey((String) invocation.getArgument(0)));
+        when(settingRepository.saveAndFlush(any(Setting.class))).thenAnswer(invocation -> {
+            Setting written = invocation.getArgument(0);
+            if (table.putIfAbsent(written.getKey(), written) != null) {
+                rejections.incrementAndGet();
+                throw new DataIntegrityViolationException(DUPLICATE_KEY_MESSAGE);
+            }
+            return written;
+        });
+
+        runConcurrently(service::seedDefaultSettings, raised);
+
+        assertThat(raised).as("failures raised by the concurrent callers").isEmpty();
+        assertThat(table.keySet()).as("stored keys")
+                .containsExactlyInAnyOrderElementsOf(SEEDED_KEYS);
+        assertThat(table.get(TWEET_POPULARITY_THRESHOLD_KEY).getValue())
+                .as("stored popularity threshold")
+                .isEqualTo(String.valueOf(CONFIGURED_POPULARITY_THRESHOLD));
+        assertThat(table.get(RESPONSE_GENERATION_DELAY_KEY).getValue())
+                .as("stored response generation delay")
+                .isEqualTo(String.valueOf(CONFIGURED_RESPONSE_GENERATION_DELAY));
+        assertThat(table.get(STREAM_KEYWORDS_KEY).getValue()).as("stored stream keywords")
+                .isEqualTo(CONFIGURED_KEYWORDS_VALUE);
+        assertThat(rejections.get()).as("writes the primary key rejected").isNotNegative();
     }
 
     @Test
@@ -886,16 +1046,72 @@ class SettingsServiceTest {
     }
 
     /**
+     * Stubs the flushing write to reject {@code rejectedKey} with an integrity violation and to
+     * accept every other key.
+     *
+     * @param rejectedKey the key whose write is rejected
+     */
+    private void stubWriteRejectedFor(String rejectedKey) {
+        when(settingRepository
+                .saveAndFlush(argThat(row -> row != null && !rejectedKey.equals(row.getKey()))))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        when(settingRepository
+                .saveAndFlush(argThat(row -> row != null && rejectedKey.equals(row.getKey()))))
+                .thenThrow(new DataIntegrityViolationException(DUPLICATE_KEY_MESSAGE));
+    }
+
+    /**
+     * Runs {@code work} on {@value #CONCURRENT_SEEDERS} threads released together, and collects every
+     * failure any of them raises.
+     *
+     * @param work   the operation each thread performs once
+     * @param raised the list every raised failure is added to
+     * @throws InterruptedException when the calling thread is interrupted while waiting
+     */
+    private static void runConcurrently(Runnable work, List<Throwable> raised)
+            throws InterruptedException {
+        CyclicBarrier released = new CyclicBarrier(CONCURRENT_SEEDERS);
+        CountDownLatch finished = new CountDownLatch(CONCURRENT_SEEDERS);
+        ExecutorService callers = Executors.newFixedThreadPool(CONCURRENT_SEEDERS);
+        try {
+            for (int caller = 0; caller < CONCURRENT_SEEDERS; caller++) {
+                callers.execute(() -> {
+                    try {
+                        released.await(CONCURRENCY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                        work.run();
+                    } catch (Throwable failure) {
+                        raised.add(failure);
+                    } finally {
+                        finished.countDown();
+                    }
+                });
+            }
+            if (!finished.await(CONCURRENCY_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                raised.add(new AssertionError("The concurrent callers did not finish in time."));
+            }
+        } finally {
+            callers.shutdownNow();
+        }
+    }
+
+    /**
      * Stubs the repository to report presence from {@code storedRows} and to append every written row
-     * to it.
+     * to it, rejecting a key the list already holds.
+     *
+     * <p>The rejection stands in for the primary key of the {@code settings} table: a second write of
+     * a key already stored answers with {@link DataIntegrityViolationException} and appends no
+     * duplicate.
      *
      * @param storedRows the mutable list standing in for the {@code settings} table
      */
     private void stubRepositoryBackedBy(List<Setting> storedRows) {
         when(settingRepository.existsById(anyString()))
                 .thenAnswer(invocation -> holdsKey(storedRows, invocation.getArgument(0)));
-        when(settingRepository.save(any(Setting.class))).thenAnswer(invocation -> {
+        when(settingRepository.saveAndFlush(any(Setting.class))).thenAnswer(invocation -> {
             Setting written = invocation.getArgument(0);
+            if (holdsKey(storedRows, written.getKey())) {
+                throw new DataIntegrityViolationException(DUPLICATE_KEY_MESSAGE);
+            }
             storedRows.add(written);
             return written;
         });
@@ -911,7 +1127,8 @@ class SettingsServiceTest {
     }
 
     /**
-     * Captures the rows the repository was asked to write.
+     * Captures the rows {@link SettingsService#updateSetting(String, String)} asked the repository to
+     * write, which it writes with {@code save}.
      *
      * @param expectedWrites the number of writes expected
      * @return the captured rows in the order they were written
@@ -923,7 +1140,21 @@ class SettingsServiceTest {
     }
 
     /**
-     * Captures the single row the repository was asked to write.
+     * Captures the rows {@link SettingsService#seedDefaultSettings()} asked the repository to write,
+     * which it writes with {@code saveAndFlush} — DL-159 — see docs/DECISION_LOG.md.
+     *
+     * @param expectedWrites the number of writes expected
+     * @return the captured rows in the order they were written
+     */
+    private List<Setting> flushedRows(int expectedWrites) {
+        ArgumentCaptor<Setting> written = ArgumentCaptor.forClass(Setting.class);
+        verify(settingRepository, times(expectedWrites)).saveAndFlush(written.capture());
+        return written.getAllValues();
+    }
+
+    /**
+     * Captures the single row {@link SettingsService#updateSetting(String, String)} asked the
+     * repository to write.
      *
      * @return the captured row
      */

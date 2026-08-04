@@ -22,7 +22,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * @param trackedAiTools     {@code COUNT(*)} over {@code ai_tools} (backend/app/db/models.py:L32-37)
  */
 // Net-new (the source imported AnalyticsService at backend/app/api/analytics.py:L3 but no such class
-// existed, so the body shape at :L23-25 was undeclared and the metric set is defined here) — see
+// existed; the body shape at :L23-25 was undeclared and the metric set is defined here) — see
 // docs/DECISION_LOG.md DL-041
 public record SummaryDto(
 

@@ -7,22 +7,20 @@ import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 /**
  * Entry point and composition root of the Code Skeptic Scanner backend service.
  *
- * <p>Replaces the {@code create_app()} factory at {@code backend/app/main.py:L15-39} together with
- * the module-level {@code Flask} object at {@code backend/app/main.py:L13} that the factory
- * configured and returned. This application has exactly one {@code ApplicationContext}.
+ * <p>Replaces the {@code create_app()} factory at {@code backend/app/main.py:L15-39} and the
+ * module-level {@code Flask} object at {@code backend/app/main.py:L13}.
  *
  * <p>{@link SpringBootApplication} places the component-scan root at this class's own package,
- * {@code com.codeskeptic.scanner}, which puts every sibling package within the scanned set:
- * {@code api}, {@code config}, {@code dto}, {@code entity}, {@code exception}, {@code repository},
- * {@code security}, {@code service}, {@code service.mapper}, {@code task} and {@code util}. The
- * {@code @RestController} classes in {@code api} register their routes through that scan; the four
- * {@code app.register_blueprint(...)} calls at {@code backend/app/main.py:L26-29} have no
- * counterpart here. {@link ConfigurationPropertiesScan} registers
- * {@link com.codeskeptic.scanner.config.ScannerProperties} from its {@code @ConfigurationProperties}
- * annotation alone, replacing {@code get_settings()} and {@code app.config.from_object(settings)} at
- * {@code backend/app/main.py:L16-18}; beans reach those values by constructor injection.
+ * {@code com.codeskeptic.scanner}, so the scanned set includes {@code api}, {@code config},
+ * {@code dto}, {@code entity}, {@code exception}, {@code repository}, {@code security},
+ * {@code service}, {@code service.mapper}, {@code task} and {@code util}. The
+ * {@code @RestController} classes in {@code api} register their routes through that scan, in place of
+ * the four {@code app.register_blueprint(...)} calls at {@code backend/app/main.py:L26-29}.
+ * {@link ConfigurationPropertiesScan} registers
+ * {@link com.codeskeptic.scanner.config.ScannerProperties}, in place of {@code get_settings()} and
+ * {@code app.config.from_object(settings)} at {@code backend/app/main.py:L16-18}.
  *
- * <p>Every remaining concern that the Flask module handled inline is declared elsewhere in the tree:
+ * <p>The remaining concerns the Flask module handled inline are declared elsewhere in the tree:
  *
  * <ul>
  *   <li>Cross-origin policy - {@code config.CorsConfig}, replacing {@code CORS(app)} at
@@ -33,20 +31,16 @@ import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
  *       {@code app.db = get_db_connection()} at {@code backend/app/main.py:L24}.
  *   <li>The 404 and 500 error bodies - {@code api.GlobalExceptionHandler}, replacing the
  *       {@code @app.errorhandler} functions at {@code backend/app/main.py:L31-37}.
- *   <li>Scheduling - {@code @EnableScheduling} is declared on {@code config.AsyncSchedulingConfig}
- *       and on no other class in this application; the periodic job is
- *       {@code task.ResponseGenerationScheduler}.
- *   <li>Stream ingestion - {@code task.TweetStreamClient}, which starts after context refresh and
- *       stops on context close.
+ *   <li>Scheduling - {@code @EnableScheduling} on {@code config.AsyncSchedulingConfig}; the periodic
+ *       job is {@code task.ResponseGenerationScheduler}, replacing
+ *       {@code backend/app/tasks/response_generation.py:L35-50}.
+ *   <li>Stream ingestion - {@code task.TweetStreamClient}, replacing
+ *       {@code backend/app/tasks/tweet_monitoring.py:L36-55}.
  * </ul>
  *
- * <p>This class declares no bean, reads no configuration key, injects no collaborator, holds no
- * state and starts no thread. It declares no {@code ApplicationRunner}, no
- * {@code CommandLineRunner} and no {@code @PostConstruct} method;
- * {@code initialize_background_tasks()} at {@code backend/app/main.py:L43-48} has no counterpart
- * here. The listen port is {@code server.port} in {@code src/main/resources/application.yml}, which
- * resolves {@code ${PORT:5000}}, and the servlet stack is selected by
- * {@code spring.main.web-application-type} in that same file; neither is set programmatically.
+ * <p>The listen port is {@code server.port} in {@code src/main/resources/application.yml}, which
+ * resolves {@code ${PORT:5000}}; the servlet stack is selected by
+ * {@code spring.main.web-application-type} in that same file.
  *
  * <p>See {@code docs/DECISION_LOG.md} and {@code docs/TRACEABILITY_MATRIX.md}.
  */

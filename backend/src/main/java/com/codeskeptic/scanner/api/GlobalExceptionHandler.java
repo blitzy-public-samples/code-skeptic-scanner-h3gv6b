@@ -5,12 +5,21 @@ import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.TypeMismatchException;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.FieldError;
+import org.springframework.web.HttpMediaTypeNotAcceptableException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
@@ -83,6 +92,22 @@ import com.codeskeptic.scanner.exception.ResponseGenerationException;
  *   <td>{@code Not found}</td><td>{@code backend/app/main.py:L33}</td>
  * </tr>
  * <tr>
+ *   <td>{@link #handleClientRequestFailure(Exception)}</td><td>400</td>
+ *   <td>{@code Bad request}</td><td>net-new — see docs/DECISION_LOG.md DL-092</td>
+ * </tr>
+ * <tr>
+ *   <td>{@link #handleMethodNotSupported(HttpRequestMethodNotSupportedException)}</td><td>405</td>
+ *   <td>{@code Method not allowed}</td><td>net-new — see docs/DECISION_LOG.md DL-092</td>
+ * </tr>
+ * <tr>
+ *   <td>{@link #handleNotAcceptable(HttpMediaTypeNotAcceptableException)}</td><td>406</td>
+ *   <td>{@code Not acceptable}</td><td>net-new — see docs/DECISION_LOG.md DL-092</td>
+ * </tr>
+ * <tr>
+ *   <td>{@link #handleUnsupportedMediaType(HttpMediaTypeNotSupportedException)}</td><td>415</td>
+ *   <td>{@code Unsupported media type}</td><td>net-new — see docs/DECISION_LOG.md DL-092</td>
+ * </tr>
+ * <tr>
  *   <td>{@link #handleUnexpectedException(Exception)}</td><td>500</td>
  *   <td>{@code Internal server error}</td><td>{@code backend/app/main.py:L37}</td>
  * </tr>
@@ -90,12 +115,13 @@ import com.codeskeptic.scanner.exception.ResponseGenerationException;
  *
  * <p>The three {@code com.codeskeptic.scanner.exception} types declare no {@code @ResponseStatus};
  * their status is assigned here. Their messages are copied through {@link Throwable#getMessage()}
- * unaltered — never normalised, reworded or recased. Each of the eight per-route literals round-trips
- * character-for-character.
+ * unaltered, so each of the eight per-route literals round-trips character-for-character.
  *
- * <p>Spring selects a handler by exception type, most specific match first.
- * {@link #handleUnexpectedException(Exception)} receives only what no earlier handler matches. That
- * includes {@code HttpMessageNotReadableException}, raised by a syntactically malformed request body.
+ * <p>Spring selects a handler by exception type, most specific match first. A client failure Spring
+ * MVC raises — a malformed body, a missing or unconvertible request value, an unsupported method, an
+ * unsupported media type or an unsatisfiable {@code Accept} header — is matched by one of the four
+ * framework handlers and keeps the status the framework assigns it;
+ * {@link #handleUnexpectedException(Exception)} receives what no earlier handler matches — DL-092.
  *
  * <p>Authentication and authorisation failures are answered by the security filter chain, which runs
  * ahead of the {@code DispatcherServlet}; no exception from them reaches this class.
@@ -117,6 +143,22 @@ public class GlobalExceptionHandler {
     private static final String INTERNAL_SERVER_ERROR = "Internal server error";
 
     /**
+     * Message served with HTTP 400 for a request the framework rejected before a handler read it. Net-new
+     * (no source literal; {@code backend/app/main.py:L31-37} registered handlers for 404 and 500 only) —
+     * see docs/DECISION_LOG.md DL-092.
+     */
+    private static final String BAD_REQUEST = "Bad request";
+
+    /** Message served with HTTP 405 — see docs/DECISION_LOG.md DL-092. */
+    private static final String METHOD_NOT_ALLOWED = "Method not allowed";
+
+    /** Message served with HTTP 415 — see docs/DECISION_LOG.md DL-092. */
+    private static final String UNSUPPORTED_MEDIA_TYPE = "Unsupported media type";
+
+    /** Message served with HTTP 406 — see docs/DECISION_LOG.md DL-092. */
+    private static final String NOT_ACCEPTABLE = "Not acceptable";
+
+    /**
      * Rejected-field names that select {@link BadRequestException#TWEET_ID_IS_REQUIRED}.
      *
      * <p>Holds the record component name of {@code com.codeskeptic.scanner.dto.CreateResponseRequest}
@@ -136,8 +178,8 @@ public class GlobalExceptionHandler {
      * Reports an absent entity with HTTP 404 and the exception's own message.
      *
      * <p>Carries the four literals of {@code backend/app/api/tweets.py:L32,L43},
-     * {@code backend/app/api/responses.py:L31,L65} and {@code backend/app/api/settings.py:L22}. The
-     * two response-scoped literals stay distinct: the message is passed through, never mapped.
+     * {@code backend/app/api/responses.py:L31,L65} and {@code backend/app/api/settings.py:L22}; the
+     * message is passed through unmapped, so the two response-scoped literals stay distinct.
      *
      * @param ex the raised exception; its {@link Throwable#getMessage()} becomes the response body
      * @return HTTP 404 carrying {@code {"error": <ex.getMessage()>}}
@@ -165,9 +207,9 @@ public class GlobalExceptionHandler {
      * Reports an incomplete response generation with HTTP 500 and the exception's own message.
      *
      * <p>Carries the literal of {@code backend/app/api/responses.py:L49}, which is
-     * {@link ResponseGenerationException#FAILED_TO_GENERATE_RESPONSE}. This status is also produced by
-     * {@link #handleUnexpectedException(Exception)}, which emits {@value #INTERNAL_SERVER_ERROR}. The
-     * two 500 bodies are separate messages.
+     * {@link ResponseGenerationException#FAILED_TO_GENERATE_RESPONSE}.
+     * {@link #handleUnexpectedException(Exception)} also produces HTTP 500, with the separate message
+     * {@value #INTERNAL_SERVER_ERROR}.
      *
      * @param ex the raised exception; its {@link Throwable#getMessage()} becomes the response body
      * @return HTTP 500 carrying {@code {"error": <ex.getMessage()>}}
@@ -181,10 +223,10 @@ public class GlobalExceptionHandler {
     /**
      * Reports a request body that failed Bean Validation with HTTP 400.
      *
-     * <p>Reached when a controller binds its body with {@code @Valid}. The tree declares exactly two
+     * <p>Reached when a controller binds its body with {@code @Valid}. The tree declares two
      * {@code @NotNull} constraints, corresponding to the inline guards at
      * {@code backend/app/api/responses.py:L40-41} and {@code backend/app/api/settings.py:L17-18}. The
-     * name of the first rejected field selects the message from a closed two-entry map:
+     * name of the first rejected field selects the message:
      *
      * <ul>
      *   <li>{@code tweetId} or {@code tweet_id} selects
@@ -194,12 +236,12 @@ public class GlobalExceptionHandler {
      *       {@code backend/app/api/settings.py:L18}</li>
      * </ul>
      *
-     * <p>Both messages are read from the constants declared on {@link BadRequestException} — the same
+     * <p>Both messages are read from the constants declared on {@link BadRequestException}, the same
      * constants {@link #handleBadRequest(BadRequestException)} passes through.
      *
      * <p>An unmapped field name yields that field error's own
-     * {@link FieldError#getDefaultMessage()}. A binding result carrying no field error at all yields
-     * {@code {"error": null}}; no message is synthesised in either case.
+     * {@link FieldError#getDefaultMessage()}, and a binding result carrying no field error yields
+     * {@code {"error": null}}.
      *
      * @param ex the raised exception, whose binding result supplies the rejected field names
      * @return HTTP 400 carrying the single-key error envelope
@@ -229,11 +271,101 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * Reports a request the framework rejected before a handler could read it with HTTP 400 and the
+     * message {@value #BAD_REQUEST}.
+     *
+     * <p>Covers a syntactically malformed or unreadable request body
+     * ({@link HttpMessageNotReadableException}), a missing or unbindable request value
+     * ({@link ServletRequestBindingException}, which is the supertype of the missing-parameter and
+     * missing-header failures), a missing multipart part
+     * ({@link MissingServletRequestPartException}) and a request value whose text the target type
+     * cannot hold ({@link TypeMismatchException}, which is the supertype of the path-variable and
+     * query-parameter conversion failures).
+     *
+     * <p>The eight per-route 400 literals are carried by {@link BadRequestException} and answered by
+     * {@link #handleBadRequest(BadRequestException)} — DL-092.
+     *
+     * @param ex the raised exception; neither its type nor its message reaches the response body
+     * @return HTTP 400 carrying {@code {"error": "Bad request"}}
+     */
+    // Net-new (no Python counterpart) — DL-092 — see docs/DECISION_LOG.md
+    @ExceptionHandler({HttpMessageNotReadableException.class, ServletRequestBindingException.class,
+            MissingServletRequestPartException.class, TypeMismatchException.class})
+    public ResponseEntity<ErrorResponse> handleClientRequestFailure(Exception ex) {
+        log.debug("Rejecting a malformed request with HTTP 400: {}", ex.getClass().getSimpleName());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(new ErrorResponse(BAD_REQUEST));
+    }
+
+    /**
+     * Reports a request whose method the matched path does not support with HTTP 405 and the message
+     * {@value #METHOD_NOT_ALLOWED}.
+     *
+     * <p>The response carries the {@code Allow} header listing the methods the path does support —
+     * see docs/DECISION_LOG.md DL-092.
+     *
+     * @param ex the raised exception, supplying the supported methods
+     * @return HTTP 405 carrying {@code {"error": "Method not allowed"}} and an {@code Allow} header
+     */
+    // Net-new (no Python counterpart) — DL-092 — see docs/DECISION_LOG.md
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    public ResponseEntity<ErrorResponse> handleMethodNotSupported(
+            HttpRequestMethodNotSupportedException ex) {
+
+        log.debug("Rejecting an unsupported method with HTTP 405");
+        Set<HttpMethod> supported = ex.getSupportedHttpMethods();
+        ResponseEntity.BodyBuilder response = ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED);
+        if (supported != null && !supported.isEmpty()) {
+            response.allow(supported.toArray(new HttpMethod[0]));
+        }
+        return response.body(new ErrorResponse(METHOD_NOT_ALLOWED));
+    }
+
+    /**
+     * Reports a request body whose media type no handler consumes with HTTP 415 and the message
+     * {@value #UNSUPPORTED_MEDIA_TYPE}.
+     *
+     * <p>See docs/DECISION_LOG.md DL-092.
+     *
+     * @param ex the raised exception; neither its type nor its message reaches the response body
+     * @return HTTP 415 carrying {@code {"error": "Unsupported media type"}}
+     */
+    // Net-new (no Python counterpart) — DL-092 — see docs/DECISION_LOG.md
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ResponseEntity<ErrorResponse> handleUnsupportedMediaType(
+            HttpMediaTypeNotSupportedException ex) {
+
+        log.debug("Rejecting an unsupported media type with HTTP 415");
+        return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
+                .body(new ErrorResponse(UNSUPPORTED_MEDIA_TYPE));
+    }
+
+    /**
+     * Reports a request whose {@code Accept} header no handler can satisfy with HTTP 406 and the
+     * message {@value #NOT_ACCEPTABLE}.
+     *
+     * <p>See docs/DECISION_LOG.md DL-092.
+     *
+     * @param ex the raised exception; neither its type nor its message reaches the response body
+     * @return HTTP 406 carrying {@code {"error": "Not acceptable"}}
+     */
+    // Net-new (no Python counterpart) — DL-092 — see docs/DECISION_LOG.md
+    @ExceptionHandler(HttpMediaTypeNotAcceptableException.class)
+    public ResponseEntity<ErrorResponse> handleNotAcceptable(HttpMediaTypeNotAcceptableException ex) {
+        log.debug("Rejecting a request whose Accept header cannot be satisfied with HTTP 406");
+        // The envelope is written as JSON irrespective of the unsatisfiable Accept header, so the
+        // response always carries a body - DL-092 - see docs/DECISION_LOG.md
+        return ResponseEntity.status(HttpStatus.NOT_ACCEPTABLE)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(new ErrorResponse(NOT_ACCEPTABLE));
+    }
+
+    /**
      * Reports any exception no other handler matches with HTTP 500 and the message
      * {@value #INTERNAL_SERVER_ERROR}.
      *
-     * <p>Reproduces {@code backend/app/main.py:L35-37}. The exception is written to the log at
-     * {@code ERROR} with its stack trace; neither its type nor its message reaches the response body.
+     * <p>Reproduces {@code backend/app/main.py:L35-37}. A client failure the framework raises is
+     * matched by an earlier handler — DL-092. The exception is written to the log at {@code ERROR}
+     * with its stack trace; neither its type nor its message reaches the response body.
      *
      * @param ex the raised exception, recorded in the log
      * @return HTTP 500 carrying {@code {"error": "Internal server error"}}

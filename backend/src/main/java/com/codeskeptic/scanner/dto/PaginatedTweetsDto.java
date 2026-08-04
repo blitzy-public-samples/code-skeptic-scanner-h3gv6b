@@ -6,16 +6,15 @@ import java.util.List;
 /**
  * Wire contract for the {@code 200 OK} body of {@code GET /tweets}.
  *
- * <p>A two-key envelope. The keys are {@code tweets} and {@code pagination}, in the declaration
- * order of the source dictionary ({@code backend/app/api/tweets.py:L19-20}). Keys are snake_case at
- * both levels. This type is outbound only and declares no validation constraint.
+ * <p>A two-key envelope: {@code tweets} and {@code pagination}, in the declaration order of the source
+ * dictionary ({@code backend/app/api/tweets.py:L19-20}). Keys are snake_case at both levels — DL-022.
  *
  * <p>The nested {@code pagination} object's keys are {@code page}, {@code per_page}, {@code total}
  * and {@code total_pages}, declared by {@link PaginationDto} — see docs/DECISION_LOG.md DL-038. Its
  * {@code page} value is 1-based, matching the {@code page} query parameter the route reads with a
  * default of 1 ({@code backend/app/api/tweets.py:L12}); the {@code per_page} parameter defaults to 10
- * ({@code backend/app/api/tweets.py:L13}). The 1-based-to-0-based conversion against Spring Data is
- * performed by {@code service/TwitterService}, not by this record.
+ * ({@code backend/app/api/tweets.py:L13}). {@code service/TwitterService} performs the
+ * 1-based-to-0-based conversion against Spring Data.
  *
  * <p>Page 1 of 10 per page over 25 rows serialises as:
  *
@@ -26,9 +25,8 @@ import java.util.List;
  *  "pagination":{"page":1,"per_page":10,"total":25,"total_pages":3}}
  * }</pre>
  *
- * <p>An empty page serialises {@code tweets} as an empty array, never {@code null}:
- * {@code {"tweets":[],"pagination":{"page":1,"per_page":10,"total":0,"total_pages":0}}}. The list is
- * supplied by {@code service/TwitterService}.
+ * <p>An empty page serialises {@code tweets} as an empty array:
+ * {@code {"tweets":[],"pagination":{"page":1,"per_page":10,"total":0,"total_pages":0}}}.
  *
  * @param tweets the page of mapped posts, one {@link TweetDto} per row, in the order the query
  *     returned them ({@code backend/app/api/tweets.py:L19})

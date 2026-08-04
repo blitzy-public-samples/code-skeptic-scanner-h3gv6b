@@ -44,16 +44,16 @@ import jakarta.annotation.PreDestroy;
  * DL-010, DL-036, DL-037 and DL-052; construct-level provenance is recorded in
  * {@code docs/TRACEABILITY_MATRIX.md}.
  *
- * <p>This is a singleton bean and every member declared here is safe for
- * concurrent use. Client acquisition, client use and client release are
- * coordinated by a read/write lock and a destroyed flag:
+ * <p>This class is thread-safe. It is a singleton bean, and client acquisition,
+ * client use and client release are coordinated by a read/write lock and a
+ * destroyed flag:
  *
  * <ul>
  *   <li>{@link #analyzeSentiment(String)} holds the read lock for the whole
- *       acquisition-and-call sequence, so the client it obtains cannot be closed
- *       while the call is in flight.</li>
- *   <li>{@link #closeLanguageClient()} takes the write lock, so it waits for
- *       every in-flight call to return, for at most
+ *       acquisition-and-call sequence. The client it obtains is not closed while
+ *       the call is in flight.</li>
+ *   <li>{@link #closeLanguageClient()} takes the write lock. It waits for every
+ *       in-flight call to return, for at most
  *       {@value #AWAIT_ACTIVE_USE_SECONDS} seconds, before releasing the
  *       client.</li>
  *   <li>Once the bean is destroyed, {@link #languageClient()} and
@@ -132,7 +132,7 @@ public class SentimentAnalysisService {
      * logged at {@code ERROR} and rethrown unchanged like any other.
      *
      * <p>The read lock of {@link #lifecycleLock} is held for the whole
-     * acquisition-and-call sequence, so the client cannot be released mid-call.
+     * acquisition-and-call sequence. The client is not released mid-call.
      *
      * @param text the tweet text to analyse; must not be {@code null}
      * @return the document sentiment score, conventionally between {@code -1.0}
@@ -221,7 +221,7 @@ public class SentimentAnalysisService {
      * The client carries the bounded {@code AnalyzeSentiment} call settings built
      * by {@link #languageServiceSettings()}.
      *
-     * <p>Declared neither {@code private} nor {@code final}, so a subclass can supply the client.
+     * <p>Declared neither {@code private} nor {@code final}. A subclass can supply the client.
      *
      * @return the Natural Language client, never {@code null}
      * @throws IllegalStateException if the bean has been destroyed, or if the
@@ -298,7 +298,7 @@ public class SentimentAnalysisService {
      * Marks the bean destroyed and releases the Natural Language client, and only
      * if {@link #languageClient()} ever created one.
      *
-     * <p>The write lock of {@link #lifecycleLock} is acquired first, so the method
+     * <p>The write lock of {@link #lifecycleLock} is acquired first. The method
      * waits up to {@value #AWAIT_ACTIVE_USE_SECONDS} seconds for in-flight calls
      * to return; if the wait elapses the client is released anyway and the wait is
      * reported at {@code WARN}. A failure to close is logged at {@code WARN} and
@@ -333,7 +333,7 @@ public class SentimentAnalysisService {
      * Sets the destroyed flag and closes the client if one was created.
      *
      * <p>The flag and the field are read and written together inside a
-     * {@code synchronized (this)} block, so a concurrent {@link #languageClient()}
+     * {@code synchronized (this)} block. A concurrent {@link #languageClient()}
      * either creates the client before the flag is set or observes the flag and
      * creates nothing.
      */

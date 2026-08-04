@@ -14,8 +14,8 @@ import org.springframework.web.reactive.function.client.WebClient;
  * <p>This class supplies transport only. It carries no {@code Authorization} header: a consumer sets
  * that header per request from the app-only bearer token it holds at runtime.
  *
- * <p>No response timeout, no read timeout and no reduced codec buffer limit are configured, so the
- * framework defaults apply: the response is unbounded and the connect phase is bounded.
+ * <p>No response timeout, no read timeout and no codec buffer limit are configured, so the framework
+ * defaults apply.
  */
 // Replaces the tweepy.Stream construction at backend/app/tasks/tweet_monitoring.py:L45-51. The
 // transport itself is net-new: the source targeted the retired v1.1 statuses/filter API over the
@@ -31,7 +31,7 @@ public class WebClientConfig {
      * for the OAuth 2 client-credentials exchange, {@code /2/tweets/search/stream} for the filtered
      * stream, and {@code /2/tweets/search/stream/rules} for stream rule registration.
      */
-    private static final String X_API_BASE_URL = "https://api.twitter.com";
+    private static final String X_API_BASE_URL = "https://api.x.com";
 
     private static final String USER_AGENT = "code-skeptic-scanner-backend";
 

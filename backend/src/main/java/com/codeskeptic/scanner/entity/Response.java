@@ -6,6 +6,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
+import jakarta.persistence.FetchType;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 import java.time.LocalDateTime;
@@ -21,16 +22,17 @@ import java.time.LocalDateTime;
  * docs/DECISION_LOG.md DL-026.
  *
  * <p>{@code id} is a generated surrogate key and shares the type of {@link Tweet#getId()} — see
- * docs/DECISION_LOG.md DL-025 and DL-049. The X post identifier is not carried in it and no
- * natural-key column is declared, so ingestion performs no de-duplication — see
- * docs/DECISION_LOG.md DL-049. {@code id} and {@code tweet_id} are both carried as {@link String} at
- * the wire boundary — see docs/DECISION_LOG.md DL-023.
+ * docs/DECISION_LOG.md DL-025 and DL-049. {@code id} and {@code tweet_id} are both carried as
+ * {@link String} at the wire boundary — see docs/DECISION_LOG.md DL-023.
  *
- * <p>{@code is_approved} carries the approval flag for a human reviewer to read. It is never a
- * trigger: no code path in this application writes to X.
+ * <p>{@code is_approved} carries the approval flag a human reviewer reads
+ * ({@code backend/app/db/models.py:L26}).
  *
- * <p>The five columns reproduce the unconstrained source declarations exactly: none adds a not-null
- * marker, a duplicate-value restriction or a width bound.
+ * <p>The five columns reproduce the unconstrained source declarations: none adds a not-null marker, a
+ * duplicate-value restriction or a width bound. {@code content} declares
+ * {@code length = Integer.MAX_VALUE}, which renders the vendor's unbounded character type and
+ * reproduces the unbounded {@code Column(String)} of backend/app/db/models.py:L24 — see
+ * docs/DECISION_LOG.md DL-068.
  */
 // Ported from backend/app/db/models.py:L20-28 (faithful port) — see docs/DECISION_LOG.md
 // Deviations from the literal source declaration, each recorded in the decision log: the type keeps
@@ -51,7 +53,8 @@ public class Response {
     private Long id;
 
     // backend/app/db/models.py:L24
-    @Column(name = "content")
+    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
+    @Column(name = "content", length = Integer.MAX_VALUE)
     private String content;
 
     // backend/app/db/models.py:L25
@@ -65,7 +68,9 @@ public class Response {
 
     // Ported from backend/app/db/models.py:L27-28 (faithful port) — see docs/DECISION_LOG.md
     // This side owns the foreign key declared as ForeignKey('tweets.id').
-    @ManyToOne
+    // SQLAlchemy relationship() loads this side lazily; the page read overrides it with an entity
+    // graph — DL-144, DL-166 — see docs/DECISION_LOG.md
+    @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "tweet_id")
     private Tweet tweet;
 
@@ -124,9 +129,8 @@ public class Response {
      * <p>Yields {@code true} for the same reference, and for any instance of this type — a
      * persistence-provider proxy included — whose identifier is non-{@code null} and equal to this
      * identifier. Yields {@code false} whenever either identifier is {@code null} and the two
-     * references differ; two instances that have not yet been persisted never compare equal. The
-     * identifier is read through {@link #getId()} on both sides. The {@code tweet} association is not
-     * read, so the comparison triggers no lazy load.
+     * references differ. The identifier is read through {@link #getId()} on both sides and the
+     * {@code tweet} association is not read.
      *
      * @param other the object to compare with
      * @return {@code true} when both instances denote the same {@code responses} row
@@ -147,8 +151,8 @@ public class Response {
     // docs/DECISION_LOG.md
     /**
      * Returns a hash code derived from the entity type. The value is identical for every instance of
-     * this type and for every proxy of it, and is unchanged by assignment of the identifier on
-     * insert. The {@code tweet} association is not read, so the computation triggers no lazy load.
+     * this type and for every proxy of it, and is unchanged by assignment of the identifier on insert.
+     * The {@code tweet} association is not read.
      *
      * @return the hash code of this entity's type
      */

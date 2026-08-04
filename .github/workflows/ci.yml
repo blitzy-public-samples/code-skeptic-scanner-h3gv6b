@@ -6,12 +6,21 @@ on:
   pull_request:
     branches: [ main ]
 
+# Least-privilege default for every job in this workflow - see
+# backend/docs/DECISION_LOG.md DL-104
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v2
+    # Pinned action revision; frontend Node input remains frozen - see
+    # backend/docs/DECISION_LOG.md DL-103, DL-135
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
 
     # Replaces the retired Python 3.9 toolchain step - see backend/docs/DECISION_LOG.md DL-004,
     # DL-005
@@ -22,11 +31,11 @@ jobs:
         java-version: '21'
         cache: maven
 
+    # Pinned by full commit SHA - see backend/docs/DECISION_LOG.md DL-103
     - name: Set up Node.js
-      uses: actions/setup-node@v2
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
-        # Restored from '14' - see backend/docs/DECISION_LOG.md DL-074
-        node-version: '22.23.2'
+        node-version: '14'
 
     - name: Install frontend dependencies
       working-directory: ./frontend

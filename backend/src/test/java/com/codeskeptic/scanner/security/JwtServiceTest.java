@@ -19,12 +19,14 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
 
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
+import io.jsonwebtoken.security.WeakKeyException;
 
 // Ported from backend/app/core/security.py:L6-12 (faithful port) — see docs/DECISION_LOG.md DL-014,
 // DL-015, DL-016, DL-017, DL-018
@@ -69,6 +71,12 @@ class JwtServiceTest {
      * enforces for HS256.
      */
     private static final String SECRET = "jwt-service-test-signing-secret-0123456789abcdef";
+
+    /**
+     * Exactly 32 bytes of text whose characters appear in no failure message this class asserts on,
+     * so a prefix of it can be used both as a rejected short secret and as the shortest accepted one.
+     */
+    private static final String SHORT_SECRET_ALPHABET = "Zq7Wx2Vy9Uz4Tb6Sc8Rd0Qg1Pf3Oh5NM";
 
     /** A second 56-byte value, never bound to {@code scanner.jwt.secret}. */
     private static final String FOREIGN_SECRET =
@@ -278,6 +286,120 @@ class JwtServiceTest {
         assertThatThrownBy(() -> new JwtService(properties))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("scanner.jwt.secret");
+    }
+
+    @ParameterizedTest(name = "a secret still holding {0} is rejected at construction")
+    @ValueSource(strings = {
+            "${SECRET_KEY}",
+            "  ${SECRET_KEY}  ",
+            "${scanner.jwt.secret}",
+            "${JWT_SECRET:}",
+            "${SECRET_KEY:${JWT_SECRET}}",
+            "${}",
+            "${A_VERY_LONG_UNRESOLVED_ENVIRONMENT_VARIABLE_NAME_WELL_OVER_THIRTY_TWO_BYTES}",
+    })
+    @DisplayName("rejects a secret that is still an unresolved property placeholder")
+    void rejectsASecretThatIsStillAnUnresolvedPropertyPlaceholder(String unresolved) {
+        // Configuration binding leaves the placeholder in place as literal text when the environment
+        // variable is absent — DL-185, DL-186 — see docs/DECISION_LOG.md
+        ScannerProperties properties =
+                propertiesWith(new ScannerProperties.Jwt(unresolved, HS256, EXPIRATION_MINUTES));
+
+        assertThatThrownBy(() -> new JwtService(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("scanner.jwt.secret")
+                .hasMessageContaining("SECRET_KEY")
+                .hasMessageContaining("no default value");
+    }
+
+    @ParameterizedTest(name = "an unresolved placeholder of {0} is rejected at construction")
+    @ValueSource(strings = {"${SECRET_KEY}", "${SECRET_KEY:${JWT_SECRET}}", "${}"})
+    @DisplayName("rejects an unresolved secret placeholder and names the key and its variable")
+    void rejectsAnUnresolvedSecretPlaceholderAtConstruction(String unresolvedPlaceholder) {
+        // Configuration binding leaves the placeholder in place as literal text when the environment
+        // variable is absent — DL-186 — see docs/DECISION_LOG.md
+        ScannerProperties properties = propertiesWith(
+                new ScannerProperties.Jwt(unresolvedPlaceholder, HS256, EXPIRATION_MINUTES));
+
+        assertThatThrownBy(() -> new JwtService(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("scanner.jwt.secret is not configured; supply it through the SECRET_KEY "
+                        + "environment variable. It has no default value.");
+    }
+
+    @ParameterizedTest(name = "a secret of {0} byte(s) is rejected at construction")
+    @ValueSource(ints = {1, 13, 16, 31})
+    @DisplayName("rejects a secret shorter than 32 bytes and names the key, its variable and the shortfall")
+    void rejectsASecretShorterThanThirtyTwoBytes(int secretBytes) {
+        String shortSecret = SHORT_SECRET_ALPHABET.substring(0, secretBytes);
+        ScannerProperties properties = propertiesWith(
+                new ScannerProperties.Jwt(shortSecret, HS256, EXPIRATION_MINUTES));
+
+        assertThatThrownBy(() -> new JwtService(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("scanner.jwt.secret")
+                .hasMessageContaining("SECRET_KEY")
+                .hasMessageContaining(secretBytes * 8 + " bits")
+                .hasMessageContaining("256")
+                .hasMessageNotContaining(shortSecret);
+    }
+
+    @Test
+    @DisplayName("accepts a secret of exactly 32 bytes at construction")
+    void acceptsASecretOfExactlyThirtyTwoBytes() {
+        JwtService service = serviceWith(SHORT_SECRET_ALPHABET, HS256, EXPIRATION_MINUTES);
+
+        assertThat(SHORT_SECRET_ALPHABET.getBytes(StandardCharsets.UTF_8)).hasSize(32);
+        assertThat(service.extractUsername(service.generateToken(USERNAME))).contains(USERNAME);
+    }
+
+    @Test
+    @DisplayName("rejects a secret whose 31 characters encode to 32 bytes only after multi-byte expansion")
+    void acceptsAMultiByteSecretMeasuredInBytesRatherThanCharacters() {
+        // The floor is measured over the UTF-8 encoding: 31 characters, one of them two bytes wide.
+        String multiByteSecret = SHORT_SECRET_ALPHABET.substring(0, 30) + "\u00e9";
+
+        assertThat(multiByteSecret).hasSize(31);
+        assertThat(multiByteSecret.getBytes(StandardCharsets.UTF_8)).hasSize(32);
+        assertThatCode(() -> serviceWith(multiByteSecret, HS256, EXPIRATION_MINUTES))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("reports an unresolved placeholder without echoing the configured value")
+    void reportsAnUnresolvedPlaceholderWithoutEchoingTheConfiguredValue() {
+        String unresolved = "${A_DISTINCTIVE_UNRESOLVED_PLACEHOLDER_NAME}";
+        ScannerProperties properties =
+                propertiesWith(new ScannerProperties.Jwt(unresolved, HS256, EXPIRATION_MINUTES));
+
+        assertThatThrownBy(() -> new JwtService(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageNotContaining("A_DISTINCTIVE_UNRESOLVED_PLACEHOLDER_NAME");
+    }
+
+    @Test
+    @DisplayName("reports an unresolved placeholder rather than letting the key length decide")
+    void reportsAnUnresolvedPlaceholderRatherThanLettingTheKeyLengthDecide() {
+        ScannerProperties properties = propertiesWith(
+                new ScannerProperties.Jwt("${SECRET_KEY}", HS256, EXPIRATION_MINUTES));
+
+        assertThatThrownBy(() -> new JwtService(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .isNotInstanceOf(WeakKeyException.class)
+                .hasMessageContaining("is not configured");
+    }
+
+    @ParameterizedTest(name = "a secret of {0} is accepted at construction")
+    @ValueSource(strings = {
+            "${not-closed-so-not-a-placeholder-and-long-enough-for-hs256",
+            "not-opened-so-not-a-placeholder-and-long-enough-for-hs256}",
+            "a-secret-that-merely-contains-${EMBEDDED}-text-and-is-long-enough",
+    })
+    @DisplayName("accepts a secret that only resembles a placeholder in part")
+    void acceptsASecretThatOnlyResemblesAPlaceholderInPart(String secret) {
+        JwtService service = serviceWith(secret, HS256, EXPIRATION_MINUTES);
+
+        assertThat(headerAlgorithmOf(service.generateToken(USERNAME))).isEqualTo(HS256);
     }
 
     @ParameterizedTest(name = "an algorithm of {0} is rejected at construction")

@@ -31,7 +31,10 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Behaviour contract, applied in this order:
  * <ol>
- *   <li>A {@code null}, empty or whitespace-only value raises {@link IllegalStateException}.</li>
+ *   <li>A {@code null}, empty or whitespace-only value raises {@link IllegalStateException}. So does
+ *       an unresolved {@code ${DATABASE_URL}} placeholder, which is the literal text configuration
+ *       binding leaves in place when the environment variable is absent — DL-186 — see
+ *       docs/DECISION_LOG.md.</li>
  *   <li>A value beginning with the literal lower-case {@code jdbc:} is returned exactly as
  *       supplied, character for character, with a {@code null} username and a {@code null}
  *       password. It is not parsed, normalised, trimmed or stripped, and its scheme is matched
@@ -63,6 +66,13 @@ import org.slf4j.LoggerFactory;
  * docs/DECISION_LOG.md. The set matches the runtime-scope JDBC drivers declared in
  * backend/pom.xml: {@code org.postgresql:postgresql}, {@code com.mysql:mysql-connector-j} and
  * {@code com.h2database:h2}.
+ *
+ * <p>Server products this service is verified against: PostgreSQL 16, MySQL 8.4 and H2 2.3. The
+ * {@code mariadb} scheme translates and connects, but a MariaDB server is not a supported server
+ * product: Connector/J reads server metadata through a MySQL 8.0.11+ catalogue a MariaDB server does
+ * not publish, and startup then fails with {@code Unable to determine Dialect without JDBC
+ * metadata}. Translation raises a warning naming that limitation whenever the scheme is declared —
+ * DL-187 — see docs/DECISION_LOG.md.
  *
  * <p>Examples, in which {@code USERNAME} and {@code PASSWORD} stand for the configured credentials:
  * <pre>{@code
@@ -122,6 +132,28 @@ public final class DatabaseUrlTranslator {
     private static final String SUPPORTED_SCHEMES = String.join(", ", VENDOR_BY_SCHEME.keySet());
 
     /**
+     * Schemes that translate to a driver published for a different server product. Each is accepted
+     * and translated, and each raises a warning naming the limitation — DL-187 — see
+     * docs/DECISION_LOG.md.
+     */
+    private static final Set<String> BEST_EFFORT_SCHEMES = Set.of("mariadb");
+
+    /**
+     * Warning text raised for a {@link #BEST_EFFORT_SCHEMES} scheme. It names the driver that will
+     * serve the connection, the failure the server product it is not published for produces, and the
+     * two server products this service is verified against — DL-187 — see docs/DECISION_LOG.md.
+     */
+    private static final String BEST_EFFORT_SCHEME_WARNING =
+            "DATABASE_URL declares the scheme '{}', which is served by the bundled MySQL "
+                    + "Connector/J driver because no MariaDB driver ships with this service. "
+                    + "Connector/J reads server metadata through a MySQL 8.0.11+ catalogue that a "
+                    + "MariaDB server does not publish, so a MariaDB server reports "
+                    + "'Could not obtain connection metadata' and then fails startup with 'Unable to "
+                    + "determine Dialect without JDBC metadata'. Point DATABASE_URL at a MySQL "
+                    + "8.0.11+ server or at a PostgreSQL server; MariaDB is not a supported server "
+                    + "product. See backend/docs/DECISION_LOG.md DL-187.";
+
+    /**
      * The JDBC property names treated as credential material wherever they appear in a URL. Matched
      * case-insensitively against the text before a property's {@code '='} — DL-072 — see
      * docs/DECISION_LOG.md.
@@ -134,6 +166,14 @@ public final class DatabaseUrlTranslator {
 
     /** Separates properties inside the query component of a parsed, non-JDBC URL. */
     private static final String QUERY_PROPERTY_SEPARATOR = "&";
+
+    /**
+     * Shape of a Spring property placeholder that resolved to nothing. Configuration binding leaves
+     * such a placeholder in place as literal text when the environment variable behind it is absent,
+     * so the bound value is neither {@code null} nor blank — DL-186 — see docs/DECISION_LOG.md.
+     */
+    private static final Pattern UNRESOLVED_PLACEHOLDER =
+            Pattern.compile("^\\$\\{.*}$", Pattern.DOTALL);
 
     /**
      * A supported JDBC vendor and the exact URL prefix its driver requires ahead of the authority.
@@ -224,7 +264,8 @@ public final class DatabaseUrlTranslator {
      * @param databaseUrl the configured {@code DATABASE_URL} value, consumed exactly as supplied; a
      *                    value beginning with the literal {@code jdbc:} is returned unchanged
      * @return the translated JDBC URL and the credentials taken from the value, never {@code null}
-     * @throws IllegalStateException if the value is {@code null}, empty or whitespace-only; if it
+     * @throws IllegalStateException if the value is {@code null}, empty, whitespace-only or an
+     *                               unresolved {@code ${DATABASE_URL}} placeholder; if it
      *                               cannot be parsed as a URL, which includes a value padded with
      *                               leading or trailing whitespace; if it declares no scheme or no
      *                               host; if its port is not an integer in
@@ -233,7 +274,9 @@ public final class DatabaseUrlTranslator {
      *                               assembled JDBC URL
      */
     public static TranslatedDatabaseUrl translate(String databaseUrl) {
-        if (databaseUrl == null || databaseUrl.isBlank()) {
+        if (databaseUrl == null
+                || databaseUrl.isBlank()
+                || UNRESOLVED_PLACEHOLDER.matcher(databaseUrl).matches()) {
             LOG.error("DATABASE_URL is not set; there is no database URL to translate.");
             throw new IllegalStateException("DATABASE_URL must be set: no database URL was supplied.");
         }
@@ -437,6 +480,10 @@ public final class DatabaseUrlTranslator {
                     scheme, SUPPORTED_SCHEMES);
             throw new IllegalStateException("DATABASE_URL declares the unsupported scheme '" + scheme
                     + "': supported schemes are " + SUPPORTED_SCHEMES + ".");
+        }
+
+        if (BEST_EFFORT_SCHEMES.contains(scheme)) {
+            LOG.warn(BEST_EFFORT_SCHEME_WARNING, scheme);
         }
         return vendor;
     }

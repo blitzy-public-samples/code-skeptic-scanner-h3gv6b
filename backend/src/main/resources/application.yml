@@ -77,11 +77,14 @@ scanner:
     max-retries: ${OPENAI_MAX_RETRIES:2}
 
   jwt:
-    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-016, DL-141 — see docs/DECISION_LOG.md
-    # Minimum length: 32 bytes for HS256, 48 for HS384, 64 for HS512. Startup fails below it.
+    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-016, DL-141, DL-184, DL-185 — see docs/DECISION_LOG.md
+    # Minimum length: 32 bytes, the floor HS256 requires. Startup fails below it.
+    # Declared with no default: SECRET_KEY must be supplied. Startup fails when it is unset, blank or
+    # still the unresolved text ${SECRET_KEY}.
     secret: ${SECRET_KEY}
-    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-015, DL-141 — see docs/DECISION_LOG.md
-    # Accepted values: HS256, HS384, HS512. The value signs every token and is the only one accepted.
+    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-015, DL-141, DL-184 — see docs/DECISION_LOG.md
+    # Accepted value: HS256, in any letter case. It is the only algorithm this service signs or verifies
+    # with, and any other value — HS384, HS512, RS256, none — refuses to start. Blank keeps HS256.
     algorithm: ${ALGORITHM:HS256}
     # Ported from backend/app/core/security.py:L9-10 (faithful port) — DL-017, DL-142 — see docs/DECISION_LOG.md
     # Accepted range: 1 to 60 minutes inclusive. Startup fails outside it.

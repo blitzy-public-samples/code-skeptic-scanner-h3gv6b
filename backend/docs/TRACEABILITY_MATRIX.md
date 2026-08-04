@@ -37,7 +37,7 @@ All twenty files under `backend/app/**` and `backend/tests/**` were deleted in c
 
 | # | Source file | Java target(s) | Status |
 |---|-------------|----------------|--------|
-| 1 | `backend/app/main.py` | `ScannerApplication` (composition root, replacing the `create_app()` factory and the duplicate module-level `Flask` object at `:L13`), `config/CorsConfig` (`CORS(app)` at `:L20`), `security/SecurityConfig` (`JWTManager(app)` at `:L22`), `api/GlobalExceptionHandler` (the 404 and 500 handlers at `:L31-37`), `config/AsyncSchedulingConfig` (`@EnableScheduling`, replacing `initialize_background_tasks()` at `:L41-48`) | Delivered |
+| 1 | `backend/app/main.py` | `ScannerApplication` (composition root, replacing the `create_app()` factory and the duplicate module-level `Flask` object at `:L13`), `config/CorsConfig` (`CORS(app)` at `:L20`), `security/SecurityConfig` (`JWTManager(app)` at `:L22`), `api/GlobalExceptionHandler` (the 404 and 500 handlers at `:L31-37`), `api/ErrorDispatchController` (the same two envelopes on the servlet `ERROR` dispatch, which no `@RestControllerAdvice` can reach — DL-183), `config/AsyncSchedulingConfig` (`@EnableScheduling`, replacing `initialize_background_tasks()` at `:L41-48`) | Delivered |
 | 2 | `backend/app/core/config.py` | `config/ScannerProperties` plus `src/main/resources/application.yml`. The per-call `get_settings()` factory at `:L17-18` becomes one injected singleton (DL-031); the `.env` convention at `:L13-15` becomes environment-variable binding | Delivered |
 | 3 | `backend/app/core/security.py` | `security/JwtService` (`create_access_token` at `:L6-12` → jjwt HS256, DL-014/DL-017/DL-018) and the `BCryptPasswordEncoder` bean in `security/SecurityConfig` (the passlib context at `:L14-18`, DL-020). The unused `decode` import at `:L1` is retired | Delivered |
 | 4 | `backend/app/db/database.py` | `config/DataSourceConfig` (replacing the per-call `create_engine`/`sessionmaker` at `:L5-13`) plus `repository/TweetRepository`, `repository/ResponseRepository`, `repository/AiToolRepository`, `repository/SettingRepository` | Delivered |
@@ -136,8 +136,8 @@ read without any declaration existing — the drift set closed by AAP G6. Every 
 | 5 | `DATABASE_URL` | Yes | `core/config.py:L9` | `scanner.database-url` — deliberately not `spring.datasource.url`, because a SQLAlchemy URL is not a JDBC URL (DL-027) | none; required | Delivered |
 | 6 | `TWEET_POPULARITY_THRESHOLD` | Yes | `core/config.py:L10` | `scanner.popularity-threshold` | `100` | Delivered |
 | 7 | `RESPONSE_GENERATION_DELAY` | Yes | `core/config.py:L11` | `scanner.response-generation-delay-seconds` | `60` | Delivered |
-| 8 | `SECRET_KEY` | **No — drift** | read by `core/security.py:L11` | `scanner.jwt.secret` | none; fail fast (DL-016) | Delivered |
-| 9 | `ALGORITHM` | **No — drift** | read by `core/security.py:L11` | `scanner.jwt.algorithm` | `HS256` (DL-015) | Delivered |
+| 8 | `SECRET_KEY` | **No — drift** | read by `core/security.py:L11` | `scanner.jwt.secret` | none; fail fast for unset, blank and unresolved-placeholder alike (DL-016, DL-185) | Delivered |
+| 9 | `ALGORITHM` | **No — drift** | read by `core/security.py:L11` | `scanner.jwt.algorithm` | `HS256`, the only accepted value; the in-file comment states so (DL-015, DL-184) | Delivered |
 | 10 | `NOTION_DATABASE_ID` | **No — drift** | read by `services/notion_service.py:L25` | `scanner.notion.database-id` | empty | Delivered |
 | 11 | `TWITTER_API_SECRET_KEY` | **No — drift** | read by `services/twitter_service.py:L12` | `scanner.twitter.api-secret-key`, nested-default alias onto `TWITTER_API_SECRET` (DL-031) | falls through to `TWITTER_API_SECRET` | Delivered |
 | 12 | `TWITTER_CONSUMER_KEY` | **No — drift** | read by `tasks/tweet_monitoring.py:L46` | `scanner.twitter.consumer-key`, alias onto `TWITTER_API_KEY` (DL-031) | falls through to `TWITTER_API_KEY` | Delivered |
@@ -272,10 +272,11 @@ as their replacement; nine are delivered.
 | `backend/tests/test_services.py` | Wrong package root at `:L3-6` (`from services.…`); two `pass` stubs at `:L12-22`; tests for `create_page`, `update_page` and `generate_text` at `:L28-38,L44-48`, none of which exist; asserts sentiment analysis returns `'positive'`/`'negative'`/`'neutral'` at `:L58-65` where the implementation returns a float | Delivered: `service/SentimentAnalysisServiceTest` (52 cases), `service/NotionServiceTest` (85), `service/LlmServiceTest` (70), `service/SettingsServiceTest` (63), `service/SettingsServiceSeedingIntegrationTest` (9). PLANNED: `service/TwitterServiceTest`, `service/ResponseServiceTest`, `service/AnalyticsServiceTest` | Partly delivered |
 | `backend/tests/test_tasks.py` | `from backend.tasks import monitor_tweets, generate_response` at `:L3` — neither the module path nor either symbol exists | PLANNED: `task/ResponseGenerationSchedulerTest`, `task/TweetStreamListenerTest` | PLANNED |
 
-Four delivered test classes descend from none of the three retired test files, because the Python suite
-tested none of what they cover. Two of the four have no source construct of any kind and are net-new:
-`config/DatabaseUrlTranslatorTest` (108 cases, DL-027/DL-064/DL-071/DL-072) and
-`service/SettingsServiceSeedingIntegrationTest` (9 cases, DL-040). The other two test production
+Five delivered test classes descend from none of the three retired test files, because the Python suite
+tested none of what they cover. Three of the five have no source construct of any kind and are net-new:
+`config/DatabaseUrlTranslatorTest` (108 cases, DL-027/DL-064/DL-071/DL-072),
+`service/SettingsServiceSeedingIntegrationTest` (9 cases, DL-040) and
+`api/ErrorDispatchControllerTest` (60 cases, DL-183). The other two test production
 constructs that do have a source origin, recorded in §2.7 rather than here:
 `security/JwtServiceTest` (57 cases) covers `core/security.py:L6-12`, and
 `repository/JpaMappingIntegrationTest` (30 cases) covers `db/models.py`.
@@ -303,7 +304,7 @@ signature; it is still net-new code, not a port.
 | `backend/pom.xml` | *No source construct — net-new* — DL-002/DL-003/DL-004 | No Python manifest ever existed; the absence is defect A4. Version overrides are DL-169, DL-170 and DL-171 |
 | `backend/.gitignore` | *No source construct — net-new* — DL-055 | `target/` only |
 | `backend/.dockerignore` | *No source construct — net-new* — DL-055 | `target/` only |
-| `backend/src/main/resources/application.yml` | `backend/app/core/config.py` (all seven declared keys) plus the eight keys read without declaration, plus the `.env` convention at `:L13-15` | Full key inventory in §1.5. `server.port` DL-029, web type DL-030, `ddl-auto` DL-026, reserved-word quoting DL-061 |
+| `backend/src/main/resources/application.yml` | `backend/app/core/config.py` (all seven declared keys) plus the eight keys read without declaration, plus the `.env` convention at `:L13-15` | Full key inventory in §1.5. `server.port` DL-029, web type DL-030, `ddl-auto` DL-026, reserved-word quoting DL-061, the `scanner.jwt` accepted-value and key-length comments DL-184 |
 | `backend/src/test/resources/application-test.yml` | *No source construct — net-new* — DL-009/DL-016/DL-026/DL-061 | No Python test configuration existed. H2 with `create-drop`, reserved-word quoting, and a test JWT secret so `mvn clean verify` needs no manual step |
 | `backend/docs/DECISION_LOG.md` | *No source construct — net-new* — required by Rule 1 | Eighty-four entries, `DL-001` … `DL-171` |
 | `backend/docs/TRACEABILITY_MATRIX.md` | *No source construct — net-new* — required by Rule 1 | This file |
@@ -321,7 +322,7 @@ signature; it is still net-new code, not a port.
 | `config/RestClientConfig.java` | `services/notion_service.py:L8` — `Client(auth=…)` | `RestClient` bean carrying the Notion base URL, version header and bearer token (DL-013) |
 | `config/AsyncSchedulingConfig.java` | `main.py:L41-48` and `tasks/response_generation.py:L8` — the blocking initialiser and the broker-less Celery application | `@EnableScheduling` plus a task scheduler; no broker and no queue (DL-047) |
 | `security/SecurityConfig.java` | `main.py:L22` (`JWTManager(app)`), `core/security.py:L14-18` (the passlib context) and the eleven bare `@jwt_required` sites | One `SecurityFilterChain`, a `BCryptPasswordEncoder` bean and a configuration-backed `InMemoryUserDetailsManager` (DL-020/DL-021) |
-| `security/JwtService.java` | `core/security.py:L6-12` — `create_access_token` | jjwt HS256, `exp = now + TTL`, `sub`-only claims (DL-014 … DL-018) |
+| `security/JwtService.java` | `core/security.py:L6-12` — `create_access_token` | jjwt HS256, `exp = now + TTL`, `sub`-only claims (DL-014 … DL-018); construction refuses an unset, blank or unresolved-placeholder secret (DL-185) |
 | `security/JwtAuthenticationFilter.java` | The `@jwt_required` decorator sites — a guard that enforced nothing | A `OncePerRequestFilter` that actually validates the bearer token (A1, DL-021) |
 
 ### 2.3 API and DTOs
@@ -331,6 +332,7 @@ signature; it is still net-new code, not a port.
 | `api/SettingController.java` | `api/settings.py:L7-24` — both routes | Paths, methods, status codes and all four wire literals preserved |
 | `api/AuthController.java` | *No source construct — net-new* — DL-019 | `POST /auth/token`, the only unauthenticated route; 401 handling is DL-078, the `sub` claim is DL-079 |
 | `api/GlobalExceptionHandler.java` | `main.py:L31-37` — `@app.errorhandler(404)` and `(500)` | `{"error": "Not found"}` and `{"error": "Internal server error"}` reproduced exactly; per-route literals routed through the three exception types (DL-065/DL-066) |
+| `api/ErrorDispatchController.java` | *No source construct — net-new* — DL-183. The behaviour it reproduces is `main.py:L31-37`: the retired tree registered no `/error` route, so a request for that path fell to `@app.errorhandler(404)` | Answers the servlet `ERROR` dispatch, which `sendError` puts beyond the reach of `api/GlobalExceptionHandler`. Withdraws Spring Boot's `BasicErrorController` by implementing the `ErrorController` marker; emits only the six literals the advice emits; copies no path, status, timestamp or exception detail into a body; restates the six Spring Security response headers the `ERROR` dispatch skips |
 | `dto/TweetDto.java` | `schema/tweet.py:L5-14` | Nine components, snake_case names, string identifier, arrays for the two delimited columns (DL-022/DL-023/DL-024) |
 | `dto/ResponseDto.java` | `schema/response.py:L4-9` | Five components; `id` and `tweet_id` serialise as strings; non-null `id` invariant (DL-167) |
 | `dto/SettingDto.java` | `db/models.py:L40-44` | `{key, value, description}` — the shape that carries all three columns (DL-039) |
@@ -364,6 +366,7 @@ signature; it is still net-new code, not a port.
 | `service/mapper/ResponseMapper.java` | *Net-new class, derived from* the `to_dict()` called at `api/responses.py:L18,L29,L47,L63` and never defined | Same, for `responses` (A7) |
 | `service/mapper/SettingMapper.java` | *Net-new class, derived from* the serialisation `api/settings.py:L11,L24` performed inline and never factored out | Entity to `SettingDto` (DL-039) |
 | `util/DelimitedStringListConverter.java` | *Net-new class, derived from* `db/models.py:L15,L18` against `schema/tweet.py:L11,L14` — single `String` columns the schema exposed as `List[str]` with no conversion anywhere | Comma-delimited, blank-safe, no schema change; the one authorized codec, reused by `service/NotionService` for the same two values (DL-024/DL-164) |
+| `util/LogSafe.java` | *No source construct — net-new* — DL-119. The retired tree carried no logging framework at all: `backend/app/**` holds no `logging`, `logger` or `getLogger` reference | Renders an identifier as `sha256:` plus the first eight digest bytes and a failure by simple type name, so the logging baseline (IR8, DL-052) emits fixed metadata without a vendor message, a stack or a value |
 
 ### 2.5 Exceptions
 
@@ -390,6 +393,7 @@ signature; it is still net-new code, not a port.
 | Target file | Source construct | Cases | Notes |
 |-------------|------------------|-------|-------|
 | `api/GlobalExceptionHandlerTest.java` | `main.py:L31-37` and `tests/test_api.py` | 30 | Both error envelopes byte-for-byte, plus every per-route literal |
+| `api/ErrorDispatchControllerTest.java` | *No source construct — net-new* — DL-183 | 60 | The whole status-to-message map by direct invocation, plus a `@WebMvcTest` slice asserting that `BasicErrorController` is withdrawn, that a direct request answers 404 `Not found`, that an `Accept: text/html` request receives JSON rather than the Whitelabel page, and that no dispatched path reaches a body |
 | `config/DatabaseUrlTranslatorTest.java` | *No source construct — net-new* — DL-027/DL-064/DL-071/DL-072 | 108 | 49 methods: translation, credential extraction and rejection, six look-alike properties, ports, schemes, redaction |
 | `repository/JpaMappingIntegrationTest.java` | `db/models.py` | 30 | `@DataJpaTest` over table names, column names, physical JDBC metadata, unbounded round trips and association ordering (DL-061/DL-068/DL-069) |
 | `security/JwtServiceTest.java` | `core/security.py:L6-12` | 57 | Mint/parse round trip, expiry offset, algorithm matrix and HMAC key-length boundary (DL-014 … DL-018) |

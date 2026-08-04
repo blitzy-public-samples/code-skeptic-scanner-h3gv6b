@@ -37,6 +37,11 @@ import com.codeskeptic.scanner.exception.ResponseGenerationException;
  * {@code backend/app/main.py:L31-33} and {@code @app.errorhandler(500)} at {@code :L35-37} — and
  * carried the other eight status/body pairs inline inside the eleven route functions.
  *
+ * <p>A failure answered by {@code HttpServletResponse.sendError(int)} unwinds the current dispatch
+ * before any exception can reach this advice, and the container re-dispatches the request to the error
+ * page. {@link ErrorDispatchController} answers that dispatch with the same literals declared below,
+ * so the two classes together are the whole of the service's error surface — DL-183.
+ *
  * <p>Every body produced here is an {@link ErrorResponse}: the single-key
  * {@code {"error": <string>}} envelope. The complete set of status and message pairs this class puts
  * on the wire is the following.
@@ -124,7 +129,9 @@ import com.codeskeptic.scanner.exception.ResponseGenerationException;
  * {@link #handleUnexpectedException(Exception)} receives what no earlier handler matches — DL-092.
  *
  * <p>Authentication and authorisation failures are answered by the security filter chain, which runs
- * ahead of the {@code DispatcherServlet}; no exception from them reaches this class.
+ * ahead of the {@code DispatcherServlet}; no exception from them reaches this class. A request the
+ * chain's firewall rejects is answered with {@code sendError} and therefore reaches
+ * {@link ErrorDispatchController} instead.
  *
  * <p>All state declared here is immutable. The single advice instance is safe to share across
  * concurrent requests.

@@ -1,6 +1,7 @@
 package com.codeskeptic.scanner.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.codeskeptic.scanner.config.DatabaseUrlTranslator.TranslatedDatabaseUrl;
@@ -93,6 +94,28 @@ class DatabaseUrlTranslatorTest {
     }
 
     @Test
+    @DisplayName("keeps the mariadb scheme inside the advertised supported set")
+    void keepsTheMariadbSchemeInsideTheAdvertisedSupportedSet() {
+        // The scheme is accepted and translated; a MariaDB server remains unsupported — DL-187 —
+        // see docs/DECISION_LOG.md
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("oracle://h/db"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("mariadb");
+
+        assertThatCode(() -> DatabaseUrlTranslator.translate("mariadb://127.0.0.1:3306/scanner"))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("strips a driver suffix from the mariadb scheme and still maps onto the mysql vendor")
+    void stripsADriverSuffixFromTheMariadbScheme() {
+        TranslatedDatabaseUrl translated =
+                DatabaseUrlTranslator.translate("mariadb+mariadbconnector://127.0.0.1:3306/scanner");
+
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:mysql://127.0.0.1:3306/scanner");
+    }
+
+    @Test
     @DisplayName("maps the h2 scheme onto the h2 jdbc vendor")
     void mapsTheH2SchemeOntoH2() {
         TranslatedDatabaseUrl translated = DatabaseUrlTranslator.translate("h2://localhost/scanner");
@@ -132,6 +155,34 @@ class DatabaseUrlTranslatorTest {
     void rejectsAWhitespaceOnlyValue() {
         assertThatThrownBy(() -> DatabaseUrlTranslator.translate("   "))
                 .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    @DisplayName("rejects an unresolved DATABASE_URL placeholder as an unset value")
+    void rejectsAnUnresolvedPlaceholder() {
+        // Configuration binding leaves the placeholder in place as literal text when the environment
+        // variable is absent — DL-186 — see docs/DECISION_LOG.md
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("${DATABASE_URL}"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("DATABASE_URL must be set: no database URL was supplied.");
+    }
+
+    @Test
+    @DisplayName("rejects an unresolved placeholder that carries a nested default")
+    void rejectsAnUnresolvedPlaceholderCarryingANestedDefault() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("${DATABASE_URL:${DB_URL}}"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("DATABASE_URL must be set: no database URL was supplied.");
+    }
+
+    @Test
+    @DisplayName("translates a value that merely contains a dollar-brace sequence")
+    void translatesAValueThatMerelyContainsADollarBraceSequence() {
+        TranslatedDatabaseUrl translated =
+                DatabaseUrlTranslator.translate("postgresql://db.internal:5432/codeskeptic$%7Bx%7D");
+
+        assertThat(translated.jdbcUrl())
+                .isEqualTo("jdbc:postgresql://db.internal:5432/codeskeptic$%7Bx%7D");
     }
 
     // -----------------------------------------------------------------------

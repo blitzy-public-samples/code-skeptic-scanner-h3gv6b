@@ -8,6 +8,7 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 import javax.crypto.SecretKey;
 
@@ -49,12 +50,15 @@ import io.jsonwebtoken.security.Keys;
  * {@code exp}, its {@code sub} is non-blank and its {@code exp} lies strictly after its
  * {@code iat} — DL-109.
  *
- * <p>Construction fails with {@link IllegalStateException} when {@code scanner.jwt.secret} is absent
- * or blank — DL-016 — when {@code scanner.jwt.algorithm} names anything other than
+ * <p>Construction fails with {@link IllegalStateException} when {@code scanner.jwt.secret} carries
+ * nothing — it is absent, blank, or still holds the unresolved {@code ${SECRET_KEY}} placeholder
+ * text an unset environment variable leaves behind — DL-016, DL-185, DL-186 — when it supplies
+ * fewer than the {@value #MINIMUM_SECRET_BYTES} bytes {@value #REQUIRED_ALGORITHM} requires —
+ * DL-141, DL-186 — when {@code scanner.jwt.algorithm} names anything other than
  * {@value #REQUIRED_ALGORITHM} — DL-108 — and when {@code scanner.jwt.expiration-minutes} lies
- * outside {@value #MINIMUM_EXPIRATION_MINUTES}..{@value #MAXIMUM_EXPIRATION_MINUTES} — DL-110. A
- * secret shorter than the 256 bits HS256 requires fails with
- * {@link io.jsonwebtoken.security.WeakKeyException} from {@link Keys#hmacShaKeyFor(byte[])}.
+ * outside {@value #MINIMUM_EXPIRATION_MINUTES}..{@value #MAXIMUM_EXPIRATION_MINUTES} — DL-110.
+ * Every one of those messages names the property at fault together with the environment variable
+ * that supplies it, and none reproduces the configured value — DL-111, DL-186.
  *
  * <p>No jjwt type appears in any signature here and no jjwt exception leaves this class: both
  * extraction methods answer {@link Optional#empty()} for every token they cannot accept. Neither the
@@ -89,6 +93,32 @@ public class JwtService {
     /** Multiplier applied by {@link #getExpirationSeconds()} to the configured lifetime in minutes. */
     private static final long SECONDS_PER_MINUTE = 60L;
 
+    /**
+     * Shortest accepted {@code scanner.jwt.secret}, in bytes of its UTF-8 encoding. HS256 requires a
+     * key of {@value #MINIMUM_SECRET_BYTES} bytes — DL-186.
+     */
+    private static final int MINIMUM_SECRET_BYTES = 32;
+
+    /** Bits per byte, applied when a rejected secret's length is reported in bits — DL-186. */
+    private static final int BITS_PER_BYTE = 8;
+
+    /**
+     * Shape of a Spring property placeholder that resolved to nothing. Configuration binding leaves
+     * such a placeholder in place as literal text when the environment variable behind it is absent,
+     * so the bound value is neither {@code null} nor blank — DL-186.
+     */
+    private static final Pattern UNRESOLVED_PLACEHOLDER =
+            Pattern.compile("^\\$\\{.*}$", Pattern.DOTALL);
+
+    /**
+     * Message of the {@link IllegalStateException} raised when {@code scanner.jwt.secret} carries
+     * nothing: it is absent, blank, or an unresolved {@code ${SECRET_KEY}} placeholder — DL-016,
+     * DL-186.
+     */
+    private static final String MISSING_SECRET_MESSAGE =
+            "scanner.jwt.secret is not configured; supply it through the SECRET_KEY environment "
+                    + "variable. It has no default value.";
+
     /** Names of the only claims a token this service accepts may carry — DL-109. */
     private static final Set<String> REQUIRED_CLAIM_NAMES = Set.of(
             Claims.SUBJECT, Claims.ISSUED_AT, Claims.EXPIRATION);
@@ -122,24 +152,21 @@ public class JwtService {
      * @param properties the bound configuration root; its {@code scanner.jwt} group supplies the
      *     secret, the algorithm name and the lifetime
      * @throws NullPointerException if {@code properties} is {@code null}
-     * @throws IllegalStateException if {@code scanner.jwt.secret} is absent or blank, if
-     *     {@code scanner.jwt.algorithm} names anything other than {@value #REQUIRED_ALGORITHM}, or
-     *     if {@code scanner.jwt.expiration-minutes} lies outside
+     * @throws IllegalStateException if {@code scanner.jwt.secret} is absent, blank or an unresolved
+     *     {@code ${SECRET_KEY}} placeholder, if it supplies fewer than
+     *     {@value #MINIMUM_SECRET_BYTES} bytes, if {@code scanner.jwt.algorithm} names anything
+     *     other than {@value #REQUIRED_ALGORITHM}, or if
+     *     {@code scanner.jwt.expiration-minutes} lies outside
      *     {@value #MINIMUM_EXPIRATION_MINUTES}..{@value #MAXIMUM_EXPIRATION_MINUTES}
-     * @throws io.jsonwebtoken.security.WeakKeyException if the secret is shorter than the 256 bits
-     *     HS256 requires
      */
     public JwtService(ScannerProperties properties) {
         Objects.requireNonNull(properties, "properties must not be null");
 
-        // A null jwt group and a null secret are both read here as an unsupplied secret.
+        // A null jwt group, a null secret, a blank secret and a secret still holding the unresolved
+        // placeholder text are all read here as an unsupplied secret — DL-185, DL-186.
         ScannerProperties.Jwt jwtProperties = properties.jwt();
-        String secret = (jwtProperties == null) ? null : jwtProperties.secret();
-        if (secret == null || secret.isBlank()) {
-            throw new IllegalStateException(
-                    "scanner.jwt.secret is not configured; supply it through the SECRET_KEY "
-                            + "environment variable. It has no default value.");
-        }
+        String secret = requireConfiguredSecret(
+                (jwtProperties == null) ? null : jwtProperties.secret());
 
         requireSupportedAlgorithm(jwtProperties.algorithm());
 
@@ -279,6 +306,62 @@ public class JwtService {
         }
 
         return Optional.of(claims);
+    }
+
+    /**
+     * Confirms that a configured secret carries key material HS256 can use.
+     *
+     * <p>Three values are read as an unsupplied secret and all three raise the same message:
+     * {@code null}, a blank value, and an unresolved {@code ${SECRET_KEY}} placeholder. The third
+     * arrives when the environment variable behind the placeholder is absent, because configuration
+     * binding leaves the placeholder in place as literal text rather than failing — DL-186.
+     *
+     * <p>A value present but shorter than {@value #MINIMUM_SECRET_BYTES} bytes is rejected before it
+     * reaches {@link Keys#hmacShaKeyFor(byte[])} — DL-141, DL-186. Neither failure message reproduces
+     * any part of the configured value — DL-111.
+     *
+     * @param configuredSecret value of {@code scanner.jwt.secret}, which may be {@code null}
+     * @return {@code configuredSecret}, guaranteed non-blank and at least
+     *     {@value #MINIMUM_SECRET_BYTES} bytes long in UTF-8
+     * @throws IllegalStateException if the value carries nothing or is shorter than
+     *     {@value #MINIMUM_SECRET_BYTES} bytes
+     */
+    private static String requireConfiguredSecret(String configuredSecret) {
+        if (configuredSecret == null
+                || configuredSecret.isBlank()
+                || isUnresolvedPlaceholder(configuredSecret)) {
+            throw new IllegalStateException(MISSING_SECRET_MESSAGE);
+        }
+
+        int suppliedBytes = configuredSecret.getBytes(StandardCharsets.UTF_8).length;
+        if (suppliedBytes < MINIMUM_SECRET_BYTES) {
+            throw new IllegalStateException(
+                    "scanner.jwt.secret supplies " + (suppliedBytes * BITS_PER_BYTE) + " bits, and "
+                            + REQUIRED_ALGORITHM + " requires "
+                            + (MINIMUM_SECRET_BYTES * BITS_PER_BYTE) + ". Set the SECRET_KEY "
+                            + "environment variable to a value of at least " + MINIMUM_SECRET_BYTES
+                            + " bytes. The configured value is not reproduced here.");
+        }
+        return configuredSecret;
+    }
+
+    /**
+     * Reports whether a configured value still holds the property placeholder that should have
+     * supplied it.
+     *
+     * <p>{@code scanner.jwt.secret} is declared as {@code ${SECRET_KEY}} with no default. The
+     * {@code @ConfigurationProperties} binder resolves placeholders through a resolver that leaves an
+     * unresolvable one in place rather than failing, so an unset {@code SECRET_KEY} binds the literal
+     * thirteen-character text {@code ${SECRET_KEY}} — a value that is neither {@code null} nor blank.
+     * Recognising that shape, ignoring surrounding whitespace, is what keeps the guard in
+     * {@link #requireConfiguredSecret(String)} reachable — DL-185, DL-186.
+     *
+     * @param value the bound value, never {@code null} when this is called
+     * @return {@code true} when the value, ignoring surrounding whitespace, opens with a dollar sign
+     *     followed by an opening brace and closes with a closing brace
+     */
+    private static boolean isUnresolvedPlaceholder(String value) {
+        return UNRESOLVED_PLACEHOLDER.matcher(value.trim()).matches();
     }
 
     /**

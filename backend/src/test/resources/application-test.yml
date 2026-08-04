@@ -1,0 +1,93 @@
+# ---------------------------------------------------------------------------
+# Test profile. Exists so that `mvn clean verify` is green from a clean
+# checkout with no manual step, no external service and no real credential.
+#
+# There was no Python test configuration of any kind, so this file is net-new.
+# ---------------------------------------------------------------------------
+---
+server:
+  # 0 = let the OS pick a free port, so a locally running instance on 5000 does
+  # not collide with the test context.
+  port: 0
+
+spring:
+  datasource:
+    url: jdbc:h2:mem:codeskeptic;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    open-in-view: false
+    properties:
+      hibernate:
+        # Still unpinned: H2 is auto-detected from connection metadata exactly
+        # as PostgreSQL and MySQL are in production.
+        # Same requirement as the main profile: `settings.key` and
+        # `settings.value` are reserved SQL keywords, so the schema
+        # cannot be created without this.
+        auto_quote_keyword: true
+        jdbc:
+          time_zone: UTC
+
+logging:
+  level:
+    root: WARN
+    com.codeskeptic.scanner: INFO
+
+scanner:
+  # Present so DataSourceConfig / DatabaseUrlTranslator have a valid value to
+  # bind even though the test profile supplies spring.datasource.* directly.
+  database-url: jdbc:h2:mem:codeskeptic;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+
+  popularity-threshold: 100
+  response-generation-delay-seconds: 60
+
+  twitter:
+    api-key: test-twitter-api-key
+    api-secret: test-twitter-api-secret
+    access-token: test-twitter-access-token
+    access-token-secret: test-twitter-access-token-secret
+    api-base-url: http://localhost:0
+    stream-url: http://localhost:0/2/tweets/search/stream
+    stream-rules-url: http://localhost:0/2/tweets/search/stream/rules
+    oauth2-token-url: http://localhost:0/oauth2/token
+    base-keywords:
+      - "AI coding tool"
+      - "AI code assistant"
+      - "AI generated code"
+      - "GPT-4"
+    reconnect-initial-backoff-seconds: 1
+    reconnect-max-backoff-seconds: 2
+    # Never open a real stream during a test run.
+    enabled: false
+
+  notion:
+    api-key: test-notion-api-key
+    database-id: test-notion-database-id
+    base-url: http://localhost:0/v1
+    version: "2022-06-28"
+
+  openai:
+    api-key: test-openai-api-key
+    model: gpt-5.6-terra
+    max-completion-tokens: 150
+    temperature: 0.7
+    n: 1
+
+  jwt:
+    # >= 256 bits, as HS256 requires. Test-only value; never used outside tests.
+    secret: test-secret-key-for-unit-tests-only-0123456789abcdef
+    algorithm: HS256
+    expiration-minutes: 60
+  auth:
+    username: admin
+    # BCryptPasswordEncoder (strength 10) hash of the literal "admin".
+    # Verified: BCryptPasswordEncoder.matches("admin", <value>) == true.
+    # Test fixture only - never a real credential.
+    password-hash: >-
+      $2a$10$LtrZhbITA8LiAZzS7XnzEeOiCiemb0hKc87if8DRFKyT9aW8SHH8e
+
+  analytics:
+    trend-window-days: 30

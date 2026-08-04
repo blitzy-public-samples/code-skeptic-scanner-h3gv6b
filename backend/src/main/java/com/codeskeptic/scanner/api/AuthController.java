@@ -66,7 +66,7 @@ import com.codeskeptic.scanner.security.JwtService;
  * class neither multiplies nor divides the value it reports — DL-017. The minted token carries
  * exactly the {@code sub}, {@code iat} and {@code exp} claims: no role, no scope, no permission and
  * no authority claim — DL-018. {@code src/main/resources/application.yml} declares
- * {@code expiration-minutes: 60}, so the value on the wire is {@code 3600}.
+ * {@code expiration-minutes: 60}; the value on the wire is {@code 3600}.
  *
  * <p>This class carries no method-security annotation. Authorization for this route is declared in
  * the security filter chain. {@code security.SecurityConfig} permits
@@ -91,9 +91,8 @@ import com.codeskeptic.scanner.security.JwtService;
  * DL-019, DL-020, DL-021, DL-052, DL-079, DL-117 and DL-118; construct-level provenance is
  * recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  *
- * <p>This is a singleton bean. Both collaborators are held in final fields and are themselves
- * singletons, and this class holds no other state, so every member declared here is safe for
- * concurrent use.
+ * <p>This class is thread-safe. It is a singleton bean, both collaborators are held in final fields
+ * and are themselves singletons, and this class holds no other state.
  */
 @RestController
 public class AuthController {

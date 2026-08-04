@@ -88,9 +88,8 @@ import com.codeskeptic.scanner.service.SettingsService;
  * DL-043, DL-048 and DL-050; construct-level provenance is recorded in
  * {@code docs/TRACEABILITY_MATRIX.md}.
  *
- * <p>This is a singleton bean. Its one collaborator is held in a final field and is itself a
- * singleton, and this class holds no other state, so every member declared here is safe for concurrent
- * use.
+ * <p>This class is thread-safe. It is a singleton bean, its one collaborator is held in a final
+ * field and is itself a singleton, and this class holds no other state.
  */
 @RestController
 public class SettingController {

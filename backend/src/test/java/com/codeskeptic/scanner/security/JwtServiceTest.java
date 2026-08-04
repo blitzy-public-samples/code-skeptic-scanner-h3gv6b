@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -24,6 +26,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import com.codeskeptic.scanner.config.ScannerProperties;
 
 import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.JwtParser;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import io.jsonwebtoken.security.WeakKeyException;
@@ -254,6 +257,62 @@ class JwtServiceTest {
         assertThat(service.extractExpiration(null)).isEmpty();
         assertThat(service.extractUsername(BLANK_TOKEN)).isEmpty();
         assertThat(service.extractExpiration(BLANK_TOKEN)).isEmpty();
+    }
+
+    // The parser is built once and reused — DL-141 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("holds one parser instance and reuses it across verifications")
+    void holdsOneParserInstanceAndReusesItAcrossVerifications() throws ReflectiveOperationException {
+        JwtService service = serviceWith(SECRET, HS256, EXPIRATION_MINUTES);
+        String token = service.generateToken(USERNAME);
+
+        Field parserField = JwtService.class.getDeclaredField("parser");
+        parserField.setAccessible(true);
+        Object beforeAnyVerification = parserField.get(service);
+
+        assertThat(beforeAnyVerification).as("parser held before any verification").isNotNull();
+        assertThat(Modifier.isFinal(parserField.getModifiers())).as("parser field is final").isTrue();
+        assertThat(JwtParser.class).as("parser field type")
+                .isAssignableFrom(beforeAnyVerification.getClass());
+
+        for (int attempt = 0; attempt < 5; attempt++) {
+            assertThat(service.extractUsername(token)).as("subject on attempt %d", attempt)
+                    .contains(USERNAME);
+            assertThat(service.extractUsername(MALFORMED_TOKEN))
+                    .as("malformed token on attempt %d", attempt).isEmpty();
+        }
+
+        assertThat(parserField.get(service)).as("parser held after repeated verification")
+                .isSameAs(beforeAnyVerification);
+    }
+
+    // The parser is built once and reused — DL-141 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("verifies every token outcome identically however many tokens it has already seen")
+    void verifiesEveryTokenOutcomeIdenticallyHoweverManyTokensItHasAlreadySeen() {
+        JwtService service = serviceWith(SECRET, HS256, EXPIRATION_MINUTES);
+        Instant issuedAt = Instant.now();
+        String valid = service.generateToken(USERNAME);
+        String foreign = tokenSignedWith(FOREIGN_KEY, issuedAt, issuedAt.plus(LIFETIME));
+        String expired = tokenSignedWith(SIGNING_KEY, issuedAt.minus(LIFETIME).minusSeconds(60),
+                issuedAt.minusSeconds(60));
+
+        for (int round = 0; round < 3; round++) {
+            assertThat(service.extractUsername(valid)).as("valid token in round %d", round)
+                    .contains(USERNAME);
+            assertThat(service.extractExpiration(valid)).as("expiry of a valid token in round %d",
+                    round).isPresent();
+            assertThat(service.extractUsername(foreign))
+                    .as("foreign-signed token in round %d", round).isEmpty();
+            assertThat(service.extractUsername(expired)).as("expired token in round %d", round)
+                    .isEmpty();
+            assertThat(service.extractUsername(MALFORMED_TOKEN))
+                    .as("malformed token in round %d", round).isEmpty();
+            assertThat(service.extractUsername(null)).as("absent token in round %d", round)
+                    .isEmpty();
+            assertThat(service.extractUsername(BLANK_TOKEN)).as("blank token in round %d", round)
+                    .isEmpty();
+        }
     }
 
     @Test

@@ -47,9 +47,9 @@ import com.codeskeptic.scanner.service.mapper.SettingMapper;
  * three columns the {@code settings} table declares at {@code backend/app/db/models.py:L42-44} — see
  * docs/DECISION_LOG.md DL-039.
  *
- * <p>Every entity is converted to its wire form inside the transaction that loaded it, so neither a
- * detached entity nor an uninitialised proxy leaves this class; {@code spring.jpa.open-in-view} is
- * {@code false}.
+ * <p>Every entity is converted to its wire form inside the transaction that loaded it. No detached
+ * entity and no uninitialised proxy leaves this class, and {@code spring.jpa.open-in-view} is
+ * {@code false} — see docs/DECISION_LOG.md DL-026.
  *
  * <p>The set of client-visible messages this class can produce is closed: it is the two wire literals
  * of {@code backend/app/api/settings.py:L18} and {@code :L22}, carried by

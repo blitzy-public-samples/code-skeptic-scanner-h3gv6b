@@ -31,7 +31,8 @@ import com.google.cloud.language.v1.Document;
 import com.google.cloud.language.v1.LanguageServiceClient;
 import com.google.cloud.language.v1.Sentiment;
 
-// Ported from backend/app/services/sentiment_analysis.py:L5-35 (faithful port) — see docs/DECISION_LOG.md
+// Ported from backend/app/services/sentiment_analysis.py:L5-35 (faithful port) — see
+// docs/DECISION_LOG.md DL-062
 // Replaces backend/tests/test_services.py:L54-65 — see docs/DECISION_LOG.md
 /**
  * Exercises the two operations {@link SentimentAnalysisService} exposes:
@@ -215,6 +216,30 @@ class SentimentAnalysisServiceTest {
         double doubtRating = service.calculateDoubtRating(2.0d);
 
         assertThat(doubtRating).isCloseTo(0.0d, within(TOLERANCE));
+    }
+
+    @Test
+    @DisplayName("maps a NaN sentiment score to a doubt rating of ten")
+    void mapsANaNSentimentScoreToADoubtRatingOfTen() {
+        double doubtRating = service.calculateDoubtRating(Double.NaN);
+
+        assertThat(doubtRating).isCloseTo(10.0d, within(TOLERANCE));
+    }
+
+    @Test
+    @DisplayName("maps positive infinity to a doubt rating of zero")
+    void mapsPositiveInfinityToADoubtRatingOfZero() {
+        double doubtRating = service.calculateDoubtRating(Double.POSITIVE_INFINITY);
+
+        assertThat(doubtRating).isCloseTo(0.0d, within(TOLERANCE));
+    }
+
+    @Test
+    @DisplayName("maps negative infinity to a doubt rating of ten")
+    void mapsNegativeInfinityToADoubtRatingOfTen() {
+        double doubtRating = service.calculateDoubtRating(Double.NEGATIVE_INFINITY);
+
+        assertThat(doubtRating).isCloseTo(10.0d, within(TOLERANCE));
     }
 
     @Test

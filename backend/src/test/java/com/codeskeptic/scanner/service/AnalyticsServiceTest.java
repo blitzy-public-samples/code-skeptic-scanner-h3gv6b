@@ -1,17 +1,31 @@
 package com.codeskeptic.scanner.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNoException;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.RecordComponent;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.transaction.annotation.Isolation;
@@ -20,18 +34,25 @@ import org.springframework.transaction.annotation.Transactional;
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.SummaryDto;
 import com.codeskeptic.scanner.dto.TrendsDto;
+import com.codeskeptic.scanner.entity.Response;
 import com.codeskeptic.scanner.repository.AiToolRepository;
 import com.codeskeptic.scanner.repository.ResponseRepository;
 import com.codeskeptic.scanner.repository.TweetRepository;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
-// Net-new (no Python module existed; signatures dictated by backend/app/api/analytics.py:L13-14,L23-24) — see docs/DECISION_LOG.md DL-041, DL-042
+// Net-new (no Python counterpart; backend/app/api/analytics.py:L3 imports a service that exists nowhere in the repository) — see docs/DECISION_LOG.md
+// Call sites backend/app/api/analytics.py:L14,L24 — see docs/DECISION_LOG.md DL-041, DL-042, DL-075, DL-180
 /**
  * Exercises the two operations {@link AnalyticsService} exposes: {@link AnalyticsService#getSummary()}
  * and {@link AnalyticsService#getTrends()}.
  *
- * <p>Every collaborator is a Mockito double, so no Spring context is started and no database,
+ * <p>Every collaborator is a Mockito double. No Spring context is started, and no database,
  * network, filesystem or credential resource is reached. Each test drives an instance this class
- * constructs directly.
+ * constructs directly in {@link #setUp()}.
+ *
+ * <p>Each stub is declared by the test that consumes it. The strict-stub checking
+ * {@link MockitoExtension} applies holds for every test in this class, and the two operations read
+ * different collaborators.
  *
  * <p>Construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  */
@@ -39,11 +60,129 @@ import com.codeskeptic.scanner.repository.TweetRepository;
 @DisplayName("AnalyticsService")
 class AnalyticsServiceTest {
 
-    /** Value bound to {@code scanner.analytics.trend-window-days} by every test. */
-    private static final int TREND_WINDOW_DAYS = 30;
+    // -----------------------------------------------------------------------
+    // Measured values — one distinct sentinel per reported metric
+    // -----------------------------------------------------------------------
 
-    /** Day the single trend bucket covers. */
-    private static final LocalDate BUCKET_DAY = LocalDate.of(2026, 8, 1);
+    /** Number of {@code tweets} rows reported as {@code total_tweets}. */
+    private static final long TOTAL_TWEETS = 12L;
+
+    /** Number of {@code responses} rows reported as {@code total_responses}. */
+    private static final long TOTAL_RESPONSES = 7L;
+
+    /** Number of approved {@code responses} rows reported as {@code approved_responses}. */
+    private static final long APPROVED_RESPONSES = 3L;
+
+    /** Difference of {@link #TOTAL_RESPONSES} and {@link #APPROVED_RESPONSES}. */
+    private static final long PENDING_RESPONSES = 4L;
+
+    /** Mean {@code tweets.doubt_rating} reported as {@code average_doubt_rating}. */
+    private static final double AVERAGE_DOUBT_RATING = 6.5d;
+
+    /** Mean {@code tweets.like_count} reported as {@code average_like_count}. */
+    private static final double AVERAGE_LIKE_COUNT = 148.25d;
+
+    /** Number of {@code ai_tools} rows reported as {@code tracked_ai_tools}. */
+    private static final long TRACKED_AI_TOOLS = 5L;
+
+    /** Response total of the case that pins the pending arithmetic. */
+    private static final long WIDER_TOTAL_RESPONSES = 10L;
+
+    /** Approved total of the case that pins the pending arithmetic. */
+    private static final long WIDER_APPROVED_RESPONSES = 3L;
+
+    /** Difference of {@link #WIDER_TOTAL_RESPONSES} and {@link #WIDER_APPROVED_RESPONSES}. */
+    private static final long WIDER_PENDING_RESPONSES = 7L;
+
+    // -----------------------------------------------------------------------
+    // Observation window — scanner.analytics.trend-window-days
+    // -----------------------------------------------------------------------
+
+    /**
+     * Window {@code src/main/resources/application.yml} and
+     * {@code src/test/resources/application-test.yml} both declare.
+     */
+    private static final int CONFIGURED_TREND_WINDOW_DAYS = 30;
+
+    /** Window used where the reported cutoff must move with the configured value. */
+    private static final int SHORTER_TREND_WINDOW_DAYS = 7;
+
+    // -----------------------------------------------------------------------
+    // Day buckets of the trend series
+    // -----------------------------------------------------------------------
+
+    /** Day the first returned bucket covers. */
+    private static final LocalDate FIRST_BUCKET_DAY = LocalDate.of(2026, 8, 1);
+
+    /** Day no returned bucket covers, lying between the two that are returned. */
+    private static final LocalDate UNBUCKETED_DAY = LocalDate.of(2026, 8, 2);
+
+    /** Day the second returned bucket covers. */
+    private static final LocalDate SECOND_BUCKET_DAY = LocalDate.of(2026, 8, 3);
+
+    /** Row count of the first returned bucket. */
+    private static final long FIRST_BUCKET_TWEET_COUNT = 12L;
+
+    /** Mean doubt rating of the first returned bucket. */
+    private static final double FIRST_BUCKET_AVERAGE_DOUBT_RATING = 6.5d;
+
+    /** Summed like count of the first returned bucket. */
+    private static final long FIRST_BUCKET_TOTAL_LIKES = 1480L;
+
+    /** Row count of the second returned bucket. */
+    private static final long SECOND_BUCKET_TWEET_COUNT = 3L;
+
+    /** Mean doubt rating of the second returned bucket. */
+    private static final double SECOND_BUCKET_AVERAGE_DOUBT_RATING = 2.25d;
+
+    /** Summed like count of the second returned bucket. */
+    private static final long SECOND_BUCKET_TOTAL_LIKES = 47L;
+
+    // -----------------------------------------------------------------------
+    // Structural inventories
+    // -----------------------------------------------------------------------
+
+    /** Simple names of the collaborator types that can contribute schema. */
+    private static final List<String> SCHEMA_CAPABLE_TYPE_NAMES = List.of(
+            "EntityManager",
+            "EntityManagerFactory",
+            "SessionFactory",
+            "Session",
+            "DataSource",
+            "JdbcTemplate",
+            "NamedParameterJdbcTemplate",
+            "JdbcClient",
+            "JdbcOperations",
+            "Connection",
+            "Statement",
+            "Flyway",
+            "Liquibase");
+
+    /** Simple names of the collaborator types that can memoise a reported value. */
+    private static final List<String> CACHE_TYPE_NAMES = List.of(
+            "Cache",
+            "CacheManager",
+            "ConcurrentMapCache",
+            "ConcurrentMapCacheManager",
+            "CaffeineCache",
+            "CaffeineCacheManager",
+            "RedisCacheManager");
+
+    /** Package prefix shared by every caching annotation the framework declares. */
+    private static final String CACHE_ANNOTATION_PACKAGE_PREFIX = "org.springframework.cache";
+
+    /** Suffix identifying a Spring Data repository collaborator. */
+    private static final String REPOSITORY_TYPE_SUFFIX = "Repository";
+
+    /** Name of the operation that reports the summary metrics. */
+    private static final String SUMMARY_OPERATION = "getSummary";
+
+    /** Name of the operation that reports the trend series. */
+    private static final String TRENDS_OPERATION = "getTrends";
+
+    // -----------------------------------------------------------------------
+    // Collaborators
+    // -----------------------------------------------------------------------
 
     @Mock
     private TweetRepository tweetRepository;
@@ -54,27 +193,289 @@ class AnalyticsServiceTest {
     @Mock
     private AiToolRepository aiToolRepository;
 
+    /** Stubbed configuration root; the {@code scanner.analytics} group is stubbed on top of it. */
+    @Mock
+    private ScannerProperties properties;
+
+    /** Instance under test, rebuilt for every test. */
     private AnalyticsService service;
 
     @BeforeEach
     void setUp() {
         service = new AnalyticsService(tweetRepository, responseRepository, aiToolRepository,
-                properties());
+                properties);
     }
 
     // -----------------------------------------------------------------------
-    // getSummary() — absent measurements
+    // The declared surface
     // -----------------------------------------------------------------------
 
     @Test
-    @DisplayName("reports a null average for each aggregate the empty tweets table yields null for")
-    void reportsANullAverageForEachAggregateTheEmptyTweetsTableYieldsNullFor() {
-        when(tweetRepository.count()).thenReturn(0L);
-        when(responseRepository.count()).thenReturn(0L);
-        when(responseRepository.countByIsApprovedTrue()).thenReturn(0L);
-        when(tweetRepository.findAverageDoubtRating()).thenReturn(null);
-        when(tweetRepository.findAverageLikeCount()).thenReturn(null);
-        when(aiToolRepository.count()).thenReturn(0L);
+    @DisplayName("takes no argument to report the summary")
+    void takesNoArgumentToReportTheSummary() throws NoSuchMethodException {
+        Method summary = AnalyticsService.class.getMethod(SUMMARY_OPERATION);
+
+        assertThat(summary.getParameterCount()).isZero();
+        assertThat(summary.getParameterTypes()).isEmpty();
+        assertThat(summary.getReturnType()).isEqualTo(SummaryDto.class);
+    }
+
+    @Test
+    @DisplayName("takes no argument to report the trend series")
+    void takesNoArgumentToReportTheTrendSeries() throws NoSuchMethodException {
+        Method trends = AnalyticsService.class.getMethod(TRENDS_OPERATION);
+
+        assertThat(trends.getParameterCount()).isZero();
+        assertThat(trends.getParameterTypes()).isEmpty();
+        assertThat(trends.getReturnType()).isEqualTo(TrendsDto.class);
+    }
+
+    @Test
+    @DisplayName("declares one summary operation one trend operation and no other public operation")
+    void declaresOneSummaryOperationOneTrendOperationAndNoOtherPublicOperation() {
+        List<Method> declared = Arrays.stream(AnalyticsService.class.getDeclaredMethods())
+                .filter(method -> !method.isSynthetic())
+                .filter(method -> Modifier.isPublic(method.getModifiers()))
+                .toList();
+
+        assertThat(declared).extracting(Method::getName)
+                .containsExactlyInAnyOrder(SUMMARY_OPERATION, TRENDS_OPERATION);
+        assertThat(declared).allSatisfy(method -> {
+            assertThat(method.getParameterCount()).isZero();
+            assertThat(Modifier.isStatic(method.getModifiers())).isFalse();
+        });
+    }
+
+    @Test
+    @DisplayName("takes its three repositories and its configuration through its only constructor")
+    void takesItsThreeRepositoriesAndItsConfigurationThroughItsOnlyConstructor() {
+        List<Constructor<?>> constructors = List.of(AnalyticsService.class.getDeclaredConstructors());
+
+        assertThat(constructors).hasSize(1);
+        assertThat(constructors.get(0).getParameterTypes()).containsExactly(TweetRepository.class,
+                ResponseRepository.class,
+                AiToolRepository.class,
+                ScannerProperties.class);
+    }
+
+    @Test
+    @DisplayName("holds no data access collaborator besides the tweet response and ai tool "
+            + "repositories")
+    void holdsNoDataAccessCollaboratorBesidesTheTweetResponseAndAiToolRepositories() {
+        assertThat(declaredCollaboratorTypes())
+                .filteredOn(type -> type.getSimpleName().endsWith(REPOSITORY_TYPE_SUFFIX))
+                .isNotEmpty()
+                .containsOnly(TweetRepository.class, ResponseRepository.class,
+                        AiToolRepository.class);
+    }
+
+    @Test
+    @DisplayName("holds no collaborator that can contribute a table column an index or a view")
+    void holdsNoCollaboratorThatCanContributeATableColumnAnIndexOrAView() {
+        assertThat(declaredCollaboratorTypes())
+                .extracting(Class::getSimpleName)
+                .doesNotContainAnyElementsOf(SCHEMA_CAPABLE_TYPE_NAMES);
+    }
+
+    @Test
+    @DisplayName("holds no cache collaborator and marks neither operation for caching")
+    void holdsNoCacheCollaboratorAndMarksNeitherOperationForCaching() throws NoSuchMethodException {
+        assertThat(declaredCollaboratorTypes())
+                .extracting(Class::getSimpleName)
+                .doesNotContainAnyElementsOf(CACHE_TYPE_NAMES);
+        assertThat(annotationPackagesOf(AnalyticsService.class.getAnnotations()))
+                .noneMatch(packageName -> packageName.startsWith(CACHE_ANNOTATION_PACKAGE_PREFIX));
+        assertThat(annotationPackagesOf(
+                AnalyticsService.class.getMethod(SUMMARY_OPERATION).getAnnotations()))
+                .noneMatch(packageName -> packageName.startsWith(CACHE_ANNOTATION_PACKAGE_PREFIX));
+        assertThat(annotationPackagesOf(
+                AnalyticsService.class.getMethod(TRENDS_OPERATION).getAnnotations()))
+                .noneMatch(packageName -> packageName.startsWith(CACHE_ANNOTATION_PACKAGE_PREFIX));
+    }
+
+    @Test
+    @DisplayName("reads every summary metric from one repeatable read snapshot")
+    void readsEverySummaryMetricFromOneRepeatableReadSnapshot() throws NoSuchMethodException {
+        Transactional declared = AnalyticsService.class.getMethod(SUMMARY_OPERATION)
+                .getAnnotation(Transactional.class);
+
+        assertThat(declared).isNotNull();
+        assertThat(declared.readOnly()).isTrue();
+        assertThat(declared.isolation()).isEqualTo(Isolation.REPEATABLE_READ);
+    }
+
+    @Test
+    @DisplayName("reads the trend series inside a read only transaction")
+    void readsTheTrendSeriesInsideAReadOnlyTransaction() throws NoSuchMethodException {
+        Transactional declared = AnalyticsService.class.getMethod(TRENDS_OPERATION)
+                .getAnnotation(Transactional.class);
+
+        assertThat(declared).isNotNull();
+        assertThat(declared.readOnly()).isTrue();
+    }
+
+    // -----------------------------------------------------------------------
+    // getSummary() — the reported metric set
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("reports seven metrics and no eighth")
+    void reportsSevenMetricsAndNoEighth() {
+        List<RecordComponent> components = List.of(SummaryDto.class.getRecordComponents());
+
+        assertThat(components).hasSize(7);
+        assertThat(components).extracting(RecordComponent::getName)
+                .containsExactly("totalTweets",
+                        "totalResponses",
+                        "approvedResponses",
+                        "pendingResponses",
+                        "averageDoubtRating",
+                        "averageLikeCount",
+                        "trackedAiTools");
+    }
+
+    @Test
+    @DisplayName("reports every aggregate the database computed")
+    void reportsEveryAggregateTheDatabaseComputed() {
+        stubTheMeasuredDatabase();
+
+        SummaryDto summary = service.getSummary();
+
+        assertThat(summary.totalTweets()).isEqualTo(TOTAL_TWEETS);
+        assertThat(summary.totalResponses()).isEqualTo(TOTAL_RESPONSES);
+        assertThat(summary.approvedResponses()).isEqualTo(APPROVED_RESPONSES);
+        assertThat(summary.pendingResponses()).isEqualTo(PENDING_RESPONSES);
+        assertThat(summary.averageDoubtRating()).isEqualTo(AVERAGE_DOUBT_RATING);
+        assertThat(summary.averageLikeCount()).isEqualTo(AVERAGE_LIKE_COUNT);
+        assertThat(summary.trackedAiTools()).isEqualTo(TRACKED_AI_TOOLS);
+        assertThat(summary).isEqualTo(new SummaryDto(TOTAL_TWEETS,
+                TOTAL_RESPONSES,
+                APPROVED_RESPONSES,
+                PENDING_RESPONSES,
+                AVERAGE_DOUBT_RATING,
+                AVERAGE_LIKE_COUNT,
+                TRACKED_AI_TOOLS));
+    }
+
+    @Test
+    @DisplayName("reports the tweet total under total_tweets and the response total under "
+            + "total_responses")
+    void reportsTheTweetTotalUnderTotalTweetsAndTheResponseTotalUnderTotalResponses() {
+        when(tweetRepository.count()).thenReturn(TOTAL_TWEETS);
+        when(responseRepository.count()).thenReturn(TOTAL_RESPONSES);
+
+        SummaryDto summary = service.getSummary();
+
+        assertThat(summary.totalTweets()).isEqualTo(TOTAL_TWEETS);
+        assertThat(summary.totalResponses()).isEqualTo(TOTAL_RESPONSES);
+        assertThat(jsonNameOf(SummaryDto.class, "totalTweets")).isEqualTo("total_tweets");
+        assertThat(jsonNameOf(SummaryDto.class, "totalResponses")).isEqualTo("total_responses");
+    }
+
+    @Test
+    @DisplayName("reports every metric under its snake case key")
+    void reportsEveryMetricUnderItsSnakeCaseKey() {
+        assertThat(jsonNamesOf(SummaryDto.class))
+                .containsExactly("total_tweets",
+                        "total_responses",
+                        "approved_responses",
+                        "pending_responses",
+                        "average_doubt_rating",
+                        "average_like_count",
+                        "tracked_ai_tools");
+    }
+
+    @Test
+    @DisplayName("reports the pending count as the total less the approved count")
+    void reportsThePendingCountAsTheTotalLessTheApprovedCount() {
+        when(responseRepository.count()).thenReturn(WIDER_TOTAL_RESPONSES);
+        when(responseRepository.countByIsApprovedTrue()).thenReturn(WIDER_APPROVED_RESPONSES);
+
+        SummaryDto summary = service.getSummary();
+
+        assertThat(summary.pendingResponses()).isEqualTo(WIDER_PENDING_RESPONSES);
+        assertThat(summary.pendingResponses())
+                .isEqualTo(summary.totalResponses() - summary.approvedResponses());
+        assertThat(summary.pendingResponses()).isNotNegative();
+        verify(responseRepository).count();
+        verify(responseRepository).countByIsApprovedTrue();
+        verifyNoMoreInteractions(responseRepository);
+    }
+
+    @Test
+    @DisplayName("reports the approved count from the approval flag alone")
+    void reportsTheApprovedCountFromTheApprovalFlagAlone() {
+        when(responseRepository.countByIsApprovedTrue()).thenReturn(APPROVED_RESPONSES);
+
+        SummaryDto summary = service.getSummary();
+
+        assertThat(summary.approvedResponses()).isEqualTo(APPROVED_RESPONSES);
+        verify(responseRepository).countByIsApprovedTrue();
+        assertThat(booleanFieldNamesOf(Response.class)).containsExactly("isApproved");
+        assertThat(recordComponentTypesOf(SummaryDto.class))
+                .noneMatch(type -> type == Boolean.class || type == boolean.class);
+    }
+
+    @Test
+    @DisplayName("issues one query for each measured metric and no other query")
+    void issuesOneQueryForEachMeasuredMetricAndNoOtherQuery() {
+        stubTheMeasuredDatabase();
+
+        service.getSummary();
+
+        verify(tweetRepository).count();
+        verify(tweetRepository).findAverageDoubtRating();
+        verify(tweetRepository).findAverageLikeCount();
+        verify(responseRepository).count();
+        verify(responseRepository).countByIsApprovedTrue();
+        verify(aiToolRepository).count();
+        verifyNoMoreInteractions(tweetRepository, responseRepository, aiToolRepository);
+        verifyNoInteractions(properties);
+    }
+
+    @Test
+    @DisplayName("reports the counts each call reads rather than repeating an earlier report")
+    void reportsTheCountsEachCallReadsRatherThanRepeatingAnEarlierReport() {
+        when(tweetRepository.count()).thenReturn(TOTAL_TWEETS, WIDER_TOTAL_RESPONSES);
+        when(responseRepository.count()).thenReturn(TOTAL_RESPONSES, WIDER_TOTAL_RESPONSES);
+        when(responseRepository.countByIsApprovedTrue())
+                .thenReturn(APPROVED_RESPONSES, WIDER_APPROVED_RESPONSES);
+        when(aiToolRepository.count()).thenReturn(TRACKED_AI_TOOLS, TRACKED_AI_TOOLS + 2L);
+
+        SummaryDto first = service.getSummary();
+        SummaryDto second = service.getSummary();
+
+        assertThat(first.totalTweets()).isEqualTo(TOTAL_TWEETS);
+        assertThat(second.totalTweets()).isEqualTo(WIDER_TOTAL_RESPONSES);
+        assertThat(first.totalResponses()).isEqualTo(TOTAL_RESPONSES);
+        assertThat(second.totalResponses()).isEqualTo(WIDER_TOTAL_RESPONSES);
+        assertThat(first.pendingResponses()).isEqualTo(PENDING_RESPONSES);
+        assertThat(second.pendingResponses()).isEqualTo(WIDER_PENDING_RESPONSES);
+        assertThat(first.trackedAiTools()).isEqualTo(TRACKED_AI_TOOLS);
+        assertThat(second.trackedAiTools()).isEqualTo(TRACKED_AI_TOOLS + 2L);
+        assertThat(second).isNotEqualTo(first);
+        verify(tweetRepository, times(2)).count();
+        verify(responseRepository, times(2)).count();
+        verify(responseRepository, times(2)).countByIsApprovedTrue();
+        verify(aiToolRepository, times(2)).count();
+    }
+
+    // -----------------------------------------------------------------------
+    // getSummary() — the empty database
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("reports the summary without raising when no tweet is stored")
+    void reportsTheSummaryWithoutRaisingWhenNoTweetIsStored() {
+        stubTheEmptyDatabase();
+
+        assertThatNoException().isThrownBy(service::getSummary);
+    }
+
+    @Test
+    @DisplayName("reports no average when the empty tweets table measures none")
+    void reportsNoAverageWhenTheEmptyTweetsTableMeasuresNone() {
+        stubTheEmptyDatabase();
 
         SummaryDto summary = service.getSummary();
 
@@ -85,12 +486,7 @@ class AnalyticsServiceTest {
     @Test
     @DisplayName("reports zero for every count the empty database holds")
     void reportsZeroForEveryCountTheEmptyDatabaseHolds() {
-        when(tweetRepository.count()).thenReturn(0L);
-        when(responseRepository.count()).thenReturn(0L);
-        when(responseRepository.countByIsApprovedTrue()).thenReturn(0L);
-        when(tweetRepository.findAverageDoubtRating()).thenReturn(null);
-        when(tweetRepository.findAverageLikeCount()).thenReturn(null);
-        when(aiToolRepository.count()).thenReturn(0L);
+        stubTheEmptyDatabase();
 
         SummaryDto summary = service.getSummary();
 
@@ -102,14 +498,11 @@ class AnalyticsServiceTest {
     }
 
     @Test
-    @DisplayName("does not report a measured zero in place of an absent average")
-    void doesNotReportAMeasuredZeroInPlaceOfAnAbsentAverage() {
-        when(tweetRepository.count()).thenReturn(3L);
-        when(responseRepository.count()).thenReturn(0L);
-        when(responseRepository.countByIsApprovedTrue()).thenReturn(0L);
+    @DisplayName("reports a measured zero average as zero and an unmeasured average as absent")
+    void reportsAMeasuredZeroAverageAsZeroAndAnUnmeasuredAverageAsAbsent() {
+        when(tweetRepository.count()).thenReturn(TOTAL_TWEETS);
         when(tweetRepository.findAverageDoubtRating()).thenReturn(null);
         when(tweetRepository.findAverageLikeCount()).thenReturn(0.0d);
-        when(aiToolRepository.count()).thenReturn(0L);
 
         SummaryDto summary = service.getSummary();
 
@@ -117,141 +510,420 @@ class AnalyticsServiceTest {
         assertThat(summary.averageLikeCount()).isEqualTo(0.0d);
     }
 
-    // -----------------------------------------------------------------------
-    // getSummary() — measured values
-    // -----------------------------------------------------------------------
-
     @Test
-    @DisplayName("reports every aggregate the database computed")
-    void reportsEveryAggregateTheDatabaseComputed() {
-        when(tweetRepository.count()).thenReturn(12L);
-        when(responseRepository.count()).thenReturn(7L);
-        when(responseRepository.countByIsApprovedTrue()).thenReturn(3L);
-        when(tweetRepository.findAverageDoubtRating()).thenReturn(6.5d);
-        when(tweetRepository.findAverageLikeCount()).thenReturn(148.25d);
-        when(aiToolRepository.count()).thenReturn(4L);
+    @DisplayName("reports the measured average unchanged")
+    void reportsTheMeasuredAverageUnchanged() {
+        when(tweetRepository.findAverageDoubtRating()).thenReturn(AVERAGE_DOUBT_RATING);
+        when(tweetRepository.findAverageLikeCount()).thenReturn(AVERAGE_LIKE_COUNT);
 
         SummaryDto summary = service.getSummary();
 
-        assertThat(summary).isEqualTo(
-                new SummaryDto(12L, 7L, 3L, 4L, 6.5d, 148.25d, 4L));
-    }
-
-    @Test
-    @DisplayName("reports the pending count as the total less the approved count")
-    void reportsThePendingCountAsTheTotalLessTheApprovedCount() {
-        when(tweetRepository.count()).thenReturn(0L);
-        when(responseRepository.count()).thenReturn(7L);
-        when(responseRepository.countByIsApprovedTrue()).thenReturn(3L);
-        when(tweetRepository.findAverageDoubtRating()).thenReturn(null);
-        when(tweetRepository.findAverageLikeCount()).thenReturn(null);
-        when(aiToolRepository.count()).thenReturn(0L);
-
-        SummaryDto summary = service.getSummary();
-
-        assertThat(summary.pendingResponses()).isEqualTo(4L);
-        assertThat(summary.pendingResponses())
-                .isEqualTo(summary.totalResponses() - summary.approvedResponses());
-        assertThat(summary.pendingResponses()).isNotNegative();
-    }
-
-    @Test
-    @DisplayName("reads every summary metric from one repeatable snapshot")
-    void readsEverySummaryMetricFromOneRepeatableSnapshot() throws NoSuchMethodException {
-        Method getSummary = AnalyticsService.class.getDeclaredMethod("getSummary");
-        Transactional declared = getSummary.getAnnotation(Transactional.class);
-
-        assertThat(declared).isNotNull();
-        assertThat(declared.readOnly()).isTrue();
-        assertThat(declared.isolation()).isEqualTo(Isolation.REPEATABLE_READ);
+        assertThat(summary.averageDoubtRating()).isEqualTo(AVERAGE_DOUBT_RATING);
+        assertThat(summary.averageLikeCount()).isEqualTo(AVERAGE_LIKE_COUNT);
     }
 
     // -----------------------------------------------------------------------
-    // getTrends()
+    // getTrends() — the day-bucketed series
     // -----------------------------------------------------------------------
 
     @Test
-    @DisplayName("reports an empty series when the window holds no row")
-    void reportsAnEmptySeriesWhenTheWindowHoldsNoRow() {
-        when(tweetRepository.findDailyTrendsSince(org.mockito.ArgumentMatchers.any(LocalDateTime.class)))
-                .thenReturn(List.of());
-
-        TrendsDto trends = service.getTrends();
-
-        assertThat(trends.trends()).isEmpty();
-    }
-
-    @Test
-    @DisplayName("reports a null bucket average and a null bucket total as they stand")
-    void reportsANullBucketAverageAndANullBucketTotalAsTheyStand() {
-        when(tweetRepository.findDailyTrendsSince(org.mockito.ArgumentMatchers.any(LocalDateTime.class)))
-                .thenReturn(List.of(bucket(BUCKET_DAY, 2L, null, null)));
-
-        TrendsDto trends = service.getTrends();
-
-        assertThat(trends.trends()).hasSize(1);
-        TrendsDto.TrendPoint point = trends.trends().get(0);
-        assertThat(point.date()).isEqualTo(BUCKET_DAY);
-        assertThat(point.tweetCount()).isEqualTo(2L);
-        assertThat(point.averageDoubtRating()).isNull();
-        assertThat(point.totalLikes()).isNull();
-    }
-
-    @Test
-    @DisplayName("reports the bucket aggregates the database computed")
-    void reportsTheBucketAggregatesTheDatabaseComputed() {
-        when(tweetRepository.findDailyTrendsSince(org.mockito.ArgumentMatchers.any(LocalDateTime.class)))
-                .thenReturn(List.of(bucket(BUCKET_DAY, 12L, 6.5d, 1480L)));
+    @DisplayName("reports one series element for each day bucket the query returned")
+    void reportsOneSeriesElementForEachDayBucketTheQueryReturned() {
+        stubTheConfiguredWindow(CONFIGURED_TREND_WINDOW_DAYS);
+        stubTheReturnedBuckets(firstBucket(), secondBucket());
 
         TrendsDto trends = service.getTrends();
 
         assertThat(trends.trends()).containsExactly(
-                new TrendsDto.TrendPoint(BUCKET_DAY, 12L, 6.5d, 1480L));
+                new TrendsDto.TrendPoint(FIRST_BUCKET_DAY, FIRST_BUCKET_TWEET_COUNT,
+                        FIRST_BUCKET_AVERAGE_DOUBT_RATING, FIRST_BUCKET_TOTAL_LIKES),
+                new TrendsDto.TrendPoint(SECOND_BUCKET_DAY, SECOND_BUCKET_TWEET_COUNT,
+                        SECOND_BUCKET_AVERAGE_DOUBT_RATING, SECOND_BUCKET_TOTAL_LIKES));
+    }
+
+    @Test
+    @DisplayName("reports each bucket day its row count its mean doubt rating and its like total")
+    void reportsEachBucketDayItsRowCountItsMeanDoubtRatingAndItsLikeTotal() {
+        stubTheConfiguredWindow(CONFIGURED_TREND_WINDOW_DAYS);
+        stubTheReturnedBuckets(firstBucket());
+
+        TrendsDto trends = service.getTrends();
+
+        assertThat(trends.trends()).hasSize(1);
+        TrendsDto.TrendPoint reported = trends.trends().get(0);
+        assertThat(reported.date()).isEqualTo(FIRST_BUCKET_DAY);
+        assertThat(reported.tweetCount()).isEqualTo(FIRST_BUCKET_TWEET_COUNT);
+        assertThat(reported.averageDoubtRating()).isEqualTo(FIRST_BUCKET_AVERAGE_DOUBT_RATING);
+        assertThat(reported.totalLikes()).isEqualTo(FIRST_BUCKET_TOTAL_LIKES);
+    }
+
+    @Test
+    @DisplayName("reports each series element under its snake case keys")
+    void reportsEachSeriesElementUnderItsSnakeCaseKeys() {
+        assertThat(jsonNameOf(TrendsDto.class, "trends")).isEqualTo("trends");
+        assertThat(jsonNamesOf(TrendsDto.TrendPoint.class))
+                .containsExactly("date", "tweet_count", "average_doubt_rating", "total_likes");
+    }
+
+    @Test
+    @DisplayName("reports the elements in the order the query returned them")
+    void reportsTheElementsInTheOrderTheQueryReturnedThem() {
+        stubTheConfiguredWindow(CONFIGURED_TREND_WINDOW_DAYS);
+        stubTheReturnedBuckets(secondBucket(), firstBucket());
+
+        TrendsDto trends = service.getTrends();
+
+        assertThat(trends.trends()).extracting(TrendsDto.TrendPoint::date)
+                .containsExactly(SECOND_BUCKET_DAY, FIRST_BUCKET_DAY);
+    }
+
+    @Test
+    @DisplayName("reports no element for a day the query returned no bucket for")
+    void reportsNoElementForADayTheQueryReturnedNoBucketFor() {
+        stubTheConfiguredWindow(CONFIGURED_TREND_WINDOW_DAYS);
+        stubTheReturnedBuckets(firstBucket(), secondBucket());
+
+        TrendsDto trends = service.getTrends();
+
+        assertThat(trends.trends()).hasSize(2);
+        assertThat(trends.trends()).extracting(TrendsDto.TrendPoint::date)
+                .containsExactly(FIRST_BUCKET_DAY, SECOND_BUCKET_DAY)
+                .doesNotContain(UNBUCKETED_DAY);
+    }
+
+    @Test
+    @DisplayName("reports an empty series when the window holds no row")
+    void reportsAnEmptySeriesWhenTheWindowHoldsNoRow() {
+        stubTheConfiguredWindow(CONFIGURED_TREND_WINDOW_DAYS);
+        stubTheReturnedBuckets();
+
+        TrendsDto trends = service.getTrends();
+
+        assertThat(trends.trends()).isNotNull().isEmpty();
+    }
+
+    @Test
+    @DisplayName("reports an unmeasured bucket average and an unmeasured bucket total as absent")
+    void reportsAnUnmeasuredBucketAverageAndAnUnmeasuredBucketTotalAsAbsent() {
+        stubTheConfiguredWindow(CONFIGURED_TREND_WINDOW_DAYS);
+        stubTheReturnedBuckets(new Bucket(FIRST_BUCKET_DAY, FIRST_BUCKET_TWEET_COUNT, null, null));
+
+        TrendsDto trends = service.getTrends();
+
+        assertThat(trends.trends()).hasSize(1);
+        TrendsDto.TrendPoint reported = trends.trends().get(0);
+        assertThat(reported.date()).isEqualTo(FIRST_BUCKET_DAY);
+        assertThat(reported.tweetCount()).isEqualTo(FIRST_BUCKET_TWEET_COUNT);
+        assertThat(reported.averageDoubtRating()).isNull();
+        assertThat(reported.totalLikes()).isNull();
+    }
+
+    @Test
+    @DisplayName("opens the window the configured number of days before the call")
+    void opensTheWindowTheConfiguredNumberOfDaysBeforeTheCall() {
+        stubTheConfiguredWindow(CONFIGURED_TREND_WINDOW_DAYS);
+        stubTheReturnedBuckets();
+
+        LocalDateTime beforeTheCall = LocalDateTime.now();
+        service.getTrends();
+        LocalDateTime afterTheCall = LocalDateTime.now();
+
+        assertThat(capturedCutoff()).isBetween(
+                beforeTheCall.minusDays(CONFIGURED_TREND_WINDOW_DAYS),
+                afterTheCall.minusDays(CONFIGURED_TREND_WINDOW_DAYS));
+    }
+
+    @Test
+    @DisplayName("opens the window seven days before the call when seven days are configured")
+    void opensTheWindowSevenDaysBeforeTheCallWhenSevenDaysAreConfigured() {
+        stubTheConfiguredWindow(SHORTER_TREND_WINDOW_DAYS);
+        stubTheReturnedBuckets();
+
+        LocalDateTime beforeTheCall = LocalDateTime.now();
+        service.getTrends();
+        LocalDateTime afterTheCall = LocalDateTime.now();
+
+        LocalDateTime cutoff = capturedCutoff();
+        assertThat(cutoff).isBetween(beforeTheCall.minusDays(SHORTER_TREND_WINDOW_DAYS),
+                afterTheCall.minusDays(SHORTER_TREND_WINDOW_DAYS));
+        assertThat(cutoff).isAfter(afterTheCall.minusDays(CONFIGURED_TREND_WINDOW_DAYS));
+        verify(properties).analytics();
+        verifyNoMoreInteractions(properties);
+    }
+
+    @Test
+    @DisplayName("issues one trend query and reads no other table")
+    void issuesOneTrendQueryAndReadsNoOtherTable() {
+        stubTheConfiguredWindow(CONFIGURED_TREND_WINDOW_DAYS);
+        stubTheReturnedBuckets();
+
+        service.getTrends();
+
+        verify(tweetRepository).findDailyTrendsSince(any(LocalDateTime.class));
+        verifyNoMoreInteractions(tweetRepository);
+        verifyNoInteractions(responseRepository, aiToolRepository);
+    }
+
+    @Test
+    @DisplayName("reads the window and the series again on each call")
+    void readsTheWindowAndTheSeriesAgainOnEachCall() {
+        stubTheConfiguredWindow(CONFIGURED_TREND_WINDOW_DAYS);
+        when(tweetRepository.findDailyTrendsSince(any(LocalDateTime.class)))
+                .thenReturn(List.of(firstBucket()))
+                .thenReturn(List.of());
+
+        TrendsDto first = service.getTrends();
+        TrendsDto second = service.getTrends();
+
+        assertThat(first.trends()).hasSize(1);
+        assertThat(second.trends()).isEmpty();
+        ArgumentCaptor<LocalDateTime> cutoffs = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(tweetRepository, times(2)).findDailyTrendsSince(cutoffs.capture());
+        assertThat(cutoffs.getAllValues()).hasSize(2);
+        assertThat(cutoffs.getAllValues().get(1)).isAfterOrEqualTo(cutoffs.getAllValues().get(0));
+        verify(properties, times(2)).analytics();
+    }
+
+    // -----------------------------------------------------------------------
+    // Fixtures
+    // -----------------------------------------------------------------------
+
+    /**
+     * Stubs each of the six aggregate queries with the sentinel of the metric it backs.
+     */
+    private void stubTheMeasuredDatabase() {
+        when(tweetRepository.count()).thenReturn(TOTAL_TWEETS);
+        when(responseRepository.count()).thenReturn(TOTAL_RESPONSES);
+        when(responseRepository.countByIsApprovedTrue()).thenReturn(APPROVED_RESPONSES);
+        when(tweetRepository.findAverageDoubtRating()).thenReturn(AVERAGE_DOUBT_RATING);
+        when(tweetRepository.findAverageLikeCount()).thenReturn(AVERAGE_LIKE_COUNT);
+        when(aiToolRepository.count()).thenReturn(TRACKED_AI_TOOLS);
     }
 
     /**
-     * Builds the configuration root every test hands to the service. Only the
-     * {@code scanner.analytics} group is populated; the service reads no other group.
-     *
-     * @return the configuration root
+     * Stubs the six aggregate queries as an empty schema answers them: zero for every count and
+     * {@code null} for both means.
      */
-    private static ScannerProperties properties() {
-        return new ScannerProperties(null, 0, 0L, null, null, null, null, null,
-                new ScannerProperties.Analytics(TREND_WINDOW_DAYS), null);
+    private void stubTheEmptyDatabase() {
+        when(tweetRepository.count()).thenReturn(0L);
+        when(responseRepository.count()).thenReturn(0L);
+        when(responseRepository.countByIsApprovedTrue()).thenReturn(0L);
+        when(tweetRepository.findAverageDoubtRating()).thenReturn(null);
+        when(tweetRepository.findAverageLikeCount()).thenReturn(null);
+        when(aiToolRepository.count()).thenReturn(0L);
     }
 
     /**
-     * Builds one projection row of the daily trend query.
+     * Stubs {@code scanner.analytics.trend-window-days} on the configuration root.
      *
-     * @param day                the bucket day
-     * @param tweetCount         the row count of the bucket
-     * @param averageDoubtRating the mean doubt rating, which may be {@code null}
-     * @param totalLikes         the summed like count, which may be {@code null}
-     * @return the projection row
+     * @param days the window the group reports
      */
-    private static TweetRepository.DailyTrend bucket(LocalDate day, Long tweetCount,
-            Double averageDoubtRating, Long totalLikes) {
-        return new TweetRepository.DailyTrend() {
+    private void stubTheConfiguredWindow(int days) {
+        when(properties.analytics()).thenReturn(new ScannerProperties.Analytics(days));
+    }
 
-            @Override
-            public LocalDate getBucketDate() {
-                return day;
-            }
+    /**
+     * Stubs the daily trend query to return the supplied buckets in the supplied order.
+     *
+     * @param buckets the projection rows the query reports, in order
+     */
+    private void stubTheReturnedBuckets(TweetRepository.DailyTrend... buckets) {
+        when(tweetRepository.findDailyTrendsSince(any(LocalDateTime.class)))
+                .thenReturn(List.of(buckets));
+    }
 
-            @Override
-            public Long getTweetCount() {
-                return tweetCount;
-            }
+    /**
+     * Builds the first fully measured bucket.
+     *
+     * @return a projection row covering {@link #FIRST_BUCKET_DAY}
+     */
+    private static Bucket firstBucket() {
+        return new Bucket(FIRST_BUCKET_DAY, FIRST_BUCKET_TWEET_COUNT,
+                FIRST_BUCKET_AVERAGE_DOUBT_RATING, FIRST_BUCKET_TOTAL_LIKES);
+    }
 
-            @Override
-            public Double getAverageDoubtRating() {
-                return averageDoubtRating;
-            }
+    /**
+     * Builds the second fully measured bucket.
+     *
+     * @return a projection row covering {@link #SECOND_BUCKET_DAY}
+     */
+    private static Bucket secondBucket() {
+        return new Bucket(SECOND_BUCKET_DAY, SECOND_BUCKET_TWEET_COUNT,
+                SECOND_BUCKET_AVERAGE_DOUBT_RATING, SECOND_BUCKET_TOTAL_LIKES);
+    }
 
-            @Override
-            public Long getTotalLikes() {
-                return totalLikes;
+    /**
+     * Captures the single cutoff the daily trend query was called with.
+     *
+     * @return the captured lower bound on {@code tweets.created_at}
+     */
+    private LocalDateTime capturedCutoff() {
+        ArgumentCaptor<LocalDateTime> cutoff = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(tweetRepository).findDailyTrendsSince(cutoff.capture());
+        return cutoff.getValue();
+    }
+
+    // -----------------------------------------------------------------------
+    // Reflection helpers
+    // -----------------------------------------------------------------------
+
+    /**
+     * Collects the declared field types and constructor parameter types of
+     * {@link AnalyticsService}, excluding synthetic fields.
+     *
+     * @return every type the class holds or accepts
+     */
+    private static List<Class<?>> declaredCollaboratorTypes() {
+        List<Class<?>> types = new ArrayList<>();
+        for (Field field : AnalyticsService.class.getDeclaredFields()) {
+            if (!field.isSynthetic()) {
+                types.add(field.getType());
             }
-        };
+        }
+        for (Constructor<?> constructor : AnalyticsService.class.getDeclaredConstructors()) {
+            types.addAll(List.of(constructor.getParameterTypes()));
+        }
+        return types;
+    }
+
+    /**
+     * Reads the package name of each supplied annotation.
+     *
+     * @param annotations the annotations to inspect
+     * @return the package name of each annotation type, in the supplied order
+     */
+    private static List<String> annotationPackagesOf(Annotation[] annotations) {
+        return Arrays.stream(annotations)
+                .map(annotation -> annotation.annotationType().getPackageName())
+                .toList();
+    }
+
+    /**
+     * Reads the names of the fields a class declares with a boolean type, boxed or primitive.
+     *
+     * @param type the class to inspect
+     * @return the names of its boolean fields, excluding synthetic fields
+     */
+    private static List<String> booleanFieldNamesOf(Class<?> type) {
+        return Arrays.stream(type.getDeclaredFields())
+                .filter(field -> !field.isSynthetic())
+                .filter(field -> field.getType() == Boolean.class || field.getType() == boolean.class)
+                .map(Field::getName)
+                .toList();
+    }
+
+    /**
+     * Reads the component types a record declares, in declaration order.
+     *
+     * @param recordType the record class to inspect
+     * @return the type of each component
+     */
+    private static List<Class<?>> recordComponentTypesOf(Class<?> recordType) {
+        List<Class<?>> types = new ArrayList<>();
+        for (RecordComponent component : recordType.getRecordComponents()) {
+            types.add(component.getType());
+        }
+        return types;
+    }
+
+    /**
+     * Reads the JSON key of every component a record declares, in declaration order.
+     *
+     * @param recordType the record class to inspect
+     * @return the key each component serialises under
+     */
+    private static List<String> jsonNamesOf(Class<?> recordType) {
+        return Arrays.stream(recordType.getRecordComponents())
+                .map(component -> jsonNameOf(recordType, component.getName()))
+                .toList();
+    }
+
+    /**
+     * Reads the JSON key a record component serialises under.
+     *
+     * @param recordType    the record class to inspect
+     * @param componentName the component whose key is read
+     * @return the value of the {@link JsonProperty} annotation carried by the component, its
+     *         accessor or its backing field
+     * @throws AssertionError if the component is absent or carries no such annotation
+     */
+    private static String jsonNameOf(Class<?> recordType, String componentName) {
+        RecordComponent component = recordComponentOf(recordType, componentName);
+        JsonProperty declared = component.getAnnotation(JsonProperty.class);
+        if (declared == null) {
+            declared = component.getAccessor().getAnnotation(JsonProperty.class);
+        }
+        if (declared == null) {
+            declared = fieldOf(recordType, componentName).getAnnotation(JsonProperty.class);
+        }
+        assertThat(declared).isNotNull();
+        return declared.value();
+    }
+
+    /**
+     * Looks up a record component by name.
+     *
+     * @param recordType    the record class to inspect
+     * @param componentName the component name
+     * @return the named component
+     * @throws AssertionError if the record declares no component with that name
+     */
+    private static RecordComponent recordComponentOf(Class<?> recordType, String componentName) {
+        return Arrays.stream(recordType.getRecordComponents())
+                .filter(candidate -> candidate.getName().equals(componentName))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(
+                        recordType.getSimpleName() + " declares no component named "
+                                + componentName));
+    }
+
+    /**
+     * Looks up a declared field by name.
+     *
+     * @param type      the class to inspect
+     * @param fieldName the field name
+     * @return the named field
+     * @throws AssertionError if the class declares no field with that name
+     */
+    private static Field fieldOf(Class<?> type, String fieldName) {
+        try {
+            return type.getDeclaredField(fieldName);
+        } catch (NoSuchFieldException absent) {
+            throw new AssertionError(
+                    type.getSimpleName() + " declares no field named " + fieldName, absent);
+        }
+    }
+
+    /**
+     * One calendar-day bucket the daily trend query reports. The component names mirror the select
+     * aliases the projection binds to.
+     *
+     * @param bucketDate         the day the bucket covers
+     * @param tweetCount         the number of rows created on that day
+     * @param averageDoubtRating the mean doubt rating over those rows, which may be {@code null}
+     * @param totalLikes         the summed like count over those rows, which may be {@code null}
+     */
+    private record Bucket(LocalDate bucketDate, Long tweetCount, Double averageDoubtRating,
+            Long totalLikes) implements TweetRepository.DailyTrend {
+
+        @Override
+        public LocalDate getBucketDate() {
+            return bucketDate;
+        }
+
+        @Override
+        public Long getTweetCount() {
+            return tweetCount;
+        }
+
+        @Override
+        public Double getAverageDoubtRating() {
+            return averageDoubtRating;
+        }
+
+        @Override
+        public Long getTotalLikes() {
+            return totalLikes;
+        }
     }
 }

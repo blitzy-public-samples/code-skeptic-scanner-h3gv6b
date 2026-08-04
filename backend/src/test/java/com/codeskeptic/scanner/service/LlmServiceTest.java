@@ -8,6 +8,7 @@ import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.assertj.core.api.Assertions.within;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -48,6 +49,8 @@ import com.openai.models.chat.completions.ChatCompletionCreateParams;
 import com.openai.models.chat.completions.ChatCompletionMessage;
 import com.openai.models.chat.completions.ChatCompletionMessageParam;
 import com.openai.services.blocking.ChatService;
+
+import jakarta.annotation.PreDestroy;
 import com.openai.services.blocking.chat.ChatCompletionService;
 
 // Ported from backend/app/services/llm_service.py:L6-32 (faithful port) — see docs/DECISION_LOG.md
@@ -848,6 +851,156 @@ class LlmServiceTest {
         assertThat(Modifier.isFinal(LlmService.class.getModifiers())).isFalse();
         assertThat(accessor.getParameterTypes()).isEmpty();
         assertThat(accessor.getReturnType()).isEqualTo(OpenAIClient.class);
+    }
+
+    // -------------------------------------------------------------------------
+    // Call budget and client lifecycle — DL-085, DL-146 — see docs/DECISION_LOG.md
+    // -------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("declares a finite request timeout and an explicit retry count")
+    void declaresAFiniteRequestTimeoutAndAnExplicitRetryCount() {
+        ScannerProperties.Openai openai =
+                openaiGroup(MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N);
+
+        assertThat(openai.requestTimeoutSeconds()).as("request timeout seconds").isPositive();
+        assertThat(openai.maxRetries()).as("retry count").isNotNegative();
+    }
+
+    @Test
+    @DisplayName("declares a shutdown callback that closes the openai client")
+    void declaresAShutdownCallbackThatClosesTheOpenaiClient() throws NoSuchMethodException {
+        Method shutdown = LlmService.class.getDeclaredMethod("closeOpenAiClient");
+
+        assertThat(shutdown.isAnnotationPresent(PreDestroy.class))
+                .as("closeOpenAiClient carries @PreDestroy").isTrue();
+        assertThat(shutdown.getParameterTypes()).isEmpty();
+        assertThat(Modifier.isPublic(shutdown.getModifiers()))
+                .as("closeOpenAiClient is the explicit lifecycle hook").isTrue();
+    }
+
+    @Test
+    @DisplayName("the shutdown callback closes a client that was created")
+    void theShutdownCallbackClosesAClientThatWasCreated() throws ReflectiveOperationException {
+        LlmService holdingAClient = serviceHoldingClient(openAiClient);
+
+        holdingAClient.closeOpenAiClient();
+
+        verify(openAiClient).close();
+    }
+
+    @Test
+    @DisplayName("the shutdown callback closes nothing when no client was created")
+    void theShutdownCallbackClosesNothingWhenNoClientWasCreated() {
+        LlmService neverUsed = new LlmService(propertiesCarrying(
+                openaiGroup(MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N)));
+
+        assertThatCode(neverUsed::closeOpenAiClient).doesNotThrowAnyException();
+        verifyNoInteractions(openAiClient);
+    }
+
+    @Test
+    @DisplayName("the shutdown callback is repeatable and closes the client once")
+    void theShutdownCallbackIsRepeatableAndClosesTheClientOnce()
+            throws ReflectiveOperationException {
+        LlmService holdingAClient = serviceHoldingClient(openAiClient);
+
+        holdingAClient.closeOpenAiClient();
+        holdingAClient.closeOpenAiClient();
+
+        verify(openAiClient, times(1)).close();
+    }
+
+    @Test
+    @DisplayName("a failure to close the client is suppressed")
+    void aFailureToCloseTheClientIsSuppressed() throws ReflectiveOperationException {
+        LlmService holdingAClient = serviceHoldingClient(openAiClient);
+        doThrow(new IllegalStateException("already closed")).when(openAiClient).close();
+
+        assertThatCode(holdingAClient::closeOpenAiClient).doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("a client released by shutdown is not reachable again")
+    void aClientReleasedByShutdownIsNotReachableAgain() throws ReflectiveOperationException {
+        LlmService holdingAClient = serviceHoldingClient(openAiClient);
+
+        holdingAClient.closeOpenAiClient();
+
+        assertThat(readClientField(holdingAClient)).as("client field after shutdown").isNull();
+        assertThatIllegalStateException()
+                .isThrownBy(() -> holdingAClient.generateResponse(tweet()))
+                .withMessageContaining("destroyed");
+    }
+
+    @Test
+    @DisplayName("generating a reply after shutdown reports the destroyed state and issues no "
+            + "request")
+    void generatingAReplyAfterShutdownReportsTheDestroyedState() {
+        LlmService destroyed = new LlmService(propertiesCarrying(
+                openaiGroup(MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N)));
+        destroyed.closeOpenAiClient();
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> destroyed.generateResponse(tweet()))
+                .withMessageContaining("destroyed");
+        verifyNoInteractions(openAiClient);
+    }
+
+    @Test
+    @DisplayName("acquiring the client after shutdown reports the destroyed state")
+    void acquiringTheClientAfterShutdownReportsTheDestroyedState() {
+        LlmService destroyed = new LlmService(propertiesCarrying(
+                openaiGroup(MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N)));
+        destroyed.closeOpenAiClient();
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> destroyed.generateResponse(tweet()))
+                .withMessageContaining("destroyed");
+    }
+
+    /**
+     * Reads a declared static field of {@link LlmService} by name.
+     *
+     * @param name the field name
+     * @return the field value
+     * @throws ReflectiveOperationException when the field cannot be read
+     */
+    private static Object readStaticField(String name) throws ReflectiveOperationException {
+        Field field = LlmService.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(null);
+    }
+
+    /**
+     * Builds a service already holding {@code heldClient} in the field the shutdown callback
+     * releases, standing in for a service whose accessor has created one.
+     *
+     * @param heldClient the client the service holds
+     * @return the service holding that client
+     * @throws ReflectiveOperationException when the field cannot be written
+     */
+    private static LlmService serviceHoldingClient(OpenAIClient heldClient)
+            throws ReflectiveOperationException {
+        LlmService service = new LlmService(propertiesCarrying(
+                openaiGroup(MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N)));
+        Field field = LlmService.class.getDeclaredField("client");
+        field.setAccessible(true);
+        field.set(service, heldClient);
+        return service;
+    }
+
+    /**
+     * Reads the client a service holds.
+     *
+     * @param service the service to read
+     * @return the held client, or {@code null} when it holds none
+     * @throws ReflectiveOperationException when the field cannot be read
+     */
+    private static Object readClientField(LlmService service) throws ReflectiveOperationException {
+        Field field = LlmService.class.getDeclaredField("client");
+        field.setAccessible(true);
+        return field.get(service);
     }
 
     @Test

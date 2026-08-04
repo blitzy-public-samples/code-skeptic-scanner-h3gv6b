@@ -48,7 +48,8 @@ public record TrendsDto(@JsonProperty("trends") List<TrendPoint> trends) {
      * @param tweetCount         {@code COUNT(*)} of the tweets in this bucket
      * @param averageDoubtRating {@code AVG(tweets.doubt_rating)} for this bucket;
      *                           {@code null} when the bucket holds no rated tweet
-     * @param totalLikes         {@code SUM(tweets.like_count)} for this bucket
+     * @param totalLikes         {@code SUM(tweets.like_count)} for this bucket;
+     *                           {@code null} when no tweet in the bucket carries a like count
      */
     // Net-new (series element over the tweets columns at backend/app/db/models.py:L12-14; no source
     // construct declared it) — see docs/DECISION_LOG.md DL-042

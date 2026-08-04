@@ -1,0 +1,225 @@
+package com.codeskeptic.scanner.entity;
+
+import com.codeskeptic.scanner.util.DelimitedStringListConverter;
+import jakarta.persistence.Column;
+import jakarta.persistence.Convert;
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.OneToMany;
+import jakarta.persistence.OrderBy;
+import jakarta.persistence.Table;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * JPA entity mapping the {@code tweets} table and its nine columns: {@code id} (the primary key),
+ * {@code content}, {@code like_count}, {@code created_at}, {@code doubt_rating}, {@code media},
+ * {@code quoted_tweet_id}, {@code user_id} and {@code ai_tools_mentioned}.
+ *
+ * <p>This entity also holds the parent side of the schema's single association: one {@code tweets}
+ * row has many {@code responses} rows, ordered by ascending {@link Response} identifier. The table
+ * is created from these annotations by {@code spring.jpa.hibernate.ddl-auto} — see
+ * docs/DECISION_LOG.md DL-026.
+ *
+ * <p>{@code id} is a generated surrogate key. The X post identifier is not carried in it and no
+ * natural-key column is declared, so ingestion performs no de-duplication — see
+ * docs/DECISION_LOG.md DL-049. {@code id} is carried as a {@link String} at the wire boundary — see
+ * docs/DECISION_LOG.md DL-023.
+ *
+ * <p>{@code media} and {@code ai_tools_mentioned} remain single comma-delimited character columns
+ * and are mapped to {@code List<String>} attributes by {@link DelimitedStringListConverter}, which
+ * owns their null and empty semantics — see docs/DECISION_LOG.md DL-024. Neither list attribute is
+ * pre-populated on construction.
+ */
+// Ported from backend/app/db/models.py:L7-18 (faithful port) — see docs/DECISION_LOG.md
+// Deviations from the literal source declaration, each recorded in the decision log: id is Long
+// with GenerationType.IDENTITY over Column(Integer, primary_key=True) — DL-049; media and
+// ai_tools_mentioned are List<String> attributes over Column(String) — DL-024 — see
+// docs/DECISION_LOG.md
+// equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see
+// docs/DECISION_LOG.md
+@Entity
+@Table(name = "tweets")
+public class Tweet {
+
+    // backend/app/db/models.py:L10
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @Column(name = "id")
+    private Long id;
+
+    // backend/app/db/models.py:L11
+    @Column(name = "content")
+    private String content;
+
+    // backend/app/db/models.py:L12
+    @Column(name = "like_count")
+    private Integer likeCount;
+
+    // backend/app/db/models.py:L13
+    @Column(name = "created_at")
+    private LocalDateTime createdAt;
+
+    // backend/app/db/models.py:L14
+    @Column(name = "doubt_rating")
+    private Double doubtRating;
+
+    // backend/app/db/models.py:L15
+    // Single delimited column value carried as a list — DL-024 — see docs/DECISION_LOG.md
+    @Convert(converter = DelimitedStringListConverter.class)
+    @Column(name = "media")
+    private List<String> media;
+
+    // backend/app/db/models.py:L16
+    // Sole Optional[str] field in the source (backend/app/schema/tweet.py:L12); may be null.
+    @Column(name = "quoted_tweet_id")
+    private String quotedTweetId;
+
+    // backend/app/db/models.py:L17
+    // Identifier of the post author, held as a plain column value; there is no user table.
+    @Column(name = "user_id")
+    private String userId;
+
+    // backend/app/db/models.py:L18
+    // Single delimited column value carried as a list — DL-024 — see docs/DECISION_LOG.md
+    @Convert(converter = DelimitedStringListConverter.class)
+    @Column(name = "ai_tools_mentioned")
+    private List<String> aiToolsMentioned;
+
+    // Ported from backend/app/db/models.py:L30 (faithful port) — see docs/DECISION_LOG.md
+    // The foreign key is owned by Response.tweet (backend/app/db/models.py:L28).
+    @OneToMany(mappedBy = "tweet")
+    @OrderBy("id ASC")
+    private List<Response> responses = new ArrayList<>();
+
+    /**
+     * No-argument constructor required by JPA for entity instantiation. Field values are populated by
+     * the persistence provider or by the accessors below.
+     */
+    public Tweet() {
+    }
+
+    public Long getId() {
+        return id;
+    }
+
+    public void setId(Long id) {
+        this.id = id;
+    }
+
+    public String getContent() {
+        return content;
+    }
+
+    public void setContent(String content) {
+        this.content = content;
+    }
+
+    public Integer getLikeCount() {
+        return likeCount;
+    }
+
+    public void setLikeCount(Integer likeCount) {
+        this.likeCount = likeCount;
+    }
+
+    public LocalDateTime getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(LocalDateTime createdAt) {
+        this.createdAt = createdAt;
+    }
+
+    public Double getDoubtRating() {
+        return doubtRating;
+    }
+
+    public void setDoubtRating(Double doubtRating) {
+        this.doubtRating = doubtRating;
+    }
+
+    public List<String> getMedia() {
+        return media;
+    }
+
+    public void setMedia(List<String> media) {
+        this.media = media;
+    }
+
+    public String getQuotedTweetId() {
+        return quotedTweetId;
+    }
+
+    public void setQuotedTweetId(String quotedTweetId) {
+        this.quotedTweetId = quotedTweetId;
+    }
+
+    public String getUserId() {
+        return userId;
+    }
+
+    public void setUserId(String userId) {
+        this.userId = userId;
+    }
+
+    public List<String> getAiToolsMentioned() {
+        return aiToolsMentioned;
+    }
+
+    public void setAiToolsMentioned(List<String> aiToolsMentioned) {
+        this.aiToolsMentioned = aiToolsMentioned;
+    }
+
+    public List<Response> getResponses() {
+        return responses;
+    }
+
+    public void setResponses(List<Response> responses) {
+        this.responses = responses;
+    }
+
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Compares two instances on the persistent identifier.
+     *
+     * <p>Yields {@code true} for the same reference, and for any instance of this type — a
+     * persistence-provider proxy included — whose identifier is non-{@code null} and equal to this
+     * identifier. Yields {@code false} whenever either identifier is {@code null} and the two
+     * references differ; two instances that have not yet been persisted never compare equal. The
+     * identifier is read through {@link #getId()} on both sides. The {@code responses} collection is
+     * not read, so the comparison triggers no lazy load.
+     *
+     * @param other the object to compare with
+     * @return {@code true} when both instances denote the same {@code tweets} row
+     */
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof Tweet that)) {
+            return false;
+        }
+        Long thisId = this.getId();
+        return thisId != null && thisId.equals(that.getId());
+    }
+
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Returns a hash code derived from the entity type. The value is identical for every instance of
+     * this type and for every proxy of it, and is unchanged by assignment of the identifier on
+     * insert. The {@code responses} collection is not read, so the computation triggers no lazy load.
+     *
+     * @return the hash code of this entity's type
+     */
+    @Override
+    public int hashCode() {
+        return Tweet.class.hashCode();
+    }
+}

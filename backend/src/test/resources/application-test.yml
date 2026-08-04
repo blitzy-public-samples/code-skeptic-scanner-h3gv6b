@@ -1,0 +1,110 @@
+# The Spring `test` profile of the code-skeptic-scanner-backend module.
+#
+# Net-new (no source construct): no Python test configuration existed under backend/ on the source
+# branch — no conftest.py, pytest.ini, setup.cfg, tox.ini, requirements.txt, pyproject.toml, Pipfile
+# and no setup.py. The retired suite was backend/tests/test_api.py, test_services.py and
+# test_tasks.py.
+#
+# This filename is profile-specific. Spring loads src/main/resources/application.yml first and layers
+# this document over it only while the `test` profile is active; a key this document omits keeps the
+# value application.yml gives it. A test class that starts a Spring context declares
+# @ActiveProfiles("test").
+#
+# @DataJpaTest replaces the DataSource by default. A @DataJpaTest class that reads the
+# scanner.database-url declared below also declares
+# @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE).
+#
+# scanner.auth.password-hash below is a bcrypt hash of the plaintext `test-password`.
+#
+# see docs/DECISION_LOG.md — DL-009, DL-016, DL-020, DL-026, DL-027, DL-029, DL-033, DL-034, DL-042
+# and DL-044
+
+# Ported from backend/app/db/database.py:L5-13 (faithful port) — see docs/DECISION_LOG.md
+spring:
+  # spring.datasource.url / .username / .password / .driver-class-name — deliberately absent — DL-027 — see docs/DECISION_LOG.md
+  # spring.jackson.property-naming-strategy — deliberately absent — DL-022 — see docs/DECISION_LOG.md
+  jpa:
+    hibernate:
+      # Net-new (no Python counterpart) — DL-026 — see docs/DECISION_LOG.md
+      ddl-auto: create-drop
+    # Net-new (no Python counterpart) — DL-026 — see docs/DECISION_LOG.md
+    open-in-view: false
+    # spring.jpa.database-platform — deliberately absent — DL-027 — see docs/DECISION_LOG.md
+    properties:
+      hibernate:
+        # Net-new (no Python counterpart) — column names at
+        # backend/app/db/models.py:L42-43 — DL-026 — see docs/DECISION_LOG.md
+        auto_quote_keyword: true
+
+scanner:
+  # Key ported from backend/app/core/config.py:L9 and backend/app/db/database.py:L7; test value is
+  # net-new — DL-009, DL-026, DL-027 — see docs/DECISION_LOG.md
+  # DatabaseUrlTranslator passes a value beginning with `jdbc:` through unchanged and extracts no
+  # credentials from it. NON_KEYWORDS lists the `settings` column names at
+  # backend/app/db/models.py:L42-43.
+  database-url: 'jdbc:h2:mem:scanner_test;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;NON_KEYWORDS=KEY,VALUE'
+  # Ported from backend/app/core/config.py:L10 and backend/app/services/twitter_service.py:L43,L46 (faithful port) — see docs/DECISION_LOG.md
+  popularity-threshold: 100
+  # Ported from backend/app/core/config.py:L11 and backend/app/tasks/response_generation.py:L50 (faithful port) — see docs/DECISION_LOG.md
+  response-generation-delay-seconds: 60
+
+  twitter:
+    # Ported from backend/app/core/config.py:L5-6 (faithful port) — see docs/DECISION_LOG.md
+    api-key: test-twitter-api-key
+    api-secret: test-twitter-api-secret
+    # Ported from backend/app/services/twitter_service.py:L12 (faithful port) — DL-031 — see docs/DECISION_LOG.md
+    api-secret-key: test-twitter-api-secret-key
+    # Ported from backend/app/tasks/tweet_monitoring.py:L46-47 (faithful port) — DL-031 — see docs/DECISION_LOG.md
+    consumer-key: test-twitter-consumer-key
+    consumer-secret: test-twitter-consumer-secret
+    # Ported from backend/app/services/twitter_service.py:L13 and backend/app/tasks/tweet_monitoring.py:L48-49 (faithful port) — DL-046 — see docs/DECISION_LOG.md
+    access-token: test-twitter-access-token
+    access-token-secret: test-twitter-access-token-secret
+
+  notion:
+    # Ported from backend/app/core/config.py:L7 and backend/app/services/notion_service.py:L8 (faithful port) — see docs/DECISION_LOG.md
+    api-key: test-notion-api-key
+    # Ported from backend/app/services/notion_service.py:L24,L35 (faithful port) — see docs/DECISION_LOG.md
+    database-id: test-notion-database-id
+
+  openai:
+    # Ported from backend/app/core/config.py:L8 and backend/app/services/llm_service.py:L9 (faithful port) — see docs/DECISION_LOG.md
+    api-key: test-openai-api-key
+    # Net-new (no Python counterpart) — DL-033 — see docs/DECISION_LOG.md
+    model: gpt-5.6-terra
+    # Ported from backend/app/services/llm_service.py:L22 (faithful port) — DL-034 — see docs/DECISION_LOG.md
+    max-completion-tokens: 150
+    # Ported from backend/app/services/llm_service.py:L25 (faithful port) — see docs/DECISION_LOG.md
+    temperature: 0.7
+    # Ported from backend/app/services/llm_service.py:L23 (faithful port) — see docs/DECISION_LOG.md
+    n: 1
+
+  jwt:
+    # Key ported from backend/app/core/security.py:L11; test value is net-new — DL-016 — see docs/DECISION_LOG.md
+    # 75 bytes.
+    secret: test-only-jwt-secret-for-code-skeptic-scanner-build-verification-0123456789
+    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-015 — see docs/DECISION_LOG.md
+    algorithm: HS256
+    # Ported from backend/app/core/security.py:L9-10 (faithful port) — DL-017 — see docs/DECISION_LOG.md
+    expiration-minutes: 60
+
+  auth:
+    # Net-new (no Python counterpart) — DL-020 — see docs/DECISION_LOG.md
+    username: admin
+    # Net-new (no Python counterpart) — DL-020 — see docs/DECISION_LOG.md
+    # bcrypt hash of the plaintext `test-password`; the hashing counterpart in the retired tree was
+    # backend/app/core/security.py:L14-18.
+    password-hash: '$2a$10$Lt3iVHWKlZC2hu2Nyh/NtekAa.gCoG3qZM.xoMT7w1b/zk3o7SBJS'
+
+  analytics:
+    # Net-new (no Python counterpart) — DL-042 — see docs/DECISION_LOG.md
+    trend-window-days: 30
+
+  ingestion:
+    # Net-new (no Python counterpart); the keyword list was empty at
+    # backend/app/tasks/tweet_monitoring.py:L53-55 — DL-044 — see docs/DECISION_LOG.md
+    stream-base-keywords:
+      - 'AI coding tool'
+      - 'AI code assistant'
+      - 'AI generated code'
+      - 'GPT-4'

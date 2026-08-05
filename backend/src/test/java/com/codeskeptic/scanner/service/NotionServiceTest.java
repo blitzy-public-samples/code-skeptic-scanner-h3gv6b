@@ -2,12 +2,15 @@ package com.codeskeptic.scanner.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.lang.annotation.Annotation;
@@ -21,6 +24,7 @@ import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.lang.reflect.TypeVariable;
 import java.lang.reflect.WildcardType;
+import java.nio.charset.StandardCharsets;
 import java.net.URI;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -33,19 +37,33 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.invocation.Invocation;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.TweetDto;
-import com.codeskeptic.scanner.util.DelimitedStringListConverter;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 // Ported from backend/app/services/notion_service.py:L5-53 (faithful port) — see docs/DECISION_LOG.md
@@ -182,6 +200,12 @@ class NotionServiceTest {
 
     /** Value handed to the {@code startCursor} parameter of {@code getTweets}. */
     private static final String START_CURSOR = "MTc5MzM1NTY4MDAwMDAwMDAwMQ";
+
+    /** {@code page_size} sent when the requested limit is not positive — DL-154. */
+    private static final int DEFAULT_PAGE_SIZE = 10;
+
+    /** Largest {@code page_size} Notion accepts, and the cap applied above it — DL-154. */
+    private static final int MAXIMUM_PAGE_SIZE = 100;
 
     /** Value handed to the {@code responseText} parameter of {@code updateTweetResponse}. */
     private static final String RESPONSE_TEXT = "Benchmarks and a repeatable harness would settle it.";
@@ -458,132 +482,58 @@ class NotionServiceTest {
                 PROPERTY_TIMESTAMP,
                 PROPERTY_DOUBT_RATING,
                 PROPERTY_ENGAGEMENT,
-                PROPERTY_TWEET_ID,
-                PROPERTY_MEDIA,
-                PROPERTY_QUOTED_TWEET_ID,
-                PROPERTY_AI_TOOLS_MENTIONED);
+                PROPERTY_TWEET_ID);
     }
 
-    @Test
-    @DisplayName("writes the media property as one delimited rich-text value")
-    void writesTheMediaPropertyAsOneDelimitedRichTextValue() {
-        stubPost();
-        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
-
-        service.storeTweet(tweet());
-
-        assertThat(storedProperty(PROPERTY_MEDIA).has(KEY_RICH_TEXT)).isTrue();
-        assertThat(textOf(storedProperty(PROPERTY_MEDIA), KEY_RICH_TEXT))
-                .isEqualTo(String.join(",", MEDIA));
-    }
-
-    @Test
-    @DisplayName("writes the ai tools mentioned property as one delimited rich-text value")
-    void writesTheAiToolsMentionedPropertyAsOneDelimitedRichTextValue() {
-        stubPost();
-        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
-
-        service.storeTweet(tweet());
-
-        assertThat(storedProperty(PROPERTY_AI_TOOLS_MENTIONED).has(KEY_RICH_TEXT)).isTrue();
-        assertThat(textOf(storedProperty(PROPERTY_AI_TOOLS_MENTIONED), KEY_RICH_TEXT))
-                .isEqualTo(String.join(",", AI_TOOLS_MENTIONED));
-    }
-
-    // The mirror and the two delimited columns share one codec — DL-164 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("writes both list properties through the codec the delimited columns use")
-    void writesBothListPropertiesThroughTheCodecTheDelimitedColumnsUse() {
-        stubPost();
-        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
-
-        service.storeTweet(tweetCarryingLists(EDGE_CASE_MEDIA, EDGE_CASE_AI_TOOLS));
-
-        assertThat(textOf(storedProperty(PROPERTY_MEDIA), KEY_RICH_TEXT))
-                .isEqualTo(DelimitedStringListConverter.encode(EDGE_CASE_MEDIA));
-        assertThat(textOf(storedProperty(PROPERTY_AI_TOOLS_MENTIONED), KEY_RICH_TEXT))
-                .isEqualTo(DelimitedStringListConverter.encode(EDGE_CASE_AI_TOOLS));
-    }
-
-    // The mirror and the two delimited columns share one codec — DL-164 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("mirrors a delimiter, a backslash, a trailing backslash and surrounding whitespace "
-            + "exactly as the delimited columns do")
-    void mirrorsEdgeCaseListValuesExactlyAsTheDelimitedColumnsDo() {
-        stubPost();
-        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
-        service.storeTweet(tweetCarryingLists(EDGE_CASE_MEDIA, EDGE_CASE_AI_TOOLS));
-        JsonNode written = storedProperties();
-
-        assertThat(textOf(written.path(PROPERTY_MEDIA), KEY_RICH_TEXT))
-                .as("mirrored media text")
-                .isEqualTo("https://pbs.example/a,b.png,https://pbs.example/c.png");
-        assertThat(textOf(written.path(PROPERTY_AI_TOOLS_MENTIONED), KEY_RICH_TEXT))
-                .as("mirrored ai tools text")
-                .isEqualTo("C:\\tools\\codeium,Cursor\\,Copilot,Cursor  Editor");
-
-        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, written)));
-        List<TweetDto> mirrored = service.getTweets(LIMIT, START_CURSOR);
-
-        assertThat(mirrored).hasSize(1);
-        assertThat(mirrored.get(0).media()).as("media read back from the mirror")
-                .containsExactlyElementsOf(
-                        DelimitedStringListConverter.decode(
-                                DelimitedStringListConverter.encode(EDGE_CASE_MEDIA)))
-                .containsExactly("https://pbs.example/a", "b.png", "https://pbs.example/c.png");
-        assertThat(mirrored.get(0).aiToolsMentioned()).as("ai tools read back from the mirror")
-                .containsExactlyElementsOf(
-                        DelimitedStringListConverter.decode(
-                                DelimitedStringListConverter.encode(EDGE_CASE_AI_TOOLS)))
-                .containsExactly("C:\\tools\\codeium", "Cursor\\", "Copilot", "Cursor  Editor");
-    }
-
-    // The mirror and the two delimited columns share one codec — DL-164 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("reads a hand-written mirror value through the same codec as a column value")
-    void readsAHandWrittenMirrorValueThroughTheSameCodecAsAColumnValue() {
-        String handWritten = "Copilot,,  Cursor  ,C:\\tools\\codeium,";
-        stubPost();
-        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
-        service.storeTweet(tweet());
-        JsonNode written = storedProperties();
-        ((ObjectNode) written).set(PROPERTY_AI_TOOLS_MENTIONED, richText(handWritten));
-
-        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, written)));
-        List<TweetDto> mirrored = service.getTweets(LIMIT, START_CURSOR);
-
-        assertThat(mirrored).hasSize(1);
-        assertThat(mirrored.get(0).aiToolsMentioned())
-                .as("hand-written mirror value read through the shared codec")
-                .containsExactlyElementsOf(DelimitedStringListConverter.decode(handWritten))
-                .containsExactly("Copilot", "Cursor", "C:\\tools\\codeium");
-    }
-
-    @Test
-    @DisplayName("writes the quoted tweet id property as rich text carrying the quoted post id")
-    void writesTheQuotedTweetIdPropertyAsRichTextCarryingTheQuotedPostId() {
-        stubPost();
-        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
-
-        service.storeTweet(tweet());
-
-        assertThat(storedProperty(PROPERTY_QUOTED_TWEET_ID).has(KEY_RICH_TEXT)).isTrue();
-        assertThat(textOf(storedProperty(PROPERTY_QUOTED_TWEET_ID), KEY_RICH_TEXT))
-                .isEqualTo(QUOTED_TWEET_ID);
-    }
-
+    // backend/app/schema/tweet.py:L12 is the sole Optional[str] field — DL-080 — see
+    // docs/DECISION_LOG.md
     @Test
     @DisplayName("omits a property whose component the post does not carry")
     void omitsAPropertyWhoseComponentThePostDoesNotCarry() {
         stubPost();
         stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
-        TweetDto sparse = new TweetDto(TWEET_ID, TWEET_CONTENT, null, null, null, List.of(), null,
-                null, List.of());
+        TweetDto quotingNothing = new TweetDto(TWEET_ID, TWEET_CONTENT, LIKE_COUNT, CREATED_AT,
+                DOUBT_RATING, List.of(), null, USER_ID, List.of());
 
-        service.storeTweet(sparse);
+        service.storeTweet(quotingNothing);
 
         assertThat(propertyNamesOf(storedProperties()))
-                .containsExactlyInAnyOrder(PROPERTY_CONTENT, PROPERTY_TWEET_ID);
+                .doesNotContain(PROPERTY_QUOTED_TWEET_ID)
+                .contains(PROPERTY_CONTENT, PROPERTY_TWEET_ID);
+    }
+
+    @Test
+    @DisplayName("writes none of the three properties the mirror contract withdraws")
+    void writesNoneOfTheThreePropertiesTheMirrorContractWithdraws() {
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+
+        service.storeTweet(tweetCarryingLists(EDGE_CASE_MEDIA, EDGE_CASE_AI_TOOLS));
+
+        assertThat(propertyNamesOf(storedProperties()))
+                .doesNotContain(PROPERTY_MEDIA, PROPERTY_QUOTED_TWEET_ID,
+                        PROPERTY_AI_TOOLS_MENTIONED);
+        assertThat(storedProperties().has(PROPERTY_MEDIA)).isFalse();
+        assertThat(storedProperties().has(PROPERTY_QUOTED_TWEET_ID)).isFalse();
+        assertThat(storedProperties().has(PROPERTY_AI_TOOLS_MENTIONED)).isFalse();
+    }
+
+    @Test
+    @DisplayName("reads the two withdrawn list components back as empty lists and the quoted post id "
+            + "as absent")
+    void readsTheWithdrawnComponentsBackAsEmptyAndAbsent() {
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+        service.storeTweet(tweetCarryingLists(EDGE_CASE_MEDIA, EDGE_CASE_AI_TOOLS));
+        JsonNode written = storedProperties();
+
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, written)));
+        List<TweetDto> mirrored = service.getTweets(LIMIT, START_CURSOR);
+
+        assertThat(mirrored).hasSize(1);
+        assertThat(mirrored.get(0).media()).isEmpty();
+        assertThat(mirrored.get(0).aiToolsMentioned()).isEmpty();
+        assertThat(mirrored.get(0).quotedTweetId()).isNull();
     }
 
     @Test
@@ -708,6 +658,59 @@ class NotionServiceTest {
         assertThat(capturedBody(databaseQuerySpec).path(KEY_PAGE_SIZE).intValue()).isEqualTo(LIMIT);
     }
 
+    // -------------------------------------------------------------------------
+    // Database query: the page_size range Notion accepts — DL-154
+    // -------------------------------------------------------------------------
+
+    @ParameterizedTest(name = "a limit of {0} is sent as the default page size")
+    @MethodSource("nonPositiveLimits")
+    @DisplayName("sends the default page size when the limit is not positive")
+    void sendsTheDefaultPageSizeWhenTheLimitIsNotPositive(int limit) {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying());
+
+        service.getTweets(limit, START_CURSOR);
+
+        assertThat(capturedBody(databaseQuerySpec).path(KEY_PAGE_SIZE).intValue())
+                .isEqualTo(DEFAULT_PAGE_SIZE);
+    }
+
+    @Test
+    @DisplayName("sends a limit of exactly one hundred uncapped")
+    void sendsALimitOfExactlyOneHundredUncapped() {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying());
+
+        service.getTweets(MAXIMUM_PAGE_SIZE, START_CURSOR);
+
+        assertThat(capturedBody(databaseQuerySpec).path(KEY_PAGE_SIZE).intValue())
+                .isEqualTo(MAXIMUM_PAGE_SIZE);
+    }
+
+    @ParameterizedTest(name = "a limit of {0} is capped at one hundred")
+    @MethodSource("limitsAboveTheMaximum")
+    @DisplayName("caps a limit above one hundred at the largest page size notion accepts")
+    void capsALimitAboveOneHundredAtTheLargestPageSizeNotionAccepts(int limit) {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying());
+
+        service.getTweets(limit, START_CURSOR);
+
+        assertThat(capturedBody(databaseQuerySpec).path(KEY_PAGE_SIZE).intValue())
+                .isEqualTo(MAXIMUM_PAGE_SIZE);
+    }
+
+    @Test
+    @DisplayName("sends a lowest accepted page size of one when the limit is one")
+    void sendsALowestAcceptedPageSizeOfOneWhenTheLimitIsOne() {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying());
+
+        service.getTweets(1, START_CURSOR);
+
+        assertThat(capturedBody(databaseQuerySpec).path(KEY_PAGE_SIZE).intValue()).isEqualTo(1);
+    }
+
     @Test
     @DisplayName("sends the supplied start cursor as the start cursor")
     void sendsTheSuppliedStartCursorAsTheStartCursor() {
@@ -760,8 +763,7 @@ class NotionServiceTest {
 
         assertThat(propertyNamesOf(written)).contains(
                 PROPERTY_CONTENT, PROPERTY_AUTHOR, PROPERTY_TIMESTAMP, PROPERTY_DOUBT_RATING,
-                PROPERTY_ENGAGEMENT, PROPERTY_TWEET_ID, PROPERTY_MEDIA, PROPERTY_QUOTED_TWEET_ID,
-                PROPERTY_AI_TOOLS_MENTIONED);
+                PROPERTY_ENGAGEMENT, PROPERTY_TWEET_ID);
         assertThat(mirrored).hasSize(1);
         TweetDto roundTripped = mirrored.get(0);
         assertThat(roundTripped.content()).isEqualTo(TWEET_CONTENT);
@@ -770,10 +772,9 @@ class NotionServiceTest {
         assertThat(roundTripped.doubtRating()).isEqualTo(DOUBT_RATING);
         assertThat(roundTripped.likeCount()).isEqualTo(LIKE_COUNT);
         assertThat(roundTripped.id()).isEqualTo(TWEET_ID);
-        assertThat(roundTripped.media()).containsExactlyElementsOf(MEDIA);
-        assertThat(roundTripped.quotedTweetId()).isEqualTo(QUOTED_TWEET_ID);
-        assertThat(roundTripped.aiToolsMentioned()).containsExactlyElementsOf(AI_TOOLS_MENTIONED);
-        assertThat(roundTripped).isEqualTo(tweet());
+        assertThat(roundTripped.media()).isEmpty();
+        assertThat(roundTripped.quotedTweetId()).isNull();
+        assertThat(roundTripped.aiToolsMentioned()).isEmpty();
     }
 
     // -------------------------------------------------------------------------
@@ -781,8 +782,9 @@ class NotionServiceTest {
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("skips a page that carries no mirrored tweet identifier")
-    void skipsAPageThatCarriesNoMirroredTweetIdentifier() {
+    @DisplayName("falls back to the notion page identifier when a page carries no mirrored tweet "
+            + "identifier")
+    void fallsBackToTheNotionPageIdentifierWhenNoMirroredTweetIdentifierIsCarried() {
         stubPost();
         stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
         service.storeTweet(tweet());
@@ -793,12 +795,13 @@ class NotionServiceTest {
                 pageCarrying(MATCHED_PAGE_ID, withoutTweetId)));
         List<TweetDto> mirrored = service.getTweets(LIMIT, START_CURSOR);
 
-        assertThat(mirrored).isEmpty();
+        assertThat(mirrored).extracting(TweetDto::id).containsExactly(MATCHED_PAGE_ID);
     }
 
     @Test
-    @DisplayName("never substitutes the notion page identifier for the tweet identifier")
-    void neverSubstitutesTheNotionPageIdentifierForTheTweetIdentifier() {
+    @DisplayName("substitutes the notion page identifier only for the page whose mirrored tweet "
+            + "identifier is absent")
+    void substitutesTheNotionPageIdentifierOnlyWhenTheTweetIdentifierIsAbsent() {
         stubPost();
         stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
         service.storeTweet(tweet());
@@ -811,32 +814,155 @@ class NotionServiceTest {
         List<TweetDto> mirrored = service.getTweets(LIMIT, START_CURSOR);
 
         assertThat(mirrored).extracting(TweetDto::id)
-                .containsExactly(TWEET_ID)
-                .doesNotContain(MATCHED_PAGE_ID, CREATED_PAGE_ID);
+                .containsExactly(MATCHED_PAGE_ID, TWEET_ID);
     }
 
+    // backend/app/schema/tweet.py:L12 is the sole Optional[str] field — DL-080 — see
+    // docs/DECISION_LOG.md
     @Test
-    @DisplayName("carries a null component for every property a mirrored page omits")
-    void carriesANullComponentForEveryPropertyAMirroredPageOmits() {
+    @DisplayName("carries a null quoted tweet id for a mirrored page that omits that property")
+    void carriesANullQuotedTweetIdForAMirroredPageThatOmitsThatProperty() {
         stubPost();
-        ObjectNode identifierOnly = MAPPER.createObjectNode();
-        identifierOnly.set(PROPERTY_TWEET_ID, richText(TWEET_ID));
-        stubDatabaseQueryReturning(queryResultCarrying(
-                pageCarrying(MATCHED_PAGE_ID, identifierOnly)));
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+        service.storeTweet(tweet());
+        ObjectNode withoutQuotedTweetId =
+                ((ObjectNode) storedProperties().deepCopy()).without(PROPERTY_QUOTED_TWEET_ID);
 
+        stubDatabaseQueryReturning(queryResultCarrying(
+                pageCarrying(MATCHED_PAGE_ID, withoutQuotedTweetId)));
         List<TweetDto> mirrored = service.getTweets(LIMIT, START_CURSOR);
 
         assertThat(mirrored).hasSize(1);
-        TweetDto sparse = mirrored.get(0);
-        assertThat(sparse.id()).isEqualTo(TWEET_ID);
-        assertThat(sparse.content()).isNull();
-        assertThat(sparse.userId()).isNull();
-        assertThat(sparse.createdAt()).isNull();
-        assertThat(sparse.likeCount()).isNull();
-        assertThat(sparse.doubtRating()).isNull();
-        assertThat(sparse.quotedTweetId()).isNull();
-        assertThat(sparse.media()).isEmpty();
-        assertThat(sparse.aiToolsMentioned()).isEmpty();
+        assertThat(mirrored.get(0).quotedTweetId()).isNull();
+        assertThat(mirrored.get(0).id()).isEqualTo(TWEET_ID);
+    }
+
+    // -------------------------------------------------------------------------
+    // The record a rejected request leaves — DL-084, DL-153
+    // -------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("records a rejection with the provider status, error code, request id and bounded "
+            + "message and never the body")
+    void recordsARejectionWithTheProviderFieldsAndNeverTheBody() {
+        String body = "{\"object\":\"error\",\"status\":400,\"code\":\"validation_error\","
+                + "\"message\":\"Media is not a property that exists.\"}";
+        stubPost();
+        when(postSpec.uri(PAGES_PATH)).thenThrow(rejection(HttpStatus.BAD_REQUEST, body, "req-9zk"));
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            assertThatThrownBy(() -> service.storeTweet(tweet()))
+                    .isInstanceOf(HttpClientErrorException.class);
+
+            String logged = onlyErrorRecord(recorded);
+            assertThat(logged)
+                    .contains("HTTP 400")
+                    .contains("Notion code validation_error")
+                    .contains("request id req-9zk")
+                    .contains("Media is not a property that exists.");
+            assertThat(logged).doesNotContain("\"object\"").doesNotContain("\"status\":400");
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
+    @Test
+    @DisplayName("records absent for an error code and a request id that fail their shape checks")
+    void recordsAbsentForAnErrorCodeAndRequestIdThatFailTheirShapeChecks() {
+        String body = "{\"code\":\"Validation Error\\ninjected\",\"message\":\"nope\"}";
+        stubPost();
+        when(postSpec.uri(PAGES_PATH))
+                .thenThrow(rejection(HttpStatus.BAD_REQUEST, body, "bad id\nforged"));
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            assertThatThrownBy(() -> service.storeTweet(tweet()))
+                    .isInstanceOf(HttpClientErrorException.class);
+
+            String logged = onlyErrorRecord(recorded);
+            assertThat(logged).contains("Notion code absent").contains("request id absent");
+            assertThat(logged).doesNotContain("injected").doesNotContain("forged");
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
+    @Test
+    @DisplayName("cuts a rejection message to two hundred characters")
+    void cutsARejectionMessageToTwoHundredCharacters() {
+        String longMessage = "x".repeat(500);
+        String body = "{\"code\":\"validation_error\",\"message\":\"" + longMessage + "\"}";
+        stubPost();
+        when(postSpec.uri(PAGES_PATH)).thenThrow(rejection(HttpStatus.BAD_REQUEST, body, "req-1"));
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            assertThatThrownBy(() -> service.storeTweet(tweet()))
+                    .isInstanceOf(HttpClientErrorException.class);
+
+            assertThat(onlyErrorRecord(recorded)).contains("x".repeat(200))
+                    .doesNotContain("x".repeat(201));
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
+    @Test
+    @DisplayName("records only the failure type when a rejection carries no HTTP response")
+    void recordsOnlyTheFailureTypeWhenARejectionCarriesNoHttpResponse() {
+        stubPost();
+        when(postSpec.uri(PAGES_PATH)).thenThrow(new IllegalStateException("transport down"));
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            assertThatIllegalStateException().isThrownBy(() -> service.storeTweet(tweet()));
+
+            String logged = onlyErrorRecord(recorded);
+            assertThat(logged).contains("IllegalStateException").doesNotContain("transport down");
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
+    private static HttpClientErrorException rejection(HttpStatus status, String body,
+            String requestId) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.add("x-request-id", requestId);
+        HttpClientErrorException answered = HttpClientErrorException
+                .create(status, status.getReasonPhrase(), headers,
+                        body.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
+        // RestClient installs this function on every exception it raises; the stub does the same so
+        // the body is readable exactly as it is in a running service.
+        answered.setBodyConvertFunction(type -> {
+            try {
+                return MAPPER.readTree(body);
+            } catch (JsonProcessingException unreadable) {
+                throw new IllegalStateException(unreadable);
+            }
+        });
+        return answered;
+    }
+
+    private static ListAppender<ILoggingEvent> attachAppender() {
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        ((Logger) LoggerFactory.getLogger(NotionService.class)).addAppender(appender);
+        return appender;
+    }
+
+    private static void detachAppender(ListAppender<ILoggingEvent> appender) {
+        ((Logger) LoggerFactory.getLogger(NotionService.class)).detachAppender(appender);
+    }
+
+    private static String onlyErrorRecord(ListAppender<ILoggingEvent> appender) {
+        List<ILoggingEvent> errors = appender.list.stream()
+                .filter(event -> event.getLevel() == Level.ERROR)
+                .toList();
+        assertThat(errors).hasSize(1);
+        assertThat(errors.get(0).getThrowableProxy()).isNull();
+        return errors.get(0).getFormattedMessage();
     }
 
     @Test
@@ -905,6 +1031,40 @@ class NotionServiceTest {
     // -------------------------------------------------------------------------
 
     @Test
+    @DisplayName("leaves notion untouched when the tweet id query matches no page")
+    void leavesNotionUntouchedWhenTheTweetIdQueryMatchesNoPage() {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying());
+
+        service.updateTweetResponse(TWEET_ID, RESPONSE_TEXT);
+
+        verify(restClient, never()).patch();
+    }
+
+    @Test
+    @DisplayName("leaves notion untouched when every matched page carries no page identifier")
+    void reportsAFailureWhenEveryMatchedPageCarriesNoPageIdentifier() {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying("", noProperties())));
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> service.updateTweetResponse(TWEET_ID, RESPONSE_TEXT))
+                .withMessageContaining("no page identifier");
+        verify(restClient, never()).patch();
+    }
+
+    @Test
+    @DisplayName("reports a failure when the tweet id query answers with an empty body")
+    void reportsAFailureWhenTheTweetIdQueryAnswersWithAnEmptyBody() {
+        stubPost();
+        stubDatabaseQueryReturning(null);
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> service.updateTweetResponse(TWEET_ID, RESPONSE_TEXT));
+        verify(restClient, never()).patch();
+    }
+
+    @Test
     @DisplayName("queries the tweet id property for the supplied post identifier")
     void queriesTheTweetIdPropertyForTheSuppliedPostIdentifier() {
         stubPost();
@@ -929,6 +1089,78 @@ class NotionServiceTest {
 
         assertThat(capturedUriTemplate(patchSpec)).isEqualTo(PAGE_PATH);
         assertThat(capturedUriVariable(patchSpec)).isEqualTo(MATCHED_PAGE_ID);
+    }
+
+    @Test
+    @DisplayName("executes the page update by taking the bodiless entity of the response")
+    void executesThePageUpdateByTakingTheBodilessEntityOfTheResponse() {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, noProperties())));
+        stubPageUpdate();
+
+        service.updateTweetResponse(TWEET_ID, RESPONSE_TEXT);
+
+        InOrder execution = inOrder(restClient, patchSpec, pageUpdateSpec, pageUpdateResponse);
+        execution.verify(restClient).patch();
+        execution.verify(patchSpec).uri(eq(PAGE_PATH), any(Object.class));
+        execution.verify(pageUpdateSpec).body(any(Object.class));
+        execution.verify(pageUpdateSpec).retrieve();
+        execution.verify(pageUpdateResponse).toBodilessEntity();
+        execution.verifyNoMoreInteractions();
+    }
+
+    @ParameterizedTest(name = "[{index}] tweet id {0}")
+    @NullAndEmptySource
+    @ValueSource(strings = {"   ", "\t", "\n"})
+    @DisplayName("issues no page update at all for a tweet identifier that carries nothing")
+    void issuesNoPageUpdateAtAllForATweetIdentifierThatCarriesNothing(String blankTweetId) {
+        service.updateTweetResponse(blankTweetId, RESPONSE_TEXT);
+
+        verify(restClient, never()).patch();
+        verify(restClient, never()).post();
+        verifyNoInteractions(patchSpec, pageUpdateSpec, pageUpdateResponse);
+    }
+
+    @Test
+    @DisplayName("issues no page update when the tweet id query matches no page")
+    void issuesNoPageUpdateWhenTheTweetIdQueryMatchesNoPage() {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying());
+
+        service.updateTweetResponse(TWEET_ID, RESPONSE_TEXT);
+
+        verify(restClient, never()).patch();
+        verifyNoInteractions(patchSpec, pageUpdateSpec, pageUpdateResponse);
+    }
+
+    @Test
+    @DisplayName("reports a failure and issues no page update when the matched page carries no "
+            + "identifier")
+    void reportsAFailureAndIssuesNoPageUpdateWhenTheMatchedPageCarriesNoIdentifier() {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(MAPPER.createObjectNode()));
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> service.updateTweetResponse(TWEET_ID, RESPONSE_TEXT))
+                .withMessageContaining("page identifier");
+
+        verify(restClient, never()).patch();
+        verifyNoInteractions(patchSpec, pageUpdateSpec, pageUpdateResponse);
+    }
+
+    @Test
+    @DisplayName("propagates a failure raised while the page update executes")
+    void propagatesAFailureRaisedWhileThePageUpdateExecutes() {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, noProperties())));
+        stubPageUpdate();
+        RuntimeException transportFailure = new IllegalStateException("the PATCH did not complete");
+        when(pageUpdateResponse.toBodilessEntity()).thenThrow(transportFailure);
+
+        assertThatThrownBy(() -> service.updateTweetResponse(TWEET_ID, RESPONSE_TEXT))
+                .isSameAs(transportFailure);
+
+        verify(pageUpdateResponse).toBodilessEntity();
     }
 
     @Test
@@ -978,6 +1210,69 @@ class NotionServiceTest {
         assertThat(Modifier.isPublic(update.getModifiers())).isTrue();
         assertThat(update.getParameterTypes()).containsExactly(String.class, String.class);
         assertThat(update.getReturnType()).isEqualTo(void.class);
+    }
+
+    // -------------------------------------------------------------------------
+    // The configured database identifier is required before any request is made
+    // -------------------------------------------------------------------------
+
+    @ParameterizedTest(name = "a database id of {0} is rejected by getTweets")
+    @MethodSource("blankDatabaseIds")
+    @DisplayName("rejects a query when the configured database id is absent or blank")
+    void rejectsAQueryWhenTheConfiguredDatabaseIdIsAbsentOrBlank(String databaseId) {
+        NotionService unconfigured = serviceCarrying(databaseId);
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> unconfigured.getTweets(LIMIT, START_CURSOR))
+                .withMessageContaining("scanner.notion.database-id");
+        verifyNoInteractions(restClient);
+    }
+
+    @ParameterizedTest(name = "a database id of {0} is rejected by storeTweet")
+    @MethodSource("blankDatabaseIds")
+    @DisplayName("rejects a mirror when the configured database id is absent or blank")
+    void rejectsAMirrorWhenTheConfiguredDatabaseIdIsAbsentOrBlank(String databaseId) {
+        NotionService unconfigured = serviceCarrying(databaseId);
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> unconfigured.storeTweet(tweet()))
+                .withMessageContaining("scanner.notion.database-id");
+        verifyNoInteractions(restClient);
+    }
+
+    @ParameterizedTest(name = "a database id of {0} is rejected by updateTweetResponse")
+    @MethodSource("blankDatabaseIds")
+    @DisplayName("rejects an update when the configured database id is absent or blank")
+    void rejectsAnUpdateWhenTheConfiguredDatabaseIdIsAbsentOrBlank(String databaseId) {
+        NotionService unconfigured = serviceCarrying(databaseId);
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> unconfigured.updateTweetResponse(TWEET_ID, RESPONSE_TEXT))
+                .withMessageContaining("scanner.notion.database-id");
+        verifyNoInteractions(restClient);
+    }
+
+    @ParameterizedTest(name = "a tweet id of {0} is a no-op even with no database id configured")
+    @MethodSource("blankTweetIds")
+    @DisplayName("leaves notion untouched for a blank tweet id before it reads the database id")
+    void leavesNotionUntouchedForABlankTweetIdBeforeItReadsTheDatabaseId(String tweetId) {
+        NotionService unconfigured = serviceCarrying(null);
+
+        unconfigured.updateTweetResponse(tweetId, RESPONSE_TEXT);
+
+        verifyNoInteractions(restClient);
+    }
+
+    @Test
+    @DisplayName("strips surrounding whitespace from the configured database id")
+    void stripsSurroundingWhitespaceFromTheConfiguredDatabaseId() {
+        service = serviceCarrying("  " + DATABASE_ID + "  ");
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying());
+
+        service.getTweets(LIMIT, START_CURSOR);
+
+        assertThat(capturedUriVariable(postSpec)).isEqualTo(DATABASE_ID);
     }
 
     // -------------------------------------------------------------------------
@@ -1095,6 +1390,47 @@ class NotionServiceTest {
         assertThat(postAnnotations).isNotEmpty();
         assertThat(surfaceAnnotations).noneMatch(NotionServiceTest::isValidationConstraint);
         assertThat(postAnnotations).noneMatch(NotionServiceTest::isValidationConstraint);
+    }
+
+    // -------------------------------------------------------------------------
+    // Fixtures: argument providers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Supplies the {@code limit} values that are replaced by the default page size — DL-154.
+     *
+     * @return zero and the negative limits
+     */
+    private static Stream<Integer> nonPositiveLimits() {
+        return Stream.of(0, -1, -10, Integer.MIN_VALUE);
+    }
+
+    /**
+     * Supplies the {@code limit} values that are capped at the largest page size Notion accepts —
+     * DL-154.
+     *
+     * @return the limits above one hundred
+     */
+    private static Stream<Integer> limitsAboveTheMaximum() {
+        return Stream.of(MAXIMUM_PAGE_SIZE + 1, 250, 1000, Integer.MAX_VALUE);
+    }
+
+    /**
+     * Supplies the {@code scanner.notion.database-id} values that leave the mirror unconfigured.
+     *
+     * @return {@code null} for an unset value, then the blank values
+     */
+    private static Stream<String> blankDatabaseIds() {
+        return Stream.of(null, "", " ", "   ", "\t", "\n");
+    }
+
+    /**
+     * Supplies the post identifiers {@code updateTweetResponse} treats as a no-op — DL-157.
+     *
+     * @return {@code null} for an absent identifier, then the blank identifiers
+     */
+    private static Stream<String> blankTweetIds() {
+        return Stream.of(null, "", " ", "\t\n");
     }
 
     // -------------------------------------------------------------------------

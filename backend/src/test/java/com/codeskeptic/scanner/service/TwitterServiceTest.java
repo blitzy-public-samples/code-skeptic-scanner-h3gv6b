@@ -50,23 +50,23 @@ import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
 
-// Ported from backend/app/services/twitter_service.py:L6-50 (faithful port) — see docs/DECISION_LOG.md
-// Replaces TestTwitterService at backend/tests/test_services.py:L8-22 — see docs/DECISION_LOG.md
+// Net-new completion coverage: three of the four operations under test were called by
+// backend/app/api/tweets.py:L16,L27,L50 but absent from the source class, and
+// backend/tests/test_services.py:L8-22 carried two bare `pass` stubs — see
+// docs/DECISION_LOG.md DL-037, DL-038, DL-040, DL-048
+// The popularity comparison is a faithful port of
+// backend/app/services/twitter_service.py:L46 — see docs/DECISION_LOG.md
 /**
  * Exercises the four operations {@link TwitterService} exposes:
  * {@link TwitterService#getPaginatedTweets(int, int)}, {@link TwitterService#getTweet(String)},
  * {@link TwitterService#updateTweetAnalysis(String, double)} and
  * {@link TwitterService#meetsPopularityThreshold(Integer)}.
  *
- * <p>The five collaborators arrive through the constructor. Four are Mockito doubles —
- * {@link TweetRepository}, {@link SettingRepository}, {@link TweetMapper} and
- * {@link SentimentAnalysisService} — and the fifth is a real {@link ScannerProperties} record
- * carrying the value of {@code scanner.popularity-threshold} under test.
+ * <p>Four collaborators are Mockito doubles and the fifth is a real {@link ScannerProperties} record
+ * carrying the value of {@code scanner.popularity-threshold} under test. No Spring context is
+ * started, no database is reached and no network call is made; stubbing is declared per test.
  *
- * <p>No Spring context is started, no database is reached and no network call is made. Stubbing is
- * declared per test.
- *
- * <p>The popularity gate is asserted at the boundary transcribed from
+ * <p>The popularity gate is asserted at the boundary of
  * {@code backend/app/services/twitter_service.py:L46}, whose threshold is read at {@code :L43} and
  * whose default of {@code 100} is declared at {@code backend/app/core/config.py:L10}.
  *
@@ -75,52 +75,37 @@ import com.codeskeptic.scanner.service.mapper.TweetMapper;
 @ExtendWith(MockitoExtension.class)
 class TwitterServiceTest {
 
-    /** Primary key of the {@code settings} row read by the popularity gate. */
     private static final String POPULARITY_THRESHOLD_KEY = "tweet_popularity_threshold";
 
-    /** Wire literal of {@code backend/app/api/tweets.py:L32} and {@code :L43}. */
     private static final String TWEET_NOT_FOUND = "Tweet not found";
 
     /** Value of {@code scanner.popularity-threshold} declared at {@code core/config.py:L10}. */
     private static final int CONFIGURED_THRESHOLD = 100;
 
-    /** Identifier of the {@code tweets} row the identifier-bearing operations address. */
     private static final int TWEET_ID = 7;
 
-    /** Path value addressing {@link #TWEET_ID}. */
     private static final String TWEET_ID_PATH_VALUE = "7";
 
-    /** Document sentiment score handed to {@link TwitterService#updateTweetAnalysis(String, double)}. */
     private static final double ANALYSIS_SCORE = 0.0d;
 
-    /** Doubt rating returned by the stubbed {@link SentimentAnalysisService}. */
     private static final double STUBBED_DOUBT_RATING = 42.0d;
 
-    /** Value of the {@code content} column of the fixture row. */
     private static final String CONTENT = "AI coding tools still write code I have to rewrite.";
 
-    /** Value of the {@code like_count} column of the fixture row. */
     private static final Integer LIKE_COUNT = 128;
 
-    /** Value of the {@code created_at} column of the fixture row. */
     private static final LocalDateTime CREATED_AT = LocalDateTime.of(2024, 3, 14, 9, 26, 53);
 
-    /** Value of the {@code doubt_rating} column of the fixture row before the analysis is written. */
     private static final Double INITIAL_DOUBT_RATING = 3.5d;
 
-    /** Sole element of the {@code media} column of the fixture row. */
     private static final String MEDIA_URL = "https://example.invalid/media/1.png";
 
-    /** Value of the {@code quoted_tweet_id} column of the fixture row. */
     private static final String QUOTED_TWEET_ID = "1234567890";
 
-    /** Value of the {@code user_id} column of the fixture row. */
     private static final String USER_ID = "9876543210";
 
-    /** Sole element of the {@code ai_tools_mentioned} column of the fixture row. */
     private static final String AI_TOOL = "GPT-4";
 
-    /** Types through which an outbound HTTP call would be issued. */
     private static final List<Class<?>> HTTP_CLIENT_TYPES = List.of(
             WebClient.class,
             WebClient.Builder.class,
@@ -128,7 +113,6 @@ class TwitterServiceTest {
             RestClient.Builder.class,
             RestTemplate.class);
 
-    /** Names of the public operations {@link TwitterService} declares. */
     private static final List<String> PUBLIC_OPERATIONS = List.of(
             "getPaginatedTweets",
             "getTweet",
@@ -533,9 +517,100 @@ class TwitterServiceTest {
         assertThat(pageRequest.getValue().getPageSize()).isEqualTo(expectedSize);
     }
 
+    @ParameterizedTest(name = "a per_page of {0} reaches the repository unreduced")
+    @ValueSource(ints = {100, 101, 500, 10_000, Integer.MAX_VALUE})
+    @DisplayName("applies no upper bound to per_page")
+    void appliesNoUpperBoundToPerPage(int perPage) {
+        when(tweetRepository.findAll(any(Pageable.class))).thenReturn(emptyPage());
+        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+
+        serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+
+        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
+        verify(tweetRepository).findAll(pageRequest.capture());
+        assertThat(pageRequest.getValue().getPageSize()).isEqualTo(perPage);
+    }
+
+    @Test
+    @DisplayName("restates the unreduced per_page in the pagination block")
+    void restatesTheUnreducedPerPageInThePaginationBlock() {
+        when(tweetRepository.findAll(any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 500), 0L));
+        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+
+        PaginatedTweetsDto envelope =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, 500);
+
+        assertThat(envelope.pagination().perPage()).isEqualTo(500);
+    }
+
     // -----------------------------------------------------------------------
     // getPaginatedTweets(int, int) — the envelope
     // -----------------------------------------------------------------------
+
+    // No upper bound is applied to per_page — IR9 — see docs/DECISION_LOG.md DL-200
+    @ParameterizedTest(name = "per_page {0} reads page size {1}")
+    @CsvSource({
+            "99,99",
+            "100,100",
+            "101,101",
+            "1000,1000",
+            "2147483647,2147483647"
+    })
+    @DisplayName("reads a per_page above the former upper bound unreduced")
+    void readsAPerPageAboveTheUpperBoundAsTheUpperBound(int perPage, int expectedSize) {
+        when(tweetRepository.findAll(any(Pageable.class)))
+                .thenAnswer(invocation -> {
+                    Pageable requested = invocation.getArgument(0);
+                    return new PageImpl<>(List.of(), requested, 0L);
+                });
+        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+
+        PaginatedTweetsDto rendered =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+
+        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
+        verify(tweetRepository).findAll(pageRequest.capture());
+        assertThat(pageRequest.getValue().getPageSize())
+                .as("page size the repository was asked for").isEqualTo(expectedSize);
+        assertThat(rendered.pagination().perPage())
+                .as("per_page the envelope restates").isEqualTo(expectedSize);
+    }
+
+    // Lower bounds applied to page and per_page — DL-077 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "page {0} of size {1} reads page index {2} of size {3}")
+    @CsvSource({
+            "0,10,0,10",
+            "-1,10,0,10",
+            "-2147483648,10,0,10",
+            "1,0,0,10",
+            "1,-1,0,10",
+            "0,0,0,10"
+    })
+    @DisplayName("reads a page or per_page below the lower bound as its default")
+    void readsAPageOrPerPageBelowTheLowerBoundAsItsDefault(int page, int perPage,
+            int expectedIndex, int expectedSize) {
+
+        when(tweetRepository.findAll(any(Pageable.class)))
+                .thenAnswer(invocation -> {
+                    Pageable requested = invocation.getArgument(0);
+                    return new PageImpl<>(List.of(), requested, 0L);
+                });
+        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+
+        PaginatedTweetsDto rendered = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD)
+                .getPaginatedTweets(page, perPage);
+
+        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
+        verify(tweetRepository).findAll(pageRequest.capture());
+        assertThat(pageRequest.getValue().getPageNumber())
+                .as("page index the repository was asked for").isEqualTo(expectedIndex);
+        assertThat(pageRequest.getValue().getPageSize())
+                .as("page size the repository was asked for").isEqualTo(expectedSize);
+        assertThat(rendered.pagination().page()).as("page the envelope restates").isEqualTo(1);
+        assertThat(rendered.pagination().perPage())
+                .as("per_page the envelope restates").isEqualTo(expectedSize);
+    }
 
     @Test
     @DisplayName("renders the pagination block from the page it read")
@@ -619,18 +694,55 @@ class TwitterServiceTest {
         assertThat(rendered.pagination().totalPages()).isZero();
     }
 
+    // backend/app/api/tweets.py:L12-13 declares a default for an absent parameter and no bound —
+    // DL-077 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("reads the first page of ten when the page number is below one")
-    void readsTheFirstPageOfTenWhenThePageNumberIsBelowOne() {
+    @DisplayName("requests the page size asked for, however large, applying no upper bound")
+    void requestsThePageSizeAskedForHoweverLarge() {
         when(tweetRepository.findAll(any(Pageable.class))).thenReturn(emptyPage());
         when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
 
-        serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(0, 0);
+        serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, 99999);
 
         ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
         verify(tweetRepository).findAll(pageRequest.capture());
         assertThat(pageRequest.getValue().getPageNumber()).isZero();
-        assertThat(pageRequest.getValue().getPageSize()).isEqualTo(10);
+        assertThat(pageRequest.getValue().getPageSize()).isEqualTo(99999);
+    }
+
+    // The per_page cap of DL-123 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "a per_page of {0} reads a page of size {1}")
+    @CsvSource({
+            "99,99",
+            "100,100",
+            "101,101",
+            "250,250",
+            "2147483647,2147483647"
+    })
+    @DisplayName("passes the page size through with no upper bound")
+    void passesThePageSizeThroughWithNoUpperBound(int perPage, int expectedSize) {
+        when(tweetRepository.findAll(any(Pageable.class))).thenReturn(emptyPage());
+        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+
+        serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+
+        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
+        verify(tweetRepository).findAll(pageRequest.capture());
+        assertThat(pageRequest.getValue().getPageSize()).isEqualTo(expectedSize);
+    }
+
+    // The per_page cap of DL-123 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reports the supplied page size in the pagination block it renders")
+    void reportsTheSuppliedPageSizeInThePaginationBlockItRenders() {
+        when(tweetRepository.findAll(any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 500), 0L));
+        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+
+        PaginatedTweetsDto rendered =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, 500);
+
+        assertThat(rendered.pagination().perPage()).isEqualTo(500);
     }
 
     // -----------------------------------------------------------------------
@@ -687,33 +799,16 @@ class TwitterServiceTest {
         assertThat(declaredOperations).containsExactlyInAnyOrderElementsOf(PUBLIC_OPERATIONS);
     }
 
-    /**
-     * Builds a {@code settings} row carrying the popularity threshold.
-     *
-     * @param value the stored value, which may be {@code null}
-     * @return a row keyed by {@link #POPULARITY_THRESHOLD_KEY}
-     */
     private static Setting thresholdRow(String value) {
         return new Setting(POPULARITY_THRESHOLD_KEY, value, "Popularity threshold");
     }
 
-    /**
-     * Builds a {@code tweets} row carrying only an identifier.
-     *
-     * @param identifier the value of the {@code id} column
-     * @return the row
-     */
     private static Tweet tweetWithIdentifier(int identifier) {
         Tweet row = new Tweet();
         row.setId(identifier);
         return row;
     }
 
-    /**
-     * Builds a {@code tweets} row whose nine columns all carry a value.
-     *
-     * @return the row, identified by {@link #TWEET_ID}
-     */
     private static Tweet fullyPopulatedTweet() {
         Tweet row = new Tweet();
         row.setId(TWEET_ID);
@@ -728,21 +823,11 @@ class TwitterServiceTest {
         return row;
     }
 
-    /**
-     * Builds the wire form of a tweet carrying only an identifier.
-     *
-     * @param identifier the value of the {@code id} field
-     * @return the wire form
-     */
     private static TweetDto dtoWithIdentifier(String identifier) {
-        return new TweetDto(identifier, null, null, null, null, null, null, null, null);
+        return new TweetDto(identifier, CONTENT, LIKE_COUNT, CREATED_AT, INITIAL_DOUBT_RATING,
+                List.of(MEDIA_URL), null, USER_ID, List.of(AI_TOOL));
     }
 
-    /**
-     * Builds a page holding no rows.
-     *
-     * @return an empty first page of ten
-     */
     private static Page<Tweet> emptyPage() {
         return new PageImpl<>(List.of(), PageRequest.of(0, 10), 0L);
     }

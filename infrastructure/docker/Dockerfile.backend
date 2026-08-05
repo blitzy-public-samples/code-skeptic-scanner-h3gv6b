@@ -19,11 +19,19 @@ RUN mvn -B clean package -DskipTests
 
 # Use an official Java runtime as the base image
 # Pinned by patch tag and SHA-256 digest - see backend/docs/DECISION_LOG.md DL-106
+# The build stage above runs Temurin 21.0.11+10, so both stages are on the same patch, and this
+# digest is the one eclipse-temurin:21-jre currently resolves to - see backend/docs/DECISION_LOG.md DL-106
 FROM eclipse-temurin:21.0.11_10-jre@sha256:8cef5fc7bebe421363ab543a2f4db5caf7d119d8db67d56b0f56c485d2de4d55
 
 # Unprivileged account the application runs as - see backend/docs/DECISION_LOG.md DL-107
 RUN groupadd --gid 10001 scanner \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin scanner
+
+# Create the unprivileged account and the application directory it owns
+RUN groupadd --system --gid 10001 scanner \
+    && useradd --system --uid 10001 --gid 10001 --home-dir /app --shell /usr/sbin/nologin scanner \
+    && mkdir -p /app \
+    && chown 10001:10001 /app
 
 # Set the working directory in the container
 WORKDIR /app
@@ -37,5 +45,14 @@ USER 10001:10001
 # Expose the port that the application will run on
 EXPOSE 5000
 
+# Report the container healthy once the listener answers HTTP on the configured port.
+# PORT is honoured because application.yml declares server.port as ${PORT:5000}
+# - see backend/docs/DECISION_LOG.md DL-218
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl --silent --output /dev/null --max-time 4 \
+        "http://127.0.0.1:${PORT:-5000}/tweets" || exit 1
+
 # Set the command to run the application
-CMD ["java", "-jar", "app.jar"]
+# Heap is sized from the container memory limit rather than the host's
+# - see backend/docs/DECISION_LOG.md DL-218
+CMD ["sh", "-c", "exec java -XX:MaxRAMPercentage=75.0 -jar app.jar"]

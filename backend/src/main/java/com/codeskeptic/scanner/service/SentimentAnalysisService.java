@@ -11,6 +11,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import com.codeskeptic.scanner.util.LogSafe;
 import com.google.api.gax.retrying.RetrySettings;
 import com.google.api.gax.rpc.UnaryCallSettings;
 import com.google.cloud.language.v1.AnalyzeSentimentRequest;
@@ -24,24 +25,22 @@ import jakarta.annotation.PreDestroy;
 // The two public operations are ported from backend/app/services/sentiment_analysis.py:L12-24 and
 // :L26-35 (faithful port) — see docs/DECISION_LOG.md DL-036, DL-037. The client lifecycle below is
 // net-new: the source constructed the client eagerly at :L8 and closed it nowhere — see
-// docs/DECISION_LOG.md DL-010.
+// docs/DECISION_LOG.md DL-207.
 /**
  * Adapter for the Google Cloud Natural Language API and the single home of the
  * doubt-rating calculation.
  *
- * <p>Two operations are exposed. {@link #analyzeSentiment(String)} returns the
+ * <p>Three operations are exposed. {@link #analyzeSentiment(String)} returns the
  * document sentiment score the Natural Language API reports for a piece of text.
  * {@link #calculateDoubtRating(double)} converts such a score into the doubt
- * rating persisted on the {@code tweets.doubt_rating} column. Neither signature
- * exposes a Google SDK type.
- *
+ * rating persisted on the {@code tweets.doubt_rating} column, and
  * <p>The underlying {@link LanguageServiceClient} authenticates with Application
  * Default Credentials and is created on first use by {@link #languageClient()};
  * constructing this bean resolves no credential and opens no connection. Every
  * {@code AnalyzeSentiment} call the client issues carries a bounded deadline.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md}
- * DL-010, DL-036, DL-037 and DL-052; construct-level provenance is recorded in
+ * DL-010, DL-036, DL-037, DL-052 and DL-207; construct-level provenance is recorded in
  * {@code docs/TRACEABILITY_MATRIX.md}.
  *
  * <p>This class is thread-safe. It is a singleton bean, and client acquisition,
@@ -151,7 +150,7 @@ public class SentimentAnalysisService {
         if (text.isBlank()) {
             log.warn("Analysing blank text; the Natural Language API request is issued unchanged");
         }
-        log.info("Requesting document sentiment for {} character(s) of text", text.length());
+        log.debug("Requesting document sentiment for {} character(s) of text", text.length());
 
         Document document = Document.newBuilder()
                 .setContent(text)
@@ -171,7 +170,9 @@ public class SentimentAnalysisService {
             log.info("Natural Language API returned document sentiment score {}", score);
             return score;
         } catch (RuntimeException e) {
-            log.error("Sentiment analysis failed for {} character(s) of text", text.length(), e);
+            // Provider seam: type only, never the provider message — see docs/DECISION_LOG.md DL-197
+            log.error("Sentiment analysis failed for {} character(s) of text: {}",
+                    text.length(), LogSafe.type(e));
             throw e;
         } finally {
             activeUse.unlock();
@@ -211,6 +212,10 @@ public class SentimentAnalysisService {
         return Math.max(0.0d, Math.min(10.0d, doubtRating));    // backend/app/services/sentiment_analysis.py:L32
     }
 
+    // Net-new (no Python counterpart): the inverse of calculateDoubtRating, whose forward
+    // expression is at backend/app/services/sentiment_analysis.py:L26-35 — see
+    // docs/DECISION_LOG.md DL-037
+
     /**
      * Returns the Natural Language client, creating it from Application Default
      * Credentials on first use and reusing it thereafter.
@@ -230,7 +235,7 @@ public class SentimentAnalysisService {
      */
     // Replaces the eager `self.client = LanguageServiceClient()` at
     // backend/app/services/sentiment_analysis.py:L8 (net-new lifecycle) — see docs/DECISION_LOG.md
-    // DL-010
+    // DL-207
     protected LanguageServiceClient languageClient() {
         LanguageServiceClient local = this.client;
         if (local == null) {
@@ -273,7 +278,7 @@ public class SentimentAnalysisService {
      * @throws IOException if the settings cannot be built
      */
     // Net-new (no Python counterpart: backend/app/services/sentiment_analysis.py:L8 created the
-    // client with no call settings) — see docs/DECISION_LOG.md DL-010
+    // client with no call settings) — see docs/DECISION_LOG.md DL-207
     private LanguageServiceSettings languageServiceSettings() throws IOException {
         LanguageServiceSettings.Builder builder = LanguageServiceSettings.newBuilder();
         UnaryCallSettings.Builder<AnalyzeSentimentRequest, AnalyzeSentimentResponse> callSettings =
@@ -304,7 +309,7 @@ public class SentimentAnalysisService {
      * reported at {@code WARN}. A failure to close is logged at {@code WARN} and
      * not propagated. Calling this method more than once has no further effect.
      */
-    // Net-new (the source closed the client nowhere) — see docs/DECISION_LOG.md DL-010; the
+    // Net-new (the source closed the client nowhere) — see docs/DECISION_LOG.md DL-207; the
     // log-and-suppress close policy is the logging baseline — see docs/DECISION_LOG.md DL-052
     @PreDestroy
     void closeLanguageClient() {
@@ -351,7 +356,8 @@ public class SentimentAnalysisService {
             local.close();
             log.info("Closed the Natural Language API client");
         } catch (RuntimeException e) {
-            log.warn("Failed to close the Natural Language API client", e);
+            log.warn("Closing the Natural Language API client did not complete: {}",
+                    LogSafe.type(e));
         }
     }
 }

@@ -36,5 +36,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * @see AiTool
  */
 // Ported from backend/app/db/database.py:L10-13 (faithful port) — see docs/DECISION_LOG.md
+// The identifier type parameter is Integer, matching ai_tools.id — DL-070, DL-138 — see
+// docs/DECISION_LOG.md
 public interface AiToolRepository extends JpaRepository<AiTool, Integer> {
 }

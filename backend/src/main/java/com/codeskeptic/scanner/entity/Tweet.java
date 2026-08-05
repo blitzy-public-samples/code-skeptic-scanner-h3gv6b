@@ -41,7 +41,7 @@ import java.util.List;
 // GenerationType.IDENTITY over Column(Integer, primary_key=True) — DL-049; media and
 // ai_tools_mentioned are List<String> attributes over Column(String) — DL-024 — see
 // docs/DECISION_LOG.md
-// equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see
+// equals(Object) and hashCode() are net-new Java persistence mechanics — DL-203 — see
 // docs/DECISION_LOG.md
 @Entity
 @Table(name = "tweets")
@@ -190,7 +190,7 @@ public class Tweet {
         this.responses = responses;
     }
 
-    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-203 — see
     // docs/DECISION_LOG.md
     /**
      * Compares two instances on the persistent identifier.
@@ -216,7 +216,7 @@ public class Tweet {
         return thisId != null && thisId.equals(that.getId());
     }
 
-    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-203 — see
     // docs/DECISION_LOG.md
     /**
      * Returns a hash code derived from the entity type. The value is identical for every instance of

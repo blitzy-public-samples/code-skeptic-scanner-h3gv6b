@@ -3,8 +3,6 @@ package com.codeskeptic.scanner.service;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.function.Predicate;
-import java.util.stream.Collectors;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceException;
@@ -27,6 +25,7 @@ import com.codeskeptic.scanner.exception.BadRequestException;
 import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.service.mapper.SettingMapper;
+import com.codeskeptic.scanner.util.LogSafe;
 
 // Net-new (no Python module existed; signatures dictated by backend/app/api/settings.py:L10,L20) —
 // see docs/DECISION_LOG.md DL-039, DL-040, DL-043
@@ -51,11 +50,11 @@ import com.codeskeptic.scanner.service.mapper.SettingMapper;
  * entity and no uninitialised proxy leaves this class, and {@code spring.jpa.open-in-view} is
  * {@code false} — see docs/DECISION_LOG.md DL-026.
  *
- * <p>The set of client-visible messages this class can produce is closed: it is the two wire literals
- * of {@code backend/app/api/settings.py:L18} and {@code :L22}, carried by
- * {@link BadRequestException#noValueProvided()} and {@link NotFoundException#settingNotFound()}.
- * Neither literal is minted here and no key name, driver text or stack detail is appended to either.
- * This class selects no HTTP status; {@code api.GlobalExceptionHandler} does.
+ * <p>The two client-visible messages are the wire literals of
+ * {@code backend/app/api/settings.py:L18} and {@code :L22}, carried by
+ * {@link BadRequestException#noValueProvided()} and {@link NotFoundException#settingNotFound()}. No
+ * key name, driver text or stack detail is appended to either. This class selects no HTTP status;
+ * {@code api.GlobalExceptionHandler} does.
  *
  * <p>The {@code settings} table is reached through {@link SettingRepository} for every read and
  * update, and through {@link EntityManager#persist(Object)} for the seeding insert alone — DL-159.
@@ -102,22 +101,29 @@ public class SettingsService {
             "Seconds between response-generation sweeps.";
 
     /**
-     * Seeded key whose value carries the terms the filtered stream tracks. The value is seeded from
-     * {@code scanner.ingestion.stream-base-keywords}; the source list was empty at
-     * {@code backend/app/tasks/tweet_monitoring.py:L53-55} — DL-040, DL-044 — see
-     * docs/DECISION_LOG.md.
+     * Seeded key whose value overrides the terms the filtered stream tracks. It is seeded blank; the
+     * source list was empty at {@code backend/app/tasks/tweet_monitoring.py:L53-55} — DL-040, DL-044
+     * — see docs/DECISION_LOG.md.
+     *
+     * <p>A blank value carries no override, so {@code task.TweetStreamClient} composes the rule set
+     * from {@code scanner.ingestion.stream-base-keywords} unioned with every {@code ai_tools.name}
+     * row. A non-blank value written through {@code PUT /settings/stream_keywords} replaces that
+     * composition in full — DL-044.
      */
     private static final String STREAM_KEYWORDS_KEY = "stream_keywords";
 
     /** Description stored on the {@value #STREAM_KEYWORDS_KEY} row. */
-    private static final String STREAM_KEYWORDS_DESCRIPTION = "Terms the filtered stream tracks.";
+    private static final String STREAM_KEYWORDS_DESCRIPTION =
+            "Comma-separated terms overriding the filtered-stream rule set; blank tracks the "
+                    + "configured base terms together with every ai_tools row.";
 
     /**
-     * Separator joining the configured base keywords into the single {@code String} the
-     * {@value #STREAM_KEYWORDS_KEY} row stores. It is the separator
-     * {@code util.DelimitedStringListConverter} reads and writes.
+     * Value seeded onto the {@value #STREAM_KEYWORDS_KEY} row — DL-040, DL-044 — see
+     * docs/DECISION_LOG.md.
      */
-    private static final String KEYWORD_DELIMITER = ",";
+    private static final String STREAM_KEYWORDS_SEED_VALUE = "";
+
+
 
     /** Data access for the {@code settings} table. */
     private final SettingRepository settingRepository;
@@ -166,6 +172,7 @@ public class SettingsService {
                 "transactionManager must not be null."));
         this.insertTransaction.setPropagationBehavior(
                 TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+        this.insertTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
     }
 
     // Call site backend/app/api/settings.py:L10 — see docs/DECISION_LOG.md DL-039
@@ -173,11 +180,10 @@ public class SettingsService {
      * Returns every row of the {@code settings} table in the order the repository reports.
      *
      * <p>Each element carries the {@code key}, {@code value} and {@code description} of one row
-     * unchanged; no value is trimmed, defaulted or substituted, and a {@code null} column is carried
-     * through as a {@code null} component. The rows are converted inside this method's transaction.
+     * unchanged, and a {@code null} column is carried through as a {@code null} component. The rows
+     * are converted inside this method's transaction.
      *
-     * <p>An empty table yields an empty list. The return value is never {@code null} and the list it
-     * returns is unmodifiable.
+     * <p>An empty table yields an empty list, and the list returned is unmodifiable.
      *
      * @return one {@link SettingDto} per row of the {@code settings} table, empty when the table
      *         holds no row, never {@code null}
@@ -195,12 +201,12 @@ public class SettingsService {
      *
      * <p>The value is validated before the row is read, matching the order of
      * {@code backend/app/api/settings.py:L17-20}. The guard tests for {@code null} alone, as
-     * {@code if new_value is None} does at {@code :L17}: an empty string is a value, is stored and is
-     * returned. No other value is rejected, and no value is trimmed or normalised on the way in.
+     * {@code if new_value is None} does at {@code :L17}, so an empty string is stored and returned. No
+     * value is trimmed or normalised on the way in — DL-050.
      *
-     * <p>{@code key} identifies an existing row and is never written; it is the primary key of the
-     * {@code settings} table. {@code description} is not written either. A key that names no row is
-     * reported as absent and no row is created for it, so this operation never inserts.
+     * <p>{@code key} is the primary key of the {@code settings} table and is never written, and
+     * {@code description} is not written either. A key that names no row is reported as absent and no
+     * row is created for it.
      *
      * @param key   the primary key of the row to update; a key naming no row, and a {@code null}
      *              key, are both reported as absent
@@ -216,27 +222,30 @@ public class SettingsService {
     public SettingDto updateSetting(String key, String value) {
         // backend/app/api/settings.py:L17-18 — the guard tests null alone
         if (value == null) {
-            log.warn("Rejected the update of setting '{}': the request carried no value.", key);
+            log.warn("Rejected the update of setting '{}': the request carried no value.",
+                    LogSafe.logSafe(key));
             throw BadRequestException.noValueProvided();
         }
 
         // backend/app/api/settings.py:L21-22
-        // Deviation from the literal call site: a null key is reported as absent — DL-073 — see
-        // docs/DECISION_LOG.md
+        // Deviation from the literal call site: a null key is reported as absent, matching the
+        // 404 branch of backend/app/api/settings.py:L21-22 — see docs/DECISION_LOG.md DL-048
         Optional<Setting> existing = (key == null)
                 ? Optional.empty()
                 : settingRepository.findById(key);
         if (existing.isEmpty()) {
-            log.warn("Rejected the update of setting '{}': the key names no row.", key);
+            log.warn("Rejected the update of setting '{}': the key names no row.",
+                    LogSafe.logSafe(key));
             throw NotFoundException.settingNotFound();
         }
 
         Setting setting = existing.get();
         setting.setValue(value);
         SettingDto updated = settingMapper.toDto(settingRepository.save(setting));
-        log.info("Updated setting '{}'.", key);
+        log.info("Updated setting '{}'.", LogSafe.logSafe(key));
         return updated;
     }
+
 
     // Net-new (no Python counterpart) — DL-040 — see docs/DECISION_LOG.md
     /**
@@ -244,9 +253,12 @@ public class SettingsService {
      *
      * <p>The three keys are {@value #TWEET_POPULARITY_THRESHOLD_KEY},
      * {@value #RESPONSE_GENERATION_DELAY_KEY} and {@value #STREAM_KEYWORDS_KEY}. Each carries a
-     * {@code description} and a {@code value} rendered from configuration:
-     * {@code scanner.popularity-threshold}, {@code scanner.response-generation-delay-seconds} and
-     * {@code scanner.ingestion.stream-base-keywords} respectively.
+     * {@code description}. The first two carry a {@code value} rendered from configuration —
+     * {@code scanner.popularity-threshold} and {@code scanner.response-generation-delay-seconds} —
+     * and each is read back in place of that configuration default on every use, by
+     * {@code service.TwitterService} and {@code task.ResponseGenerationScheduler} respectively —
+     * DL-040. The third carries the blank value {@value #STREAM_KEYWORDS_SEED_VALUE}, which
+     * {@code task.TweetStreamClient} reads as "no override" — DL-044.
      *
      * <p>A key this operation observes as present is left exactly as it stands: its {@code value} and
      * its {@code description} are both untouched, whatever they hold and however they came to hold
@@ -272,27 +284,28 @@ public class SettingsService {
         seedIfAbsent(RESPONSE_GENERATION_DELAY_KEY,
                 Long.toString(properties.responseGenerationDelaySeconds()),
                 RESPONSE_GENERATION_DELAY_DESCRIPTION);
+        // A blank seed leaves the override inert, so the composed rule set applies — DL-044 — see
+        // docs/DECISION_LOG.md
         seedIfAbsent(STREAM_KEYWORDS_KEY,
-                streamKeywordsSeedValue(),
+                STREAM_KEYWORDS_SEED_VALUE,
                 STREAM_KEYWORDS_DESCRIPTION);
     }
 
     /**
-     * Inserts one default row when its key is absent, and writes nothing when the key is present.
+     * Writes one default row when its key is absent, and writes nothing when the key is present.
      *
      * <p>The write is an insert and only an insert: the row is handed to
      * {@link jakarta.persistence.EntityManager#persist(Object)} and flushed, so the statement issued
-     * is always {@code insert into settings}. No merge is performed and no {@code update} statement
-     * can be produced by this method, which is what makes a stored row unreachable from here — see
-     * docs/DECISION_LOG.md DL-159.
+     * is always {@code insert into settings}. No merge is performed and no {@code update} statement is
+     * reachable from this method — see docs/DECISION_LOG.md DL-159.
      *
      * <p>The insert runs in a transaction of its own, opened by {@link #insertTransaction} with
      * {@code PROPAGATION_REQUIRES_NEW}. A rejected insert therefore rolls back that transaction
      * alone, leaving any transaction the caller holds usable and the remaining keys still writable.
      *
-     * <p>{@code existsById} is consulted first and loads no row. It is an optimisation, not the
-     * guard: the primary key is. Two concurrent outcomes are possible for one key and neither writes
-     * over a stored row:
+     * <p>{@code existsById} is consulted first and loads no row; the primary key is what refuses a
+     * duplicate — see docs/DECISION_LOG.md DL-159. Two concurrent outcomes are possible for one key
+     * and neither writes over a stored row:
      *
      * <ul>
      *   <li>the key is present when {@code existsById} runs — nothing is written;
@@ -308,6 +321,12 @@ public class SettingsService {
      *
      * <p>An insert is logged once at {@code INFO} and names the key; a key already present, and a key
      * taken concurrently, are logged at {@code DEBUG}. No stored value is written to the log.
+     *
+     * <p>The presence check and the insert are two statements, so another instance may insert the
+     * same key in between. That outcome surfaces as a {@link DataIntegrityViolationException} on the
+     * insert, which is caught here: the row is re-read, the value the other instance stored is left
+     * in place, and nothing is rethrown. One row losing that race neither writes over the winning
+     * row nor stops the remaining rows from being seeded.
      *
      * @param key         the primary key of the default row
      * @param value       the value to store when the row is written
@@ -337,28 +356,4 @@ public class SettingsService {
         }
     }
 
-    /**
-     * Renders the configured base keywords as the single delimited {@code String} the
-     * {@value #STREAM_KEYWORDS_KEY} row stores.
-     *
-     * <p>Each term is trimmed and terms that are {@code null} or blank are dropped; the retained
-     * terms are joined with {@value #KEYWORD_DELIMITER} in configured order. An absent
-     * {@code scanner.ingestion} group, an absent keyword list and a list that retains no term all
-     * yield an empty string.
-     *
-     * @return the joined keywords, or an empty string when no term is configured; never {@code null}
-     */
-    // Term normalisation and tolerance of an absent group — DL-073 — see docs/DECISION_LOG.md
-    private String streamKeywordsSeedValue() {
-        ScannerProperties.Ingestion ingestion = properties.ingestion();
-        List<String> configured = (ingestion == null) ? List.of() : ingestion.streamBaseKeywords();
-        if (configured == null || configured.isEmpty()) {
-            return "";
-        }
-        return configured.stream()
-                .filter(Objects::nonNull)
-                .map(String::trim)
-                .filter(Predicate.not(String::isEmpty))
-                .collect(Collectors.joining(KEYWORD_DELIMITER));
-    }
 }

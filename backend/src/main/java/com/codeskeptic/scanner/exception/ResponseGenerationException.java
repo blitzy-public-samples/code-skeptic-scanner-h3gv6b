@@ -16,7 +16,7 @@ package com.codeskeptic.scanner.exception;
  * through {@link RuntimeException} and declares a fixed {@code serialVersionUID}.
  */
 // Ported from the inline HTTP 500 branch at backend/app/api/responses.py:L46,L49 (faithful port) —
-// see docs/DECISION_LOG.md
+// DL-212 — see docs/DECISION_LOG.md
 public final class ResponseGenerationException extends RuntimeException {
 
     private static final long serialVersionUID = 1L;

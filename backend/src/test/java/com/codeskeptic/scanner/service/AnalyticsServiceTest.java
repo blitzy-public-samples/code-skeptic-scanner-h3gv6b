@@ -40,21 +40,14 @@ import com.codeskeptic.scanner.repository.ResponseRepository;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
-// Net-new (no Python counterpart; backend/app/api/analytics.py:L3 imports a service that exists nowhere in the repository) — see docs/DECISION_LOG.md
-// Call sites backend/app/api/analytics.py:L14,L24 — see docs/DECISION_LOG.md DL-041, DL-042, DL-075, DL-180
+// Net-new coverage of the zero-argument call sites at backend/app/api/analytics.py:L14,L24 — see
+// docs/DECISION_LOG.md DL-041, DL-042, DL-075, DL-180
 /**
  * Exercises the two operations {@link AnalyticsService} exposes: {@link AnalyticsService#getSummary()}
  * and {@link AnalyticsService#getTrends()}.
  *
- * <p>Every collaborator is a Mockito double. No Spring context is started, and no database,
- * network, filesystem or credential resource is reached. Each test drives an instance this class
- * constructs directly in {@link #setUp()}.
- *
- * <p>Each stub is declared by the test that consumes it. The strict-stub checking
- * {@link MockitoExtension} applies holds for every test in this class, and the two operations read
- * different collaborators.
- *
- * <p>Construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * <p>Every collaborator is a Mockito double, no Spring context is started and no database, network,
+ * filesystem or credential resource is reached. Each stub is declared by the test that consumes it.
  */
 @ExtendWith(MockitoExtension.class)
 @DisplayName("AnalyticsService")
@@ -64,85 +57,60 @@ class AnalyticsServiceTest {
     // Measured values — one distinct sentinel per reported metric
     // -----------------------------------------------------------------------
 
-    /** Number of {@code tweets} rows reported as {@code total_tweets}. */
     private static final long TOTAL_TWEETS = 12L;
 
-    /** Number of {@code responses} rows reported as {@code total_responses}. */
     private static final long TOTAL_RESPONSES = 7L;
 
-    /** Number of approved {@code responses} rows reported as {@code approved_responses}. */
     private static final long APPROVED_RESPONSES = 3L;
 
-    /** Difference of {@link #TOTAL_RESPONSES} and {@link #APPROVED_RESPONSES}. */
     private static final long PENDING_RESPONSES = 4L;
 
-    /** Mean {@code tweets.doubt_rating} reported as {@code average_doubt_rating}. */
     private static final double AVERAGE_DOUBT_RATING = 6.5d;
 
-    /** Mean {@code tweets.like_count} reported as {@code average_like_count}. */
     private static final double AVERAGE_LIKE_COUNT = 148.25d;
 
-    /** Number of {@code ai_tools} rows reported as {@code tracked_ai_tools}. */
     private static final long TRACKED_AI_TOOLS = 5L;
 
-    /** Response total of the case that pins the pending arithmetic. */
     private static final long WIDER_TOTAL_RESPONSES = 10L;
 
-    /** Approved total of the case that pins the pending arithmetic. */
     private static final long WIDER_APPROVED_RESPONSES = 3L;
 
-    /** Difference of {@link #WIDER_TOTAL_RESPONSES} and {@link #WIDER_APPROVED_RESPONSES}. */
     private static final long WIDER_PENDING_RESPONSES = 7L;
 
     // -----------------------------------------------------------------------
     // Observation window — scanner.analytics.trend-window-days
     // -----------------------------------------------------------------------
 
-    /**
-     * Window {@code src/main/resources/application.yml} and
-     * {@code src/test/resources/application-test.yml} both declare.
-     */
     private static final int CONFIGURED_TREND_WINDOW_DAYS = 30;
 
-    /** Window used where the reported cutoff must move with the configured value. */
     private static final int SHORTER_TREND_WINDOW_DAYS = 7;
 
     // -----------------------------------------------------------------------
     // Day buckets of the trend series
     // -----------------------------------------------------------------------
 
-    /** Day the first returned bucket covers. */
     private static final LocalDate FIRST_BUCKET_DAY = LocalDate.of(2026, 8, 1);
 
-    /** Day no returned bucket covers, lying between the two that are returned. */
     private static final LocalDate UNBUCKETED_DAY = LocalDate.of(2026, 8, 2);
 
-    /** Day the second returned bucket covers. */
     private static final LocalDate SECOND_BUCKET_DAY = LocalDate.of(2026, 8, 3);
 
-    /** Row count of the first returned bucket. */
     private static final long FIRST_BUCKET_TWEET_COUNT = 12L;
 
-    /** Mean doubt rating of the first returned bucket. */
     private static final double FIRST_BUCKET_AVERAGE_DOUBT_RATING = 6.5d;
 
-    /** Summed like count of the first returned bucket. */
     private static final long FIRST_BUCKET_TOTAL_LIKES = 1480L;
 
-    /** Row count of the second returned bucket. */
     private static final long SECOND_BUCKET_TWEET_COUNT = 3L;
 
-    /** Mean doubt rating of the second returned bucket. */
     private static final double SECOND_BUCKET_AVERAGE_DOUBT_RATING = 2.25d;
 
-    /** Summed like count of the second returned bucket. */
     private static final long SECOND_BUCKET_TOTAL_LIKES = 47L;
 
     // -----------------------------------------------------------------------
     // Structural inventories
     // -----------------------------------------------------------------------
 
-    /** Simple names of the collaborator types that can contribute schema. */
     private static final List<String> SCHEMA_CAPABLE_TYPE_NAMES = List.of(
             "EntityManager",
             "EntityManagerFactory",
@@ -158,7 +126,6 @@ class AnalyticsServiceTest {
             "Flyway",
             "Liquibase");
 
-    /** Simple names of the collaborator types that can memoise a reported value. */
     private static final List<String> CACHE_TYPE_NAMES = List.of(
             "Cache",
             "CacheManager",
@@ -168,16 +135,12 @@ class AnalyticsServiceTest {
             "CaffeineCacheManager",
             "RedisCacheManager");
 
-    /** Package prefix shared by every caching annotation the framework declares. */
     private static final String CACHE_ANNOTATION_PACKAGE_PREFIX = "org.springframework.cache";
 
-    /** Suffix identifying a Spring Data repository collaborator. */
     private static final String REPOSITORY_TYPE_SUFFIX = "Repository";
 
-    /** Name of the operation that reports the summary metrics. */
     private static final String SUMMARY_OPERATION = "getSummary";
 
-    /** Name of the operation that reports the trend series. */
     private static final String TRENDS_OPERATION = "getTrends";
 
     // -----------------------------------------------------------------------
@@ -193,11 +156,9 @@ class AnalyticsServiceTest {
     @Mock
     private AiToolRepository aiToolRepository;
 
-    /** Stubbed configuration root; the {@code scanner.analytics} group is stubbed on top of it. */
     @Mock
     private ScannerProperties properties;
 
-    /** Instance under test, rebuilt for every test. */
     private AnalyticsService service;
 
     @BeforeEach
@@ -700,10 +661,6 @@ class AnalyticsServiceTest {
         when(aiToolRepository.count()).thenReturn(TRACKED_AI_TOOLS);
     }
 
-    /**
-     * Stubs the six aggregate queries as an empty schema answers them: zero for every count and
-     * {@code null} for both means.
-     */
     private void stubTheEmptyDatabase() {
         when(tweetRepository.count()).thenReturn(0L);
         when(responseRepository.count()).thenReturn(0L);
@@ -713,40 +670,20 @@ class AnalyticsServiceTest {
         when(aiToolRepository.count()).thenReturn(0L);
     }
 
-    /**
-     * Stubs {@code scanner.analytics.trend-window-days} on the configuration root.
-     *
-     * @param days the window the group reports
-     */
     private void stubTheConfiguredWindow(int days) {
         when(properties.analytics()).thenReturn(new ScannerProperties.Analytics(days));
     }
 
-    /**
-     * Stubs the daily trend query to return the supplied buckets in the supplied order.
-     *
-     * @param buckets the projection rows the query reports, in order
-     */
     private void stubTheReturnedBuckets(TweetRepository.DailyTrend... buckets) {
         when(tweetRepository.findDailyTrendsSince(any(LocalDateTime.class)))
                 .thenReturn(List.of(buckets));
     }
 
-    /**
-     * Builds the first fully measured bucket.
-     *
-     * @return a projection row covering {@link #FIRST_BUCKET_DAY}
-     */
     private static Bucket firstBucket() {
         return new Bucket(FIRST_BUCKET_DAY, FIRST_BUCKET_TWEET_COUNT,
                 FIRST_BUCKET_AVERAGE_DOUBT_RATING, FIRST_BUCKET_TOTAL_LIKES);
     }
 
-    /**
-     * Builds the second fully measured bucket.
-     *
-     * @return a projection row covering {@link #SECOND_BUCKET_DAY}
-     */
     private static Bucket secondBucket() {
         return new Bucket(SECOND_BUCKET_DAY, SECOND_BUCKET_TWEET_COUNT,
                 SECOND_BUCKET_AVERAGE_DOUBT_RATING, SECOND_BUCKET_TOTAL_LIKES);
@@ -786,24 +723,12 @@ class AnalyticsServiceTest {
         return types;
     }
 
-    /**
-     * Reads the package name of each supplied annotation.
-     *
-     * @param annotations the annotations to inspect
-     * @return the package name of each annotation type, in the supplied order
-     */
     private static List<String> annotationPackagesOf(Annotation[] annotations) {
         return Arrays.stream(annotations)
                 .map(annotation -> annotation.annotationType().getPackageName())
                 .toList();
     }
 
-    /**
-     * Reads the names of the fields a class declares with a boolean type, boxed or primitive.
-     *
-     * @param type the class to inspect
-     * @return the names of its boolean fields, excluding synthetic fields
-     */
     private static List<String> booleanFieldNamesOf(Class<?> type) {
         return Arrays.stream(type.getDeclaredFields())
                 .filter(field -> !field.isSynthetic())
@@ -812,12 +737,6 @@ class AnalyticsServiceTest {
                 .toList();
     }
 
-    /**
-     * Reads the component types a record declares, in declaration order.
-     *
-     * @param recordType the record class to inspect
-     * @return the type of each component
-     */
     private static List<Class<?>> recordComponentTypesOf(Class<?> recordType) {
         List<Class<?>> types = new ArrayList<>();
         for (RecordComponent component : recordType.getRecordComponents()) {
@@ -826,12 +745,6 @@ class AnalyticsServiceTest {
         return types;
     }
 
-    /**
-     * Reads the JSON key of every component a record declares, in declaration order.
-     *
-     * @param recordType the record class to inspect
-     * @return the key each component serialises under
-     */
     private static List<String> jsonNamesOf(Class<?> recordType) {
         return Arrays.stream(recordType.getRecordComponents())
                 .map(component -> jsonNameOf(recordType, component.getName()))
@@ -860,14 +773,6 @@ class AnalyticsServiceTest {
         return declared.value();
     }
 
-    /**
-     * Looks up a record component by name.
-     *
-     * @param recordType    the record class to inspect
-     * @param componentName the component name
-     * @return the named component
-     * @throws AssertionError if the record declares no component with that name
-     */
     private static RecordComponent recordComponentOf(Class<?> recordType, String componentName) {
         return Arrays.stream(recordType.getRecordComponents())
                 .filter(candidate -> candidate.getName().equals(componentName))
@@ -877,14 +782,6 @@ class AnalyticsServiceTest {
                                 + componentName));
     }
 
-    /**
-     * Looks up a declared field by name.
-     *
-     * @param type      the class to inspect
-     * @param fieldName the field name
-     * @return the named field
-     * @throws AssertionError if the class declares no field with that name
-     */
     private static Field fieldOf(Class<?> type, String fieldName) {
         try {
             return type.getDeclaredField(fieldName);

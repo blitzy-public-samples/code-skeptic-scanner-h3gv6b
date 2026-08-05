@@ -3,6 +3,7 @@ package com.codeskeptic.scanner.service;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.assertj.core.api.Assertions.catchThrowable;
@@ -21,6 +22,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.RecordComponent;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.List;
@@ -29,6 +31,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.DoubleStream;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.slf4j.LoggerFactory;
+
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -44,6 +51,12 @@ import com.codeskeptic.scanner.dto.ResponseDto;
 import com.codeskeptic.scanner.dto.TweetDto;
 import com.codeskeptic.scanner.exception.ResponseGenerationException;
 import com.openai.client.OpenAIClient;
+import com.openai.core.http.Headers;
+import com.openai.errors.BadRequestException;
+import com.openai.models.ErrorObject;
+import com.openai.models.ReasoningEffort;
+import com.openai.client.okhttp.OpenAIOkHttpClient;
+import com.openai.core.ClientOptions;
 import com.openai.models.chat.completions.ChatCompletion;
 import com.openai.models.chat.completions.ChatCompletionCreateParams;
 import com.openai.models.chat.completions.ChatCompletionMessage;
@@ -86,14 +99,20 @@ class LlmServiceTest {
     /** Value bound to {@code scanner.openai.max-completion-tokens}. */
     private static final long MAX_COMPLETION_TOKENS = 150L;
 
-    /** Value bound to {@code scanner.openai.temperature}. */
-    private static final double TEMPERATURE = 0.7d;
+    /**
+     * Value bound to {@code scanner.openai.temperature} by the default fixture: the key is unset, so
+     * no temperature reaches the request.
+     */
+    private static final Double TEMPERATURE = null;
 
     /** Value bound to {@code scanner.openai.n}. */
     private static final long N = 1L;
 
     /** The {@code scanner.openai.reasoning-effort} value the fixtures bind. */
-    private static final String REASONING_EFFORT = "minimal";
+    private static final String REASONING_EFFORT = "low";
+
+    /** A {@code scanner.openai.reasoning-effort} value the OpenAI client does not recognise. */
+    private static final String UNACCEPTED_REASONING_EFFORT = "exhaustive";
 
     /** The {@code scanner.openai.request-timeout-seconds} value the fixtures bind. */
     private static final long REQUEST_TIMEOUT_SECONDS = 30L;
@@ -101,14 +120,20 @@ class LlmServiceTest {
     /** The {@code scanner.openai.max-retries} value the fixtures bind. */
     private static final int MAX_RETRIES = 2;
 
+    /** Request timeout, in seconds, that the OpenAI client applies none of on its own. */
+    private static final long DISTINCTIVE_REQUEST_TIMEOUT_SECONDS = 17L;
+
+    /** Retry count that differs from the one the OpenAI client defaults to. */
+    private static final int DISTINCTIVE_MAX_RETRIES = 5;
+
     /** Second value bound to {@code scanner.openai.model}. */
     private static final String OTHER_MODEL = "a-different-chat-model-identifier";
 
     /** Second value bound to {@code scanner.openai.max-completion-tokens}. */
     private static final long OTHER_MAX_COMPLETION_TOKENS = 77L;
 
-    /** Second value bound to {@code scanner.openai.temperature}. */
-    private static final double OTHER_TEMPERATURE = 0.11d;
+    /** Second value bound to {@code scanner.openai.temperature}, supplied explicitly. */
+    private static final Double OTHER_TEMPERATURE = 0.11d;
 
     /** Second value bound to {@code scanner.openai.n}. */
     private static final long OTHER_N = 2L;
@@ -217,6 +242,30 @@ class LlmServiceTest {
     }
 
     @Test
+    @DisplayName("rejects a request timeout below one second rather than building an unbounded client")
+    void rejectsARequestTimeoutBelowOneSecondRatherThanBuildingAnUnboundedClient() {
+        LlmService withoutATimeout = new LlmService(propertiesCarrying(
+                new ScannerProperties.Openai(API_KEY, MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N,
+                        REASONING_EFFORT, 0L, MAX_RETRIES)));
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> withoutATimeout.generateResponse(tweet()))
+                .withMessageContaining("scanner.openai.request-timeout-seconds");
+    }
+
+    @Test
+    @DisplayName("rejects a negative retry limit")
+    void rejectsANegativeRetryLimit() {
+        LlmService withANegativeRetryLimit = new LlmService(propertiesCarrying(
+                new ScannerProperties.Openai(API_KEY, MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N,
+                        REASONING_EFFORT, REQUEST_TIMEOUT_SECONDS, -1)));
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> withANegativeRetryLimit.generateResponse(tweet()))
+                .withMessageContaining("scanner.openai.max-retries");
+    }
+
+    @Test
     @DisplayName("generating a reply reaches the openai client accessor once")
     void generatingAReplyReachesTheOpenaiClientAccessorOnce() {
         stubGeneratedText(PADDED_GENERATED_TEXT);
@@ -318,15 +367,117 @@ class LlmServiceTest {
     }
 
     @Test
-    @DisplayName("sends a temperature of zero point seven")
-    void sendsATemperatureOfZeroPointSeven() {
+    @DisplayName("records the finish reason when the first choice carries no content")
+    void recordsTheFinishReasonWhenTheFirstChoiceCarriesNoContent() {
+        ListAppender<ILoggingEvent> records = attachLogRecorder();
+        stubClientReturning(completionCarrying(
+                choiceCarrying(Optional.empty(), ChatCompletion.Choice.FinishReason.LENGTH)));
+
+        assertThatExceptionOfType(IllegalStateException.class)
+                .isThrownBy(() -> service.generateResponse(tweet()))
+                .withMessage("INCOMPLETE:length");
+
+        assertThat(renderedRecords(records))
+                .anyMatch(record -> record.contains("INCOMPLETE:length"));
+        detachLogRecorder(records);
+    }
+
+    @Test
+    @DisplayName("records the finish reason when the first choice carries blank content")
+    void recordsTheFinishReasonWhenTheFirstChoiceCarriesBlankContent() {
+        ListAppender<ILoggingEvent> records = attachLogRecorder();
+        stubClientReturning(completionCarrying(
+                choiceCarrying(Optional.of("   "), ChatCompletion.Choice.FinishReason.LENGTH)));
+
+        assertThatExceptionOfType(IllegalStateException.class)
+                .isThrownBy(() -> service.generateResponse(tweet()))
+                .withMessage("INCOMPLETE:length");
+
+        assertThat(renderedRecords(records))
+                .anyMatch(record -> record.contains("INCOMPLETE:length"));
+        detachLogRecorder(records);
+    }
+
+    @Test
+    @DisplayName("records the provider status, type, code and param when the request is rejected")
+    void recordsTheProviderStatusTypeCodeAndParamWhenTheRequestIsRejected() {
+        ListAppender<ILoggingEvent> records = attachLogRecorder();
+        when(openAiClient.chat()).thenReturn(chatService);
+        when(chatService.completions()).thenReturn(chatCompletionService);
+        when(chatCompletionService.create(any(ChatCompletionCreateParams.class)))
+                .thenThrow(rejectedRequest());
+
+        assertThatExceptionOfType(BadRequestException.class)
+                .isThrownBy(() -> service.generateResponse(tweet()));
+
+        assertThat(renderedRecords(records)).anyMatch(record -> record.contains("HTTP 400")
+                && record.contains("unsupported_parameter")
+                && record.contains("temperature"));
+        detachLogRecorder(records);
+    }
+
+    @Test
+    @DisplayName("sends no temperature when scanner.openai.temperature is unset")
+    void sendsNoTemperatureWhenTheKeyIsUnset() {
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+
+        service.generateResponse(tweet());
+
+        assertThat(capturedRequest().temperature()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("sends the reasoning effort bound to the openai properties")
+    void sendsTheReasoningEffortBoundToTheOpenaiProperties() {
         stubGeneratedText(PADDED_GENERATED_TEXT);
 
         service.generateResponse(tweet());
 
         ChatCompletionCreateParams request = capturedRequest();
-        assertThat(request.temperature()).isPresent();
-        assertThat(request.temperature().orElseThrow()).isCloseTo(0.7d, within(TOLERANCE));
+        assertThat(request.reasoningEffort()).isPresent();
+        assertThat(request.reasoningEffort().orElseThrow().asString()).isEqualTo(REASONING_EFFORT);
+    }
+
+    @Test
+    @DisplayName("sends no reasoning effort when the key is blank")
+    void sendsNoReasoningEffortWhenTheKeyIsBlank() {
+        service = seamedServiceCarrying(new ScannerProperties.Openai(API_KEY, MODEL,
+                MAX_COMPLETION_TOKENS, TEMPERATURE, N, "   ", REQUEST_TIMEOUT_SECONDS, MAX_RETRIES));
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+
+        service.generateResponse(tweet());
+
+        assertThat(capturedRequest().reasoningEffort()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("rejects a temperature outside the accepted range")
+    void rejectsATemperatureOutsideTheAcceptedRange() {
+        service = seamedServiceCarrying(openaiGroup(MODEL, MAX_COMPLETION_TOKENS, 2.5d, N));
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> service.generateResponse(tweet()))
+                .withMessageContaining("scanner.openai.temperature");
+    }
+
+    @Test
+    @DisplayName("rejects a max completion tokens value below one")
+    void rejectsAMaxCompletionTokensValueBelowOne() {
+        service = seamedServiceCarrying(openaiGroup(MODEL, 0L, TEMPERATURE, N));
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> service.generateResponse(tweet()))
+                .withMessageContaining("scanner.openai.max-completion-tokens");
+    }
+
+    @Test
+    @DisplayName("rejects an n below one")
+    void rejectsAnNBelowOne() {
+        service = seamedServiceCarrying(openaiGroup(MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, 0L));
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> service.generateResponse(tweet()))
+                .withMessageContaining("scanner.openai.n");
     }
 
     @Test
@@ -337,6 +488,78 @@ class LlmServiceTest {
         service.generateResponse(tweet());
 
         assertThat(capturedRequest().n()).contains(1L);
+    }
+
+    @Test
+    @DisplayName("sends the reasoning effort bound to the openai reasoning effort property")
+    void sendsTheReasoningEffortBoundToTheOpenaiReasoningEffortProperty() {
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+
+        service.generateResponse(tweet());
+
+        assertThat(capturedRequest().reasoningEffort())
+                .contains(ReasoningEffort.of(REASONING_EFFORT));
+    }
+
+    @Test
+    @DisplayName("sends a second reasoning effort when the property carries another accepted value")
+    void sendsASecondReasoningEffortWhenThePropertyCarriesAnotherAcceptedValue() {
+        service = seamedServiceCarrying(openaiGroupWithReasoningEffort("medium"));
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+
+        service.generateResponse(tweet());
+
+        assertThat(capturedRequest().reasoningEffort()).contains(ReasoningEffort.MEDIUM);
+    }
+
+    @Test
+    @DisplayName("sends an accepted reasoning effort surrounded by padding")
+    void sendsAnAcceptedReasoningEffortWhoseLetterCaseAndPaddingDiffer() {
+        service = seamedServiceCarrying(openaiGroupWithReasoningEffort("  high  "));
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+
+        service.generateResponse(tweet());
+
+        assertThat(capturedRequest().reasoningEffort()).contains(ReasoningEffort.HIGH);
+    }
+
+    @Test
+    @DisplayName("sends no reasoning effort when the property is blank")
+    void sendsNoReasoningEffortWhenThePropertyIsBlank() {
+        service = seamedServiceCarrying(openaiGroupWithReasoningEffort("   "));
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+
+        service.generateResponse(tweet());
+
+        assertThat(capturedRequest().reasoningEffort()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("sends no reasoning effort when the property is unbound")
+    void sendsNoReasoningEffortWhenThePropertyIsUnbound() {
+        service = seamedServiceCarrying(openaiGroupWithReasoningEffort(null));
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+
+        service.generateResponse(tweet());
+
+        assertThat(capturedRequest().reasoningEffort()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("reports the reasoning effort key and the accepted values without reaching the openai client")
+    void reportsTheReasoningEffortKeyAndTheAcceptedValuesWithoutReachingTheOpenaiClient() {
+        service = seamedServiceCarrying(openaiGroupWithReasoningEffort(UNACCEPTED_REASONING_EFFORT));
+
+        Throwable failure = catchThrowable(() -> service.generateResponse(tweet()));
+
+        assertThat(failure).isInstanceOf(IllegalStateException.class);
+        assertThat(failure.getMessage())
+                .contains("scanner.openai.reasoning-effort")
+                .contains("none", "minimal", "low", "medium", "high", "xhigh", "max")
+                .doesNotContain(UNACCEPTED_REASONING_EFFORT);
+
+        assertThat(service.openAiClientAccessorCalls()).isZero();
+        verifyNoInteractions(openAiClient);
     }
 
     @Test
@@ -353,6 +576,17 @@ class LlmServiceTest {
         assertThat(request.n()).contains(2L);
         assertThat(request.temperature()).isPresent();
         assertThat(request.temperature().orElseThrow()).isCloseTo(0.11d, within(TOLERANCE));
+    }
+
+    @Test
+    @DisplayName("sends a temperature only when scanner.openai.temperature carries a value")
+    void sendsATemperatureOnlyWhenTheKeyCarriesAValue() {
+        service = seamedServiceCarrying(openaiGroup(MODEL, MAX_COMPLETION_TOKENS, 1.5d, N));
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+
+        service.generateResponse(tweet());
+
+        assertThat(capturedRequest().temperature().orElseThrow()).isCloseTo(1.5d, within(TOLERANCE));
     }
 
     @Test
@@ -374,6 +608,95 @@ class LlmServiceTest {
         service.generateResponse(tweet());
 
         assertThat(capturedRequest().stop()).isEmpty();
+    }
+
+    // -------------------------------------------------------------------------
+    // Reasoning effort — DL-145
+    // -------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("sends the configured reasoning effort")
+    void sendsTheConfiguredReasoningEffort() {
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+
+        service.generateResponse(tweet());
+
+        assertThat(capturedRequest().reasoningEffort().orElseThrow().asString())
+                .isEqualTo(REASONING_EFFORT);
+    }
+
+    @ParameterizedTest(name = "reasoning effort {0} reaches the request")
+    @MethodSource("acceptedReasoningEfforts")
+    @DisplayName("sends every reasoning effort the sdk recognises")
+    void sendsEveryReasoningEffortTheSdkRecognises(String reasoningEffort) {
+        service = seamedServiceCarrying(openaiGroupWithReasoningEffort(reasoningEffort));
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+
+        service.generateResponse(tweet());
+
+        assertThat(capturedRequest().reasoningEffort())
+                .contains(ReasoningEffort.of(reasoningEffort));
+    }
+
+    @ParameterizedTest(name = "reasoning effort {0} is trimmed before it reaches the request")
+    @MethodSource("paddedReasoningEfforts")
+    @DisplayName("trims the configured reasoning effort")
+    void trimsTheConfiguredReasoningEffort(String reasoningEffort) {
+        service = seamedServiceCarrying(openaiGroupWithReasoningEffort(reasoningEffort));
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+
+        service.generateResponse(tweet());
+
+        assertThat(capturedRequest().reasoningEffort()).contains(ReasoningEffort.LOW);
+    }
+
+    @ParameterizedTest(name = "reasoning effort {0} omits the parameter")
+    @MethodSource("blankReasoningEfforts")
+    @DisplayName("omits the reasoning effort when the configured value is absent or blank")
+    void omitsTheReasoningEffortWhenTheConfiguredValueIsAbsentOrBlank(String reasoningEffort) {
+        service = seamedServiceCarrying(openaiGroupWithReasoningEffort(reasoningEffort));
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+
+        service.generateResponse(tweet());
+
+        assertThat(capturedRequest().reasoningEffort()).isEmpty();
+        assertThat(capturedRequest()._reasoningEffort().isMissing()).isTrue();
+    }
+
+    @ParameterizedTest(name = "reasoning effort {0} is rejected")
+    @MethodSource("unacceptedReasoningEfforts")
+    @DisplayName("rejects a reasoning effort the sdk does not recognise, naming the key")
+    void rejectsAReasoningEffortTheSdkDoesNotRecogniseNamingTheKey(String reasoningEffort) {
+        LlmService misconfigured = seamedServiceCarrying(
+                openaiGroupWithReasoningEffort(reasoningEffort));
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> misconfigured.generateResponse(tweet()))
+                .withMessageContaining("scanner.openai.reasoning-effort")
+                .withMessageContaining("none, minimal, low, medium, high, xhigh, max");
+    }
+
+    @Test
+    @DisplayName("rejects an unrecognised reasoning effort before it reaches the openai client")
+    void rejectsAnUnrecognisedReasoningEffortBeforeItReachesTheOpenaiClient() {
+        LlmService misconfigured = seamedServiceCarrying(
+                openaiGroupWithReasoningEffort("Minimal"));
+
+        catchThrowable(() -> misconfigured.generateResponse(tweet()));
+
+        verifyNoInteractions(openAiClient);
+    }
+
+    @Test
+    @DisplayName("never renders the configured reasoning effort in the failure it reports")
+    void neverRendersTheConfiguredReasoningEffortInTheFailureItReports() {
+        LlmService misconfigured = seamedServiceCarrying(
+                openaiGroupWithReasoningEffort("exhaustive"));
+
+        Throwable thrown = catchThrowable(() -> misconfigured.generateResponse(tweet()));
+
+        assertThat(thrown).isInstanceOf(IllegalStateException.class);
+        assertThat(thrown.getMessage()).doesNotContain("exhaustive");
     }
 
     // -------------------------------------------------------------------------
@@ -500,33 +823,6 @@ class LlmServiceTest {
     }
 
     @Test
-    @DisplayName("composes a context clause carrying an unknown doubt rating when the rating is absent")
-    void composesAContextClauseCarryingAnUnknownDoubtRatingWhenTheRatingIsAbsent() {
-        stubGeneratedText(PADDED_GENERATED_TEXT);
-        TweetDto withoutARating = new TweetDto(TWEET_ID, TWEET_CONTENT, LIKE_COUNT, CREATED_AT,
-                null, MEDIA, null, USER_ID, AI_TOOLS_MENTIONED);
-
-        assertThat(withoutARating.doubtRating()).isNull();
-        assertThatCode(() -> service.generateResponse(withoutARating)).doesNotThrowAnyException();
-        assertThat(promptOf(capturedRequest())).isEqualTo(expectedPrompt(
-                TWEET_CONTENT, "AI tools mentioned: GitHub Copilot, Cursor; doubt rating: unknown"));
-    }
-
-    @Test
-    @DisplayName("reads a post whose scalar components are null without reaching the openai client")
-    void readsAPostWhoseScalarComponentsAreNullWithoutRejectingIt() {
-        TweetDto withoutScalars =
-                new TweetDto(null, null, null, null, null, MEDIA, null, null, AI_TOOLS_MENTIONED);
-
-        assertThat(withoutScalars.likeCount()).isNull();
-        assertThat(withoutScalars.doubtRating()).isNull();
-        assertThat(withoutScalars.content()).isNull();
-        assertThat(withoutScalars.createdAt()).isNull();
-        assertThat(withoutScalars.userId()).isNull();
-        assertThat(withoutScalars.id()).isNull();
-    }
-
-    @Test
     @DisplayName("carries an empty post body into the prompt between quotes")
     void carriesAnEmptyPostBodyIntoThePromptBetweenQuotes() {
         stubGeneratedText(PADDED_GENERATED_TEXT);
@@ -551,8 +847,8 @@ class LlmServiceTest {
     }
 
     @Test
-    @DisplayName("carries a five thousand character post body into the prompt whole")
-    void carriesAFiveThousandCharacterPostBodyIntoThePromptWhole() {
+    @DisplayName("cuts a five thousand character post body to the bounded length")
+    void cutsAFiveThousandCharacterPostBodyToTheBoundedLength() {
         stubGeneratedText(PADDED_GENERATED_TEXT);
         String longBody = "a".repeat(5_000);
         TweetDto withALongBody = tweetCarrying(longBody, DOUBT_RATING, AI_TOOLS_MENTIONED);
@@ -560,9 +856,22 @@ class LlmServiceTest {
         assertThatCode(() -> service.generateResponse(withALongBody)).doesNotThrowAnyException();
 
         String prompt = promptOf(capturedRequest());
-        assertThat(prompt).contains(longBody);
-        assertThat(prompt).isEqualTo(expectedPrompt(
-                longBody, "AI tools mentioned: GitHub Copilot, Cursor; doubt rating: 7.5"));
+        assertThat(prompt).doesNotContain(longBody);
+        assertThat(prompt).isEqualTo(expectedPrompt("a".repeat(1_000) + "\u2026",
+                "AI tools mentioned: GitHub Copilot, Cursor; doubt rating: 7.5"));
+    }
+
+    @Test
+    @DisplayName("folds a line break inside the post body to a space")
+    void foldsALineBreakInsideThePostBodyToASpace() {
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+        TweetDto withLineBreaks =
+                tweetCarrying("first\r\nsecond", DOUBT_RATING, AI_TOOLS_MENTIONED);
+
+        service.generateResponse(withLineBreaks);
+
+        assertThat(promptOf(capturedRequest())).isEqualTo(expectedPrompt("first  second",
+                "AI tools mentioned: GitHub Copilot, Cursor; doubt rating: 7.5"));
     }
 
     @Test
@@ -590,7 +899,7 @@ class LlmServiceTest {
     void returnsTheTrimmedTextOfTheFirstChoice() {
         stubGeneratedText(PADDED_GENERATED_TEXT);
 
-        String generatedText = service.generateResponse(tweet());
+        String generatedText = service.generateResponse(tweet()).content();
 
         assertThat(generatedText).isEqualTo(TRIMMED_GENERATED_TEXT);
         assertThat(generatedText).isNotEqualTo(PADDED_GENERATED_TEXT);
@@ -605,47 +914,150 @@ class LlmServiceTest {
                 choiceCarrying(Optional.of("first choice text")),
                 choiceCarrying(Optional.of("second choice text"))));
 
-        String generatedText = service.generateResponse(tweet());
+        String generatedText = service.generateResponse(tweet()).content();
 
         assertThat(generatedText).isEqualTo("first choice text");
     }
 
     // -------------------------------------------------------------------------
-    // Absent model output is a generation failure — DL-083
+    // Unusable model output is a generation failure, reported under one of four fixed codes —
+    // DL-083 and DL-145
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("reports a generation failure when the response carries no choice")
-    void reportsAGenerationFailureWhenTheResponseCarriesNoChoice() {
+    @DisplayName("reports NO_CHOICE when the response carries no choice")
+    void reportsNoChoiceWhenTheResponseCarriesNoChoice() {
         stubClientReturning(completionCarrying());
 
         Throwable thrown = catchThrowable(() -> service.generateResponse(tweet()));
 
-        assertThat(thrown).isInstanceOf(ResponseGenerationException.class);
-        assertThat(thrown).hasMessage(ResponseGenerationException.FAILED_TO_GENERATE_RESPONSE);
+        assertThat(thrown).isInstanceOf(IllegalStateException.class);
+        assertThat(thrown).hasMessage("NO_CHOICE");
     }
 
     @Test
-    @DisplayName("reports a generation failure when the first choice carries no content")
-    void reportsAGenerationFailureWhenTheFirstChoiceCarriesNoContent() {
+    @DisplayName("reports BLANK_TEXT when the first choice carries no content")
+    void reportsBlankTextWhenTheFirstChoiceCarriesNoContent() {
         stubClientReturning(completionCarrying(choiceCarrying(Optional.empty())));
 
         Throwable thrown = catchThrowable(() -> service.generateResponse(tweet()));
 
-        assertThat(thrown).isInstanceOf(ResponseGenerationException.class);
-        assertThat(thrown).hasMessage(ResponseGenerationException.FAILED_TO_GENERATE_RESPONSE);
+        assertThat(thrown).isInstanceOf(IllegalStateException.class);
+        assertThat(thrown).hasMessage("BLANK_TEXT");
     }
 
-    @ParameterizedTest(name = "content {0} is reported as a generation failure")
+    @ParameterizedTest(name = "content {0} is reported as BLANK_TEXT")
     @MethodSource("blankGeneratedText")
-    @DisplayName("reports a generation failure when the first choice carries blank content")
-    void reportsAGenerationFailureWhenTheFirstChoiceCarriesBlankContent(String content) {
+    @DisplayName("reports BLANK_TEXT when the first choice carries blank content")
+    void reportsBlankTextWhenTheFirstChoiceCarriesBlankContent(String content) {
         stubGeneratedText(content);
 
         Throwable thrown = catchThrowable(() -> service.generateResponse(tweet()));
 
-        assertThat(thrown).isInstanceOf(ResponseGenerationException.class);
-        assertThat(thrown).hasMessage(ResponseGenerationException.FAILED_TO_GENERATE_RESPONSE);
+        assertThat(thrown).isInstanceOf(IllegalStateException.class);
+        assertThat(thrown).hasMessage("BLANK_TEXT");
+    }
+
+    @ParameterizedTest(name = "refusal {0} is reported as REFUSAL")
+    @MethodSource("nonBlankRefusals")
+    @DisplayName("reports REFUSAL when the first choice carries a non-blank refusal")
+    void reportsRefusalWhenTheFirstChoiceCarriesANonBlankRefusal(String refusal) {
+        stubClientReturning(completionCarrying(choiceCarrying(
+                Optional.of(TRIMMED_GENERATED_TEXT), Optional.of(refusal),
+                ChatCompletion.Choice.FinishReason.STOP)));
+
+        Throwable thrown = catchThrowable(() -> service.generateResponse(tweet()));
+
+        assertThat(thrown).isInstanceOf(IllegalStateException.class);
+        assertThat(thrown).hasMessage("REFUSAL");
+    }
+
+    @ParameterizedTest(name = "refusal {0} is not a refusal")
+    @MethodSource("blankRefusals")
+    @DisplayName("accepts the reply when the refusal is absent or blank")
+    void acceptsTheReplyWhenTheRefusalIsAbsentOrBlank(String refusal) {
+        stubClientReturning(completionCarrying(choiceCarrying(
+                Optional.of(TRIMMED_GENERATED_TEXT), Optional.ofNullable(refusal),
+                ChatCompletion.Choice.FinishReason.STOP)));
+
+        assertThat(service.generateResponse(tweet()).content()).isEqualTo(TRIMMED_GENERATED_TEXT);
+    }
+
+    @ParameterizedTest(name = "finish reason {0} is reported as INCOMPLETE")
+    @MethodSource("incompleteFinishReasons")
+    @DisplayName("reports INCOMPLETE with the finish reason when the choice did not stop")
+    void reportsIncompleteWithTheFinishReasonWhenTheChoiceDidNotStop(String finishReason) {
+        stubClientReturning(completionCarrying(choiceCarrying(
+                Optional.of(TRIMMED_GENERATED_TEXT), Optional.empty(),
+                ChatCompletion.Choice.FinishReason.of(finishReason))));
+
+        Throwable thrown = catchThrowable(() -> service.generateResponse(tweet()));
+
+        assertThat(thrown).isInstanceOf(IllegalStateException.class);
+        assertThat(thrown).hasMessage("INCOMPLETE:" + finishReason);
+    }
+
+    @Test
+    @DisplayName("guards a finish reason carrying a record separator before it reaches the code")
+    void guardsAFinishReasonCarryingARecordSeparatorBeforeItReachesTheCode() {
+        stubClientReturning(completionCarrying(choiceCarrying(
+                Optional.of(TRIMMED_GENERATED_TEXT), Optional.empty(),
+                ChatCompletion.Choice.FinishReason.of("length\nWARN forged record"))));
+
+        Throwable thrown = catchThrowable(() -> service.generateResponse(tweet()));
+
+        assertThat(thrown).isInstanceOf(IllegalStateException.class);
+        assertThat(thrown).hasMessage("INCOMPLETE:length?WARN forged record");
+        assertThat(thrown.getMessage()).doesNotContain("\n");
+    }
+
+    @Test
+    @DisplayName("reports a refusal before it reports an incomplete finish reason")
+    void reportsARefusalBeforeItReportsAnIncompleteFinishReason() {
+        stubClientReturning(completionCarrying(choiceCarrying(
+                Optional.empty(), Optional.of("I cannot help with that."),
+                ChatCompletion.Choice.FinishReason.CONTENT_FILTER)));
+
+        Throwable thrown = catchThrowable(() -> service.generateResponse(tweet()));
+
+        assertThat(thrown).hasMessage("REFUSAL");
+    }
+
+    @Test
+    @DisplayName("reports an incomplete finish reason before it reports blank text")
+    void reportsAnIncompleteFinishReasonBeforeItReportsBlankText() {
+        stubClientReturning(completionCarrying(choiceCarrying(
+                Optional.empty(), Optional.empty(), ChatCompletion.Choice.FinishReason.LENGTH)));
+
+        Throwable thrown = catchThrowable(() -> service.generateResponse(tweet()));
+
+        assertThat(thrown).hasMessage("INCOMPLETE:length");
+    }
+
+    @Test
+    @DisplayName("never carries the refusal text into the failure it reports")
+    void neverCarriesTheRefusalTextIntoTheFailureItReports() {
+        String refusal = "I will not write a reply that disparages a named product.";
+        stubClientReturning(completionCarrying(choiceCarrying(
+                Optional.empty(), Optional.of(refusal),
+                ChatCompletion.Choice.FinishReason.STOP)));
+
+        Throwable thrown = catchThrowable(() -> service.generateResponse(tweet()));
+
+        assertThat(thrown.getMessage()).doesNotContain(refusal);
+        assertThat(thrown.getMessage()).isEqualTo("REFUSAL");
+    }
+
+    @Test
+    @DisplayName("reports unusable output without the wire literal, which the caller supplies")
+    void reportsUnusableOutputWithoutTheWireLiteralWhichTheCallerSupplies() {
+        stubClientReturning(completionCarrying());
+
+        Throwable thrown = catchThrowable(() -> service.generateResponse(tweet()));
+
+        assertThat(thrown).isNotInstanceOf(ResponseGenerationException.class);
+        assertThat(thrown.getMessage())
+                .isNotEqualTo(ResponseGenerationException.FAILED_TO_GENERATE_RESPONSE);
     }
 
     @Test
@@ -653,7 +1065,7 @@ class LlmServiceTest {
     void neverReturnsBlankGeneratedText() {
         stubGeneratedText(PADDED_GENERATED_TEXT);
 
-        String generatedText = service.generateResponse(tweet());
+        String generatedText = service.generateResponse(tweet()).content();
 
         assertThat(generatedText).isNotBlank();
     }
@@ -789,49 +1201,6 @@ class LlmServiceTest {
     }
 
     @Test
-    @DisplayName("declares a single post parameter and a text return type on generate response")
-    void declaresASinglePostParameterAndATextReturnTypeOnGenerateResponse() throws NoSuchMethodException {
-        Method generateResponse = LlmService.class.getDeclaredMethod("generateResponse", TweetDto.class);
-
-        assertThat(generateResponse.getParameterTypes()).containsExactly(TweetDto.class);
-        assertThat(generateResponse.getReturnType()).isEqualTo(String.class);
-    }
-
-    @Test
-    @DisplayName("does not accept a wire record for a reply that carries no identifier")
-    void doesNotAcceptAWireRecordForAReplyThatCarriesNoIdentifier() {
-        assertThatNullPointerException()
-                .isThrownBy(() -> new ResponseDto(null, TRIMMED_GENERATED_TEXT,
-                        LocalDateTime.of(2026, 1, 31, 9, 15), false, TWEET_ID))
-                .withMessageContaining("id");
-    }
-
-    @Test
-    @DisplayName("accepts a wire record for a stored reply whose nullable columns are null")
-    void acceptsAWireRecordForAStoredReplyWhoseNullableColumnsAreNull() {
-        ResponseDto stored = new ResponseDto("12", null, null, null, null);
-
-        assertThat(stored.id()).isEqualTo("12");
-        assertThat(stored.content()).isNull();
-        assertThat(stored.generatedAt()).isNull();
-        assertThat(stored.isApproved()).isNull();
-        assertThat(stored.tweetId()).isNull();
-        assertThat(recordComponent(ResponseDto.class, "isApproved").getType())
-                .isEqualTo(Boolean.class);
-    }
-
-    @Test
-    @DisplayName("returns no wire record and reaches no dto type from its declared surface")
-    void returnsNoWireRecordFromItsDeclaredSurface() {
-        List<Class<?>> returnTypes = Arrays.stream(LlmService.class.getDeclaredMethods())
-                .filter(method -> !method.isSynthetic())
-                .map(Method::getReturnType)
-                .toList();
-
-        assertThat(returnTypes).doesNotContain(ResponseDto.class);
-    }
-
-    @Test
     @DisplayName("declares the client release operation as a destruction callback")
     void declaresTheClientReleaseOperationAsADestructionCallback() throws NoSuchMethodException {
         Method release = LlmService.class.getDeclaredMethod("closeOpenAiClient");
@@ -839,6 +1208,31 @@ class LlmServiceTest {
         assertThat(release.isAnnotationPresent(jakarta.annotation.PreDestroy.class)).isTrue();
         assertThat(release.getParameterTypes()).isEmpty();
         assertThat(release.getReturnType()).isEqualTo(void.class);
+    }
+
+    @Test
+    @DisplayName("accepts a wire record for an unstored reply that carries no identifier")
+    void acceptsAWireRecordForAnUnstoredReplyThatCarriesNoIdentifier() {
+        ResponseDto unstored = new ResponseDto(null, TRIMMED_GENERATED_TEXT,
+                LocalDateTime.of(2026, 1, 31, 9, 15), false, TWEET_ID);
+
+        assertThat(unstored.id()).isNull();
+        assertThat(unstored.content()).isEqualTo(TRIMMED_GENERATED_TEXT);
+        assertThat(unstored.tweetId()).isEqualTo(TWEET_ID);
+    }
+
+    @Test
+    @DisplayName("returns no wire record and reaches no dto type from its declared surface")
+    void returnsAPopulatedWireRecordFromItsDeclaredSurface() {
+        stubGeneratedText(PADDED_GENERATED_TEXT);
+
+        ResponseDto generated = service.generateResponse(tweet());
+
+        assertThat(generated.id()).isNull();
+        assertThat(generated.content()).isEqualTo(TRIMMED_GENERATED_TEXT);
+        assertThat(generated.tweetId()).isEqualTo(TWEET_ID);
+        assertThat(generated.isApproved()).isFalse();
+        assertThat(generated.generatedAt()).isNotNull();
     }
 
     @Test
@@ -858,13 +1252,47 @@ class LlmServiceTest {
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("declares a finite request timeout and an explicit retry count")
-    void declaresAFiniteRequestTimeoutAndAnExplicitRetryCount() {
+    @DisplayName("binds a finite request timeout and an explicit retry count from configuration")
+    void bindsAFiniteRequestTimeoutAndAnExplicitRetryCountFromConfiguration() {
         ScannerProperties.Openai openai =
                 openaiGroup(MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N);
 
         assertThat(openai.requestTimeoutSeconds()).as("request timeout seconds").isPositive();
         assertThat(openai.maxRetries()).as("retry count").isNotNegative();
+    }
+
+    @Test
+    @DisplayName("applies the configured request timeout and retry count to the client it builds")
+    void appliesTheConfiguredRequestTimeoutAndRetryCountToTheClientItBuilds() throws Exception {
+        LlmService building = new LlmService(propertiesCarrying(new ScannerProperties.Openai(
+                API_KEY, MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N, REASONING_EFFORT,
+                DISTINCTIVE_REQUEST_TIMEOUT_SECONDS, DISTINCTIVE_MAX_RETRIES)));
+
+        ClientOptions applied = clientOptionsOf(building.openAiClient());
+
+        assertThat(applied.timeout().request())
+                .as("request timeout applied to OpenAIOkHttpClient.builder().timeout(...)")
+                .isEqualTo(Duration.ofSeconds(DISTINCTIVE_REQUEST_TIMEOUT_SECONDS));
+        assertThat(applied.maxRetries())
+                .as("retry count applied to OpenAIOkHttpClient.builder().maxRetries(...)")
+                .isEqualTo(DISTINCTIVE_MAX_RETRIES);
+
+        building.closeOpenAiClient();
+    }
+
+    @Test
+    @DisplayName("applies values the openai client does not default to, so a dropped builder call is "
+            + "detected")
+    void appliesValuesTheOpenaiClientDoesNotDefaultTo() throws Exception {
+        ClientOptions untouched = clientOptionsOf(
+                OpenAIOkHttpClient.builder().apiKey(API_KEY).build());
+
+        assertThat(untouched.timeout().request())
+                .as("the request timeout the client defaults to")
+                .isNotEqualTo(Duration.ofSeconds(DISTINCTIVE_REQUEST_TIMEOUT_SECONDS));
+        assertThat(untouched.maxRetries())
+                .as("the retry count the client defaults to")
+                .isNotEqualTo(DISTINCTIVE_MAX_RETRIES);
     }
 
     @Test
@@ -960,16 +1388,18 @@ class LlmServiceTest {
     }
 
     /**
-     * Reads a declared static field of {@link LlmService} by name.
+     * Reads the transport options an {@link OpenAIClient} was built with.
      *
-     * @param name the field name
-     * @return the field value
-     * @throws ReflectiveOperationException when the field cannot be read
+     * @param client the client under inspection
+     * @return the options the builder applied
+     * @throws ReflectiveOperationException when the options cannot be read
      */
-    private static Object readStaticField(String name) throws ReflectiveOperationException {
-        Field field = LlmService.class.getDeclaredField(name);
-        field.setAccessible(true);
-        return field.get(null);
+    private static ClientOptions clientOptionsOf(OpenAIClient client)
+            throws ReflectiveOperationException {
+
+        Field options = client.getClass().getDeclaredField("clientOptions");
+        options.setAccessible(true);
+        return (ClientOptions) options.get(client);
     }
 
     /**
@@ -990,13 +1420,6 @@ class LlmServiceTest {
         return service;
     }
 
-    /**
-     * Reads the client a service holds.
-     *
-     * @param service the service to read
-     * @return the held client, or {@code null} when it holds none
-     * @throws ReflectiveOperationException when the field cannot be read
-     */
     private static Object readClientField(LlmService service) throws ReflectiveOperationException {
         Field field = LlmService.class.getDeclaredField("client");
         field.setAccessible(true);
@@ -1040,6 +1463,77 @@ class LlmServiceTest {
      */
     private static java.util.stream.Stream<String> blankGeneratedText() {
         return java.util.stream.Stream.of("", " ", "   ", "\t", "\n", " \t\n ");
+    }
+
+    /**
+     * Supplies the refusals that make a reply unusable — DL-145.
+     *
+     * @return refusals carrying text
+     */
+    private static java.util.stream.Stream<String> nonBlankRefusals() {
+        return java.util.stream.Stream.of("I cannot help with that.", "no", " padded refusal ");
+    }
+
+    /**
+     * Supplies the refusal values that leave a reply usable — absent, empty and whitespace-only.
+     *
+     * @return {@code null} for an absent refusal, then the blank refusals
+     */
+    private static java.util.stream.Stream<String> blankRefusals() {
+        return java.util.stream.Stream.of(null, "", " ", "\t\n");
+    }
+
+    /**
+     * Supplies the finish reasons that are not {@code stop} — every other value the SDK enumerates,
+     * plus one it does not — DL-145.
+     *
+     * @return the finish reasons that make a reply incomplete
+     */
+    private static java.util.stream.Stream<String> incompleteFinishReasons() {
+        return java.util.stream.Stream.of("length", "tool_calls", "content_filter", "function_call",
+                "a_reason_the_sdk_does_not_enumerate");
+    }
+
+    /**
+     * Supplies every reasoning effort the OpenAI SDK recognises, read from the SDK's own enumeration
+     * so the set cannot drift from the one the service accepts — DL-145.
+     *
+     * @return the accepted reasoning-effort values
+     */
+    private static java.util.stream.Stream<String> acceptedReasoningEfforts() {
+        return java.util.stream.Stream.of(ReasoningEffort.NONE, ReasoningEffort.MINIMAL,
+                        ReasoningEffort.LOW, ReasoningEffort.MEDIUM, ReasoningEffort.HIGH,
+                        ReasoningEffort.XHIGH, ReasoningEffort.MAX)
+                .map(ReasoningEffort::asString);
+    }
+
+    /**
+     * Supplies accepted reasoning efforts carrying surrounding whitespace.
+     *
+     * @return {@code low} surrounded by whitespace
+     */
+    private static java.util.stream.Stream<String> paddedReasoningEfforts() {
+        return java.util.stream.Stream.of(" low", "low ", "  low  ", "\tlow\n");
+    }
+
+    /**
+     * Supplies the reasoning-effort values that omit the parameter — DL-145.
+     *
+     * @return {@code null} for an unset value, then the blank values
+     */
+    private static java.util.stream.Stream<String> blankReasoningEfforts() {
+        return java.util.stream.Stream.of(null, "", " ", "   ", "\t", "\n", " \t\n ");
+    }
+
+    /**
+     * Supplies reasoning-effort values the OpenAI SDK does not recognise, including one that differs
+     * from an accepted value by case only.
+     *
+     * @return the rejected reasoning-effort values
+     */
+    private static java.util.stream.Stream<String> unacceptedReasoningEfforts() {
+        return java.util.stream.Stream.of("Minimal", "MINIMAL", "exhaustive", "very-high", "0",
+                "minimal ish");
     }
 
     /**
@@ -1091,10 +1585,22 @@ class LlmServiceTest {
      * @return the group
      */
     private static ScannerProperties.Openai openaiGroup(String model, long maxCompletionTokens,
-            double temperature, long n) {
+            Double temperature, long n) {
 
         return new ScannerProperties.Openai(API_KEY, model, maxCompletionTokens, temperature, n,
                 REASONING_EFFORT, REQUEST_TIMEOUT_SECONDS, MAX_RETRIES);
+    }
+
+    /**
+     * Builds a {@code scanner.openai} group carrying the supplied reasoning effort and the values
+     * every other test uses.
+     *
+     * @param reasoningEffort value of {@code scanner.openai.reasoning-effort}, possibly {@code null}
+     * @return the group
+     */
+    private static ScannerProperties.Openai openaiGroupWithReasoningEffort(String reasoningEffort) {
+        return new ScannerProperties.Openai(API_KEY, MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N,
+                reasoningEffort, REQUEST_TIMEOUT_SECONDS, MAX_RETRIES);
     }
 
     /**
@@ -1180,19 +1686,44 @@ class LlmServiceTest {
     }
 
     /**
-     * Builds a choice whose message carries the supplied content and no refusal.
+     * Builds a complete choice: the supplied content, no refusal and a {@code stop} finish reason.
      *
      * @param content the message content, or {@link Optional#empty()} for a choice carrying none
      * @return the choice
      */
     private static ChatCompletion.Choice choiceCarrying(Optional<String> content) {
+        return choiceCarrying(content, Optional.empty(), ChatCompletion.Choice.FinishReason.STOP);
+    }
+
+    /**
+     * Builds one choice carrying the supplied content and finish reason, and no refusal.
+     *
+     * @param content      the message content the choice carries
+     * @param finishReason the reason the model stopped
+     * @return the choice
+     */
+    private static ChatCompletion.Choice choiceCarrying(Optional<String> content,
+            ChatCompletion.Choice.FinishReason finishReason) {
+        return choiceCarrying(content, Optional.empty(), finishReason);
+    }
+
+    /**
+     * Builds one choice carrying the supplied content, refusal and finish reason.
+     *
+     * @param content      the message content, or {@link Optional#empty()} for a choice carrying none
+     * @param refusal      the refusal, or {@link Optional#empty()} for a choice carrying none
+     * @param finishReason the reason the model stopped
+     * @return the choice
+     */
+    private static ChatCompletion.Choice choiceCarrying(Optional<String> content,
+            Optional<String> refusal, ChatCompletion.Choice.FinishReason finishReason) {
         return ChatCompletion.Choice.builder()
-                .finishReason(ChatCompletion.Choice.FinishReason.STOP)
+                .finishReason(finishReason)
                 .index(0L)
                 .logprobs(Optional.empty())
                 .message(ChatCompletionMessage.builder()
                         .content(content)
-                        .refusal(Optional.empty())
+                        .refusal(refusal)
                         .build())
                 .build();
     }
@@ -1212,6 +1743,55 @@ class LlmServiceTest {
      *
      * @param completion the response the stubbed client returns
      */
+    /**
+     * Builds a provider rejection carrying a status, a type, a code and a parameter name.
+     *
+     * @return the rejection the client raises
+     */
+    private static BadRequestException rejectedRequest() {
+        return BadRequestException.builder()
+                .headers(Headers.builder().build())
+                .error(ErrorObject.builder()
+                        .message("Unsupported parameter")
+                        .type("unsupported_parameter")
+                        .code("unsupported_parameter")
+                        .param("temperature")
+                        .build())
+                .build();
+    }
+
+    /**
+     * Attaches a recorder to this class's logger.
+     *
+     * @return the attached recorder
+     */
+    private static ListAppender<ILoggingEvent> attachLogRecorder() {
+        ListAppender<ILoggingEvent> records = new ListAppender<>();
+        records.start();
+        ((Logger) LoggerFactory.getLogger(LlmService.class)).addAppender(records);
+        return records;
+    }
+
+    /**
+     * Detaches a recorder from this class's logger.
+     *
+     * @param records the recorder to detach
+     */
+    private static void detachLogRecorder(ListAppender<ILoggingEvent> records) {
+        ((Logger) LoggerFactory.getLogger(LlmService.class)).detachAppender(records);
+        records.stop();
+    }
+
+    /**
+     * Renders every captured record with its arguments substituted.
+     *
+     * @param records the recorder to read
+     * @return the rendered messages
+     */
+    private static List<String> renderedRecords(ListAppender<ILoggingEvent> records) {
+        return records.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
+    }
+
     private void stubClientReturning(ChatCompletion completion) {
         when(openAiClient.chat()).thenReturn(chatService);
         when(chatService.completions()).thenReturn(chatCompletionService);

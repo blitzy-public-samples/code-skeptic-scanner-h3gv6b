@@ -1,5 +1,6 @@
 package com.codeskeptic.scanner.service.mapper;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 import org.springframework.stereotype.Component;
@@ -8,7 +9,7 @@ import com.codeskeptic.scanner.dto.TweetDto;
 import com.codeskeptic.scanner.entity.Tweet;
 
 // Net-new (no Python counterpart method) — call sites backend/app/api/tweets.py:L19,L30 —
-// DL-023, DL-024, DL-080 — see docs/DECISION_LOG.md
+// DL-023, DL-024, DL-080, DL-204, DL-205 — see docs/DECISION_LOG.md
 /**
  * Converts {@link Tweet} entities into their {@link TweetDto} wire form.
  *
@@ -16,15 +17,16 @@ import com.codeskeptic.scanner.entity.Tweet;
  * {@code id}, {@code content}, {@code like_count}, {@code created_at}, {@code doubt_rating},
  * {@code media}, {@code quoted_tweet_id}, {@code user_id} and {@code ai_tools_mentioned} — and
  * applies exactly one transformation: the {@link Integer} identifier becomes its decimal
- * {@link String}
- * form, and stays {@code null} when the entity carries no identifier.
+ * {@link String} form.
  *
  * <p>Every other column value is copied verbatim.
  *
- * <p>Null policy — see docs/DECISION_LOG.md DL-080. Each of the nine columns is nullable and a
- * {@code null} column value is carried through as a {@code null} component; no conversion unboxes a
- * column value. {@link TweetDto} normalises the two list components, which are the only components
- * that are never {@code null}. The entity's {@code responses} association is not read.
+ * <p>Null policy — see docs/DECISION_LOG.md DL-080. The columns stay nullable, so a stored row can
+ * carry {@code null} in a column that {@code backend/app/schema/tweet.py:L6-14} declares required.
+ * Such a row has no wire form and is rejected here, naming the column, rather than serialised with a
+ * JSON {@code null}. {@code quoted_tweet_id} is the sole column that may be {@code null}.
+ * {@link TweetDto} normalises the two list components. The entity's {@code responses} association is
+ * not read.
  *
  * <p>Conversion runs in one direction: this mapper declares no entity-producing operation and
  * performs no persistence access and no outbound call. Instances hold no state and are thread-safe.
@@ -32,27 +34,40 @@ import com.codeskeptic.scanner.entity.Tweet;
 @Component
 public final class TweetMapper {
 
+    /** Wire value carried for a {@code null} text column. */
+    private static final String ABSENT_TEXT = "";
+
+    /** Wire value carried for a {@code null} {@code like_count} column. */
+    private static final int ABSENT_LIKE_COUNT = 0;
+
+    /** Wire value carried for a {@code null} {@code doubt_rating} column. */
+    private static final double ABSENT_DOUBT_RATING = 0.0d;
+
+    /** Wire value carried for a {@code null} {@code created_at} column. */
+    private static final LocalDateTime ABSENT_TIMESTAMP = LocalDateTime.of(1970, 1, 1, 0, 0);
+
     /**
      * Converts a single tweet entity into its wire form.
      *
      * @param tweet the entity to convert, may be {@code null}
      * @return a DTO holding the entity's nine column values with the identifier rendered as a
      *         string, or {@code null} when {@code tweet} is {@code null}
+     * @throws IllegalStateException if the row carries {@code null} in a column the wire contract of
+     *         {@code backend/app/schema/tweet.py:L6-14} declares required
      */
     public TweetDto toDto(Tweet tweet) {
         if (tweet == null) {
             return null;
         }
-        Integer identifier = tweet.getId();
         return new TweetDto(
-                identifier == null ? null : String.valueOf(identifier),
-                tweet.getContent(),
-                tweet.getLikeCount(),
-                tweet.getCreatedAt(),
-                tweet.getDoubtRating(),
+                String.valueOf(required(tweet.getId(), "id")),
+                required(tweet.getContent(), "content"),
+                required(tweet.getLikeCount(), "like_count"),
+                required(tweet.getCreatedAt(), "created_at"),
+                required(tweet.getDoubtRating(), "doubt_rating"),
                 tweet.getMedia(),
                 tweet.getQuotedTweetId(),
-                tweet.getUserId(),
+                required(tweet.getUserId(), "user_id"),
                 tweet.getAiToolsMentioned());
     }
 
@@ -72,5 +87,23 @@ public final class TweetMapper {
         return tweets.stream()
                 .map(this::toDto)
                 .toList();
+    }
+
+    // The required fields of backend/app/schema/tweet.py:L6-14 — DL-080 — see docs/DECISION_LOG.md
+    /**
+     * Returns a column value the wire contract declares required.
+     *
+     * @param value  the stored column value
+     * @param column the wire key of the column, used in the failure message
+     * @param <T>    the column's value type
+     * @return {@code value}
+     * @throws IllegalStateException if {@code value} is {@code null}
+     */
+    private static <T> T required(T value, String column) {
+        if (value == null) {
+            throw new IllegalStateException("A tweets row carrying no " + column
+                    + " has no wire form: backend/app/schema/tweet.py declares the field required.");
+        }
+        return value;
     }
 }

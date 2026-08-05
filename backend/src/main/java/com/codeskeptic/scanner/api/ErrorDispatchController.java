@@ -1,14 +1,15 @@
 package com.codeskeptic.scanner.api;
 
 import java.util.Map;
+import java.util.Objects;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.web.servlet.error.ErrorController;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.web.header.HeaderWriter;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -17,6 +18,7 @@ import com.codeskeptic.scanner.dto.ErrorResponse;
 import jakarta.servlet.DispatcherType;
 import jakarta.servlet.RequestDispatcher;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
 // Net-new (no Python counterpart; the retired tree served no /error route) — DL-183 — see
 // docs/DECISION_LOG.md
@@ -24,28 +26,28 @@ import jakarta.servlet.http.HttpServletRequest;
  * Renders the service's error envelope for the servlet {@code ERROR} dispatch.
  *
  * <p>{@link GlobalExceptionHandler} translates every exception that reaches the
- * {@code DispatcherServlet} during a {@code REQUEST} dispatch. It cannot reach a failure answered by
- * {@code HttpServletResponse.sendError(int)}, because that call unwinds the current dispatch and asks
- * the container to re-dispatch the request to the error page. This class is the target of that
+ * {@code DispatcherServlet} during a {@code REQUEST} dispatch. It does not reach a failure answered by
+ * {@code HttpServletResponse.sendError(int)}, which unwinds the current dispatch and asks the
+ * container to re-dispatch the request to the error page. This class is the target of that
  * re-dispatch, so the two classes together are the whole of the service's error surface and every
  * error body on the wire is one of the six literals they share.
  *
- * <p>Implementing {@link ErrorController} is what withdraws Spring Boot's
- * {@code BasicErrorController}: {@code ErrorMvcAutoConfiguration} declares that bean
+ * <p>Implementing {@link ErrorController} withdraws Spring Boot's {@code BasicErrorController}, which
+ * {@code ErrorMvcAutoConfiguration} declares
  * {@code @ConditionalOnMissingBean(value = ErrorController.class, search = SearchStrategy.CURRENT)}.
- * The container-level error-page registration is a separate, unconditional bean of the same
- * auto-configuration and is therefore unaffected — the container still dispatches to the path below.
- * The mapped path is read from {@code server.error.path}, falling back to {@code error.path} and then
- * to {@code /error}, which is the expression {@code BasicErrorController} itself declares.
+ * That auto-configuration's container-level error-page registration is a separate, unconditional
+ * bean, so the container still dispatches to the path below. The mapped path is read from
+ * {@code server.error.path}, falling back to {@code error.path} and then to {@code /error}, the
+ * expression {@code BasicErrorController} itself declares.
  *
- * <p>The mapping names no HTTP method, because an {@code ERROR} dispatch preserves the method of the
+ * <p>The mapping names no HTTP method; an {@code ERROR} dispatch preserves the method of the
  * request that failed.
  *
  * <table border="1">
  * <caption>Status and message this controller puts on the wire</caption>
  * <tr><th>Condition</th><th>Status</th><th>Message on the wire</th></tr>
  * <tr>
- *   <td>Dispatch type is not {@code ERROR} — a client requested the path directly</td>
+ *   <td>Dispatch type is not {@code ERROR} — an authenticated client requested the path directly</td>
  *   <td>404</td><td>{@code Not found}</td>
  * </tr>
  * <tr><td>{@code ERROR} dispatch carrying status 401 or 403</td><td>unchanged</td>
@@ -63,19 +65,38 @@ import jakarta.servlet.http.HttpServletRequest;
  *   <td>{@code Internal server error}</td></tr>
  * </table>
  *
+ * <p>Every row of that table describes what a caller carrying an accepted bearer token receives.
+ * {@code security.SecurityConfig} authorizes every path other than {@code POST /auth/token} with
+ * {@code anyRequest().authenticated()}, and an unmapped path is no exception: a request that carries
+ * no accepted token is answered by the chain's entry point with 401, an empty body and a
+ * {@code WWW-Authenticate: Bearer} challenge, and neither the {@code DispatcherServlet} nor this class
+ * is reached. Those 404 rows are reachable only with a token — DL-021, DL-115. The retired
+ * tree's {@code @app.errorhandler(404)} at {@code backend/app/main.py:L33} was registered outside the
+ * {@code @jwt_required} guards and answered an unauthenticated caller as well.
+ *
  * <p>Every message above is already emitted by {@link GlobalExceptionHandler}; this class introduces
  * none of its own. The body is always the single-key {@link ErrorResponse} envelope, written as
  * {@code application/json} irrespective of the request's {@code Accept} header. Neither the request
  * path, the request method, the status code, a timestamp nor any exception detail is copied into a
  * response body.
  *
- * <p>The response also carries the six headers Spring Security's {@code HeaderWriterFilter} writes on
- * every other response. That filter is a {@code OncePerRequestFilter} keeping the default
- * {@code shouldNotFilterErrorDispatch()}, so it is skipped on an {@code ERROR} dispatch and the
- * headers are restated here — DL-183.
+ * <p>Spring Security's {@code HeaderWriterFilter} keeps the default
+ * {@code shouldNotFilterErrorDispatch()} and is therefore skipped on an {@code ERROR} dispatch. This
+ * class applies the policy {@code security/SecurityConfig} publishes as a {@code HeaderWriter} bean.
+ * Each writer in that policy either skips a name the response
+ * already carries or replaces its value through {@code setHeader}, so restating the policy over a
+ * response the {@code REQUEST} dispatch already wrote leaves each header with exactly one value —
+ * DL-183, DL-194.
  *
- * <p>This is a singleton bean holding no mutable state, so it is safe to share across concurrent
- * requests. Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-183;
+ * <p>An unauthenticated client does not reach this class: {@code security/SecurityConfig}
+ * authenticates every request other than {@code POST /auth/token}, so its entry point answers a
+ * direct, unauthenticated request to this path with 401 and no body. The 404 in the table above is
+ * what an authenticated client reads.
+ *
+ * <p>This is a singleton bean holding its one collaborator in a final field and no mutable state, so
+ * it is safe to share across concurrent requests.
+ *
+ * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-183 and DL-194;
  * construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  */
 @RestController
@@ -116,19 +137,22 @@ public class ErrorDispatchController implements ErrorController {
             HttpStatus.UNSUPPORTED_MEDIA_TYPE.value(), UNSUPPORTED_MEDIA_TYPE);
 
     /**
-     * Response header set Spring Security's {@code HeaderWriterFilter} writes on a {@code REQUEST}
-     * dispatch, restated because that filter is skipped on an {@code ERROR} dispatch — DL-183.
-     *
-     * <p>The values are the framework defaults; {@code security/SecurityConfig} customises none of
-     * them.
+     * The application's transport-security header policy, published by
+     * {@code security/SecurityConfig} — DL-194.
      */
-    private static final Map<String, String> SECURITY_HEADERS = Map.of(
-            "X-Content-Type-Options", "nosniff",
-            "X-Frame-Options", "DENY",
-            "X-XSS-Protection", "0",
-            HttpHeaders.CACHE_CONTROL, "no-cache, no-store, max-age=0, must-revalidate",
-            HttpHeaders.PRAGMA, "no-cache",
-            HttpHeaders.EXPIRES, "0");
+    private final HeaderWriter transportSecurityHeaderWriter;
+
+    /**
+     * Creates the controller with the shared transport-security header policy.
+     *
+     * @param transportSecurityHeaderWriter the policy {@code security/SecurityConfig} publishes, must
+     *     not be {@code null}
+     * @throws NullPointerException when {@code transportSecurityHeaderWriter} is {@code null}
+     */
+    public ErrorDispatchController(HeaderWriter transportSecurityHeaderWriter) {
+        this.transportSecurityHeaderWriter = Objects.requireNonNull(transportSecurityHeaderWriter,
+                "transportSecurityHeaderWriter must not be null");
+    }
 
     /**
      * Answers the request the container dispatched to the error page.
@@ -136,14 +160,27 @@ public class ErrorDispatchController implements ErrorController {
      * <p>A request whose dispatch type is not {@link DispatcherType#ERROR} was made by a client
      * addressing the path directly. The retired Python tree registered four blueprints at
      * {@code backend/app/main.py:L26-29} and none of them served this path, so such a request is
-     * reported exactly as any other unmapped path is: 404 carrying {@value #NOT_FOUND}.
+     * reported exactly as any other unmapped path is: 404 carrying {@value #NOT_FOUND}. An
+     * unauthenticated caller does not reach this method at all — the chain's entry point answers such
+     * a request with 401 and no body — so the 404 above is what an authenticated caller reads.
+     *
+     * <p>The shared header policy is applied to the response before the body is selected. Each of its
+     * writers sets a header only when the response does not already carry it, so a header the
+     * {@code REQUEST} dispatch already wrote keeps exactly one value — DL-194.
      *
      * @param request the dispatched request, read for its dispatch type and for the status the
      *     container recorded under {@link RequestDispatcher#ERROR_STATUS_CODE}
+     * @param response the response being written, which receives the shared header policy
      * @return the status and single-key body named in this class's table
      */
     @RequestMapping("${server.error.path:${error.path:/error}}")
-    public ResponseEntity<ErrorResponse> handleError(HttpServletRequest request) {
+    public ResponseEntity<ErrorResponse> handleError(HttpServletRequest request,
+            HttpServletResponse response) {
+
+        // The shared policy of security/SecurityConfig, applied where HeaderWriterFilter is skipped —
+        // DL-194 — see docs/DECISION_LOG.md
+        transportSecurityHeaderWriter.writeHeaders(request, response);
+
         if (request.getDispatcherType() != DispatcherType.ERROR) {
             log.debug("A client addressed the error path directly; responding HTTP 404");
             return respond(HttpStatus.NOT_FOUND.value(), NOT_FOUND);
@@ -199,12 +236,12 @@ public class ErrorDispatchController implements ErrorController {
      * @param status status to report
      * @param message message to carry under the JSON key {@code error}, or {@code null} for a
      *     response with no body
-     * @return the response, carrying the restated security headers and, when {@code message} is not
-     *     {@code null}, a {@code application/json} body
+     * @return the response, carrying a {@code application/json} body when {@code message} is not
+     *     {@code null} and no body otherwise. The transport-security headers are written onto the
+     *     response itself by {@link #handleError(HttpServletRequest, HttpServletResponse)} — DL-194
      */
     private static ResponseEntity<ErrorResponse> respond(int status, String message) {
         ResponseEntity.BodyBuilder builder = ResponseEntity.status(status);
-        SECURITY_HEADERS.forEach(builder::header);
         if (message == null) {
             return builder.build();
         }

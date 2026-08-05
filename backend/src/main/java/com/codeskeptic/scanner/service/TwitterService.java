@@ -19,6 +19,7 @@ import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
+import com.codeskeptic.scanner.util.LogSafe;
 
 // Ported from backend/app/services/twitter_service.py:L6-50 (faithful port) — see docs/DECISION_LOG.md
 /**
@@ -51,7 +52,7 @@ import com.codeskeptic.scanner.service.mapper.TweetMapper;
  * place of the {@code TwitterService()} instantiation performed inside each request handler at
  * {@code backend/app/api/tweets.py:L14,L26,L39} and the {@code get_settings()} call performed inside
  * the constructor at {@code backend/app/services/twitter_service.py:L11}. The class carries no mutable
- * state, so every method is safe for concurrent use.
+ * state, and every method is safe for concurrent use.
  *
  * <p>Two further methods of the retired class are implemented elsewhere:
  * {@code stream_tweets} at {@code backend/app/services/twitter_service.py:L19-23} by
@@ -84,13 +85,6 @@ public class TwitterService {
 
     /** Lowest {@code per_page} a page request accepts. */
     private static final int MINIMUM_PER_PAGE = 1;
-
-    /**
-     * The largest page size this service materialises, applied to any larger {@code per_page} value.
-     *
-     * <p>See docs/DECISION_LOG.md DL-149.
-     */
-    private static final int MAXIMUM_PER_PAGE = 100;
 
     /** Data access for the {@code tweets} table. */
     private final TweetRepository tweetRepository;
@@ -146,13 +140,13 @@ public class TwitterService {
      *
      * <p>{@code page} is 1-based, matching the wire parameter whose default is declared at
      * {@code backend/app/api/tweets.py:L12}, and is converted to the 0-based index the repository
-     * takes. Requesting page {@value #DEFAULT_PAGE} reads repository index {@code 0}, and the
+     * takes. Requesting page 1 reads repository index {@code 0}, and the
      * {@link PaginationDto#page()} of the result restates the 1-based number.
      *
-     * <p>Arguments outside the accepted range are replaced by the documented defaults and the
-     * replacement is logged at {@code WARN}: a {@code page} below {@value #DEFAULT_PAGE} is read as
-     * {@value #DEFAULT_PAGE}, and a {@code perPage} below {@value #MINIMUM_PER_PAGE} is read as
-     * {@value #DEFAULT_PER_PAGE} — DL-077. No upper bound is applied to {@code perPage}.
+     * <p>Arguments outside the accepted range are replaced and the replacement is logged at
+     * {@code WARN}: a {@code page} below {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}, and
+     * a {@code perPage} below {@value #MINIMUM_PER_PAGE} is read as {@value #DEFAULT_PER_PAGE} —
+     * DL-077. No upper bound is applied to {@code perPage} — see docs/DECISION_LOG.md DL-200.
      *
      * <p>A {@code page} beyond the last populated page yields an empty {@link
      * PaginatedTweetsDto#tweets()} list while {@link PaginationDto#total()} and
@@ -162,16 +156,21 @@ public class TwitterService {
      * <p>The rows are converted inside this method's transaction and the returned lists are
      * unmodifiable.
      *
-     * @param page    the 1-based page number requested through the {@code page} query parameter
-     * @param perPage the page size requested through the {@code per_page} query parameter
+     * @param page    the 1-based page number requested through the {@code page} query parameter; a
+     *                value below {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}
+     * @param perPage the page size requested through the {@code per_page} query parameter; a value
+     *                below {@value #MINIMUM_PER_PAGE} is read as {@value #DEFAULT_PER_PAGE} and no
+     *                larger value is reduced
      * @return the {@code tweets} and {@code pagination} pair rendered by {@code GET /tweets}, never
      *         {@code null}
      */
     @Transactional(readOnly = true)
     public PaginatedTweetsDto getPaginatedTweets(int page, int perPage) {
+        // Only the values PageRequest.of cannot express are replaced; a large per_page is honoured
+        // as requested — DL-193, DL-217 — see docs/DECISION_LOG.md
         int effectivePage = (page < DEFAULT_PAGE) ? DEFAULT_PAGE : page;
-        int effectivePerPage = (perPage < MINIMUM_PER_PAGE) ? DEFAULT_PER_PAGE
-                : Math.min(perPage, MAXIMUM_PER_PAGE);
+        // No upper bound is applied; the source declared none — see docs/DECISION_LOG.md DL-123
+        int effectivePerPage = (perPage < MINIMUM_PER_PAGE) ? DEFAULT_PER_PAGE : perPage;
         if (effectivePage != page || effectivePerPage != perPage) {
             log.warn("Read requested page {} size {} as page {} size {}.",
                     page, perPage, effectivePage, effectivePerPage);
@@ -320,7 +319,8 @@ public class TwitterService {
         try {
             return Integer.parseInt(tweetId);
         } catch (NumberFormatException ex) {
-            log.debug("Reporting tweet identifier '{}' as a row that is not present.", tweetId);
+            log.debug("Reporting tweet identifier '{}' as a row that is not present.",
+                    LogSafe.logSafe(tweetId));
             throw NotFoundException.tweetNotFound().withCause(ex);
         }
     }

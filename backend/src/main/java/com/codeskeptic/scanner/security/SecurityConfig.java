@@ -5,9 +5,13 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.Charset;
+import java.nio.charset.IllegalCharsetNameException;
 import java.nio.charset.StandardCharsets;
+import java.nio.charset.UnsupportedCharsetException;
 import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -32,13 +36,24 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.web.header.HeaderWriter;
+import org.springframework.security.web.header.writers.CacheControlHeadersWriter;
+import org.springframework.security.web.header.writers.CompositeHeaderWriter;
+import org.springframework.security.web.header.writers.HstsHeaderWriter;
+import org.springframework.security.web.header.writers.XContentTypeOptionsHeaderWriter;
+import org.springframework.security.web.header.writers.XXssProtectionHeaderWriter;
+import org.springframework.security.web.header.writers.frameoptions.XFrameOptionsHeaderWriter;
 import org.springframework.security.web.context.RequestAttributeSecurityContextRepository;
 import org.springframework.security.web.context.SecurityContextRepository;
+import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
+import org.springframework.security.web.util.matcher.RequestMatcher;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
+import com.codeskeptic.scanner.util.ConfiguredValues;
 
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ReadListener;
@@ -58,9 +73,8 @@ import jakarta.servlet.http.HttpServletResponse;
  * <p>The single {@link SecurityFilterChain} declared here replaces {@code jwt = JWTManager(app)} at
  * {@code backend/app/main.py:L22} together with the eleven bare {@code @jwt_required} decorators at
  * {@code backend/app/api/tweets.py:L10,L24,L37}, {@code backend/app/api/responses.py:L9,L23,L34,L52},
- * {@code backend/app/api/settings.py:L8,L14} and {@code backend/app/api/analytics.py:L8,L18}. That
- * form, applied without parentheses, registers the decorator factory in {@code flask-jwt-extended}
- * 4.x and leaves the route unguarded. The chain declared here authenticates all eleven — DL-021.
+ * {@code backend/app/api/settings.py:L8,L14} and {@code backend/app/api/analytics.py:L8,L18}, each
+ * applied without parentheses. The chain declared here authenticates all eleven — DL-021.
  *
  * <p>Five beans are published, and no other:
  *
@@ -77,9 +91,9 @@ import jakarta.servlet.http.HttpServletResponse;
  *       {@code com.codeskeptic.scanner.dto.LoginRequest} — DL-019.
  * </ul>
  *
- * <p>The chain carries exactly two authorization rules. {@code POST /auth/token} is permitted with no
- * authentication and is the only such route in the service — DL-019. Every other request requires an
- * authenticated principal, which covers the eleven pre-existing routes: {@code GET /tweets},
+ * <p>The chain carries two authorization rules. {@code POST /auth/token} is permitted with no
+ * authentication — DL-019. Every other request requires an authenticated principal, which covers the
+ * eleven pre-existing routes: {@code GET /tweets},
  * {@code GET /tweets/{tweetId}}, {@code POST /tweets/{tweetId}/analyze}, {@code GET /responses},
  * {@code GET /responses/{responseId}}, {@code POST /responses},
  * {@code PUT /responses/{responseId}}, {@code GET /settings}, {@code PUT /settings/{key}},
@@ -99,6 +113,20 @@ import jakarta.servlet.http.HttpServletResponse;
  * envelopes of {@code backend/app/main.py:L31-37} and is reached only by exceptions raised inside the
  * {@code DispatcherServlet}.
  *
+ * <p>Two request-body bounds are enforced inside the chain, both before any converter reads a body.
+ * {@code POST /auth/token} accepts at most 4096 encoded bytes and answers a larger body with the
+ * route's own empty 401 — DL-118. Every other request that carries a body accepts at most 65536
+ * encoded bytes and answers a larger body with 400 and {@code {"error":"Bad request"}}, the body
+ * {@code com.codeskeptic.scanner.api.ErrorDispatchController} renders for a dispatched 400 —
+ * DL-183. The second bound runs after authorization: an unauthenticated request is answered with the
+ * bare 401 first.
+ *
+ * <p>Response headers are the Spring Security defaults, with {@code Strict-Transport-Security}
+ * declared explicitly at the values the framework's own writer carries — a one-year lifetime,
+ * subdomains included, no preload. That header is written on a request the container reports as
+ * secure, and {@code server.forward-headers-strategy} in {@code application.yml} is what makes a
+ * request whose TLS was terminated upstream report itself that way.
+ *
  * <p>The credential store holds exactly one principal, built from {@code scanner.auth.username} and
  * {@code scanner.auth.password-hash} and holding no authority. No table backs it, and the schema this
  * service creates stays the four tables of {@code backend/app/db/models.py} — DL-020. Neither the
@@ -111,9 +139,8 @@ import jakarta.servlet.http.HttpServletResponse;
  * DL-021, DL-051, DL-112, DL-114, DL-115, DL-116 and DL-118; construct-level provenance is
  * recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  *
- * <p>This is a singleton configuration class. All four fields are {@code final} and hold singleton
- * collaborators, and every bean published here is fully built before it is returned and never mutated
- * afterwards, so every member declared here is safe for concurrent use.
+ * <p>This is a singleton configuration class and is thread-safe. All four fields are {@code final} and
+ * every bean published here is fully built before it is returned and never mutated afterwards.
  */
 @Configuration
 @EnableWebSecurity
@@ -124,6 +151,20 @@ public class SecurityConfig {
 
     /** Path of the one route this chain permits with no authentication — DL-019. */
     private static final String TOKEN_ENDPOINT = "/auth/token";
+
+    // The authorization rule and the body-size filter decide from this one matcher — DL-118 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Matcher of {@code POST} {@value #TOKEN_ENDPOINT}. It is the single instance both the
+     * {@code permitAll} rule of {@link #securityFilterChain(HttpSecurity)} and
+     * {@code LoginRequestBodyLimitFilter.shouldNotFilter} consult; the two decide the same question
+     * from the same input. {@link PathPatternRequestMatcher} reads the parsed request path,
+     * percent-decoded and normalized: {@code POST /auth/%74oken} matches it exactly as
+     * {@code POST /auth/token} does, as does Spring MVC when it dispatches to
+     * {@code api/AuthController}.
+     */
+    private static final RequestMatcher TOKEN_ENDPOINT_MATCHER =
+            PathPatternRequestMatcher.withDefaults().matcher(HttpMethod.POST, TOKEN_ENDPOINT);
 
     /**
      * Principal name applied when {@code scanner.auth.username} is absent or blank; the same default
@@ -137,6 +178,35 @@ public class SecurityConfig {
     /** Maximum encoded size of the JSON body accepted by {@code POST /auth/token} — DL-118. */
     private static final int MAXIMUM_LOGIN_REQUEST_BYTES = 4_096;
 
+    // Applies to every authenticated route the bound DL-118 places on POST /auth/token — see
+    // docs/DECISION_LOG.md DL-118
+    /**
+     * Maximum encoded size of the request body accepted on an authenticated route that carries one:
+     * sixteen times {@value #MAXIMUM_LOGIN_REQUEST_BYTES}, the bound the token route carries.
+     *
+     * <p>The bound is enforced before any converter reads the body: a larger body is neither
+     * deserialized nor allocated in full. The retired schemas and the retired {@code String} columns
+     * declared no length — DL-118.
+     */
+    private static final int MAXIMUM_REQUEST_BODY_BYTES = 65_536;
+
+    /**
+     * Request methods that carry no body, and on which {@link RequestBodyLimitFilter} therefore does
+     * nothing.
+     */
+    private static final Set<String> BODYLESS_METHODS =
+            Set.of(HttpMethod.GET.name(), HttpMethod.HEAD.name(), HttpMethod.OPTIONS.name(),
+                    HttpMethod.TRACE.name());
+
+    // Net-new (no Python counterpart) — see docs/DECISION_LOG.md
+    /**
+     * Lifetime declared by {@code Strict-Transport-Security}, in seconds: one year, which is the value
+     * Spring Security's own writer carries. The header is written on a request the container reports as
+     * secure; {@code server.forward-headers-strategy} in {@code application.yml} is what makes a
+     * TLS-terminated request report itself that way.
+     */
+    private static final long HSTS_MAX_AGE_SECONDS = 31_536_000L;
+
     /**
      * Shape a value of {@code scanner.auth.password-hash} must match: the modular-crypt bcrypt form,
      * a two-digit cost, and a 53-character radix-64 salt-and-digest tail — DL-116.
@@ -144,13 +214,6 @@ public class SecurityConfig {
     private static final Pattern BCRYPT_HASH =
             Pattern.compile("^\\$2[aby]\\$(\\d{2})\\$[./A-Za-z0-9]{53}$");
 
-    /**
-     * Shape of a Spring property placeholder that resolved to nothing. Configuration binding leaves
-     * such a placeholder in place as literal text when the environment variable behind it is absent,
-     * so the bound value is neither {@code null} nor blank — DL-189.
-     */
-    private static final Pattern UNRESOLVED_PLACEHOLDER =
-            Pattern.compile("^\\$\\{.*}$", Pattern.DOTALL);
 
     /** Smallest bcrypt cost {@link #userDetailsService()} accepts — DL-116. */
     private static final int MINIMUM_BCRYPT_COST = 10;
@@ -168,9 +231,7 @@ public class SecurityConfig {
                     + "has no default value.";
 
     /**
-     * Message of the {@link IllegalStateException} raised when {@code scanner.auth.password-hash}
-     * carries a value that is not a bcrypt hash of an accepted shape — DL-116. The rejected value is
-     * never named.
+     * Message raised for a password hash outside the accepted bcrypt shape — DL-116.
      */
     private static final String MALFORMED_PASSWORD_HASH_MESSAGE =
             "scanner.auth.password-hash does not carry a bcrypt hash of the expected form: "
@@ -228,16 +289,18 @@ public class SecurityConfig {
      * {@code com.codeskeptic.scanner.config.CorsConfig}; CSRF protection off; stateless session
      * management; the request-attribute context repository; HTTP Basic, form login and logout all
      * off; two authorization rules — {@code POST /auth/token} permitted and every other request
-     * authenticated; the bearer-aware {@code 401} entry point; and
+     * authenticated; the bearer-aware {@code 401} entry point;
      * {@link JwtAuthenticationFilter} positioned ahead of
-     * {@link UsernamePasswordAuthenticationFilter}.
+     * {@link UsernamePasswordAuthenticationFilter}; and the two request-body bounds, the login bound
+     * ahead of {@link UsernamePasswordAuthenticationFilter} and the general bound behind
+     * {@link AuthorizationFilter}.
      *
      * <p>Disabling logout removes the {@code /logout} route Spring Security otherwise installs and
      * permits for every method — DL-114. With logout off, {@code POST /auth/token} is the only route
      * this chain serves without authentication.
      *
-     * <p>{@link JwtAuthenticationFilter} is constructed here and is not a bean, so it is registered
-     * in this chain alone and never in the servlet container's own filter list. It receives the same
+     * <p>{@link JwtAuthenticationFilter} is constructed here and is not a bean; it is registered in
+     * this chain alone and never in the servlet container's own filter list. It receives the same
      * {@link SecurityContextRepository} instance the chain is configured with — DL-112.
      *
      * @param http the builder Spring Security supplies for this chain
@@ -257,16 +320,23 @@ public class SecurityConfig {
                 .formLogin(AbstractHttpConfigurer::disable)
                 .logout(AbstractHttpConfigurer::disable)
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers(HttpMethod.POST, TOKEN_ENDPOINT).permitAll()
+                        .requestMatchers(TOKEN_ENDPOINT_MATCHER).permitAll()
                         .anyRequest().authenticated())
+                .headers(headers -> headers
+                        .httpStrictTransportSecurity(hsts -> hsts
+                                .includeSubDomains(true)
+                                .preload(false)
+                                .maxAgeInSeconds(HSTS_MAX_AGE_SECONDS)))
                 .exceptionHandling(ex -> ex
                         .authenticationEntryPoint(bearerAuthenticationEntryPoint()))
                 .addFilterBefore(
                         new LoginRequestBodyLimitFilter(),
                         UsernamePasswordAuthenticationFilter.class)
                 .addFilterBefore(
-                        new JwtAuthenticationFilter(jwtService, securityContextRepository),
-                        UsernamePasswordAuthenticationFilter.class);
+                        new JwtAuthenticationFilter(jwtService, securityContextRepository,
+                                userDetailsService()),
+                        UsernamePasswordAuthenticationFilter.class)
+                .addFilterAfter(new RequestBodyLimitFilter(), AuthorizationFilter.class);
 
         log.info("Security filter chain built: POST {} is permitted unauthenticated; logout is "
                 + "disabled; every other request requires an authenticated principal, answered with "
@@ -274,6 +344,47 @@ public class SecurityConfig {
                 TOKEN_ENDPOINT, HttpStatus.UNAUTHORIZED.value(), BEARER_CHALLENGE);
 
         return http.build();
+    }
+
+    // Net-new (no Python counterpart) — DL-194 — see docs/DECISION_LOG.md
+    /**
+     * Publishes the transport-security header policy of this application, as one writer.
+     *
+     * <p>The composed writers are the ones Spring Security's {@code HeadersConfigurer} applies by
+     * default, in its order: {@code X-Content-Type-Options}, {@code X-XSS-Protection},
+     * the cache directives {@code Cache-Control}, {@code Pragma} and {@code Expires},
+     * {@code Strict-Transport-Security} on a secure request only, and {@code X-Frame-Options}. This
+     * class customises none of them, so the chain's {@code HeaderWriterFilter} and this bean apply the
+     * same policy from the same declaration — DL-194.
+     *
+     * <p>Each composed writer either skips a name the response already carries or replaces its value
+     * through {@code setHeader}, so applying this bean to a response the chain has already written
+     * leaves each header with exactly one value.
+     * {@code com.codeskeptic.scanner.api.ErrorDispatchController} applies it on the servlet
+     * {@code ERROR} dispatch, which {@code HeaderWriterFilter} skips.
+     *
+     * @return the composed policy; never {@code null}
+     */
+    @Bean
+    public HeaderWriter transportSecurityHeaderWriter() {
+        return defaultTransportSecurityHeaderWriter();
+    }
+
+    /**
+     * Builds the policy {@link #transportSecurityHeaderWriter()} publishes.
+     *
+     * <p>Declared on this class so the policy has one declaration site: the bean above returns it, and
+     * a caller outside the container obtains the same composition — DL-194.
+     *
+     * @return a writer composing Spring Security's default header writers; never {@code null}
+     */
+    public static HeaderWriter defaultTransportSecurityHeaderWriter() {
+        return new CompositeHeaderWriter(List.of(
+                new XContentTypeOptionsHeaderWriter(),
+                new XXssProtectionHeaderWriter(),
+                new CacheControlHeadersWriter(),
+                new HstsHeaderWriter(),
+                new XFrameOptionsHeaderWriter()));
     }
 
     // Net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-112
@@ -296,12 +407,12 @@ public class SecurityConfig {
      *
      * <p>Successor of {@code verify_password} at {@code backend/app/core/security.py:L14-15} and
      * {@code get_password_hash} at {@code :L17-18}, both built on {@code passlib.hash.bcrypt}
-     * imported at {@code :L3} and neither invoked by any call site in the retired tree. This bean is
-     * invoked on every credential check the {@link AuthenticationManager} performs.
+     * imported at {@code :L3}. This bean is invoked on every credential check the
+     * {@link AuthenticationManager} performs.
      *
      * <p>{@link BCryptPasswordEncoder} reads and writes the modular-crypt bcrypt format the passlib
-     * context produced, so {@code scanner.auth.password-hash} carries a raw {@code $2a$}, {@code $2b$}
-     * or {@code $2y$} hash and no encoder-identifier prefix.
+     * context produced. {@code scanner.auth.password-hash} carries a raw {@code $2a$}, {@code $2b$} or
+     * {@code $2y$} hash and no encoder-identifier prefix.
      *
      * @return the bcrypt password encoder; never {@code null}
      */
@@ -321,9 +432,8 @@ public class SecurityConfig {
      * {@value #MAXIMUM_BCRYPT_COST} — DL-116. A value failing either check fails context refresh and
      * is never reproduced in the failure message or the log.
      *
-     * <p>The principal holds an empty authority collection. The service declares no role, no scope
-     * and no authority anywhere, and the chain's {@code anyRequest().authenticated()} rule reads
-     * none — DL-020.
+     * <p>The principal holds an empty authority collection, which is what the chain's
+     * {@code anyRequest().authenticated()} rule reads — DL-020.
      *
      * <p>This bean replaces Spring Boot's {@code UserDetailsServiceAutoConfiguration}. The schema
      * remains the four tables of {@code backend/app/db/models.py} — DL-020.
@@ -352,9 +462,8 @@ public class SecurityConfig {
      *
      * <p>The manager Spring Security assembles from {@link #userDetailsService()} and
      * {@link #passwordEncoder()} performs the credential check behind {@code POST /auth/token} —
-     * DL-019. A presented password that does not match the stored hash raises
-     * {@link org.springframework.security.authentication.BadCredentialsException}; an unknown
-     * principal name raises the same type, the manager's default for a principal it cannot resolve.
+     * DL-019. A presented password that does not match the stored hash and an unknown principal name
+     * both raise {@link org.springframework.security.authentication.BadCredentialsException}.
      *
      * @param configuration the authentication configuration Spring Security publishes for the
      *     application context
@@ -406,15 +515,12 @@ public class SecurityConfig {
     /**
      * Reads and validates the principal's bcrypt password hash from the {@code scanner.auth} group.
      *
-     * <p>Four values are read alike, as an unsupplied hash, and all four raise
-     * {@link #MISSING_PASSWORD_HASH_MESSAGE}: an unbound group, an absent value, a blank value and an
-     * unresolved {@code ${AUTH_PASSWORD_HASH}} placeholder. The fourth arrives when the environment
-     * variable behind the placeholder is absent, because configuration binding leaves the placeholder
-     * in place as literal text rather than failing — DL-189.
-     *
-     * <p>A value present but not matching {@link #BCRYPT_HASH}, or carrying a cost outside
-     * {@value #MINIMUM_BCRYPT_COST}..{@value #MAXIMUM_BCRYPT_COST}, is rejected as malformed. Each
-     * outcome fails context refresh, and none reproduces the configured value — DL-116.
+     * <p>An unbound group, an absent value, a blank value and an unresolved
+     * {@code ${AUTH_PASSWORD_HASH}} placeholder are all read as an unsupplied hash and raise
+     * {@link #MISSING_PASSWORD_HASH_MESSAGE} — DL-189. A value not matching {@link #BCRYPT_HASH}, or
+     * carrying a cost outside {@value #MINIMUM_BCRYPT_COST}..{@value #MAXIMUM_BCRYPT_COST}, is
+     * rejected as malformed. Each outcome fails context refresh, and none reproduces the configured
+     * value — DL-116.
      *
      * @return the value of {@code scanner.auth.password-hash}, trimmed and validated
      * @throws IllegalStateException if that value carries nothing or is not an accepted bcrypt hash
@@ -422,9 +528,7 @@ public class SecurityConfig {
     private String configuredPasswordHash() {
         ScannerProperties.Auth auth = properties.auth();
         String passwordHash = (auth == null) ? null : auth.passwordHash();
-        if (passwordHash == null
-                || passwordHash.isBlank()
-                || isUnresolvedPlaceholder(passwordHash)) {
+        if (ConfiguredValues.isUnset(passwordHash)) {
             throw new IllegalStateException(MISSING_PASSWORD_HASH_MESSAGE);
         }
         String trimmed = passwordHash.trim();
@@ -444,46 +548,25 @@ public class SecurityConfig {
 
     // Applies to scanner.auth.password-hash the guard security/JwtService already applies to
     // scanner.jwt.secret — DL-185, DL-186, DL-189 — see docs/DECISION_LOG.md
-    /**
-     * Reports whether a configured value still holds the property placeholder that should have
-     * supplied it.
-     *
-     * <p>{@code scanner.auth.password-hash} is declared as {@code ${AUTH_PASSWORD_HASH}} with no
-     * default. The {@code @ConfigurationProperties} binder resolves placeholders through a resolver
-     * that leaves an unresolvable one in place rather than failing, so an unset
-     * {@code AUTH_PASSWORD_HASH} binds the literal twenty-two-character text
-     * {@code ${AUTH_PASSWORD_HASH}} — a value that is neither {@code null} nor blank. Recognising that
-     * shape, ignoring surrounding whitespace, is what keeps
-     * {@link #MISSING_PASSWORD_HASH_MESSAGE} reachable — DL-189.
-     *
-     * @param value the bound value, never {@code null} when this is called
-     * @return {@code true} when the value, ignoring surrounding whitespace, opens with a dollar sign
-     *     followed by an opening brace and closes with a closing brace
-     */
-    private static boolean isUnresolvedPlaceholder(String value) {
-        return UNRESOLVED_PLACEHOLDER.matcher(value.trim()).matches();
-    }
 
     /**
      * Bounds the encoded login body before Jackson allocates or deserializes it — DL-118.
      *
-     * <p>The filter applies only to {@code POST /auth/token}. It reads at most
-     * {@value #MAXIMUM_LOGIN_REQUEST_BYTES} plus one bytes, rejects a larger body with the route's
-     * empty 401 response, and replays an accepted body to Spring MVC.
+     * <p>The filter applies to exactly the requests {@link #TOKEN_ENDPOINT_MATCHER} matches, which is
+     * the same instance the chain's {@code permitAll} rule consults. Matching therefore runs against
+     * the parsed request path — percent-decoded and normalized — so an encoded spelling such as
+     * {@code POST /auth/%74oken} is bounded here exactly as {@code POST /auth/token} is.
+     *
+     * <p>It reads at most {@value #MAXIMUM_LOGIN_REQUEST_BYTES} plus one bytes, rejects a larger body
+     * with the route's empty 401 response, and replays an accepted body to Spring MVC.
      */
     private static final class LoginRequestBodyLimitFilter extends OncePerRequestFilter {
 
+        // The same matcher instance the permitAll rule consults — DL-118 — see
+        // docs/DECISION_LOG.md
         @Override
         protected boolean shouldNotFilter(HttpServletRequest request) {
-            if (!HttpMethod.POST.name().equals(request.getMethod())) {
-                return true;
-            }
-            String requestPath = request.getRequestURI();
-            String contextPath = request.getContextPath();
-            if (!contextPath.isEmpty() && requestPath.startsWith(contextPath)) {
-                requestPath = requestPath.substring(contextPath.length());
-            }
-            return !TOKEN_ENDPOINT.equals(requestPath);
+            return !TOKEN_ENDPOINT_MATCHER.matches(request);
         }
 
         @Override
@@ -509,7 +592,62 @@ public class SecurityConfig {
         }
     }
 
-    /** Request wrapper that replays the bounded login body consumed by the size filter. */
+    // Applies to every authenticated route that carries a body the bound DL-118 places on
+    // POST /auth/token — see docs/DECISION_LOG.md DL-118, DL-183
+    /**
+     * Bounds the encoded request body on an authenticated route before any converter reads it.
+     *
+     * <p>The filter runs after {@link AuthorizationFilter}, so a request that carries no
+     * authenticated principal is still answered with the chain's bare 401 rather than with this
+     * bound. It does nothing on a request whose method carries no body, and nothing on
+     * {@code POST /auth/token}, which {@link LoginRequestBodyLimitFilter} bounds at the smaller
+     * {@value #MAXIMUM_LOGIN_REQUEST_BYTES} bytes.
+     *
+     * <p>A declared {@code Content-Length} above {@value #MAXIMUM_REQUEST_BODY_BYTES} is rejected
+     * without reading the body at all. A body whose length is not declared is read to at most
+     * {@value #MAXIMUM_REQUEST_BODY_BYTES} plus one bytes, and rejected if that many arrive. An
+     * accepted body is replayed to Spring MVC through {@link CachedBodyRequest}.
+     *
+     * <p>Rejection calls {@link HttpServletResponse#sendError(int)} with 400, which dispatches to
+     * {@code api.ErrorDispatchController} and answers {@code {"error":"Bad request"}} — the same
+     * status and the same body {@code api.GlobalExceptionHandler} returns for a request the
+     * converters cannot read. No wire literal is written here — DL-183.
+     */
+    private static final class RequestBodyLimitFilter extends OncePerRequestFilter {
+
+        @Override
+        protected boolean shouldNotFilter(HttpServletRequest request) {
+            return BODYLESS_METHODS.contains(request.getMethod())
+                    || TOKEN_ENDPOINT_MATCHER.matches(request);
+        }
+
+        @Override
+        protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
+                FilterChain filterChain) throws ServletException, IOException {
+            if (request.getContentLengthLong() > MAXIMUM_REQUEST_BODY_BYTES) {
+                rejectOversizedRequest(request, response);
+                return;
+            }
+
+            byte[] body = request.getInputStream().readNBytes(MAXIMUM_REQUEST_BODY_BYTES + 1);
+            if (body.length > MAXIMUM_REQUEST_BODY_BYTES) {
+                rejectOversizedRequest(request, response);
+                return;
+            }
+
+            filterChain.doFilter(new CachedBodyRequest(request, body), response);
+        }
+
+        private static void rejectOversizedRequest(HttpServletRequest request,
+                HttpServletResponse response) throws IOException {
+
+            log.warn("Rejected a {} request whose body exceeded {} bytes",
+                    request.getMethod(), MAXIMUM_REQUEST_BODY_BYTES);
+            response.sendError(HttpStatus.BAD_REQUEST.value());
+        }
+    }
+
+    /** Request wrapper that replays a bounded body consumed by a size filter. */
     private static final class CachedBodyRequest extends HttpServletRequestWrapper {
 
         private final byte[] body;
@@ -524,13 +662,39 @@ public class SecurityConfig {
             return new CachedBodyServletInputStream(body);
         }
 
+        // Net-new (no Python counterpart) — DL-198 — see docs/DECISION_LOG.md
+        /**
+         * {@inheritDoc}
+         *
+         * <p>Falls back to UTF-8 when the request declares no charset, declares one this JVM does not
+         * provide, or declares one that is not a legal charset name. {@link Charset#forName(String)}
+         * throws {@link java.nio.charset.UnsupportedCharsetException} and
+         * {@link java.nio.charset.IllegalCharsetNameException}, both unchecked, so without this guard
+         * a caller-supplied {@code Content-Type} charset could raise from inside the filter chain.
+         */
         @Override
         public BufferedReader getReader() {
+            return new BufferedReader(new InputStreamReader(getInputStream(), readerCharset()));
+        }
+
+        /**
+         * Resolves the charset {@link #getReader()} decodes the cached body with.
+         *
+         * @return the declared charset when it is usable, otherwise {@link StandardCharsets#UTF_8};
+         *     never {@code null}
+         */
+        private Charset readerCharset() {
             String encoding = getCharacterEncoding();
-            Charset charset = (encoding == null)
-                    ? StandardCharsets.UTF_8
-                    : Charset.forName(encoding);
-            return new BufferedReader(new InputStreamReader(getInputStream(), charset));
+            if (encoding == null || encoding.isBlank()) {
+                return StandardCharsets.UTF_8;
+            }
+            try {
+                return Charset.forName(encoding);
+            } catch (UnsupportedCharsetException | IllegalCharsetNameException unusable) {
+                log.warn("Request declared a charset this service cannot decode with; reading the "
+                        + "cached body as UTF-8 instead");
+                return StandardCharsets.UTF_8;
+            }
         }
 
         @Override

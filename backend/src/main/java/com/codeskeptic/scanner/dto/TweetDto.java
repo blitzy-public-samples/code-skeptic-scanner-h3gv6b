@@ -18,13 +18,13 @@ import java.util.stream.Collectors;
  * while the columns are single delimited {@code Column(String)} values at
  * {@code backend/app/db/models.py:L15} and {@code :L18} — see docs/DECISION_LOG.md DL-024.
  *
- * <p>Null policy — see docs/DECISION_LOG.md DL-080. The seven scalar components accept {@code null}:
- * each maps to a column that {@code backend/app/db/models.py:L10-18} declares without
- * {@code nullable=False}, so {@code null} is a schema-valid stored value and is carried to the wire
- * as JSON {@code null}. {@code likeCount} and {@code doubtRating} are therefore boxed. The two
- * {@link List} components are never {@code null}: the canonical constructor replaces {@code null}
- * with an empty list and replaces a supplied list with an unmodifiable copy, so a list the caller
- * later mutates does not change this record.
+ * <p>Null policy — see docs/DECISION_LOG.md DL-080. The seven scalar components accept {@code null},
+ * matching the columns {@code backend/app/db/models.py:L10-18} declares without
+ * {@code nullable=False}, and a {@code null} is carried to the wire as JSON {@code null}.
+ * {@code likeCount} and {@code doubtRating} are boxed. The two {@link List} components are never
+ * {@code null}: the canonical constructor replaces {@code null} with an empty list and replaces a
+ * supplied list with an unmodifiable copy, so a list the caller later mutates does not change this
+ * record.
  *
  * <p>Serialised form:
  *

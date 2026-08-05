@@ -1,6 +1,7 @@
 package com.codeskeptic.scanner.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
@@ -22,11 +23,16 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
+import jakarta.persistence.LockModeType;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
@@ -37,6 +43,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionStatus;
@@ -58,67 +65,53 @@ import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.mapper.ResponseMapper;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
 import com.fasterxml.jackson.databind.node.BooleanNode;
+import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 
-// Net-new (no Python counterpart; backend/app/api/responses.py:L3 imports a service that exists
-// nowhere in the repository) — see docs/DECISION_LOG.md
+// Net-new coverage of the four call sites at backend/app/api/responses.py:L15,L26,L44,L60, whose
+// service was imported at :L3 and existed nowhere — see docs/DECISION_LOG.md DL-076, DL-084, DL-086,
+// DL-177
 /**
  * Exercises the four operations of {@link ResponseService}: the page it lists, the row it reads, the
  * row it generates and the row it updates.
  *
- * <p>Five client-visible messages are reachable from this class, and each is asserted as its own exact
+ * <p>Five client-visible messages are reachable from this class and each is asserted as its own exact
  * string: {@code Tweet ID is required}, {@code Response not found},
  * {@code Failed to generate response}, {@code Update data is required} and
  * {@code Response not found or update failed}. The two {@link NotFoundException} messages are also
- * asserted against each other. No test here asserts an HTTP status; {@code api.GlobalExceptionHandler}
- * selects those and {@code api.ResponseControllerTest} asserts them.
+ * asserted against each other. No test here asserts an HTTP status.
  *
- * <p>Every collaborator is a Mockito double. No Spring context is started, and no network, database,
- * filesystem or credential resource is reached. {@link LlmService} is never called for real.
- *
- * <p>Construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * <p>Every collaborator is a Mockito double, no Spring context is started and no network, database,
+ * filesystem or credential resource is reached.
  */
 @ExtendWith(MockitoExtension.class)
 @DisplayName("ResponseService")
 class ResponseServiceTest {
 
-    /** Raw path form of the {@code tweets} row every generation test replies to. */
     private static final String TWEET_ID = "4711";
 
-    /** Numeric form of {@link #TWEET_ID}, the value {@link TweetRepository} is queried with. */
     private static final int TWEET_KEY = 4711;
 
-    /** Raw path form of the {@code responses} row the read and update tests address. */
     private static final String RESPONSE_ID = "88";
 
-    /** Numeric form of {@link #RESPONSE_ID}, the value {@link ResponseRepository} is queried with. */
     private static final int RESPONSE_KEY = 88;
 
-    /** A raw path segment that carries no number. */
     private static final String UNPARSEABLE_ID = "eighty-eight";
 
-    /** Text {@link LlmService} returns for an accepted generation. */
     private static final String GENERATED_TEXT = "Even seasoned reviewers disagree.";
 
-    /** Content the stored {@code responses} row carries before an update. */
     private static final String STORED_CONTENT = "Reviewers still disagree about the generated diff.";
 
-    /** Content an update writes over {@link #STORED_CONTENT}. */
     private static final String REVISED_CONTENT = "Two reviewers read the generated diff line by line.";
 
-    /** Generation time the stored {@code responses} row carries. */
     private static final LocalDateTime STORED_AT = LocalDateTime.of(2026, 1, 31, 9, 16);
 
-    /** Creation time the replied-to {@code tweets} row carries. */
     private static final LocalDateTime TWEET_AT = LocalDateTime.of(2026, 1, 31, 9, 15);
 
-    /** Text of the replied-to {@code tweets} row. */
     private static final String TWEET_CONTENT = "Nobody reviews what the assistant writes.";
 
-    /** The message {@code api.GlobalExceptionHandler} renders for an unmapped failure. */
     private static final String CATCH_ALL_MESSAGE = "Internal server error";
 
-    /** The message {@code api.GlobalExceptionHandler} renders for an unmapped route. */
     private static final String CATCH_ALL_NOT_FOUND = "Not found";
 
     @Mock
@@ -221,7 +214,7 @@ class ResponseServiceTest {
     @Test
     @DisplayName("reports that the response was not found or the update failed when it names no row")
     void reportsThatTheResponseWasNotFoundOrTheUpdateFailedWhenItNamesNoRow() {
-        when(responseRepository.findById(RESPONSE_KEY)).thenReturn(Optional.empty());
+        when(responseRepository.findByIdForUpdate(RESPONSE_KEY)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID, contentOnly()))
                 .isInstanceOf(NotFoundException.class)
@@ -247,6 +240,7 @@ class ResponseServiceTest {
     @DisplayName("reports a different message for a missing row on a read than on an update")
     void reportsADifferentMessageForAMissingRowOnAReadThanOnAnUpdate() {
         when(responseRepository.findById(RESPONSE_KEY)).thenReturn(Optional.empty());
+        when(responseRepository.findByIdForUpdate(RESPONSE_KEY)).thenReturn(Optional.empty());
 
         Throwable onRead = catchThrowable(() -> service.getResponseById(RESPONSE_ID));
         Throwable onUpdate = catchThrowable(() -> service.updateResponse(RESPONSE_ID, contentOnly()));
@@ -340,7 +334,7 @@ class ResponseServiceTest {
                 new DataIntegrityViolationException("could not execute statement [23502]");
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
         when(responseRepository.save(any(Response.class))).thenThrow(rejectedInsert);
 
         Throwable thrown = catchThrowable(() -> service.generateResponse(TWEET_ID));
@@ -369,6 +363,103 @@ class ResponseServiceTest {
                 .isNotEqualTo(BadRequestException.TWEET_ID_IS_REQUIRED);
     }
 
+    // The single background generation entry point — DL-196
+    @Test
+    @DisplayName("stores nothing for a background pass when the row already carries a response")
+    void storesNothingForABackgroundPassWhenTheRowAlreadyCarriesAResponse() {
+        Tweet subject = tweetCarryingTheKey();
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(true);
+
+        Optional<ResponseDto> stored = service.generateResponseIfAbsent(TWEET_ID);
+
+        assertThat(stored).isEmpty();
+        verify(responseRepository).existsByTweetId(TWEET_KEY);
+        verify(responseRepository, never()).save(any(Response.class));
+    }
+
+    // The single background generation entry point — DL-196
+    @Test
+    @DisplayName("stores one row for a background pass when the row carries no response")
+    void storesOneRowForABackgroundPassWhenTheRowCarriesNoResponse() {
+        Tweet subject = tweetCarryingTheKey();
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false);
+        when(responseRepository.save(any(Response.class))).thenAnswer(invocation -> {
+            Response saved = invocation.getArgument(0);
+            saved.setId(RESPONSE_KEY);
+            return saved;
+        });
+        when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
+
+        Optional<ResponseDto> stored = service.generateResponseIfAbsent(TWEET_ID);
+
+        assertThat(stored).isPresent();
+        assertThat(stored.get().id()).isEqualTo(RESPONSE_ID);
+        verify(responseRepository).existsByTweetId(TWEET_KEY);
+        verify(responseRepository).save(any(Response.class));
+    }
+
+    // The existence guard shares the transaction that inserts — DL-196
+    @Test
+    @DisplayName("tests existence inside the storing transaction, after the model has answered")
+    void testsExistenceInsideTheStoringTransactionAfterTheModelHasAnswered() {
+        Tweet subject = tweetCarryingTheKey();
+        TweetDto subjectDto = tweetDto();
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(subjectDto);
+        when(llmService.generateResponse(subjectDto)).thenReturn(generatedDto());
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(true);
+
+        service.generateResponseIfAbsent(TWEET_ID);
+
+        InOrder ordering = inOrder(tweetRepository, llmService, responseRepository);
+        ordering.verify(tweetRepository).findById(TWEET_KEY);
+        ordering.verify(llmService).generateResponse(subjectDto);
+        ordering.verify(tweetRepository).findById(TWEET_KEY);
+        ordering.verify(responseRepository).existsByTweetId(TWEET_KEY);
+        ordering.verifyNoMoreInteractions();
+    }
+
+    // The route path is not guarded — DL-196
+    @Test
+    @DisplayName("does not consult the existence guard on the route path")
+    void doesNotConsultTheExistenceGuardOnTheRoutePath() {
+        Tweet subject = tweetCarryingTheKey();
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(responseRepository.save(any(Response.class))).thenAnswer(invocation -> {
+            Response saved = invocation.getArgument(0);
+            saved.setId(RESPONSE_KEY);
+            return saved;
+        });
+        when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
+
+        service.generateResponse(TWEET_ID);
+
+        verify(responseRepository, never()).existsByTweetId(any());
+        verify(responseRepository).save(any(Response.class));
+    }
+
+    // backend/app/api/responses.py:L40-41 applies to the background path too — DL-196
+    @Test
+    @DisplayName("refuses a background generation request carrying no identifier")
+    void refusesABackgroundGenerationRequestCarryingNoIdentifier() {
+        assertThatThrownBy(() -> service.generateResponseIfAbsent(null))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessage(BadRequestException.TWEET_ID_IS_REQUIRED);
+        assertThatThrownBy(() -> service.generateResponseIfAbsent(""))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessage(BadRequestException.TWEET_ID_IS_REQUIRED);
+
+        verifyNoInteractions(llmService, responseRepository);
+    }
+
     // backend/app/api/responses.py:L44,L46-47
     @Test
     @DisplayName("stores the generated text as an unapproved row and returns the stored row")
@@ -376,7 +467,7 @@ class ResponseServiceTest {
         Tweet subject = tweetCarryingTheKey();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
         when(responseRepository.save(any(Response.class))).thenAnswer(invocation -> {
             Response saved = invocation.getArgument(0);
             saved.setId(RESPONSE_KEY);
@@ -408,7 +499,7 @@ class ResponseServiceTest {
         TweetDto subjectDto = tweetDto();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(subjectDto);
-        when(llmService.generateResponse(subjectDto)).thenReturn(GENERATED_TEXT);
+        when(llmService.generateResponse(subjectDto)).thenReturn(generatedDto());
         when(responseRepository.save(any(Response.class))).thenAnswer(returnsTheRowWithAnAssignedId());
         when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
 
@@ -425,6 +516,78 @@ class ResponseServiceTest {
         orchestration.verifyNoMoreInteractions();
     }
 
+    // The claim the two automatic paths share — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reports nothing and stores nothing for a row that already carries a reply")
+    void skipsAnAutomaticGenerationForARowThatAlreadyCarriesAReply() {
+        Tweet subject = tweetCarryingTheKey();
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(true);
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+
+        assertThat(service.generateResponseIfAbsent(TWEET_ID)).isEmpty();
+
+        verify(responseRepository).existsByTweetId(TWEET_KEY);
+        verify(responseRepository, never()).save(any(Response.class));
+        verifyNoInteractions(responseMapper);
+    }
+
+    // The claim the two automatic paths share — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("stores nothing when the row is taken between the model request and the insert")
+    void storesNothingWhenTheRowIsTakenDuringGeneration() {
+        Tweet subject = tweetCarryingTheKey();
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(true);
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+
+        assertThat(service.generateResponseIfAbsent(TWEET_ID)).isEmpty();
+
+        verify(responseRepository, never()).save(any(Response.class));
+        verifyNoInteractions(responseMapper);
+    }
+
+    // The claim the two automatic paths share — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("stores the reply when the row still carries none at the insert")
+    void storesTheReplyWhenTheRowCarriesNone() {
+        Tweet subject = tweetCarryingTheKey();
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false);
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(responseRepository.save(any(Response.class))).thenAnswer(returnsTheRowWithAnAssignedId());
+        when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
+
+        assertThat(service.generateResponseIfAbsent(TWEET_ID))
+                .isPresent()
+                .get()
+                .extracting(ResponseDto::id)
+                .isEqualTo(RESPONSE_ID);
+
+        verify(responseRepository).existsByTweetId(TWEET_KEY);
+        verify(responseRepository).save(any(Response.class));
+    }
+
+    // The route POST /responses is unaffected by the claim — backend/app/api/responses.py:L44 —
+    // see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("tests no claim on the reviewer-initiated route")
+    void testsNoClaimOnTheReviewerInitiatedRoute() {
+        Tweet subject = tweetCarryingTheKey();
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(responseRepository.save(any(Response.class))).thenAnswer(returnsTheRowWithAnAssignedId());
+        when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
+
+        service.generateResponse(TWEET_ID);
+
+        verify(responseRepository, never()).existsByTweetId(any());
+    }
+
     // backend/app/db/models.py:L26-28 with backend/app/api/responses.py:L44
     @Test
     @DisplayName("associates the stored row with the loaded tweet and stores it unapproved")
@@ -432,7 +595,7 @@ class ResponseServiceTest {
         Tweet subject = tweetCarryingTheKey();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
         when(responseRepository.save(any(Response.class))).thenAnswer(returnsTheRowWithAnAssignedId());
         when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
 
@@ -460,7 +623,7 @@ class ResponseServiceTest {
         ResponseDto mapped = storedDto();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
         when(responseRepository.save(any(Response.class))).thenAnswer(invocation -> {
             Response submitted = invocation.getArgument(0);
             assertThat(submitted.getId()).isNull();
@@ -520,6 +683,63 @@ class ResponseServiceTest {
         Response written = theRowSubmittedForUpdate(existing);
         assertThat(written.getContent()).isEqualTo(REVISED_CONTENT);
         assertThat(written.getIsApproved()).isTrue();
+    }
+
+    // Presence decides, not value — DL-082 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("clears the content when the body carries it as an explicit json null")
+    void clearsTheContentWhenTheBodyCarriesItAsAnExplicitJsonNull() {
+        Response existing = storedRowCarryingApproval(true);
+        stubTheUpdateOf(existing);
+
+        service.updateResponse(RESPONSE_ID,
+                new UpdateResponseRequest(NullNode.getInstance(), null));
+
+        Response written = theRowSubmittedForUpdate(existing);
+        assertThat(written.getContent()).isNull();
+        assertThat(written.getIsApproved()).isTrue();
+    }
+
+    // Presence decides, not value — DL-082 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("clears the approval flag when the body carries it as an explicit json null")
+    void clearsTheApprovalFlagWhenTheBodyCarriesItAsAnExplicitJsonNull() {
+        Response existing = storedRowCarryingApproval(true);
+        stubTheUpdateOf(existing);
+
+        service.updateResponse(RESPONSE_ID,
+                new UpdateResponseRequest(null, NullNode.getInstance()));
+
+        Response written = theRowSubmittedForUpdate(existing);
+        assertThat(written.getIsApproved()).isNull();
+        assertThat(written.getContent()).isEqualTo(STORED_CONTENT);
+    }
+
+    // Presence decides, not value — DL-082 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("clears both columns when the body carries both as explicit json nulls")
+    void clearsBothColumnsWhenTheBodyCarriesBothAsExplicitJsonNulls() {
+        Response existing = storedRowCarryingApproval(true);
+        stubTheUpdateOf(existing);
+
+        service.updateResponse(RESPONSE_ID,
+                new UpdateResponseRequest(NullNode.getInstance(), NullNode.getInstance()));
+
+        Response written = theRowSubmittedForUpdate(existing);
+        assertThat(written.getContent()).isNull();
+        assertThat(written.getIsApproved()).isNull();
+    }
+
+    // Presence decides, not value — DL-082 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("accepts a body whose only key is an explicit json null rather than rejecting it")
+    void acceptsABodyWhoseOnlyKeyIsAnExplicitJsonNullRatherThanRejectingIt() {
+        Response existing = storedRowCarryingApproval(true);
+        stubTheUpdateOf(existing);
+
+        assertThatCode(() -> service.updateResponse(RESPONSE_ID,
+                new UpdateResponseRequest(NullNode.getInstance(), null)))
+                .doesNotThrowAnyException();
     }
 
     // backend/app/db/models.py:L26 with backend/app/api/responses.py:L60
@@ -611,6 +831,31 @@ class ResponseServiceTest {
         assertThat(requested.getPageSize()).isEqualTo(10);
     }
 
+    // backend/app/api/responses.py:L11-12 declares defaults and no bound — DL-123
+    @ParameterizedTest(name = "a per_page of {0} reaches the repository unreduced")
+    @ValueSource(ints = {100, 101, 500, 10_000, Integer.MAX_VALUE})
+    @DisplayName("applies no upper bound to per_page")
+    void appliesNoUpperBoundToPerPage(int perPage) {
+        when(responseRepository.findAll(any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, perPage), 0L));
+
+        service.getPaginatedResponses(1, perPage);
+
+        assertThat(theRequestedPage().getPageSize()).isEqualTo(perPage);
+    }
+
+    // backend/app/api/responses.py:L11-12 declares defaults and no bound — DL-123
+    @Test
+    @DisplayName("restates the unreduced per_page in the pagination block")
+    void restatesTheUnreducedPerPageInThePaginationBlock() {
+        when(responseRepository.findAll(any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 500), 0L));
+
+        PaginatedResponsesDto envelope = service.getPaginatedResponses(1, 500);
+
+        assertThat(envelope.pagination().perPage()).isEqualTo(500);
+    }
+
     // backend/app/api/responses.py:L11,L15
     @Test
     @DisplayName("requests the third wire page as index two and reports it as page three")
@@ -624,6 +869,66 @@ class ResponseServiceTest {
         assertThat(requested.getPageNumber()).isEqualTo(2);
         assertThat(requested.getPageSize()).isEqualTo(10);
         assertThat(envelope.pagination().page()).isEqualTo(3);
+    }
+
+    // No upper bound is applied to per_page — IR9 — see docs/DECISION_LOG.md DL-200
+    @ParameterizedTest(name = "a per_page of {0} reads a page of size {0}")
+    @CsvSource({
+            "99,99",
+            "100,100",
+            "101,101",
+            "250,250",
+            "2147483647,2147483647"
+    })
+    @DisplayName("passes the page size through with no upper bound")
+    void passesThePageSizeThroughWithNoUpperBound(int perPage, int expectedSize) {
+        when(responseRepository.findAll(any(Pageable.class)))
+                .thenReturn(pageOfStoredRows(0, expectedSize, 0L));
+
+        service.getPaginatedResponses(1, perPage);
+
+        assertThat(theRequestedPage().getPageSize()).isEqualTo(expectedSize);
+    }
+
+    // No upper bound is applied to per_page — IR9 — see docs/DECISION_LOG.md DL-200
+    @Test
+    @DisplayName("reports the supplied page size in the pagination block it builds")
+    void reportsTheSuppliedPageSizeInThePaginationBlockItBuilds() {
+        when(responseRepository.findAll(any(Pageable.class)))
+                .thenReturn(pageOfStoredRows(0, 500, 0L));
+
+        PaginationDto pagination = service.getPaginatedResponses(1, 500).pagination();
+
+        assertThat(pagination.perPage()).isEqualTo(500);
+    }
+
+    // Lower bounds applied to page and per_page — DL-077 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "page {0} of size {1} reads page index {2} of size {3}")
+    @CsvSource({
+            "0,10,0,10",
+            "-1,10,0,10",
+            "-2147483648,10,0,10",
+            "1,0,0,10",
+            "1,-1,0,10",
+            "0,0,0,10"
+    })
+    @DisplayName("reads a page or per_page below the lower bound as its default")
+    void readsAPageOrPerPageBelowTheLowerBoundAsItsDefault(int page, int perPage,
+            int expectedIndex, int expectedSize) {
+
+        when(responseRepository.findAll(any(Pageable.class))).thenAnswer(invocation ->
+                new PageImpl<>(List.of(), invocation.<Pageable>getArgument(0), 0L));
+
+        PaginatedResponsesDto envelope = service.getPaginatedResponses(page, perPage);
+
+        Pageable requested = theRequestedPage();
+        assertThat(requested.getPageNumber())
+                .as("page index the repository was asked for").isEqualTo(expectedIndex);
+        assertThat(requested.getPageSize())
+                .as("page size the repository was asked for").isEqualTo(expectedSize);
+        assertThat(envelope.pagination().page()).as("page the envelope restates").isEqualTo(1);
+        assertThat(envelope.pagination().perPage())
+                .as("per_page the envelope restates").isEqualTo(expectedSize);
     }
 
     // backend/app/api/responses.py:L17-20
@@ -707,12 +1012,17 @@ class ResponseServiceTest {
                 LlmService.class.getName(),
                 ResponseMapper.class.getName(),
                 TweetMapper.class.getName(),
-                TransactionTemplate.class.getName());
+                TransactionTemplate.class.getName(),
+                // The in-process generation claim of DL-196 — a Set of raw identifiers, not a
+                // collaborator
+                Set.class.getName());
     }
 
+    // The fifth operation is generateResponseIfAbsent, the claim-aware entry point the two
+    // automatic paths share — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("declares exactly four operations and none of them publishes")
-    void declaresExactlyFourOperationsAndNoneOfThemPublishes() {
+    @DisplayName("declares exactly five operations and none of them publishes")
+    void declaresExactlyFiveOperationsAndNoneOfThemPublishes() {
         List<Method> declared = Arrays.stream(ResponseService.class.getDeclaredMethods())
                 .filter(method -> !method.isSynthetic())
                 .toList();
@@ -726,7 +1036,7 @@ class ResponseServiceTest {
                 .filteredOn(method -> Modifier.isPublic(method.getModifiers()))
                 .extracting(Method::getName)
                 .containsExactlyInAnyOrder("getPaginatedResponses", "getResponseById",
-                        "generateResponse", "updateResponse");
+                        "generateResponse", "generateResponseIfAbsent", "updateResponse");
         assertThat(declared).allSatisfy(method -> assertThat(namesAPublication(method.getName()))
                 .as("declared method %s", method.getName())
                 .isFalse());
@@ -743,11 +1053,57 @@ class ResponseServiceTest {
 
         assertThat(existing.getIsApproved()).isTrue();
         verifyNoInteractions(llmService, tweetRepository, tweetMapper);
-        verify(responseRepository).findById(RESPONSE_KEY);
+        verify(responseRepository).findByIdForUpdate(RESPONSE_KEY);
+        verify(responseRepository, never()).findById(RESPONSE_KEY);
         verify(responseRepository).save(existing);
         verifyNoMoreInteractions(responseRepository);
         verify(responseMapper).toDto(existing);
         verifyNoMoreInteractions(responseMapper);
+    }
+
+    // Pessimistic write lock ahead of a partial update — DL-122 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reads the row through the locked finder before writing either column")
+    void readsTheRowThroughTheLockedFinderBeforeWritingEitherColumn() {
+        Response existing = storedRowCarryingApproval(false);
+        stubTheUpdateOf(existing);
+
+        service.updateResponse(RESPONSE_ID,
+                new UpdateResponseRequest(new TextNode("edited"), BooleanNode.TRUE));
+
+        InOrder lockedUpdate = inOrder(responseRepository);
+        lockedUpdate.verify(responseRepository).findByIdForUpdate(RESPONSE_KEY);
+        lockedUpdate.verify(responseRepository).save(existing);
+        lockedUpdate.verifyNoMoreInteractions();
+        verify(responseRepository, never()).findById(RESPONSE_KEY);
+    }
+
+    // Pessimistic write lock ahead of a partial update — DL-122 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("declares the locked finder with a pessimistic write lock and the read finder without")
+    void declaresTheLockedFinderWithAPessimisticWriteLockAndTheReadFinderWithout()
+            throws NoSuchMethodException {
+
+        Lock declared = ResponseRepository.class
+                .getMethod("findByIdForUpdate", Integer.class)
+                .getAnnotation(Lock.class);
+
+        assertThat(declared).as("@Lock on findByIdForUpdate").isNotNull();
+        assertThat(declared.value()).isEqualTo(LockModeType.PESSIMISTIC_WRITE);
+        assertThat(ResponseRepository.class.getMethod("findAll", Pageable.class)
+                .getAnnotation(Lock.class)).as("@Lock on the paged read").isNull();
+    }
+
+    // Pessimistic write lock ahead of a partial update — DL-122 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("takes no lock when the identifier carries no number")
+    void takesNoLockWhenTheIdentifierCarriesNoNumber() {
+        assertThatThrownBy(() -> service.updateResponse("not-a-number", contentOnly()))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessage("Response not found or update failed");
+
+        verify(responseRepository, never()).findByIdForUpdate(any());
+        verify(responseRepository, never()).save(any(Response.class));
     }
 
     /**
@@ -784,21 +1140,10 @@ class ResponseServiceTest {
                 || normalised.contains("tweetback");
     }
 
-    /**
-     * Builds a request body carrying the {@code content} key alone.
-     *
-     * @return a request whose {@code content} is {@link #REVISED_CONTENT} and whose approval key is
-     *         absent
-     */
     private static UpdateResponseRequest contentOnly() {
         return new UpdateResponseRequest(TextNode.valueOf(REVISED_CONTENT), null);
     }
 
-    /**
-     * Builds the {@code tweets} row every generation test replies to.
-     *
-     * @return an entity carrying {@link #TWEET_KEY} as its identifier
-     */
     private static Tweet tweetCarryingTheKey() {
         Tweet tweet = new Tweet();
         tweet.setId(TWEET_KEY);
@@ -811,23 +1156,11 @@ class ResponseServiceTest {
         return tweet;
     }
 
-    /**
-     * Builds the wire form of the replied-to post.
-     *
-     * @return a DTO carrying {@link #TWEET_ID} as its identifier
-     */
     private static TweetDto tweetDto() {
         return new TweetDto(TWEET_ID, TWEET_CONTENT, 250, TWEET_AT, 7.5d, List.of(), null, "99",
                 List.of("GitHub Copilot"));
     }
 
-    /**
-     * Builds a stored {@code responses} row carrying the given approval flag.
-     *
-     * @param approval the value of the {@code is_approved} column
-     * @return an entity carrying {@link #RESPONSE_KEY}, {@link #STORED_CONTENT}, {@link #STORED_AT} and
-     *         an association to {@link #tweetCarryingTheKey()}
-     */
     private static Response storedRowCarryingApproval(Boolean approval) {
         Response response = new Response();
         response.setId(RESPONSE_KEY);
@@ -838,13 +1171,20 @@ class ResponseServiceTest {
         return response;
     }
 
-    /**
-     * Builds the wire form of the stored {@code responses} row.
-     *
-     * @return a DTO carrying {@link #RESPONSE_ID} as its identifier
-     */
     private static ResponseDto storedDto() {
         return new ResponseDto(RESPONSE_ID, STORED_CONTENT, STORED_AT, false, TWEET_ID);
+    }
+
+    /**
+     * Builds the generation result the language-model adapter returns.
+     *
+     * <p>The identifier is {@code null}: the adapter has not persisted anything, so no key has been
+     * assigned. Approval is {@code false}.
+     *
+     * @return the adapter's result carrying {@link #GENERATED_TEXT}
+     */
+    private static ResponseDto generatedDto() {
+        return new ResponseDto(null, GENERATED_TEXT, STORED_AT, false, TWEET_ID);
     }
 
     /**
@@ -860,11 +1200,6 @@ class ResponseServiceTest {
                 total);
     }
 
-    /**
-     * Answers a {@code save} call by assigning {@link #RESPONSE_KEY} to the submitted row.
-     *
-     * @return an answer returning the submitted row with an identifier assigned
-     */
     private static Answer<Response> returnsTheRowWithAnAssignedId() {
         return invocation -> {
             Response submitted = invocation.getArgument(0);
@@ -879,7 +1214,7 @@ class ResponseServiceTest {
      * @param existing the row {@link ResponseRepository} returns and receives back
      */
     private void stubTheUpdateOf(Response existing) {
-        when(responseRepository.findById(RESPONSE_KEY)).thenReturn(Optional.of(existing));
+        when(responseRepository.findByIdForUpdate(RESPONSE_KEY)).thenReturn(Optional.of(existing));
         when(responseRepository.save(existing)).thenReturn(existing);
         when(responseMapper.toDto(existing)).thenReturn(storedDto());
     }
@@ -897,11 +1232,6 @@ class ResponseServiceTest {
         return submitted.getValue();
     }
 
-    /**
-     * Captures the {@link Pageable} a listing submitted to {@link ResponseRepository}.
-     *
-     * @return the captured page request
-     */
     private Pageable theRequestedPage() {
         ArgumentCaptor<Pageable> requested = ArgumentCaptor.forClass(Pageable.class);
         verify(responseRepository).findAll(requested.capture());
@@ -924,12 +1254,12 @@ class ResponseServiceTest {
 
             @Override
             public void commit(TransactionStatus status) {
-                // No transaction is started, and nothing is committed.
+                // Intentionally empty.
             }
 
             @Override
             public void rollback(TransactionStatus status) {
-                // No transaction is started, and nothing is rolled back.
+                // Intentionally empty.
             }
         });
     }

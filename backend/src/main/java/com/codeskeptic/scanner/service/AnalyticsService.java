@@ -26,8 +26,8 @@ import com.codeskeptic.scanner.repository.TweetRepository;
  * {@code app.services.analytics_service}, a module the source tree never contained. The two
  * operations declared here carry the signatures its call sites already fixed:
  * {@code analytics_service.get_summary()} at {@code :L24} and {@code analytics_service.get_trends()}
- * at {@code :L14}. Both are argument-less, and {@code documentation/Code Structure.md:L557,L586}
- * records {@code "parameters": []} for each. Neither analytics route declares a query parameter.
+ * at {@code :L14}, both argument-less, as {@code documentation/Code Structure.md:L557,L586} declares
+ * them. Neither analytics route declares a query parameter — see docs/DECISION_LOG.md DL-042.
  *
  * <p>Every value the two operations report is an aggregate the database computes: a row count, a
  * derived count, an {@code avg} or a {@code sum}. The reports read the pre-existing {@code tweets},
@@ -47,7 +47,7 @@ import com.codeskeptic.scanner.repository.TweetRepository;
  * persistence layer propagates to {@code api.GlobalExceptionHandler}.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-041, DL-042,
- * DL-052 and DL-075; this file's target-to-source row in {@code docs/TRACEABILITY_MATRIX.md} reads
+ * DL-052, DL-075 and DL-088; this file's target-to-source row in {@code docs/TRACEABILITY_MATRIX.md} reads
  * "no source construct — net-new".
  *
  * <p>Usage:
@@ -211,6 +211,7 @@ public class AnalyticsService {
         LocalDateTime since = LocalDateTime.now().minusDays(windowDays);
 
         List<TrendsDto.TrendPoint> trends = tweetRepository.findDailyTrendsSince(since).stream()
+                // avg(...) and sum(...) are reported as they stand, null included — DL-075
                 .map(bucket -> new TrendsDto.TrendPoint(bucket.getBucketDate(),
                         bucket.getTweetCount(),
                         bucket.getAverageDoubtRating(),

@@ -11,8 +11,8 @@ import com.fasterxml.jackson.databind.JsonNode;
  * no identifier is carried in the body. No validation constraint is declared — see
  * docs/DECISION_LOG.md DL-050.
  *
- * <p>Each component is held as the raw JSON node the body carried, which keeps a key's presence
- * independent of its value — see docs/DECISION_LOG.md DL-082:
+ * <p>Each component is held as the raw JSON node the body carried, and a key's presence is reported
+ * independently of its value — see docs/DECISION_LOG.md DL-082:
  *
  * <ul>
  *   <li>a key the body omits binds to {@code null}, and {@link #contentPresent()} /
@@ -23,9 +23,10 @@ import com.fasterxml.jackson.databind.JsonNode;
  *   <li>a key the body carries with a value binds to that value.
  * </ul>
  *
- * <p>{@code content} accepts a JSON string or {@code null}; {@code is_approved} accepts a JSON
- * boolean or {@code null}. Any other JSON type is rejected by the canonical constructor, so the
- * request never reaches a service with a value the columns cannot hold.
+ * <p>No JSON type is rejected, matching the free-form {@code update_data = request.json} of
+ * {@code backend/app/api/responses.py:L54} — see docs/DECISION_LOG.md DL-050. A node whose type the
+ * target column cannot hold reads as {@code null} through the value accessors below, while its key
+ * still counts as present.
  *
  * @param content    raw {@code content} node, or {@code null} when the body omits the key
  * @param isApproved raw {@code is_approved} node, or {@code null} when the body omits the key
@@ -42,23 +43,6 @@ public record UpdateResponseRequest(
 
 ) {
 
-    /** Wire key of the {@code responses.content} column. */
-    private static final String CONTENT_KEY = "content";
-
-    /** Wire key of the {@code responses.is_approved} column. */
-    private static final String IS_APPROVED_KEY = "is_approved";
-
-    /**
-     * Rejects a node whose JSON type the target column cannot hold.
-     *
-     * @throws IllegalArgumentException if {@code content} is neither a string nor null, or if
-     *     {@code isApproved} is neither a boolean nor null
-     */
-    public UpdateResponseRequest {
-        requireTextOrNull(content, CONTENT_KEY);
-        requireBooleanOrNull(isApproved, IS_APPROVED_KEY);
-    }
-
     /**
      * Reports whether the request body carried the {@code content} key, whatever its value.
      *
@@ -72,10 +56,11 @@ public record UpdateResponseRequest(
     /**
      * Returns the {@code content} value the request body carried.
      *
-     * @return the text, or {@code null} when the body carried the key as {@code null} or omitted it
+     * @return the text, or {@code null} when the body carried the key as {@code null}, omitted it, or
+     *     carried a node that is not a JSON string
      */
     public String contentValue() {
-        return (content == null || content.isNull()) ? null : content.textValue();
+        return (content == null || !content.isTextual()) ? null : content.textValue();
     }
 
     /**
@@ -91,10 +76,11 @@ public record UpdateResponseRequest(
     /**
      * Returns the {@code is_approved} value the request body carried.
      *
-     * @return the flag, or {@code null} when the body carried the key as {@code null} or omitted it
+     * @return the flag, or {@code null} when the body carried the key as {@code null}, omitted it, or
+     *     carried a node that is not a JSON boolean
      */
     public Boolean approvalValue() {
-        return (isApproved == null || isApproved.isNull()) ? null : isApproved.booleanValue();
+        return (isApproved == null || !isApproved.isBoolean()) ? null : isApproved.booleanValue();
     }
 
     /**
@@ -109,29 +95,4 @@ public record UpdateResponseRequest(
         return !contentPresent() && !approvalPresent();
     }
 
-    /**
-     * Confirms that a node holds a JSON string or JSON null.
-     *
-     * @param node the bound node; {@code null} when the body omitted the key
-     * @param key  the wire key, used in the failure message
-     * @throws IllegalArgumentException if the node holds any other JSON type
-     */
-    private static void requireTextOrNull(JsonNode node, String key) {
-        if (node != null && !node.isNull() && !node.isTextual()) {
-            throw new IllegalArgumentException(key + " must be a string or null.");
-        }
-    }
-
-    /**
-     * Confirms that a node holds a JSON boolean or JSON null.
-     *
-     * @param node the bound node; {@code null} when the body omitted the key
-     * @param key  the wire key, used in the failure message
-     * @throws IllegalArgumentException if the node holds any other JSON type
-     */
-    private static void requireBooleanOrNull(JsonNode node, String key) {
-        if (node != null && !node.isNull() && !node.isBoolean()) {
-            throw new IllegalArgumentException(key + " must be a boolean or null.");
-        }
-    }
 }

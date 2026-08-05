@@ -5,6 +5,7 @@ import com.codeskeptic.scanner.entity.AiTool;
 import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.repository.AiToolRepository;
 import com.codeskeptic.scanner.repository.SettingRepository;
+import com.codeskeptic.scanner.util.LogSafe;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -220,11 +221,7 @@ public class TweetStreamClient implements SmartLifecycle {
     /** Byte on which the response body is split into records. */
     private static final byte LINE_FEED = (byte) '\n';
 
-    /** Longest prefix of an unreadable record a log event carries. */
-    private static final int RECORD_EXCERPT_LIMIT = 120;
 
-    /** Marker appended to a prefix truncated to {@value #RECORD_EXCERPT_LIMIT} characters. */
-    private static final String TRUNCATION_MARK = "...";
 
     /** Shortest delay applied before a reconnection. */
     private static final Duration MIN_RECONNECT_BACKOFF = Duration.ofSeconds(5L);
@@ -865,8 +862,8 @@ public class TweetStreamClient implements SmartLifecycle {
      * Hands one complete record to {@link TweetStreamListener#onStatus(JsonNode)}.
      *
      * <p>A blank record is a keep-alive: it is discarded without being parsed and without a log event.
-     * A record that cannot be read as JSON is recorded at {@code WARN} with a prefix of at most
-     * {@value #RECORD_EXCERPT_LIMIT} characters and skipped. A listener failure is recorded at
+     * A record that cannot be read as JSON is recorded at {@code WARN} as a correlation token and the
+     * failure's type, never as its content, and skipped. A listener failure is recorded at
      * {@code ERROR} and skipped. Neither ends the connection.
      *
      * @param record one complete record, may be {@code null}
@@ -883,8 +880,10 @@ public class TweetStreamClient implements SmartLifecycle {
         try {
             payload = OBJECT_MAPPER.readTree(candidate);
         } catch (JsonProcessingException failure) {
-            log.warn("Skipping an unreadable X filtered stream record [{}]: {}",
-                    excerpt(candidate), describe(failure));
+            // Neither the record nor the parse failure's message is written: a non-reversible
+            // correlation token and the failure's type only — DL-149 — see docs/DECISION_LOG.md
+            log.warn("Skipping an unreadable X filtered stream record; record {}: {}",
+                    LogSafe.correlation(candidate), LogSafe.type(failure));
             return true;
         }
 
@@ -899,8 +898,10 @@ public class TweetStreamClient implements SmartLifecycle {
             }
             return keepStreaming;
         } catch (RuntimeException failure) {
+            // The listener failure can quote a value it was handed, so only its type is recorded —
+            // DL-149 — see docs/DECISION_LOG.md
             log.error("Skipping an X filtered stream record: the listener failed after {}",
-                    describe(failure), failure);
+                    LogSafe.type(failure));
             return true;
         }
     }
@@ -1073,19 +1074,6 @@ public class TweetStreamClient implements SmartLifecycle {
         return value == null || value.isBlank();
     }
 
-    /**
-     * Shortens a record for a log event.
-     *
-     * @param record the record to shorten, must not be {@code null}
-     * @return {@code record} when it is at most {@value #RECORD_EXCERPT_LIMIT} characters, and its
-     *     first {@value #RECORD_EXCERPT_LIMIT} characters followed by {@value #TRUNCATION_MARK}
-     *     otherwise
-     */
-    private static String excerpt(String record) {
-        return record.length() <= RECORD_EXCERPT_LIMIT
-                ? record
-                : record.substring(0, RECORD_EXCERPT_LIMIT) + TRUNCATION_MARK;
-    }
 
     /**
      * Renders a failure for a log event.

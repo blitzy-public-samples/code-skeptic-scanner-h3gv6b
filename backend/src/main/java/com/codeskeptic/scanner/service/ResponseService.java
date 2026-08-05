@@ -4,6 +4,8 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,6 +29,7 @@ import com.codeskeptic.scanner.repository.ResponseRepository;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.mapper.ResponseMapper;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
+import com.codeskeptic.scanner.util.LogSafe;
 
 // Net-new (no Python module existed; signatures dictated by
 // backend/app/api/responses.py:L15,L26,L44,L60) — see docs/DECISION_LOG.md
@@ -44,7 +47,7 @@ import com.codeskeptic.scanner.service.mapper.TweetMapper;
  *
  * <p>The source constructed the service once per request, at
  * {@code backend/app/api/responses.py:L14}, {@code :L25}, {@code :L43} and {@code :L59}. This is one
- * singleton bean holding its five collaborators in final fields — DL-043.
+ * singleton bean holding its five collaborators in final fields — DL-211.
  *
  * <p>The set of client-visible messages this class can produce is closed at five, each a wire literal
  * of the source:
@@ -103,25 +106,26 @@ public class ResponseService {
     // Logging baseline — DL-052 — see docs/DECISION_LOG.md
     private static final Logger log = LoggerFactory.getLogger(ResponseService.class);
 
+    /** Difference between a 1-based wire page number and the 0-based repository index — DL-038. */
     /**
-     * Wire page number applied when the requested page is below the first one. It is the default the
-     * source declared for the {@code page} query parameter at
-     * {@code backend/app/api/responses.py:L11}.
+     * Page number read when {@code page} lies below it, transcribing the default of
+     * {@code request.args.get('page', 1, type=int)} at backend/app/api/responses.py:L11.
      */
     private static final int DEFAULT_PAGE = 1;
 
     /**
-     * Page size applied when the requested size is not positive. It is the default the source declared
-     * for the {@code per_page} query parameter at {@code backend/app/api/responses.py:L12}.
+     * Page size read when {@code perPage} lies below one, transcribing the default of
+     * {@code request.args.get('per_page', 10, type=int)} at backend/app/api/responses.py:L12.
      */
     private static final int DEFAULT_PER_PAGE = 10;
 
+    private static final int WIRE_PAGE_OFFSET = 1;
+
     /**
-     * The largest page size this service materialises, applied to any larger {@code per_page} value.
-     *
-     * <p>See docs/DECISION_LOG.md DL-149.
+     * Number of monitors {@link #generateResponseIfAbsent(String)} spreads {@code tweets} identifiers
+     * over — DL-190.
      */
-    private static final int MAXIMUM_PER_PAGE = 100;
+    private static final int GENERATION_LOCK_STRIPES = 64;
 
     /** Data access for the {@code responses} table. */
     private final ResponseRepository responseRepository;
@@ -140,6 +144,22 @@ public class ResponseService {
 
     /** Demarcates the short transactional unit that stores a generated row — DL-086. */
     private final TransactionTemplate transactionTemplate;
+
+    // In-process claim held for the duration of one background generation — DL-196 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Raw {@code tweets} identifiers a background generation currently holds. An identifier is added
+     * by {@link #generateResponseIfAbsent(String)} before it reads the subject row and removed when
+     * that call returns or raises.
+     */
+    private final Set<String> generationClaims = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Identifiers of the {@code tweets} rows an automatic generation pass is currently answering —
+     * DL-191. An identifier is present only while
+     * {@link #generateResponseIfAbsent(String)} runs for it.
+     */
+    private final Set<Integer> claimed = ConcurrentHashMap.newKeySet();
 
     /**
      * Creates the bean with its collaborators, replacing the per-request construction at
@@ -180,8 +200,9 @@ public class ResponseService {
      * <p>{@code page} is 1-based, as the query parameter at {@code backend/app/api/responses.py:L11}
      * is, and is converted to the 0-based index {@code findAll(Pageable)} takes. A {@code page} below
      * {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE} and a {@code perPage} below {@code 1}
-     * is read as {@value #DEFAULT_PER_PAGE}; neither is rejected. A {@code page} beyond the last one
-     * yields an empty {@code responses} list and a populated pagination block.
+     * is read as {@value #DEFAULT_PER_PAGE}; neither is rejected, and no upper bound is applied to
+     * {@code perPage}. A {@code page} beyond the last one yields an empty {@code responses} list and
+     * a populated pagination block.
      *
      * <p>The pagination block carries {@code page} as the 1-based number of the page returned,
      * {@code per_page} as its size, {@code total} as the number of rows in the table and
@@ -191,21 +212,22 @@ public class ResponseService {
      * @param page    the 1-based page number to return; a value below {@value #DEFAULT_PAGE} is read
      *                as {@value #DEFAULT_PAGE}
      * @param perPage the number of rows per page; a value below {@code 1} is read as
-     *                {@value #DEFAULT_PER_PAGE}
+     *                {@value #DEFAULT_PER_PAGE} and no larger value is reduced
      * @return the {@code responses} and {@code pagination} envelope, never {@code null}; the
      *         {@code responses} list is empty when the page holds no row and is unmodifiable
      */
     @Transactional(readOnly = true)
     public PaginatedResponsesDto getPaginatedResponses(int page, int perPage) {
         // Out-of-range values are read as the defaults of backend/app/api/responses.py:L11-12 —
-        // DL-077 — see docs/DECISION_LOG.md
+        // DL-200 — see docs/DECISION_LOG.md
         int requestedPage = (page < DEFAULT_PAGE) ? DEFAULT_PAGE : page;
-        int requestedPerPage = (perPage < 1) ? DEFAULT_PER_PAGE : Math.min(perPage, MAXIMUM_PER_PAGE);
+        // No upper bound is applied; the source declared none — see docs/DECISION_LOG.md DL-123
+        int requestedPerPage = (perPage < 1) ? DEFAULT_PER_PAGE : perPage;
 
         // The wire page of backend/app/api/responses.py:L11 is 1-based; PageRequest is 0-based —
         // DL-038 — see docs/DECISION_LOG.md
-        Page<Response> found =
-                responseRepository.findAll(PageRequest.of(requestedPage - 1, requestedPerPage));
+        Page<Response> found = responseRepository.findAll(
+                PageRequest.of(Math.subtractExact(requestedPage, WIRE_PAGE_OFFSET), requestedPerPage));
 
         List<ResponseDto> responses = responseMapper.toDtoList(found.getContent());
         PaginationDto pagination = new PaginationDto(
@@ -246,7 +268,8 @@ public class ResponseService {
 
         // backend/app/api/responses.py:L28-31
         if (existing.isEmpty()) {
-            log.warn("Rejected the read of response '{}': the identifier names no row.", responseId);
+            log.warn("Rejected the read of response '{}': the identifier names no row.",
+                    LogSafe.logSafe(responseId));
             throw NotFoundException.responseNotFound();
         }
 
@@ -254,7 +277,6 @@ public class ResponseService {
     }
 
     // Contract from backend/app/api/responses.py:L38-49 (400/201/500) — see docs/DECISION_LOG.md
-    // DL-076
     /**
      * Generates a reply to the {@code tweets} row identified by {@code tweetId}, stores it as a new
      * {@code responses} row, and returns the stored row.
@@ -299,26 +321,100 @@ public class ResponseService {
             throw BadRequestException.tweetIdRequired();
         }
 
-        log.info("Generating a response for tweet '{}'.", tweetId);
+        log.info("Generating a response for tweet '{}'.", LogSafe.logSafe(tweetId));
 
         Integer identifier = parseIdentifier(tweetId);
         try {
             TweetDto subject = readSubject(identifier);
-            String generatedText = llmService.generateResponse(subject);
-            ResponseDto stored = store(identifier, generatedText);
+            ResponseDto generated = llmService.generateResponse(subject);
+            ResponseDto stored = store(identifier, generated.content(), false);
 
-            log.info("Stored response {} for tweet '{}' awaiting review.", stored.id(), tweetId);
+            log.info("Stored response {} for tweet '{}' awaiting review.",
+                    stored.id(), LogSafe.logSafe(tweetId));
             return stored;
         } catch (ResponseGenerationException e) {
             // The failure already carrying the wire literal of :L49 passes through unchanged.
             throw e;
         } catch (RuntimeException e) {
-            // Single sanitized error log for this path — DL-084 — see docs/DECISION_LOG.md
-            log.error("Response generation failed for tweet '{}': {}.",
-                    tweetId, e.getClass().getSimpleName());
+            // The failing layer owns the diagnostic record: service/LlmService reports the provider
+            // status and error code, and readSubject and store report an absent row. This record
+            // carries only the wrapping — see docs/DECISION_LOG.md DL-052
+            log.debug("Wrapping a generation failure for tweet '{}' as the wire literal of "
+                    + "backend/app/api/responses.py:L49: {}.",
+                    tweetId, LogSafe.type(e));
             throw new ResponseGenerationException(e);
         }
     }
+
+    // The single entry point of both background generation paths — DL-196 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Generates and stores a reply for the {@code tweets} row identified by {@code tweetId} unless that
+     * row already carries one, and reports what was stored.
+     *
+     * <p>This is the one operation {@code task.TweetStreamListener} and
+     * {@code task.ResponseGenerationScheduler} call, so exactly one reply per {@code tweets} row is
+     * generated no matter which of them reaches the row first. Two protections combine:
+     *
+     * <ul>
+     *   <li>an in-process claim on {@code tweetId}, held for the whole generation, which a second
+     *       concurrent caller in this instance cannot take; and</li>
+     *   <li>{@link ResponseRepository#existsByTweetId(Integer)}, tested inside the same transaction
+     *       that would insert the row, which covers the interval during which a language model is
+     *       answering.</li>
+     * </ul>
+     *
+     * <p>An empty result means nothing was stored: the row already carried a reply, or another caller
+     * held the claim. Both outcomes are recorded at {@code DEBUG}.
+     *
+     * <p>{@code POST /responses} does not come through here: it calls
+     * {@link #generateResponse(String)} directly, so its documented outcomes are unchanged — see
+     * docs/DECISION_LOG.md DL-196.
+     *
+     * @param tweetId the raw identifier of the {@code tweets} row to reply to; must be neither
+     *                {@code null} nor empty
+     * @return the stored row in its wire form, or empty when nothing was stored
+     * @throws BadRequestException         when {@code tweetId} is {@code null} or empty
+     * @throws ResponseGenerationException when generating or storing the row fails
+     */
+    public Optional<ResponseDto> generateResponseIfAbsent(String tweetId) {
+        if (tweetId == null || tweetId.isEmpty()) {
+            log.warn("Rejected a background generation request: it carried no tweet identifier.");
+            throw BadRequestException.tweetIdRequired();
+        }
+
+        if (!generationClaims.add(tweetId)) {
+            log.debug("Tweet '{}' is already being generated for; this pass stores nothing.",
+                    tweetId);
+            return Optional.empty();
+        }
+
+        try {
+            Integer identifier = parseIdentifier(tweetId);
+            TweetDto subject = readSubject(identifier);
+            ResponseDto generated = llmService.generateResponse(subject);
+            ResponseDto stored = store(identifier, generated.content(), true);
+
+            if (stored == null) {
+                log.debug("Tweet '{}' acquired a response while one was being generated; nothing was "
+                        + "stored.", tweetId);
+                return Optional.empty();
+            }
+
+            log.info("Stored response {} for tweet '{}' awaiting review.", stored.id(), tweetId);
+            return Optional.of(stored);
+        } catch (ResponseGenerationException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            // Single sanitized error log for this path — DL-084 — see docs/DECISION_LOG.md
+            log.error("Response generation failed for tweet '{}': {}.",
+                    LogSafe.logSafe(tweetId), LogSafe.type(e));
+            throw new ResponseGenerationException(e);
+        } finally {
+            generationClaims.remove(tweetId);
+        }
+    }
+
 
     /**
      * Reads the {@code tweets} row a generation request names and returns its wire form.
@@ -354,16 +450,25 @@ public class ResponseService {
      * stored row, replacing the {@code response.save()} call at
      * {@code backend/app/tasks/response_generation.py:L25-26}.
      *
+     * <p>When {@code onlyWhenAbsent} is set, the transaction first tests
+     * {@link ResponseRepository#existsByTweetId(Integer)} and stores nothing, returning {@code null},
+     * for a row that already carries a reply. The test and the insert share one transaction — see
+     * docs/DECISION_LOG.md DL-196.
+     *
      * @param identifier the parsed identifier of the parent row
      * @param generatedText the text to store; neither {@code null} nor blank
-     * @return the stored row in its wire form, never {@code null}
+     * @param onlyWhenAbsent {@code true} to store nothing when the parent row already carries a reply
+     * @return the stored row in its wire form, or {@code null} when {@code onlyWhenAbsent} is set and
+     *         the parent row already carries a reply
      * @throws ResponseGenerationException when {@code identifier} names no row at this point,
      *                                     carrying the wire literal of
      *                                     {@code backend/app/api/responses.py:L49}
      */
     // Replaces response.save() at backend/app/tasks/response_generation.py:L25-26 — DL-086 — see
     // docs/DECISION_LOG.md
-    private ResponseDto store(Integer identifier, String generatedText) {
+    // The onlyWhenAbsent branch is the transaction-scoped existence guard — DL-196 — see
+    // docs/DECISION_LOG.md
+    private ResponseDto store(Integer identifier, String generatedText, boolean onlyWhenAbsent) {
         return transactionTemplate.execute(status -> {
             Optional<Tweet> found = (identifier == null)
                     ? Optional.empty()
@@ -374,11 +479,17 @@ public class ResponseService {
                 throw new ResponseGenerationException();
             }
 
+            if (onlyWhenAbsent && responseRepository.existsByTweetId(identifier)) {
+                log.debug("Tweet {} already carries a response; the background pass stores nothing.",
+                        identifier);
+                return null;
+            }
+
             Response response = new Response();
             response.setContent(generatedText);
             // backend/app/db/models.py:L26 — the flag a human reviewer reads
             response.setIsApproved(false);
-            // Minted where the row is built — DL-077 — see docs/DECISION_LOG.md
+            // Minted where the row is built — DL-201 — see docs/DECISION_LOG.md
             response.setGeneratedAt(LocalDateTime.now());
             // backend/app/db/models.py:L27-28 — the association owns the tweet_id column
             response.setTweet(found.get());
@@ -388,7 +499,7 @@ public class ResponseService {
     }
 
     // Call site backend/app/api/responses.py:L60; 400 literal :L57; 404 literal :L65 — see
-    // docs/DECISION_LOG.md DL-048 and DL-076
+    // docs/DECISION_LOG.md DL-048
     /**
      * Applies a partial update to the {@code responses} row identified by {@code responseId} and
      * returns the stored row.
@@ -411,6 +522,11 @@ public class ResponseService {
      *
      * <p>{@code is_approved} is the flag a human reviewer reads.
      *
+     * <p>The row is read through {@link ResponseRepository#findByIdForUpdate(Integer)}, which holds a
+     * pessimistic write lock on it for the remainder of this method's transaction, so two requests
+     * writing the two different columns at the same moment cannot overwrite one another's column — see
+     * docs/DECISION_LOG.md DL-122.
+     *
      * @param responseId the raw path segment identifying the row; an unparseable and a {@code null}
      *                   value are both reported as absent
      * @param request    the columns to write; {@code null}, and a request carrying neither key, are
@@ -427,15 +543,17 @@ public class ResponseService {
         // backend/app/api/responses.py:L56-57 — the guard tests null and a body carrying no key
         if (request == null || request.carriesNoUpdatableField()) {
             log.warn("Rejected the update of response '{}': the request carried no updatable field.",
-                    responseId);
+                    LogSafe.logSafe(responseId));
             throw BadRequestException.updateDataRequired();
         }
 
-        Optional<Response> existing = findByIdentifier(responseId);
+        // Locked read ahead of the mutation — DL-122 — see docs/DECISION_LOG.md
+        Optional<Response> existing = findByIdentifierForUpdate(responseId);
 
         // backend/app/api/responses.py:L62-65 — a literal distinct from the one at :L31
         if (existing.isEmpty()) {
-            log.warn("Rejected the update of response '{}': the identifier names no row.", responseId);
+            log.warn("Rejected the update of response '{}': the identifier names no row.",
+                    LogSafe.logSafe(responseId));
             throw NotFoundException.responseNotFoundOrUpdateFailed();
         }
 
@@ -451,12 +569,14 @@ public class ResponseService {
         ResponseDto stored = responseMapper.toDto(responseRepository.save(response));
 
         log.info("Updated response '{}': content {}, approval {}.",
-                responseId,
+                LogSafe.logSafe(responseId),
                 request.contentPresent() ? "written" : "unchanged",
                 request.approvalPresent() ? "written" : "unchanged");
 
         return stored;
     }
+
+    // Net-new guard over the generation result — DL-081 — see docs/DECISION_LOG.md
 
     /**
      * Reads the {@code responses} row named by a raw path segment.
@@ -474,6 +594,28 @@ public class ResponseService {
         return (identifier == null) ? Optional.empty() : responseRepository.findById(identifier);
     }
 
+    // Locked read ahead of the mutation — DL-122 — see docs/DECISION_LOG.md
+    /**
+     * Reads the {@code responses} row named by a raw path segment, holding a write lock on it.
+     *
+     * <p>Behaves exactly as {@link #findByIdentifier(String)} in every respect except the lock: an
+     * empty {@link Optional} is returned for a {@code null} segment, for a segment carrying no number,
+     * and for a number naming no row. No lock is taken in any of those three cases: no row is read.
+     *
+     * <p>The lock lives for the duration of the caller's transaction, so this operation is called only
+     * from {@link #updateResponse(String, UpdateResponseRequest)}, which is
+     * {@link Transactional} — DL-122.
+     *
+     * @param responseId the raw path segment identifying the row; may be {@code null}
+     * @return the locked row, or an empty {@link Optional} when {@code responseId} names none
+     */
+    private Optional<Response> findByIdentifierForUpdate(String responseId) {
+        Integer identifier = parseIdentifier(responseId);
+        return (identifier == null)
+                ? Optional.empty()
+                : responseRepository.findByIdForUpdate(identifier);
+    }
+
     /**
      * Converts a raw path segment or request value into the identifier type the repositories take.
      *
@@ -485,7 +627,7 @@ public class ResponseService {
      * @param value the raw value to convert; may be {@code null}
      * @return the converted identifier, or {@code null} when {@code value} carries no number
      */
-    // DL-077 — see docs/DECISION_LOG.md
+    // DL-202 — see docs/DECISION_LOG.md
     private static Integer parseIdentifier(String value) {
         if (value == null) {
             return null;

@@ -32,7 +32,7 @@ package com.codeskeptic.scanner.exception;
  */
 // Ported from the inline HTTP 404 branches at backend/app/api/tweets.py:L32,L43,
 // backend/app/api/responses.py:L31,L65 and backend/app/api/settings.py:L22 (faithful port) — see
-// docs/DECISION_LOG.md DL-048
+// docs/DECISION_LOG.md DL-048, DL-212
 public final class NotFoundException extends RuntimeException {
 
     private static final long serialVersionUID = 1L;

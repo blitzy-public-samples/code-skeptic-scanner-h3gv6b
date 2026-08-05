@@ -1,5 +1,13 @@
 package com.codeskeptic.scanner.security;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import java.util.stream.Stream;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.slf4j.LoggerFactory;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -47,6 +55,10 @@ import io.jsonwebtoken.security.WeakKeyException;
  * {@link #SECRET}, the value every service under test is configured with; {@link #FOREIGN_KEY} is
  * derived from {@link #FOREIGN_SECRET}, which is never bound to {@code scanner.jwt.secret}.
  *
+ * <p>One test asserts the content of the log record a verification failure produces. It attaches a
+ * {@link ListAppender} to the {@link JwtService} logger for the duration of the call under test and
+ * detaches it again, so no other test observes it.
+ *
  * <p>Both secret literals declared here are test-only values. Construct-level provenance is
  * recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  */
@@ -62,9 +74,18 @@ class JwtServiceTest {
 
     /**
      * Value bound to {@code scanner.jwt.expiration-minutes}; the value
-     * {@code src/test/resources/application-test.yml} declares.
+     * {@code src/test/resources/application-test.yml} declares, and the largest the service accepts.
      */
     private static final long EXPIRATION_MINUTES = 60L;
+
+    /** Smallest value {@code scanner.jwt.expiration-minutes} may carry. */
+    private static final long MINIMUM_EXPIRATION_MINUTES = 1L;
+
+    /** Property key named by the message the lifetime guard raises. */
+    private static final String LIFETIME_PROPERTY = "scanner.jwt.expiration-minutes";
+
+    /** Property key named by the message the algorithm guard raises. */
+    private static final String ALGORITHM_PROPERTY = "scanner.jwt.algorithm";
 
     /** {@link #EXPIRATION_MINUTES} expressed as a {@link Duration}. */
     private static final Duration LIFETIME = Duration.ofMinutes(EXPIRATION_MINUTES);
@@ -76,8 +97,8 @@ class JwtServiceTest {
     private static final String SECRET = "jwt-service-test-signing-secret-0123456789abcdef";
 
     /**
-     * Exactly 32 bytes of text whose characters appear in no failure message this class asserts on,
-     * so a prefix of it can be used both as a rejected short secret and as the shortest accepted one.
+     * Exactly 32 bytes of text whose characters appear in no failure message this class asserts on. A
+     * prefix of it serves as a rejected short secret and the whole value as the shortest accepted one.
      */
     private static final String SHORT_SECRET_ALPHABET = "Zq7Wx2Vy9Uz4Tb6Sc8Rd0Qg1Pf3Oh5NM";
 
@@ -86,9 +107,9 @@ class JwtServiceTest {
             "jwt-service-test-foreign-signing-secret-fedcba9876543210";
 
     /**
-     * A 64-byte value bound to {@code scanner.jwt.secret} by the HS512 rejection test only; 512 bits
-     * is the floor jjwt 0.13.0 enforces for HS512, so a token can be signed with HS512 using the
-     * very key the service under test verifies with.
+     * A 64-byte value bound to {@code scanner.jwt.secret} by the HS512 rejection test only. It meets
+     * the 512-bit floor jjwt 0.13.0 enforces for HS512, and a token signed with HS512 under it carries
+     * the very key the service under test verifies with.
      */
     private static final String LONG_SECRET =
             "jwt-service-test-signing-secret-that-is-sixty-four-bytes-00000000";
@@ -259,7 +280,6 @@ class JwtServiceTest {
         assertThat(service.extractExpiration(BLANK_TOKEN)).isEmpty();
     }
 
-    // The parser is built once and reused — DL-141 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("holds one parser instance and reuses it across verifications")
     void holdsOneParserInstanceAndReusesItAcrossVerifications() throws ReflectiveOperationException {
@@ -286,7 +306,6 @@ class JwtServiceTest {
                 .isSameAs(beforeAnyVerification);
     }
 
-    // The parser is built once and reused — DL-141 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("verifies every token outcome identically however many tokens it has already seen")
     void verifiesEveryTokenOutcomeIdenticallyHoweverManyTokensItHasAlreadySeen() {
@@ -359,8 +378,7 @@ class JwtServiceTest {
     })
     @DisplayName("rejects a secret that is still an unresolved property placeholder")
     void rejectsASecretThatIsStillAnUnresolvedPropertyPlaceholder(String unresolved) {
-        // Configuration binding leaves the placeholder in place as literal text when the environment
-        // variable is absent — DL-185, DL-186 — see docs/DECISION_LOG.md
+        // DL-185, DL-186 — see docs/DECISION_LOG.md
         ScannerProperties properties =
                 propertiesWith(new ScannerProperties.Jwt(unresolved, HS256, EXPIRATION_MINUTES));
 
@@ -375,8 +393,7 @@ class JwtServiceTest {
     @ValueSource(strings = {"${SECRET_KEY}", "${SECRET_KEY:${JWT_SECRET}}", "${}"})
     @DisplayName("rejects an unresolved secret placeholder and names the key and its variable")
     void rejectsAnUnresolvedSecretPlaceholderAtConstruction(String unresolvedPlaceholder) {
-        // Configuration binding leaves the placeholder in place as literal text when the environment
-        // variable is absent — DL-186 — see docs/DECISION_LOG.md
+        // DL-186 — see docs/DECISION_LOG.md
         ScannerProperties properties = propertiesWith(
                 new ScannerProperties.Jwt(unresolvedPlaceholder, HS256, EXPIRATION_MINUTES));
 
@@ -413,9 +430,8 @@ class JwtServiceTest {
     }
 
     @Test
-    @DisplayName("rejects a secret whose 31 characters encode to 32 bytes only after multi-byte expansion")
+    @DisplayName("accepts a secret of 31 characters whose UTF-8 encoding reaches 32 bytes")
     void acceptsAMultiByteSecretMeasuredInBytesRatherThanCharacters() {
-        // The floor is measured over the UTF-8 encoding: 31 characters, one of them two bytes wide.
         String multiByteSecret = SHORT_SECRET_ALPHABET.substring(0, 30) + "\u00e9";
 
         assertThat(multiByteSecret).hasSize(31);
@@ -437,8 +453,8 @@ class JwtServiceTest {
     }
 
     @Test
-    @DisplayName("reports an unresolved placeholder rather than letting the key length decide")
-    void reportsAnUnresolvedPlaceholderRatherThanLettingTheKeyLengthDecide() {
+    @DisplayName("reports an unresolved placeholder as an unconfigured secret and not as a weak key")
+    void reportsAnUnresolvedPlaceholderAsAnUnconfiguredSecret() {
         ScannerProperties properties = propertiesWith(
                 new ScannerProperties.Jwt("${SECRET_KEY}", HS256, EXPIRATION_MINUTES));
 
@@ -470,7 +486,139 @@ class JwtServiceTest {
 
         assertThatThrownBy(() -> new JwtService(properties))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("scanner.jwt.algorithm");
+                .hasMessageContaining(ALGORITHM_PROPERTY)
+                .hasMessageContaining(HS256);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"HS256", "hs256", "Hs256", "  HS256  "})
+    @DisplayName("accepts HS256 whatever its case and surrounding whitespace")
+    void acceptsHs256WhateverItsCaseAndSurroundingWhitespace(String configuredAlgorithm) {
+        assertThatCode(() -> serviceWith(SECRET, configuredAlgorithm, EXPIRATION_MINUTES))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("accepts an absent or blank algorithm at construction")
+    void acceptsAnAbsentOrBlankAlgorithmAtConstruction() {
+        assertThatCode(() -> serviceWith(SECRET, null, EXPIRATION_MINUTES))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> serviceWith(SECRET, "   ", EXPIRATION_MINUTES))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("signs with HS256 whatever the configured algorithm permits")
+    void signsWithHs256WhateverTheConfiguredAlgorithmPermits() {
+        JwtService service = serviceWith(SECRET, null, EXPIRATION_MINUTES);
+
+        String header = service.generateToken(USERNAME).split("\\.")[0];
+
+        assertThat(new String(Base64.getUrlDecoder().decode(header), StandardCharsets.UTF_8))
+                .contains("\"alg\":\"" + HS256 + "\"");
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {1L, 2L, 15L, 30L, 59L, 60L})
+    @DisplayName("accepts a lifetime from one minute to sixty minutes inclusive")
+    void acceptsALifetimeFromOneMinuteToSixtyMinutesInclusive(long configuredMinutes) {
+        assertThatCode(() -> serviceWith(SECRET, HS256, configuredMinutes))
+                .doesNotThrowAnyException();
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {0L, -1L, -60L, Long.MIN_VALUE})
+    @DisplayName("rejects a lifetime that is not positive at construction")
+    void rejectsALifetimeThatIsNotPositiveAtConstruction(long configuredMinutes) {
+        ScannerProperties properties =
+                propertiesWith(new ScannerProperties.Jwt(SECRET, HS256, configuredMinutes));
+
+        assertThatThrownBy(() -> new JwtService(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining(LIFETIME_PROPERTY);
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {61L, 120L, 1440L, Long.MAX_VALUE})
+    @DisplayName("rejects a lifetime above the documented sixty-minute maximum at construction")
+    void rejectsALifetimeAboveTheDocumentedSixtyMinuteMaximumAtConstruction(long configuredMinutes) {
+        ScannerProperties properties =
+                propertiesWith(new ScannerProperties.Jwt(SECRET, HS256, configuredMinutes));
+
+        assertThatThrownBy(() -> new JwtService(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining(LIFETIME_PROPERTY);
+    }
+
+    @Test
+    @DisplayName("reports a lifetime in seconds for every accepted lifetime without overflowing")
+    void reportsALifetimeInSecondsForEveryAcceptedLifetimeWithoutOverflowing() {
+        for (long minutes = MINIMUM_EXPIRATION_MINUTES; minutes <= EXPIRATION_MINUTES; minutes++) {
+            JwtService service = serviceWith(SECRET, HS256, minutes);
+
+            assertThat(service.getExpirationSeconds())
+                    .isPositive()
+                    .isEqualTo(minutes * 60L);
+        }
+    }
+
+    @Test
+    @DisplayName("mints a token no more than an hour after its issued-at claim for every accepted "
+            + "lifetime")
+    void mintsATokenNoMoreThanAnHourAfterItsIssuedAtClaimForEveryAcceptedLifetime() {
+        for (long minutes = MINIMUM_EXPIRATION_MINUTES; minutes <= EXPIRATION_MINUTES; minutes++) {
+            Claims claims = claimsOf(serviceWith(SECRET, HS256, minutes).generateToken(USERNAME));
+
+            Duration lifetime = Duration.between(
+                    claims.getIssuedAt().toInstant(), claims.getExpiration().toInstant());
+
+            assertThat(lifetime).isEqualTo(Duration.ofMinutes(minutes));
+            assertThat(lifetime).isLessThanOrEqualTo(LIFETIME);
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("unverifiableTokens")
+    @DisplayName("logs a verification failure as a category only, never the parser message")
+    void logsAVerificationFailureAsACategoryOnlyNeverTheParserMessage(String unverifiableToken) {
+        JwtService service = serviceWith(SECRET, HS256, EXPIRATION_MINUTES);
+        Logger serviceLogger = (Logger) LoggerFactory.getLogger(JwtService.class);
+        Level restoreLevel = serviceLogger.getLevel();
+        ListAppender<ILoggingEvent> records = new ListAppender<>();
+        records.start();
+        serviceLogger.addAppender(records);
+        serviceLogger.setLevel(Level.DEBUG);
+        try {
+            assertThat(service.extractUsername(unverifiableToken)).isEmpty();
+        } finally {
+            serviceLogger.setLevel(restoreLevel);
+            serviceLogger.detachAppender(records);
+            records.stop();
+        }
+
+        assertThat(records.list).hasSize(1);
+        ILoggingEvent record = records.list.get(0);
+        assertThat(record.getLevel()).isEqualTo(Level.DEBUG);
+        assertThat(record.getThrowableProxy()).isNull();
+        assertThat(record.getArgumentArray()).isNullOrEmpty();
+        assertThat(record.getFormattedMessage())
+                .isEqualTo("A presented JWT did not verify")
+                .doesNotContain(unverifiableToken);
+    }
+
+    /**
+     * Tokens {@link JwtService#extractUsername(String)} cannot verify, each reaching the parser and
+     * therefore producing one log record.
+     *
+     * @return one unverifiable compact JWS or JWS-shaped value per invocation
+     */
+    private static Stream<String> unverifiableTokens() {
+        Instant now = Instant.now();
+        return Stream.of(
+                MALFORMED_TOKEN,
+                DOTTED_MALFORMED_TOKEN,
+                tokenSignedWith(FOREIGN_KEY, now, now.plus(LIFETIME)),
+                tokenSignedWith(SIGNING_KEY, now.minus(LIFETIME), now.minus(EXPIRED_BY)));
     }
 
     @Test

@@ -20,6 +20,7 @@ import org.springframework.web.bind.annotation.RestController;
 import com.codeskeptic.scanner.dto.LoginRequest;
 import com.codeskeptic.scanner.dto.TokenResponse;
 import com.codeskeptic.scanner.security.JwtService;
+import com.codeskeptic.scanner.util.LogSafe;
 
 // Net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-019, DL-117, DL-118
 /**
@@ -44,10 +45,10 @@ import com.codeskeptic.scanner.security.JwtService;
  * </tr>
  * </table>
  *
- * <p>This class declares that one route and no second route: no refresh route, no logout route, no
- * registration route, no principal-describing route and no operation over the credential store. The
- * path is unprefixed, as the paths of the four retired blueprints were: it carries no {@code /api}
- * segment and no version segment, and no type-level request mapping contributes a prefix.
+ * <p>This class declares that one route and no other, and no operation over the credential store.
+ * The path is unprefixed, as the paths of the four retired blueprints were: it carries no
+ * {@code /api} segment and no version segment, and no type-level request mapping contributes a
+ * prefix.
  *
  * <p>The request body is {@code {"username": "...", "password": "..."}}, bound to
  * {@link LoginRequest}. That record declares no Bean Validation constraint and this class declares no
@@ -68,11 +69,9 @@ import com.codeskeptic.scanner.security.JwtService;
  * no authority claim — DL-018. {@code src/main/resources/application.yml} declares
  * {@code expiration-minutes: 60}; the value on the wire is {@code 3600}.
  *
- * <p>This class carries no method-security annotation. Authorization for this route is declared in
- * the security filter chain. {@code security.SecurityConfig} permits
- * {@code POST /auth/token} with no authentication — the only such route in the service — and requires
- * an authenticated principal on every other request, which covers all eleven pre-existing routes —
- * DL-019, DL-021.
+ * <p>Authorization for this route is declared in the security filter chain:
+ * {@code security.SecurityConfig} permits {@code POST /auth/token} with no authentication and requires
+ * an authenticated principal on every other request — DL-019, DL-021.
  *
  * <p>The credential check is performed by the injected {@link AuthenticationManager}, which
  * {@code security.SecurityConfig} publishes from the application's
@@ -83,16 +82,14 @@ import com.codeskeptic.scanner.security.JwtService;
  * {@code PasswordEncoder}. It reads no entity, holds no repository and adds no table: the schema this
  * service creates stays the four tables of {@code backend/app/db/models.py}.
  *
- * <p>Nothing here publishes to X: this class declares no ingestion and no response-publishing
- * operation. No submitted password, no submitted principal name and no minted token is written to the
- * log at any level — DL-052.
+ * <p>No submitted password, no submitted principal name and no minted token is written to the log at
+ * any level — DL-052.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-017, DL-018,
  * DL-019, DL-020, DL-021, DL-052, DL-079, DL-117 and DL-118; construct-level provenance is
  * recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  *
- * <p>This class is thread-safe. It is a singleton bean, both collaborators are held in final fields
- * and are themselves singletons, and this class holds no other state.
+ * <p>This class is a singleton bean, is thread-safe and holds no mutable state.
  */
 @RestController
 public class AuthController {
@@ -149,15 +146,13 @@ public class AuthController {
      * the authentication backend itself fails; this method selects no fourth status.
      *
      * <p>The {@code sub} claim of the minted token is {@link Authentication#getName()} of the
-     * authentication the {@link AuthenticationManager} returned — the resolved principal name, which
-     * is present on every authentication that manager completes — and not the submitted string —
-     * DL-079.
+     * authentication the {@link AuthenticationManager} returned, not the submitted string — DL-079.
      *
      * <p>A {@code null} request, a request whose {@code username} member is absent and a request
      * whose {@code password} member is absent are each carried to the {@link AuthenticationManager}
      * as a {@code null} principal or a {@code null} credential, and the manager rejects each of them.
-     * A member longer than {@value #MAXIMUM_CREDENTIAL_LENGTH} characters is rejected here, before
-     * the manager and therefore before bcrypt, and reports the same 401 — DL-118.
+     * A member longer than {@value #MAXIMUM_CREDENTIAL_LENGTH} characters is rejected here, ahead of
+     * both the manager and bcrypt, and reports the same 401 — DL-118.
      *
      * <p>Only a rejected credential yields 401: {@link BadCredentialsException},
      * {@link UsernameNotFoundException} and {@link AccountStatusException} and their subtypes. Every
@@ -205,16 +200,19 @@ public class AuthController {
             // Only the exception's type is logged: never the submitted principal name, never the
             // submitted password, never the provider's message.
             log.warn("A credential submitted to POST /auth/token did not authenticate: {}",
-                    rejected.getClass().getSimpleName());
+                    LogSafe.type(rejected));
             return unauthorized();
         }
 
-        // DL-018: the claim set is sub, iat and exp. DL-079: the subject is the resolved principal
-        // name. DL-017: the lifetime is converted once, by JwtService.getExpirationSeconds().
+        // DL-018: the claim set is sub, iat and exp, and the subject is the resolved principal name.
+        // DL-017: the lifetime is converted once, by JwtService.getExpirationSeconds().
         String token = jwtService.generateToken(authentication.getName());
         TokenResponse body = new TokenResponse(token, TOKEN_TYPE, jwtService.getExpirationSeconds());
 
-        log.info("Issued a bearer token valid for {} second(s)", body.expiresIn());
+        // The name logged is the principal security/SecurityConfig resolved, which is the value of
+        // scanner.auth.username rather than the submitted text — see docs/DECISION_LOG.md DL-197
+        log.info("Issued a bearer token to principal '{}', valid for {} second(s)",
+                authentication.getName(), body.expiresIn());
 
         return ResponseEntity.ok(body);
     }

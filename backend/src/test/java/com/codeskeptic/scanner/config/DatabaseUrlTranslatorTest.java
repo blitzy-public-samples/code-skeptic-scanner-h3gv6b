@@ -1,7 +1,6 @@
 package com.codeskeptic.scanner.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.codeskeptic.scanner.config.DatabaseUrlTranslator.TranslatedDatabaseUrl;
@@ -11,13 +10,14 @@ import java.lang.reflect.Modifier;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
- * Exercises the {@link DatabaseUrlTranslator#translate(String)} contract: the {@code jdbc:}
- * pass-through and the credential material it rejects, the supported scheme set, driver-suffix
- * stripping, credential extraction from the user-info component and from the query string,
- * percent-escape decoding, query-string preservation, host and port validation, and the rejected
- * values.
+ * Exercises the {@link DatabaseUrlTranslator#translate(String)} contract: the unconditional
+ * {@code jdbc:} pass-through, the supported scheme set, driver-suffix stripping, credential
+ * extraction from the user-info component and from the query string, percent-escape decoding,
+ * query-string preservation, host and port validation, and the rejected values.
  *
  * <p>Net-new (no Python counterpart) - see docs/DECISION_LOG.md DL-027.
  */
@@ -82,37 +82,41 @@ class DatabaseUrlTranslatorTest {
         assertThat(translated.password()).isNull();
     }
 
-    @Test
-    @DisplayName("maps the mariadb scheme onto the mysql jdbc vendor")
-    void mapsTheMariadbSchemeOntoMysql() {
-        TranslatedDatabaseUrl translated =
-                DatabaseUrlTranslator.translate("mariadb://127.0.0.1:3306/scanner");
-
-        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:mysql://127.0.0.1:3306/scanner");
-        assertThat(translated.username()).isNull();
-        assertThat(translated.password()).isNull();
-    }
-
-    @Test
-    @DisplayName("keeps the mariadb scheme inside the advertised supported set")
-    void keepsTheMariadbSchemeInsideTheAdvertisedSupportedSet() {
-        // The scheme is accepted and translated; a MariaDB server remains unsupported — DL-187 —
-        // see docs/DECISION_LOG.md
-        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("oracle://h/db"))
+    // No declared driver is published for a MariaDB server, so the scheme is rejected before a
+    // connection pool exists rather than translated — DL-187 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {0}")
+    @ValueSource(strings = {
+        "mariadb://127.0.0.1:3306/scanner",
+        "mariadb://scanner:scanner@127.0.0.1:3306/scanner",
+        "mariadb+mariadbconnector://127.0.0.1:3306/scanner",
+        "MariaDB://127.0.0.1:3306/scanner",
+        "mariadb://host/db?useSSL=true",
+    })
+    @DisplayName("rejects the mariadb scheme instead of translating it onto the mysql vendor")
+    void rejectsTheMariadbScheme(String databaseUrl) {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate(databaseUrl))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("mariadb");
-
-        assertThatCode(() -> DatabaseUrlTranslator.translate("mariadb://127.0.0.1:3306/scanner"))
-                .doesNotThrowAnyException();
     }
 
     @Test
-    @DisplayName("strips a driver suffix from the mariadb scheme and still maps onto the mysql vendor")
-    void stripsADriverSuffixFromTheMariadbScheme() {
-        TranslatedDatabaseUrl translated =
-                DatabaseUrlTranslator.translate("mariadb+mariadbconnector://127.0.0.1:3306/scanner");
+    @DisplayName("names the supported schemes and the remedy when it rejects mariadb")
+    void namesTheSupportedSchemesAndTheRemedyWhenItRejectsMariadb() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("mariadb://127.0.0.1:3306/scanner"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("postgresql")
+                .hasMessageContaining("mysql")
+                .hasMessageContaining("h2")
+                .hasMessageContaining("DL-187");
+    }
 
-        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:mysql://127.0.0.1:3306/scanner");
+    @Test
+    @DisplayName("drops the mariadb scheme from the advertised supported set")
+    void dropsTheMariadbSchemeFromTheAdvertisedSupportedSet() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("oracle://h/db"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("supported schemes are")
+                .hasMessageNotContaining("mariadb");
     }
 
     @Test
@@ -120,9 +124,8 @@ class DatabaseUrlTranslatorTest {
     void mapsTheH2SchemeOntoH2() {
         TranslatedDatabaseUrl translated = DatabaseUrlTranslator.translate("h2://localhost/scanner");
 
-        // The vendor prefix for the h2 scheme is `jdbc:h2:tcp://` — DL-071 — see
-        // docs/DECISION_LOG.md
-        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:h2:tcp://localhost/scanner");
+        // The vendor prefix for the h2 scheme is `jdbc:h2://` — DL-071 — see docs/DECISION_LOG.md
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:h2://localhost/scanner");
         assertThat(translated.username()).isNull();
         assertThat(translated.password()).isNull();
     }
@@ -160,8 +163,9 @@ class DatabaseUrlTranslatorTest {
     @Test
     @DisplayName("rejects an unresolved DATABASE_URL placeholder as an unset value")
     void rejectsAnUnresolvedPlaceholder() {
+        // DL-186 — see docs/DECISION_LOG.md
         // Configuration binding leaves the placeholder in place as literal text when the environment
-        // variable is absent — DL-186 — see docs/DECISION_LOG.md
+        // variable is absent — DL-182 — see docs/DECISION_LOG.md
         assertThatThrownBy(() -> DatabaseUrlTranslator.translate("${DATABASE_URL}"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("DATABASE_URL must be set: no database URL was supplied.");
@@ -186,42 +190,65 @@ class DatabaseUrlTranslatorTest {
     }
 
     // -----------------------------------------------------------------------
-    // The jdbc: pass-through rejects credential material
+    // The jdbc: pass-through is unconditional — DL-072 — see docs/DECISION_LOG.md
     // -----------------------------------------------------------------------
 
     @Test
-    @DisplayName("rejects a jdbc url whose authority carries user-info")
-    void rejectsAJdbcUrlCarryingUserInfo() {
-        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("jdbc:postgresql://u:p@host/db"))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("must not appear in the JDBC URL")
-                .hasMessageNotContaining("u:p");
+    @DisplayName("passes through a jdbc url whose authority carries user-info")
+    void passesThroughAJdbcUrlCarryingUserInfo() {
+        TranslatedDatabaseUrl translated =
+                DatabaseUrlTranslator.translate("jdbc:postgresql://u:p@host/db");
+
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:postgresql://u:p@host/db");
+        assertThat(translated.username()).isNull();
+        assertThat(translated.password()).isNull();
     }
 
     @Test
-    @DisplayName("rejects a jdbc url carrying a user property")
-    void rejectsAJdbcUrlCarryingAUserProperty() {
-        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("jdbc:mysql://host/db?user=root"))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("must not appear in the JDBC URL")
-                .hasMessageNotContaining("root");
+    @DisplayName("passes through a jdbc url carrying a user property")
+    void passesThroughAJdbcUrlCarryingAUserProperty() {
+        TranslatedDatabaseUrl translated =
+                DatabaseUrlTranslator.translate("jdbc:mysql://host/db?user=root");
+
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:mysql://host/db?user=root");
+        assertThat(translated.username()).isNull();
+        assertThat(translated.password()).isNull();
     }
 
     @Test
-    @DisplayName("rejects a jdbc url carrying a password property")
-    void rejectsAJdbcUrlCarryingAPasswordProperty() {
-        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("jdbc:postgresql://host/db?password=s3cret"))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("must not appear in the JDBC URL")
-                .hasMessageNotContaining("s3cret");
+    @DisplayName("passes through a jdbc url carrying a password property")
+    void passesThroughAJdbcUrlCarryingAPasswordProperty() {
+        TranslatedDatabaseUrl translated =
+                DatabaseUrlTranslator.translate("jdbc:postgresql://host/db?password=s3cret");
+
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:postgresql://host/db?password=s3cret");
+        assertThat(translated.username()).isNull();
+        assertThat(translated.password()).isNull();
     }
 
     @Test
-    @DisplayName("rejects a jdbc url whose credential property is separated by a semicolon")
-    void rejectsAJdbcUrlCarryingASemicolonSeparatedCredentialProperty() {
-        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("jdbc:mysql://host/db;user=root"))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("must not appear in the JDBC URL");
+    @DisplayName("passes through a jdbc url whose credential property is separated by a semicolon")
+    void passesThroughAJdbcUrlCarryingASemicolonSeparatedCredentialProperty() {
+        TranslatedDatabaseUrl translated =
+                DatabaseUrlTranslator.translate("jdbc:mysql://host/db;user=root");
+
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:mysql://host/db;user=root");
+        assertThat(translated.username()).isNull();
+        assertThat(translated.password()).isNull();
+    }
+
+    // The redaction contract of TranslatedDatabaseUrl#toString() — DL-072 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("never renders a passed-through jdbc url in its own string form")
+    void neverRendersAPassedThroughJdbcUrlInItsOwnStringForm() {
+        TranslatedDatabaseUrl translated =
+                DatabaseUrlTranslator.translate("jdbc:postgresql://u:p@host/db?password=s3cret");
+
+        assertThat(translated.toString())
+                .doesNotContain("u:p")
+                .doesNotContain("s3cret")
+                .doesNotContain("host");
     }
 
     // -----------------------------------------------------------------------

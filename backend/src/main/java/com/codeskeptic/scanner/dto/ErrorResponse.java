@@ -2,7 +2,8 @@ package com.codeskeptic.scanner.dto;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 
-// Ported from backend/app/main.py:L31-37 (faithful port of the 404/500 error envelopes) — see docs/DECISION_LOG.md
+// Ported from backend/app/main.py:L31-37 (faithful port of the 404/500 error envelopes) — DL-210 —
+// see docs/DECISION_LOG.md
 /**
  * Error body of every failing endpoint in the service.
  *

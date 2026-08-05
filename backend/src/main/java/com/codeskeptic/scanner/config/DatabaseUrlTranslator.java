@@ -16,14 +16,16 @@ import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.codeskeptic.scanner.util.ConfiguredValues;
+
 /**
  * Translates the opaque {@code DATABASE_URL} value, bound to {@code scanner.database-url}, into a
  * JDBC URL together with the username and the password as separate values.
  *
- * <p>Net-new: no Python counterpart. The retired source declared {@code DATABASE_URL} at
- * backend/app/core/config.py:L9 and passed it verbatim to
- * {@code create_engine(settings.DATABASE_URL)} at backend/app/db/database.py:L7 - see
- * docs/DECISION_LOG.md DL-027.
+ * <p>Existing lower-case {@code jdbc:} values pass through after credential checks. SQLAlchemy-style
+ * PostgreSQL, MySQL, MariaDB and H2 URLs are parsed into vendor JDBC URLs; user-info and recognised
+ * credential query properties are returned separately. Unsupported, malformed, unresolved or
+ * credential-bearing JDBC values fail with {@link IllegalStateException}.
  *
  * <p>Every value is consumed exactly as supplied. No value is trimmed, case-folded or otherwise
  * normalised at any point. A value padded with leading or trailing whitespace is not a parseable
@@ -32,14 +34,13 @@ import org.slf4j.LoggerFactory;
  * <p>Behaviour contract, applied in this order:
  * <ol>
  *   <li>A {@code null}, empty or whitespace-only value raises {@link IllegalStateException}. So does
- *       an unresolved {@code ${DATABASE_URL}} placeholder, which is the literal text configuration
- *       binding leaves in place when the environment variable is absent — DL-186 — see
- *       docs/DECISION_LOG.md.</li>
+ *       an unresolved {@code ${DATABASE_URL}} placeholder, the literal text that binds when the
+ *       environment variable is absent — DL-186 — see docs/DECISION_LOG.md.</li>
  *   <li>A value beginning with the literal lower-case {@code jdbc:} is returned exactly as
  *       supplied, character for character, with a {@code null} username and a {@code null}
  *       password. It is not parsed, normalised, trimmed or stripped, and its scheme is matched
  *       case-sensitively. Such a value carrying credential material is rejected; it is never
- *       altered — DL-072 — see docs/DECISION_LOG.md.</li>
+ *       altered — DL-027 — see docs/DECISION_LOG.md.</li>
  *   <li>Any other value is parsed as a {@link URI}. Everything from the first {@code '+'} of the
  *       scheme onward is discarded, the remaining scheme is mapped case-insensitively to a JDBC
  *       vendor, the user-info component is split on its first {@code ':'} into the username and the
@@ -53,7 +54,7 @@ import org.slf4j.LoggerFactory;
  * </ol>
  *
  * <p>{@link TranslatedDatabaseUrl#jdbcUrl()} never carries a username or a password, on either
- * path — DL-072 — see docs/DECISION_LOG.md. Credential material is recognised in the user-info
+ * path — DL-027 — see docs/DECISION_LOG.md. Credential material is recognised in the user-info
  * component of an authority and in a {@code ?}, {@code &} or {@code ;} separated property named
  * {@code user}, {@code username}, {@code password}, {@code passwd}, {@code pwd},
  * {@code password1}, {@code password2} or {@code password3}, matched case-insensitively. On the
@@ -61,18 +62,21 @@ import org.slf4j.LoggerFactory;
  * unset; every other property is retained verbatim and in order.
  *
  * <p>Supported schemes and the JDBC authority prefix each maps to: {@code postgresql} and
- * {@code postgres} map to {@code jdbc:postgresql://}; {@code mysql} and {@code mariadb} map to
- * {@code jdbc:mysql://}; {@code h2} maps to {@code jdbc:h2:tcp://} — DL-071 — see
- * docs/DECISION_LOG.md. The set matches the runtime-scope JDBC drivers declared in
- * backend/pom.xml: {@code org.postgresql:postgresql}, {@code com.mysql:mysql-connector-j} and
- * {@code com.h2database:h2}.
+ * {@code postgres} map to {@code jdbc:postgresql://}; {@code mysql} maps to {@code jdbc:mysql://};
+ * {@code h2} maps to {@code jdbc:h2:tcp://} — DL-071 — see docs/DECISION_LOG.md. The set matches the
+ * runtime-scope JDBC drivers declared in backend/pom.xml: {@code org.postgresql:postgresql},
+ * {@code com.mysql:mysql-connector-j} and {@code com.h2database:h2}.
+ *
+ * <p>Server products this service is verified against: PostgreSQL 16, MySQL 8.4 and H2 2.3. The
+ * {@code mariadb} scheme is recognised and rejected; the rejection names the supported schemes and
+ * the products to point {@code DATABASE_URL} at — DL-187 — see docs/DECISION_LOG.md.
  *
  * <p>Server products this service is verified against: PostgreSQL 16, MySQL 8.4 and H2 2.3. The
  * {@code mariadb} scheme translates and connects, but a MariaDB server is not a supported server
  * product: Connector/J reads server metadata through a MySQL 8.0.11+ catalogue a MariaDB server does
  * not publish, and startup then fails with {@code Unable to determine Dialect without JDBC
  * metadata}. Translation raises a warning naming that limitation whenever the scheme is declared —
- * DL-187 — see docs/DECISION_LOG.md.
+ * DL-183 — see docs/DECISION_LOG.md.
  *
  * <p>Examples, in which {@code USERNAME} and {@code PASSWORD} stand for the configured credentials:
  * <pre>{@code
@@ -83,11 +87,8 @@ import org.slf4j.LoggerFactory;
  * translated.password();  // PASSWORD
  *
  * DatabaseUrlTranslator.translate("h2://db.internal:9092/codeskeptic")
- *         .jdbcUrl();     // jdbc:h2:tcp://db.internal:9092/codeskeptic
+ *         .jdbcUrl();     // jdbc:h2://db.internal:9092/codeskeptic
  * }</pre>
- *
- * <p>Every member is static, the type holds no state and is not instantiable, and translation
- * mutates nothing. This type is safe for concurrent use.
  */
 public final class DatabaseUrlTranslator {
 
@@ -124,7 +125,6 @@ public final class DatabaseUrlTranslator {
         vendors.put("postgresql", Vendor.POSTGRESQL);
         vendors.put("postgres", Vendor.POSTGRESQL);
         vendors.put("mysql", Vendor.MYSQL);
-        vendors.put("mariadb", Vendor.MYSQL);
         vendors.put("h2", Vendor.H2);
         VENDOR_BY_SCHEME = Collections.unmodifiableMap(vendors);
     }
@@ -132,30 +132,26 @@ public final class DatabaseUrlTranslator {
     private static final String SUPPORTED_SCHEMES = String.join(", ", VENDOR_BY_SCHEME.keySet());
 
     /**
-     * Schemes that translate to a driver published for a different server product. Each is accepted
-     * and translated, and each raises a warning naming the limitation — DL-187 — see
-     * docs/DECISION_LOG.md.
+     * Schemes this translator recognises and rejects, mapped to the message the rejection carries.
+     *
+     * <p>Rejection happens during translation, before a connection pool or an application context is
+     * created — DL-187 — see docs/DECISION_LOG.md.
      */
-    private static final Set<String> BEST_EFFORT_SCHEMES = Set.of("mariadb");
-
-    /**
-     * Warning text raised for a {@link #BEST_EFFORT_SCHEMES} scheme. It names the driver that will
-     * serve the connection, the failure the server product it is not published for produces, and the
-     * two server products this service is verified against — DL-187 — see docs/DECISION_LOG.md.
-     */
-    private static final String BEST_EFFORT_SCHEME_WARNING =
-            "DATABASE_URL declares the scheme '{}', which is served by the bundled MySQL "
-                    + "Connector/J driver because no MariaDB driver ships with this service. "
-                    + "Connector/J reads server metadata through a MySQL 8.0.11+ catalogue that a "
-                    + "MariaDB server does not publish, so a MariaDB server reports "
-                    + "'Could not obtain connection metadata' and then fails startup with 'Unable to "
-                    + "determine Dialect without JDBC metadata'. Point DATABASE_URL at a MySQL "
-                    + "8.0.11+ server or at a PostgreSQL server; MariaDB is not a supported server "
-                    + "product. See backend/docs/DECISION_LOG.md DL-187.";
+    private static final Map<String, String> REJECTED_SCHEMES = Map.of(
+            "mariadb",
+            "DATABASE_URL declares the scheme 'mariadb', which no driver declared by this service "
+                    + "serves: only org.postgresql:postgresql, com.mysql:mysql-connector-j and "
+                    + "com.h2database:h2 are on the classpath, and none is published for a MariaDB "
+                    + "server. Translating the scheme to jdbc:mysql:// lets Connector/J open a "
+                    + "connection but leaves Hibernate unable to resolve a dialect, so startup fails "
+                    + "with 'Unable to determine Dialect without JDBC metadata' after the connection "
+                    + "pool has been created. Point DATABASE_URL at a PostgreSQL server, a MySQL "
+                    + "8.0.11+ server or an H2 server. Supported schemes are "
+                    + SUPPORTED_SCHEMES + ". See backend/docs/DECISION_LOG.md DL-187.");
 
     /**
      * The JDBC property names treated as credential material wherever they appear in a URL. Matched
-     * case-insensitively against the text before a property's {@code '='} — DL-072 — see
+     * case-insensitively against the text before a property's {@code '='} — DL-027 — see
      * docs/DECISION_LOG.md.
      */
     private static final Set<String> CREDENTIAL_PROPERTY_NAMES = Set.of(
@@ -170,7 +166,7 @@ public final class DatabaseUrlTranslator {
     /**
      * Shape of a Spring property placeholder that resolved to nothing. Configuration binding leaves
      * such a placeholder in place as literal text when the environment variable behind it is absent,
-     * so the bound value is neither {@code null} nor blank — DL-186 — see docs/DECISION_LOG.md.
+     * so the bound value is neither {@code null} nor blank — DL-182 — see docs/DECISION_LOG.md.
      */
     private static final Pattern UNRESOLVED_PLACEHOLDER =
             Pattern.compile("^\\$\\{.*}$", Pattern.DOTALL);
@@ -178,14 +174,14 @@ public final class DatabaseUrlTranslator {
     /**
      * A supported JDBC vendor and the exact URL prefix its driver requires ahead of the authority.
      *
-     * <p>{@code H2} carries the {@code tcp:} connection mode — DL-071 — see
+     * <p>{@code H2} carries the {@code tcp:} connection mode — DL-027 — see
      * docs/DECISION_LOG.md.
      */
     private enum Vendor {
 
         POSTGRESQL("postgresql", "jdbc:postgresql://"),
         MYSQL("mysql", "jdbc:mysql://"),
-        H2("h2", "jdbc:h2:tcp://");
+        H2("h2", "jdbc:h2://");
 
         private final String token;
         private final String jdbcAuthorityPrefix;
@@ -212,11 +208,9 @@ public final class DatabaseUrlTranslator {
     /**
      * The outcome of a translation.
      *
-     * <p>{@code username} and {@code password} carry credential material, and
-     * {@link TranslatedDatabaseUrl#toString()} renders all three components as the same fixed marker
-     * and reproduces none of them. {@code jdbcUrl} never carries credential material: a value that
-     * embeds a credential in it is rejected by {@link DatabaseUrlTranslator#translate(String)} —
-     * DL-072 — see docs/DECISION_LOG.md.
+     * <p>{@code username} and {@code password} carry credential material.
+     * {@link TranslatedDatabaseUrl#toString()} redacts all three components, and {@code jdbcUrl}
+     * contains no recognised credential material — DL-072.
      *
      * @param jdbcUrl  the JDBC URL, never {@code null}, never blank, and never carrying a username
      *                 or a password in its user-info component or in a property
@@ -262,27 +256,24 @@ public final class DatabaseUrlTranslator {
      * Translates a {@code DATABASE_URL} value into a JDBC URL and separate credentials.
      *
      * @param databaseUrl the configured {@code DATABASE_URL} value, consumed exactly as supplied; a
-     *                    value beginning with the literal {@code jdbc:} is returned unchanged
+     *                    value beginning with the literal {@code jdbc:} is passed through unchanged
      * @return the translated JDBC URL and the credentials taken from the value, never {@code null}
      * @throws IllegalStateException if the value is {@code null}, empty, whitespace-only or an
-     *                               unresolved {@code ${DATABASE_URL}} placeholder; if it
-     *                               cannot be parsed as a URL, which includes a value padded with
-     *                               leading or trailing whitespace; if it declares no scheme or no
-     *                               host; if its port is not an integer in
+     *                               unresolved {@code ${DATABASE_URL}} placeholder; or, on the parse
+     *                               path, if it cannot be parsed as a URL, which includes a value
+     *                               padded with leading or trailing whitespace; if it declares no
+     *                               scheme or no host; if its port is not an integer in
      *                               {@code 0..}{@value #MAX_PORT}; if its scheme is not one of the
      *                               supported schemes; or if credential material remains inside the
      *                               assembled JDBC URL
      */
     public static TranslatedDatabaseUrl translate(String databaseUrl) {
-        if (databaseUrl == null
-                || databaseUrl.isBlank()
-                || UNRESOLVED_PLACEHOLDER.matcher(databaseUrl).matches()) {
+        if (ConfiguredValues.isUnset(databaseUrl)) {
             LOG.error("DATABASE_URL is not set; there is no database URL to translate.");
             throw new IllegalStateException("DATABASE_URL must be set: no database URL was supplied.");
         }
 
         if (databaseUrl.startsWith(JDBC_SCHEME_PREFIX)) {
-            rejectCredentialMaterial(databaseUrl, "DATABASE_URL holds a JDBC URL that carries credential material");
             LOG.info("DATABASE_URL already holds a JDBC URL; it is used exactly as supplied and no "
                     + "credentials are extracted from it.");
             return new TranslatedDatabaseUrl(databaseUrl, null, null);
@@ -461,7 +452,7 @@ public final class DatabaseUrlTranslator {
     /**
      * Discards any {@code +driver} suffix and matches the remaining scheme case-insensitively.
      *
-     * @throws IllegalStateException if the scheme is absent or unsupported
+     * @throws IllegalStateException if the scheme is absent, recognised but rejected, or unsupported
      */
     private static Vendor resolveVendor(String rawScheme) {
         if (rawScheme == null || rawScheme.isBlank()) {
@@ -474,6 +465,12 @@ public final class DatabaseUrlTranslator {
         final String scheme = (driverSuffix < 0 ? rawScheme : rawScheme.substring(0, driverSuffix))
                 .toLowerCase(Locale.ROOT);
 
+        final String rejection = REJECTED_SCHEMES.get(scheme);
+        if (rejection != null) {
+            LOG.error(rejection);
+            throw new IllegalStateException(rejection);
+        }
+
         final Vendor vendor = VENDOR_BY_SCHEME.get(scheme);
         if (vendor == null) {
             LOG.error("DATABASE_URL declares the unsupported scheme '{}'. Supported schemes: {}.",
@@ -481,17 +478,13 @@ public final class DatabaseUrlTranslator {
             throw new IllegalStateException("DATABASE_URL declares the unsupported scheme '" + scheme
                     + "': supported schemes are " + SUPPORTED_SCHEMES + ".");
         }
-
-        if (BEST_EFFORT_SCHEMES.contains(scheme)) {
-            LOG.warn(BEST_EFFORT_SCHEME_WARNING, scheme);
-        }
         return vendor;
     }
 
     /**
      * Splits a raw user-info component on its first literal {@code ':'} and percent-decodes each half
-     * separately; either part may be absent. Splitting before decoding keeps an encoded {@code ':'}
-     * inside a username or password out of the separator search.
+     * separately; either part may be absent. An encoded {@code ':'} inside a username or password is
+     * not a separator — see docs/DECISION_LOG.md DL-071.
      */
     private static UserInfo splitUserInfo(String rawUserInfo) {
         if (rawUserInfo == null || rawUserInfo.isEmpty()) {

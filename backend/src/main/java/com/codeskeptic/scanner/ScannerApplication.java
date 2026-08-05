@@ -44,7 +44,7 @@ import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
  *
  * <p>See {@code docs/DECISION_LOG.md} and {@code docs/TRACEABILITY_MATRIX.md}.
  */
-// Ported from backend/app/main.py:L15-39 (faithful port) — see docs/DECISION_LOG.md
+// Ported from backend/app/main.py:L15-39 (faithful port) — DL-209 — see docs/DECISION_LOG.md
 @SpringBootApplication
 @ConfigurationPropertiesScan
 public class ScannerApplication {

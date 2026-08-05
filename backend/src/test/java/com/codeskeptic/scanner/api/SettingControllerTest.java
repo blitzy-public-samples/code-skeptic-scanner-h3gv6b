@@ -28,6 +28,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.json.JsonCompareMode;
 import org.springframework.test.web.servlet.MockMvc;
 
 import com.codeskeptic.scanner.dto.SettingDto;
@@ -35,8 +36,7 @@ import com.codeskeptic.scanner.exception.BadRequestException;
 import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.service.SettingsService;
 
-// Ported from backend/tests/test_api.py:L36-44, whose two settings expectations are deliberately
-// discounted (faithful port of the route contract at backend/app/api/settings.py:L7-24) — see
+// Ported from backend/tests/test_api.py:L36-44 and backend/app/api/settings.py:L7-24 — see
 // docs/DECISION_LOG.md DL-039, DL-048, DL-050, DL-188
 /**
  * Exercises the two routes {@link SettingController} serves — {@code GET /settings} and
@@ -64,9 +64,7 @@ import com.codeskeptic.scanner.service.SettingsService;
  *     <td>{@code {"error":"Bad request"}}</td><td>net-new — DL-092, DL-188</td></tr>
  * </table>
  *
- * <p>The security filter chain is withdrawn from this slice, so these tests assert the route's own
- * behaviour rather than the chain's. The chain — the bearer requirement on both routes and the empty
- * 401 it answers with — is asserted by {@code api.AuthControllerTest}.
+ * <p>The slice runs without the security filter chain and asserts the route and advice responses.
  */
 @WebMvcTest(SettingController.class)
 @AutoConfigureMockMvc(addFilters = false)
@@ -146,7 +144,7 @@ class SettingControllerTest {
 
         mockMvc.perform(get("/settings"))
                 .andExpect(status().isOk())
-                .andExpect(content().json("[]", true));
+                .andExpect(content().json("[]", JsonCompareMode.STRICT));
     }
 
     // backend/app/api/settings.py:L13-24

@@ -82,11 +82,14 @@ class SettingsServiceSeedingIntegrationTest {
     /** Description an operator write puts in a seeded row before a later event is published. */
     private static final String OPERATOR_DESCRIPTION = "Edited through PUT /settings/{key}.";
 
-    /** Declared character length of {@code settings.key} — DL-069 — see docs/DECISION_LOG.md. */
-    private static final int SETTINGS_KEY_LENGTH = 768;
+    /**
+     * Generated character capacity of {@code settings.key}. The mapping declares no {@code length},
+     * so the column carries the undeclared-length capacity — DL-069 — see docs/DECISION_LOG.md.
+     */
+    private static final int SETTINGS_KEY_LENGTH = 255;
 
-    /** Delimiter joining the seeded stream keywords. */
-    private static final String KEYWORD_DELIMITER = ",";
+    /** Value the tracked-terms row is seeded with — DL-044 — see docs/DECISION_LOG.md. */
+    private static final String STREAM_KEYWORDS_SEED_VALUE = "";
 
     /** Name of the presence-check operation a stale read is simulated on. */
     private static final String EXISTS_BY_ID = "existsById";
@@ -148,8 +151,7 @@ class SettingsServiceSeedingIntegrationTest {
                 .isEqualTo(Integer.toString(properties.popularityThreshold()));
         assertThat(delay.getValue())
                 .isEqualTo(Long.toString(properties.responseGenerationDelaySeconds()));
-        assertThat(keywords.getValue()).isEqualTo(String.join(KEYWORD_DELIMITER,
-                properties.ingestion().streamBaseKeywords()));
+        assertThat(keywords.getValue()).isEqualTo(STREAM_KEYWORDS_SEED_VALUE);
         assertThat(List.of(threshold, delay, keywords))
                 .allSatisfy(seeded -> assertThat(seeded.getDescription()).isNotBlank());
     }
@@ -235,8 +237,7 @@ class SettingsServiceSeedingIntegrationTest {
                 .as("stored keys after the seeding")
                 .containsExactlyInAnyOrderElementsOf(SEEDED_KEYS);
         assertThat(row(STREAM_KEYWORDS_KEY).getValue()).as("re-inserted tracked terms")
-                .isEqualTo(String.join(KEYWORD_DELIMITER,
-                        properties.ingestion().streamBaseKeywords()));
+                .isEqualTo(STREAM_KEYWORDS_SEED_VALUE);
     }
 
     @Test
@@ -249,8 +250,7 @@ class SettingsServiceSeedingIntegrationTest {
 
         assertThat(settingRepository.count()).isEqualTo(SEEDED_KEYS.size());
         Setting reinserted = row(STREAM_KEYWORDS_KEY);
-        assertThat(reinserted.getValue()).isEqualTo(String.join(KEYWORD_DELIMITER,
-                properties.ingestion().streamBaseKeywords()));
+        assertThat(reinserted.getValue()).isEqualTo(STREAM_KEYWORDS_SEED_VALUE);
         assertThat(reinserted.getDescription()).isNotBlank();
         Setting presentAfter = row(TWEET_POPULARITY_THRESHOLD_KEY);
         assertThat(presentAfter.getValue()).isEqualTo(presentBefore.getValue());
@@ -293,8 +293,8 @@ class SettingsServiceSeedingIntegrationTest {
     }
 
     /**
-     * Wraps the real repository so that the first presence check of one key reports it absent while
-     * its row is really stored, and every later check reports the truth.
+     * Wraps the real repository; the first presence check of one stored key reports it absent and
+     * every later check reports the database state.
      *
      * <p>This is the interleaving a second instance produces: it checks presence, another writer
      * commits the same key, its own insert is then rejected by the actual primary key of the

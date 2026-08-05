@@ -12,6 +12,9 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.context.SecurityContextHolderStrategy;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -29,11 +32,9 @@ import jakarta.servlet.http.HttpServletResponse;
 /**
  * Establishes the authentication for a request presenting a bearer token this service minted.
  *
- * <p>The retired Python tree registered {@code JWTManager(app)} at {@code backend/app/main.py:L22}
- * and applied {@code @jwt_required} bare, without parentheses, at all eleven route sites named
- * above; in {@code flask-jwt-extended} 4.x that form registers the decorator factory and leaves the
- * route unguarded. This filter is the verification half of that scheme, made effective — DL-021.
- * {@link JwtService} is the minting half.
+ * <p>Replaces {@code JWTManager(app)} at {@code backend/app/main.py:L22} together with the eleven
+ * {@code @jwt_required} route sites named above — DL-021. This filter is the verification half of the
+ * token scheme; {@link JwtService} is the minting half.
  *
  * <p>Per request the filter reads the {@code Authorization} header, which
  * {@code frontend/src/utils/api.ts:L14} already sends as {@code Bearer <token>}. The scheme name is
@@ -57,13 +58,16 @@ import jakarta.servlet.http.HttpServletResponse;
  * authentication is answered by the entry point {@code SecurityConfig} configures.
  * {@link JwtService#extractUsername(String)} absorbs every verification failure; no exception leaves
  * this filter. Neither a header value, nor a token value, nor the token's subject is written to the
- * log — DL-111.
+ * log — DL-111. One fixed sentence is written at {@code DEBUG} when a request authenticates, and
+ * nothing at all when a presented token does not verify: no request method, no request URI and no
+ * principal reaches a record, and {@link JwtService} records the refusal as a fixed reason code —
+ * DL-144, DL-203.
  *
- * <p>This class carries no stereotype annotation and is not a bean; {@code SecurityConfig}
- * constructs it directly and registers it in the security filter chain — DL-021.
+ * <p>Log records carry the request method and URI only; neither a header value, a token value, nor
+ * the authenticated principal name is written — DL-052, DL-094.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-014, DL-021,
- * DL-111, DL-112 and DL-113; construct-level provenance is recorded in
+ * DL-111, DL-112, DL-113, DL-144 and DL-203; construct-level provenance is recorded in
  * {@code docs/TRACEABILITY_MATRIX.md}.
  *
  * <p>All three fields are {@code final} and hold stateless collaborators; every member declared here
@@ -86,6 +90,9 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     /** The repository the security chain reads the context back from — DL-112. */
     private final SecurityContextRepository securityContextRepository;
 
+    /** Resolves the {@code sub} claim against the configured credential store — DL-021. */
+    private final UserDetailsService userDetailsService;
+
     /** Strategy that holds the context for the current thread. */
     private final SecurityContextHolderStrategy securityContextHolderStrategy =
             SecurityContextHolder.getContextHolderStrategy();
@@ -99,10 +106,13 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
      * @throws NullPointerException if either argument is {@code null}
      */
     public JwtAuthenticationFilter(JwtService jwtService,
-            SecurityContextRepository securityContextRepository) {
+            SecurityContextRepository securityContextRepository,
+            UserDetailsService userDetailsService) {
         this.jwtService = Objects.requireNonNull(jwtService, "jwtService must not be null");
         this.securityContextRepository = Objects.requireNonNull(securityContextRepository,
                 "securityContextRepository must not be null");
+        this.userDetailsService = Objects.requireNonNull(userDetailsService,
+                "userDetailsService must not be null");
     }
 
     /**
@@ -111,7 +121,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
      *
      * <p>An unacceptable token and an absent header are treated alike: the context is left as it was
      * found and the request proceeds unauthenticated. An authentication already present in the
-     * context is never replaced.
+     * context is not replaced.
      *
      * @param request the request whose {@code Authorization} header is read
      * @param response handed to the context repository so the context can be persisted
@@ -126,15 +136,23 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         String token = bearerToken(request.getHeader(HttpHeaders.AUTHORIZATION));
         if (token != null) {
             Optional<String> username = jwtService.extractUsername(token);
-            if (username.isEmpty()) {
-                log.debug("A presented bearer token was not accepted; {} continues unauthenticated",
-                        request.getMethod());
-            } else if (securityContextHolderStrategy.getContext().getAuthentication() == null) {
-                SecurityContext context = securityContextHolderStrategy.createEmptyContext();
-                context.setAuthentication(authenticationFor(username.get(), request));
-                securityContextHolderStrategy.setContext(context);
-                securityContextRepository.saveContext(context, request, response);
-                log.debug("Authenticated {} through a bearer token", request.getMethod());
+            if (username.isPresent()
+                    && securityContextHolderStrategy.getContext().getAuthentication() == null) {
+                UserDetails principal = resolvePrincipal(username.get());
+                if (principal == null) {
+                    // A fixed sentence: no request method, no request URI and no principal —
+                    // DL-144, DL-203 — see docs/DECISION_LOG.md
+                    log.debug("A presented bearer token named a principal the credential store "
+                            + "does not hold; the request continues unauthenticated");
+                } else {
+                    SecurityContext context = securityContextHolderStrategy.createEmptyContext();
+                    context.setAuthentication(authenticationFor(principal.getUsername(), request));
+                    securityContextHolderStrategy.setContext(context);
+                    securityContextRepository.saveContext(context, request, response);
+                    // A fixed sentence: no request method, no request URI and no principal — DL-144,
+                    // DL-203 — see docs/DECISION_LOG.md
+                    log.debug("Authenticated a request through a bearer token");
+                }
             }
         }
         filterChain.doFilter(request, response);
@@ -184,14 +202,32 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     /**
      * Builds the authenticated token for a verified subject.
      *
-     * <p>The three-argument constructor marks the token authenticated. The principal is the token's
-     * {@code sub} claim, the credentials are {@code null} and the authority collection is empty —
-     * DL-021.
+     * <p>The token is marked authenticated. The principal is the token's {@code sub} claim, the
+     * credentials are {@code null} and the authority collection is empty — DL-021.
      *
-     * @param username the verified {@code sub} claim
+     * @param username the name of the resolved principal
      * @param request the request whose remote address and session id are recorded as details
      * @return an authenticated token holding no authorities
      */
+    /**
+     * Resolves a verified subject against the credential store.
+     *
+     * <p>{@link UserDetailsService#loadUserByUsername(String)} is called on every authenticated
+     * request. A subject the store does not hold yields {@code null} and the request proceeds
+     * unauthenticated, so a token minted for a principal name that is no longer configured stops
+     * authenticating at that moment rather than at its expiry.
+     *
+     * @param username the verified {@code sub} claim
+     * @return the stored principal, or {@code null} when the store holds none of that name
+     */
+    private UserDetails resolvePrincipal(String username) {
+        try {
+            return userDetailsService.loadUserByUsername(username);
+        } catch (UsernameNotFoundException absent) {
+            return null;
+        }
+    }
+
     private static UsernamePasswordAuthenticationToken authenticationFor(String username,
             HttpServletRequest request) {
         UsernamePasswordAuthenticationToken authentication =

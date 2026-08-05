@@ -47,6 +47,7 @@ import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.test.context.ActiveProfiles;
 
 /**
@@ -1244,14 +1245,18 @@ class JpaMappingIntegrationTest {
         statistics.setStatisticsEnabled(true);
         statistics.clear();
 
-        Page<Response> page = responseRepository.findAll(PageRequest.of(0, 10));
+        // The row order is requested explicitly; relational row order is otherwise unspecified.
+        Page<Response> page =
+                responseRepository.findAll(PageRequest.of(0, 10, Sort.by(Sort.Direction.ASC, "id")));
         List<Integer> parentIds = page.getContent().stream()
                 .map(response -> response.getTweet().getId())
                 .toList();
 
         assertThat(page.getTotalElements()).as("rows the page reports").isEqualTo(3L);
+        // findAll(PageRequest.of(0, 10)) supplies no Sort, so the provider chooses the row order;
+        // this assertion is about which parent every row resolves to, not about that order.
         assertThat(parentIds).as("parent identifier of every row on the page")
-                .containsExactly(first.getId(), second.getId(), third.getId());
+                .containsExactlyInAnyOrder(first.getId(), second.getId(), third.getId());
         assertThat(statistics.getPrepareStatementCount())
                 .as("statements issued to render one page of responses")
                 .isLessThanOrEqualTo(2L);

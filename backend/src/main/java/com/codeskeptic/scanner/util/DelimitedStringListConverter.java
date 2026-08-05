@@ -55,10 +55,10 @@ import java.util.stream.Collectors;
  * <p>Reading back a written value returns the written list element for element for any list whose
  * elements are non-{@code null}, not blank and free of the delimiter. That holds for an element
  * containing a backslash, a double quote, a non-ASCII character, an emoji or interior whitespace.
- * Three kinds of element are not carried through unchanged, and all three follow from the
- * contracts above: a {@code null} element and an element that is blank once trimmed are read back
- * as absent, so a list consisting only of those reads back empty; leading and trailing whitespace
- * is discarded; and an element containing a comma is read back as several elements.</p>
+ * Three kinds of element are not carried through unchanged — see docs/DECISION_LOG.md DL-164: a
+ * {@code null} element and an element that is blank once trimmed are read back as absent, so a list
+ * consisting only of those reads back empty; leading and trailing whitespace is discarded; and an
+ * element containing a comma is read back as several elements.</p>
  *
  * <p>{@link #encode(List)} and {@link #decode(String)} expose this representation to its other
  * producer and consumer: {@code service.NotionService} mirrors the same two values into rich text and

@@ -1,6 +1,7 @@
 package com.codeskeptic.scanner.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -38,6 +39,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -45,6 +50,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -173,6 +179,12 @@ class SettingsServiceTest {
 
     /** Wire literal of {@code backend/app/api/settings.py:L22}. */
     private static final String SETTING_NOT_FOUND = "Setting not found";
+
+    /** Message carried by the duplicate-key failure a concurrent insert produces. */
+    private static final String DUPLICATE_KEY = "Duplicate entry for the settings primary key.";
+
+    /** Message carried by a write failure that is not a duplicate key. */
+    private static final String WRITE_FAILED = "The settings insert failed.";
 
     /** Simple names of the types that can contribute schema. */
     /** The only persistence-context operation the seeding uses to write a row. */
@@ -726,30 +738,28 @@ class SettingsServiceTest {
     }
 
     @Test
-    @DisplayName("seeds the keywords with the configured stream terms")
-    void seedsTheKeywordsWithTheConfiguredStreamTerms() {
+    @DisplayName("seeds a blank keywords override so the composed rule set applies")
+    void seedsABlankKeywordsOverrideSoTheComposedRuleSetApplies() {
         stubConfiguredSeedValues();
         stubEveryKeyAbsent();
 
         service.seedDefaultSettings();
 
         Setting seeded = seededRow(flushedRows(3), STREAM_KEYWORDS_KEY);
-        assertThat(seeded.getValue()).isEqualTo(CONFIGURED_KEYWORDS_VALUE);
-        assertThat(seeded.getValue()).contains(CONFIGURED_KEYWORD_ONE, CONFIGURED_KEYWORD_TWO);
-        verify(properties).ingestion();
+        assertThat(seeded.getValue()).isEmpty();
+        assertThat(seeded.getDescription()).isNotBlank();
     }
 
     @Test
-    @DisplayName("seeds an empty keywords value when no stream term is configured")
-    void seedsAnEmptyKeywordsValueWhenNoStreamTermIsConfigured() {
-        when(properties.popularityThreshold()).thenReturn(CONFIGURED_POPULARITY_THRESHOLD);
-        when(properties.responseGenerationDelaySeconds()).thenReturn(CONFIGURED_RESPONSE_GENERATION_DELAY);
-        when(properties.ingestion()).thenReturn(new ScannerProperties.Ingestion(List.of()));
+    @DisplayName("reads no configured stream term while seeding the keywords override")
+    void readsNoConfiguredStreamTermWhileSeedingTheKeywordsOverride() {
+        stubConfiguredSeedValues();
         stubEveryKeyAbsent();
 
         service.seedDefaultSettings();
 
         assertThat(seededRow(flushedRows(3), STREAM_KEYWORDS_KEY).getValue()).isEmpty();
+        verify(properties, never()).ingestion();
     }
 
     // -----------------------------------------------------------------------
@@ -838,7 +848,7 @@ class SettingsServiceTest {
         assertThat(storedRows).extracting(Setting::getValue).containsExactly(
                 String.valueOf(CONFIGURED_POPULARITY_THRESHOLD),
                 String.valueOf(CONFIGURED_RESPONSE_GENERATION_DELAY),
-                CONFIGURED_KEYWORDS_VALUE);
+                "");
     }
 
     @Test
@@ -1010,7 +1020,7 @@ class SettingsServiceTest {
                 .as("stored response generation delay")
                 .isEqualTo(String.valueOf(CONFIGURED_RESPONSE_GENERATION_DELAY));
         assertThat(table.get(STREAM_KEYWORDS_KEY).getValue()).as("stored stream keywords")
-                .isEqualTo(CONFIGURED_KEYWORDS_VALUE);
+                .isEmpty();
         assertThat(rejections.get()).as("writes the primary key rejected").isNotNegative();
     }
 
@@ -1032,6 +1042,113 @@ class SettingsServiceTest {
                 TWEET_POPULARITY_THRESHOLD_KEY, STORED_VALUE, STORED_DESCRIPTION));
         assertThat(rendered).extracting(SettingDto::value)
                 .doesNotContain(String.valueOf(CONFIGURED_POPULARITY_THRESHOLD));
+    }
+
+    // -----------------------------------------------------------------------
+    // seedDefaultSettings() — concurrent seeding
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("opens one transaction of its own for every seeded key")
+    void opensOneTransactionOfItsOwnForEverySeededKey() {
+        stubConfiguredSeedValues();
+        stubEveryKeyAbsent();
+
+        service.seedDefaultSettings();
+
+        assertThat(openedTransactions).hasSize(SEEDED_KEYS.size());
+    }
+
+    @Test
+    @DisplayName("seeds every key in a new repeatable read transaction")
+    void seedsEveryKeyInANewRepeatableReadTransaction() {
+        stubConfiguredSeedValues();
+        stubEveryKeyAbsent();
+
+        service.seedDefaultSettings();
+
+        assertThat(openedTransactions).isNotEmpty().allSatisfy(definition -> {
+            assertThat(definition.getPropagationBehavior())
+                    .isEqualTo(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+            assertThat(definition.getIsolationLevel())
+                    .isEqualTo(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        });
+    }
+
+    @Test
+    @DisplayName("treats a key another instance inserted first as already seeded")
+    void treatsAKeyAnotherInstanceInsertedFirstAsAlreadySeeded() {
+        stubConfiguredSeedValues();
+        stubConcurrentInsertOf(TWEET_POPULARITY_THRESHOLD_KEY);
+
+        assertThatCode(() -> service.seedDefaultSettings()).doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("seeds the remaining keys after another instance inserted the first key")
+    void seedsTheRemainingKeysAfterAnotherInstanceInsertedTheFirstKey() {
+        stubConfiguredSeedValues();
+        stubConcurrentInsertOf(TWEET_POPULARITY_THRESHOLD_KEY);
+
+        service.seedDefaultSettings();
+
+        assertThat(flushedRows(SEEDED_KEYS.size())).extracting(Setting::getKey)
+                .containsExactlyElementsOf(SEEDED_KEYS);
+    }
+
+    @Test
+    @DisplayName("attempts a key another instance inserted first no more than once")
+    void attemptsAKeyAnotherInstanceInsertedFirstNoMoreThanOnce() {
+        stubConfiguredSeedValues();
+        stubConcurrentInsertOf(TWEET_POPULARITY_THRESHOLD_KEY);
+
+        service.seedDefaultSettings();
+
+        assertThat(flushedRows(SEEDED_KEYS.size())).extracting(Setting::getKey)
+                .containsOnlyOnce(TWEET_POPULARITY_THRESHOLD_KEY);
+    }
+
+    @Test
+    @DisplayName("writes no update and no delete when a key was inserted concurrently")
+    void writesNoUpdateAndNoDeleteWhenAKeyWasInsertedConcurrently() {
+        stubConfiguredSeedValues();
+        stubConcurrentInsertOf(TWEET_POPULARITY_THRESHOLD_KEY);
+
+        service.seedDefaultSettings();
+
+        verify(settingRepository, never()).save(any(Setting.class));
+        verify(settingRepository, never()).delete(any(Setting.class));
+        verify(settingRepository, never()).deleteById(anyString());
+        verifyNoInteractions(settingMapper);
+    }
+
+    @Test
+    @DisplayName("leaves a row inserted concurrently exactly as the other instance stored it")
+    void leavesARowInsertedConcurrentlyExactlyAsTheOtherInstanceStoredIt() {
+        Setting rowAnotherInstanceInserted =
+                new Setting(TWEET_POPULARITY_THRESHOLD_KEY, STORED_VALUE, STORED_DESCRIPTION);
+        stubConfiguredSeedValues();
+        stubConcurrentInsertOf(TWEET_POPULARITY_THRESHOLD_KEY);
+
+        service.seedDefaultSettings();
+
+        assertThat(rowAnotherInstanceInserted.getValue()).isEqualTo(STORED_VALUE);
+        assertThat(rowAnotherInstanceInserted.getDescription()).isEqualTo(STORED_DESCRIPTION);
+        verify(settingRepository, never()).save(any(Setting.class));
+    }
+
+    @Test
+    @DisplayName("propagates a write failure that is not a key another instance inserted first")
+    void propagatesAWriteFailureThatIsNotAKeyAnotherInstanceInsertedFirst() {
+        // The failure reaches the caller on the first key, so no later key's value is read.
+        when(properties.popularityThreshold()).thenReturn(CONFIGURED_POPULARITY_THRESHOLD);
+        when(settingRepository.existsById(anyString())).thenReturn(false);
+        doThrow(new DataIntegrityViolationException(WRITE_FAILED))
+                .when(entityManager).persist(any(Setting.class));
+
+        assertThatThrownBy(() -> service.seedDefaultSettings())
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessage(WRITE_FAILED);
     }
 
     // -----------------------------------------------------------------------
@@ -1120,6 +1237,22 @@ class SettingsServiceTest {
      *
      * @param rejectedKey the key whose insert is rejected
      */
+    /**
+     * Stubs the state another instance leaves behind when it inserts {@code key} first: the key reads
+     * as absent when presence is first tested and as present afterwards, and the insert of that one
+     * key is rejected with an integrity violation.
+     *
+     * @param key the key another instance inserted first
+     */
+    private void stubConcurrentInsertOf(String key) {
+        AtomicInteger presenceTests = new AtomicInteger();
+        when(settingRepository.existsById(anyString())).thenAnswer(invocation ->
+                key.equals(invocation.getArgument(0)) && presenceTests.incrementAndGet() > 1);
+        doThrow(new DataIntegrityViolationException(DUPLICATE_KEY_MESSAGE)).when(entityManager)
+                .persist(argThat(row -> row instanceof Setting stored
+                        && key.equals(stored.getKey())));
+    }
+
     private void stubWriteRejectedFor(String rejectedKey) {
         doThrow(new DataIntegrityViolationException(DUPLICATE_KEY_MESSAGE)).when(entityManager)
                 .persist(argThat(row -> row instanceof Setting stored
@@ -1183,26 +1316,24 @@ class SettingsServiceTest {
         }).when(entityManager).persist(any(Setting.class));
     }
 
-    /** Stubs the three configured values the seeding reads. */
+    /** Stubs the two configured values the seeding reads. */
     private void stubConfiguredSeedValues() {
         when(properties.popularityThreshold()).thenReturn(CONFIGURED_POPULARITY_THRESHOLD);
         when(properties.responseGenerationDelaySeconds())
                 .thenReturn(CONFIGURED_RESPONSE_GENERATION_DELAY);
-        when(properties.ingestion()).thenReturn(new ScannerProperties.Ingestion(
-                List.of(CONFIGURED_KEYWORD_ONE, CONFIGURED_KEYWORD_TWO)));
     }
 
     /**
      * Captures the rows {@link SettingsService#updateSetting(String, String)} asked the repository to
      * write, which it writes with {@code save}.
      *
-     * @param expectedWrites the number of writes expected
-     * @return the captured rows in the order they were written
+     * @param expectedInserts the number of inserts expected
+     * @return the captured rows in the order they were inserted
      */
-    private List<Setting> savedRows(int expectedWrites) {
-        ArgumentCaptor<Setting> written = ArgumentCaptor.forClass(Setting.class);
-        verify(settingRepository, times(expectedWrites)).save(written.capture());
-        return written.getAllValues();
+    private List<Setting> seededRows(int expectedInserts) {
+        ArgumentCaptor<Setting> inserted = ArgumentCaptor.forClass(Setting.class);
+        verify(settingRepository, times(expectedInserts)).saveAndFlush(inserted.capture());
+        return inserted.getAllValues();
     }
 
     /**
@@ -1252,7 +1383,47 @@ class SettingsServiceTest {
      * @return the captured row
      */
     private Setting savedRow() {
-        return savedRows(1).get(0);
+        ArgumentCaptor<Setting> written = ArgumentCaptor.forClass(Setting.class);
+        verify(settingRepository).save(written.capture());
+        return written.getValue();
+    }
+
+
+    // -----------------------------------------------------------------------
+    // Log-injection guard — DL-149 — see docs/DECISION_LOG.md
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("renders a newline-bearing setting key with its control characters replaced, forging "
+            + "no log record")
+    void rendersANewlineBearingSettingKeyAsACorrelationToken() {
+        String forged = "auto_response\nFORGED record injected by the caller";
+        when(settingRepository.findById(forged)).thenReturn(Optional.empty());
+
+        Logger logger = (Logger) LoggerFactory.getLogger(SettingsService.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        logger.addAppender(captured);
+        Level restored = logger.getLevel();
+        logger.setLevel(Level.TRACE);
+        try {
+            assertThatThrownBy(() -> service.updateSetting(forged, "true"))
+                    .isInstanceOf(NotFoundException.class);
+        } finally {
+            logger.setLevel(restored);
+            logger.detachAppender(captured);
+        }
+
+        assertThat(captured.list).as("records the rejection emitted").isNotEmpty();
+        assertThat(captured.list).allSatisfy(event -> {
+            String rendered = event.getFormattedMessage();
+            assertThat(rendered).as("rendered record").doesNotContain("\n").doesNotContain("\r");
+            assertThat(rendered).as("rendered record")
+                    .doesNotContain("\nFORGED")
+                    .doesNotContain("\rFORGED");
+            assertThat(rendered.chars()).as("rendered record")
+                    .allMatch(character -> character >= ' ' && character <= '~');
+        });
     }
 
     /**
@@ -1272,5 +1443,65 @@ class SettingsServiceTest {
             types.addAll(List.of(constructor.getParameterTypes()));
         }
         return types;
+    }
+
+    /**
+     * A {@link PlatformTransactionManager} that records the definition of every transaction opened
+     * against it and counts the commits and rollbacks it is asked for. It opens no connection and
+     * reaches no database; the callback the template runs executes inline.
+     */
+    private static final class RecordingTransactionManager implements PlatformTransactionManager {
+
+        /** One entry per transaction opened, in the order they were opened. */
+        private final List<TransactionDefinition> openedTransactions = new ArrayList<>();
+
+        /** Number of transactions committed. */
+        private int commits;
+
+        /** Number of transactions rolled back. */
+        private int rollbacks;
+
+        @Override
+        public TransactionStatus getTransaction(TransactionDefinition definition) {
+            openedTransactions.add(definition);
+            return new SimpleTransactionStatus();
+        }
+
+        @Override
+        public void commit(TransactionStatus status) {
+            commits++;
+        }
+
+        @Override
+        public void rollback(TransactionStatus status) {
+            rollbacks++;
+        }
+
+        /**
+         * Returns the definition of every transaction opened against this manager.
+         *
+         * @return one entry per transaction, in the order they were opened
+         */
+        private List<TransactionDefinition> definitions() {
+            return List.copyOf(openedTransactions);
+        }
+
+        /**
+         * Returns how many transactions were committed.
+         *
+         * @return the commit count
+         */
+        private int commits() {
+            return commits;
+        }
+
+        /**
+         * Returns how many transactions were rolled back.
+         *
+         * @return the rollback count
+         */
+        private int rollbacks() {
+            return rollbacks;
+        }
     }
 }

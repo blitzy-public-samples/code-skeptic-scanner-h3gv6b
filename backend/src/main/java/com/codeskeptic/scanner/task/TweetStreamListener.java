@@ -7,6 +7,7 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,37 +22,41 @@ import com.codeskeptic.scanner.service.ResponseService;
 import com.codeskeptic.scanner.service.SentimentAnalysisService;
 import com.codeskeptic.scanner.service.TwitterService;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
+import com.codeskeptic.scanner.util.LogSafe;
 import com.fasterxml.jackson.databind.JsonNode;
 
-// Ported from backend/app/tasks/tweet_monitoring.py:L8-34 (faithful port) — see
-// docs/DECISION_LOG.md
-// The scaffolding annotation at backend/app/tasks/tweet_monitoring.py:L13-14 is resolved by this
-// implementation and is not carried forward — see docs/DECISION_LOG.md
+// Ported from the TweetListener class at backend/app/tasks/tweet_monitoring.py:L8-34 (faithful port
+// of intent) — see docs/DECISION_LOG.md DL-049
+// Net-new: the persistence step the source left unimplemented at :L29 and the generation trigger it
+// left unimplemented at :L32; both resolutions are recorded in docs/TRACEABILITY_MATRIX.md §1.9 —
+// see docs/DECISION_LOG.md DL-049
 /**
  * Handles one record delivered by the X filtered stream.
  *
  * <p>{@link #onStatus(JsonNode)} is the single operation. It performs the four steps documented for
  * {@code on_status} at {@code documentation/Code Structure.md:L1407-1411}, in that order: it
  * evaluates the popularity gate, obtains the sentiment score and the doubt rating, stores one
- * {@code tweets} row, and triggers response generation for the stored row. A Notion mirror write is
- * issued between the storing step and the trigger.
+ * {@code tweets} row, and triggers response generation for the stored row. Two Notion mirror writes
+ * are issued: the stored row is mirrored between the storing step and the trigger, and the generated
+ * reply is mirrored onto the same page once the trigger has stored it.
  *
- * <p>The relational database is the system of record and the Notion write is a secondary mirror: a
- * failed mirror write leaves the stored row in place and does not stop the trigger, and a failed
- * trigger leaves the stored row in place.
+ * <p>The relational database is the system of record and both Notion writes are secondary mirrors: a
+ * failed row mirror leaves the stored row in place and does not stop the trigger, a failed trigger
+ * leaves the stored row in place and issues no reply mirror, and a failed reply mirror leaves the
+ * stored reply in place.
  *
  * <p>This class issues no outbound request of its own and carries no X protocol surface. The stream
- * connection, its rule set and its reconnection handling belong to {@code TweetStreamClient}, which
+ * connection, its rule set and its reconnection handling belong to {@link TweetStreamClient}, which
  * calls this operation once per delivered record.
  *
- * <p>Two values this operation depends on are computed elsewhere and are not derived here: the
- * popularity gate is evaluated by {@link TwitterService#meetsPopularityThreshold(Integer)}, and the
- * doubt rating written to {@code tweets.doubt_rating} is produced by
+ * <p>Two values this operation depends on are computed elsewhere: the popularity gate is evaluated by
+ * {@link TwitterService#meetsPopularityThreshold(Integer)}, and the doubt rating written to
+ * {@code tweets.doubt_rating} is produced by
  * {@link SentimentAnalysisService#calculateDoubtRating(double)}.
  *
  * <p>Ingestion stores every accepted record: no stored row is read back for comparison and no
  * identifier of the delivered record is matched against the table. A record delivered twice stores
- * two rows — see docs/DECISION_LOG.md DL-049.
+ * two rows — DL-049.
  *
  * <p>{@code spring.jpa.open-in-view} is {@code false}. The stored entity is converted to its wire
  * form by {@link TweetMapper}, which reads only loaded scalar values and never traverses the lazy
@@ -59,94 +64,64 @@ import com.fasterxml.jackson.databind.JsonNode;
  *
  * <p>Collaborators arrive through the constructor and are held for the lifetime of the singleton, in
  * place of the {@code TwitterService()} and {@code SentimentAnalysis()} instantiation performed at
- * {@code backend/app/tasks/tweet_monitoring.py:L40-41}. The class carries no mutable state, so it is
- * safe for concurrent use.
+ * {@code backend/app/tasks/tweet_monitoring.py:L40-41}. This class is thread-safe and carries no
+ * mutable state.
  *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-049 and DL-052;
- * construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-049, DL-052 and
+ * DL-191; construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  *
  * @see TwitterService#meetsPopularityThreshold(Integer)
  * @see SentimentAnalysisService#calculateDoubtRating(double)
- * @see ResponseService#generateResponse(String)
+ * @see ResponseService#generateResponseIfAbsent(String)
  */
 @Component
 public class TweetStreamListener {
 
-    // Logging baseline — DL-052 — see docs/DECISION_LOG.md
-    /** Records each accepted record, each skipped record and each failed collaborator call. */
     private static final Logger log = LoggerFactory.getLogger(TweetStreamListener.class);
 
-    /**
-     * Longest rendered payload prefix a log record carries. A rendered payload longer than this many
-     * characters is truncated to this length and marked with a trailing {@value #TRUNCATION_MARK}.
-     */
-    private static final int PAYLOAD_EXCERPT_LIMIT = 120;
-
-    /** Appended to a rendered payload that was truncated to {@value #PAYLOAD_EXCERPT_LIMIT}. */
-    private static final String TRUNCATION_MARK = "...";
+    /** Recorded when a delivered record carries no {@code data} object. */
+    private static final String REJECTED_NO_DATA_OBJECT = "it carries no data object";
 
     /** Payload member carrying the delivered post object. */
     private static final String KEY_DATA = "data";
-
-    /** Post member carrying the text of the post, mapped to {@code tweets.content}. */
     private static final String KEY_TEXT = "text";
-
-    /** Post member carrying the engagement counters. */
     private static final String KEY_PUBLIC_METRICS = "public_metrics";
-
-    /** Counter member mapped to {@code tweets.like_count}. */
     private static final String KEY_LIKE_COUNT = "like_count";
-
-    /** Post member mapped to {@code tweets.created_at}. */
     private static final String KEY_CREATED_AT = "created_at";
-
-    /** Post member mapped to {@code tweets.user_id}. */
     private static final String KEY_AUTHOR_ID = "author_id";
-
-    /** Post member carrying the attachment references. */
     private static final String KEY_ATTACHMENTS = "attachments";
-
-    /** Attachment member mapped to {@code tweets.media}. */
     private static final String KEY_MEDIA_KEYS = "media_keys";
-
-    /** Payload member carrying the stream rules the record matched. */
     private static final String KEY_MATCHING_RULES = "matching_rules";
-
-    /** Rule member mapped to {@code tweets.ai_tools_mentioned}. */
     private static final String KEY_TAG = "tag";
-
-    /** Post member carrying the posts this record references. */
     private static final String KEY_REFERENCED_TWEETS = "referenced_tweets";
-
-    /** Reference member naming the kind of reference. */
     private static final String KEY_TYPE = "type";
-
-    /** Reference member carrying the referenced post's identifier. */
     private static final String KEY_ID = "id";
 
     /** Value of {@value #KEY_TYPE} that maps a reference to {@code tweets.quoted_tweet_id}. */
     private static final String QUOTED_REFERENCE_TYPE = "quoted";
 
+    // Payload log redaction — DL-195 — see docs/DECISION_LOG.md
+    /**
+     * Payload members a log record may name. Only the member's name and whether the record carried it
+     * are ever written; no member value and no rendered payload is written at any level.
+     */
+    private static final List<String> LOGGABLE_MEMBERS =
+            List.of(KEY_DATA, KEY_TEXT, KEY_PUBLIC_METRICS, KEY_CREATED_AT, KEY_AUTHOR_ID,
+                    KEY_ATTACHMENTS, KEY_REFERENCED_TWEETS, KEY_MATCHING_RULES);
+
     /** Evaluates the popularity gate over a like count. */
     private final TwitterService twitterService;
 
-    /** Supplies the document sentiment score and the doubt rating derived from it. */
     private final SentimentAnalysisService sentimentAnalysisService;
 
-    /** Data access for the {@code tweets} table. */
     private final TweetRepository tweetRepository;
 
-    /** Generates and stores the reply to a stored {@code tweets} row. */
     private final ResponseService responseService;
 
-    /** Mirrors a stored row to the Notion database. */
     private final NotionService notionService;
 
-    /** Converts a stored {@link Tweet} into the wire form the Notion mirror write carries. */
     private final TweetMapper tweetMapper;
 
-    // Replaces __init__ at backend/app/tasks/tweet_monitoring.py:L9-11 and the per-call
-    // instantiation at :L40-41 (faithful port of the injection points) — see docs/DECISION_LOG.md
     /**
      * Creates the component with its six collaborators.
      *
@@ -183,15 +158,18 @@ public class TweetStreamListener {
         this.tweetMapper = Objects.requireNonNull(tweetMapper, "tweetMapper must not be null.");
     }
 
-    // Ported from on_status at backend/app/tasks/tweet_monitoring.py:L15-34 (faithful port) — see
-    // docs/DECISION_LOG.md
+    // Ported from on_status at backend/app/tasks/tweet_monitoring.py:L15-34 (faithful port of
+    // intent) — see docs/DECISION_LOG.md DL-049
     /**
      * Handles one stream record and reports whether streaming continues.
      *
-     * <p>The record is read as the X filtered stream delivers it: a {@code data} object carrying the
-     * post, an optional {@code matching_rules} array naming the rules it matched, and any further
-     * members. Every member is read through {@link JsonNode#path(String)}, which yields a missing
-     * node when the member is absent.
+     * <p>Every member is read through {@link JsonNode#path(String)}, which yields a missing node when
+     * the member is absent. The four steps documented at
+     * {@code documentation/Code Structure.md:L1407-1411} run in order: the popularity gate over
+     * {@code data.public_metrics.like_count}, the sentiment score and doubt rating over
+     * {@code data.text}, one stored {@code tweets} row, then the Notion mirror followed by the
+     * generation trigger. The stored row's {@code id} is assigned by the database on insert and the
+     * {@code responses} association is not touched.
      *
      * <p>Four steps run in the order documented at
      * {@code documentation/Code Structure.md:L1407-1411}:
@@ -211,26 +189,23 @@ public class TweetStreamListener {
      *       as {@code quoted_tweet_id}. The row's {@code id} is assigned by the database on insert
      *       and the {@code responses} association is not touched.</li>
      *   <li>The stored row is mirrored to the Notion database, then
-     *       {@link ResponseService#generateResponse(String)} is called with the assigned identifier.
-     *       The generated row is stored by that call awaiting review; nothing here reads or writes
-     *       its approval flag.</li>
+     *       {@link ResponseService#generateResponseIfAbsent(String)} is called with the assigned
+     *       identifier. That call is the single background generation entry point and stores nothing
+     *       when the row already carries a reply — see docs/DECISION_LOG.md DL-196. The generated row
+     *       is stored by that call awaiting review; nothing here reads or writes its approval
+     *       flag.</li>
      * </ol>
      *
-     * <p>Every outcome reports {@code true}, reproducing the unconditional
-     * {@code return True} at {@code backend/app/tasks/tweet_monitoring.py:L34}. Nothing is stored and
-     * a record is reported as handled when {@code payload} is {@code null}, when {@code data} is
-     * absent, when {@code data.text} is absent or blank, when the popularity gate reports
-     * {@code false}, and when obtaining the sentiment score or the doubt rating fails. Once the row
-     * is stored, a failure of the Notion mirror write and a failure of the trigger are each recorded
-     * at {@code ERROR} and the row remains stored.
-     *
-     * <p>A malformed record never raises out of this method. A failure raised while storing the row
-     * propagates to the caller unchanged.
+     * <p>Every handled outcome reports {@code true}, matching
+     * {@code backend/app/tasks/tweet_monitoring.py:L34}. Invalid payloads and failures before storage
+     * are logged and skipped. Mirror and generation failures are logged after the stored row commits.
+     * A persistence failure propagates to the caller.
      *
      * @param payload one record of the filtered stream, may be {@code null}
      * @return {@code true} to continue streaming, {@code false} to stop, as documented at
      *         {@code documentation/Code Structure.md:L1393}
      */
+    // Payload type at the ingestion boundary — see docs/DECISION_LOG.md DL-199
     public boolean onStatus(JsonNode payload) {
         if (payload == null) {
             log.warn("Skipping a stream record that carries no payload.");
@@ -238,37 +213,42 @@ public class TweetStreamListener {
         }
 
         JsonNode data = payload.path(KEY_DATA);
-        String text = readString(data.path(KEY_TEXT));
+        if (!data.isObject()) {
+            log.warn("Skipping a stream record: {}; record {}",
+                    REJECTED_NO_DATA_OBJECT, LogSafe.correlation(payload));
+            return true;
+        }
+
+        String text = readTextValue(data.path(KEY_TEXT));
         if (text == null) {
-            log.warn("Skipping a stream record that carries no post text: {}", excerpt(payload));
+            // Member presence only; no payload content — DL-195 — see docs/DECISION_LOG.md
+            log.warn("Skipping a stream record that carries no post text; members present: {}.",
+                    presentMembers(payload));
             return true;
         }
 
         Integer likeCount = readInteger(data.path(KEY_PUBLIC_METRICS).path(KEY_LIKE_COUNT));
 
-        // Step 1 — the call at backend/app/tasks/tweet_monitoring.py:L17; the threshold and the
-        // comparison belong to TwitterService — see docs/DECISION_LOG.md
         if (!twitterService.meetsPopularityThreshold(likeCount)) {
             log.debug("Skipping a stream record with like count {}: the popularity gate reports "
                     + "false.", likeCount);
             return true;
         }
 
-        // Step 2 — the call at backend/app/tasks/tweet_monitoring.py:L19; the doubt-rating
-        // calculation belongs to SentimentAnalysisService — see docs/DECISION_LOG.md
         double doubtRating;
         try {
             double sentimentScore = sentimentAnalysisService.analyzeSentiment(text);
             doubtRating = sentimentAnalysisService.calculateDoubtRating(sentimentScore);
         } catch (RuntimeException failure) {
-            log.error("Skipping a stream record: obtaining its doubt rating failed with {}.",
-                    failure.getClass().getSimpleName());
+            // service/SentimentAnalysisService owns the failure record — see
+            // docs/DECISION_LOG.md DL-197
+            log.debug("Skipping a stream record: obtaining its doubt rating failed with {}.",
+                    LogSafe.type(failure));
             return true;
         }
 
-        // Step 3 — the columns of backend/app/db/models.py:L10-18, in place of the id, text, user and
-        // sentiment arguments at backend/app/tasks/tweet_monitoring.py:L22-28 — see
-        // docs/DECISION_LOG.md
+        // Columns of backend/app/db/models.py:L10-18, in place of the id, text, user and sentiment
+        // arguments at backend/app/tasks/tweet_monitoring.py:L22-28
         Tweet tweet = new Tweet();
         tweet.setContent(text);
         tweet.setLikeCount(likeCount);
@@ -276,33 +256,27 @@ public class TweetStreamListener {
         tweet.setDoubtRating(doubtRating);
         tweet.setMedia(readTextArray(data.path(KEY_ATTACHMENTS).path(KEY_MEDIA_KEYS)));
         tweet.setQuotedTweetId(readQuotedTweetId(data.path(KEY_REFERENCED_TWEETS)));
-        tweet.setUserId(readString(data.path(KEY_AUTHOR_ID)));
+        tweet.setUserId(readTextValue(data.path(KEY_AUTHOR_ID)));
         tweet.setAiToolsMentioned(readRuleTags(payload.path(KEY_MATCHING_RULES)));
 
-        // Closes the unimplemented persistence step at
-        // backend/app/tasks/tweet_monitoring.py:L29 — see docs/DECISION_LOG.md
         // No de-duplication — see docs/DECISION_LOG.md DL-049
         Tweet saved = tweetRepository.save(tweet);
         log.info("Stored ingested tweet row {} with like count {}.", saved.getId(), likeCount);
 
-        // Step 4 — the secondary mirror, then the trigger
         mirrorToNotion(saved);
         triggerResponseGeneration(saved);
 
-        // backend/app/tasks/tweet_monitoring.py:L34
         return true;
     }
 
-    // Implements the ingestion step documented at
-    // documentation/Software Requirements Specifications (SRS).md:L226 by calling store_tweet, ported
-    // from backend/app/services/notion_service.py:L12-28. The step at :L227 has no counterpart here
-    // — see docs/DECISION_LOG.md
+    // Ported from store_tweet at backend/app/services/notion_service.py:L12-28 (faithful port) — see
+    // docs/DECISION_LOG.md
     /**
      * Writes the secondary Notion mirror of a stored row.
      *
      * <p>The wire form handed to {@link NotionService#storeTweet(TweetDto)} is produced by
-     * {@link TweetMapper#toDto(Tweet)}, which is the one converter that renders the row's identifier
-     * as a string and its two delimited columns as arrays.
+     * {@link TweetMapper#toDto(Tweet)}: the row's identifier is rendered as a string and its two
+     * delimited columns as arrays.
      *
      * <p>A failure raised by the mirror write is recorded at {@code ERROR} and is not rethrown; the
      * stored row is unaffected.
@@ -313,56 +287,110 @@ public class TweetStreamListener {
         try {
             TweetDto mirrored = tweetMapper.toDto(saved);
             String pageId = notionService.storeTweet(mirrored);
+            // The Notion page identifier reaches the log only as a correlation token — DL-119 —
+            // see docs/DECISION_LOG.md
             log.debug("Mirrored tweet row {} to the Notion database as page {}.",
-                    saved.getId(), pageId);
+                    saved.getId(), LogSafe.correlation(pageId));
         } catch (RuntimeException failure) {
-            log.error("Mirroring tweet row {} to the Notion database failed with {}.",
-                    saved.getId(), failure.getClass().getSimpleName());
+            // service/NotionService owns the failure record — see docs/DECISION_LOG.md DL-197
+            log.debug("Mirroring tweet row {} to the Notion database failed with {}.",
+                    saved.getId(), LogSafe.type(failure));
         }
     }
 
     /**
-     * Triggers response generation for a stored row.
+     * Triggers response generation for a stored row and mirrors the generated reply to Notion.
      *
-     * <p>{@link ResponseService#generateResponse(String)} is called in process with the identifier the
-     * database assigned to the row. That call owns the language-model request, stores the generated
-     * {@code responses} row and sets its approval flag; nothing here reads or writes that flag.
+     * <p>{@link ResponseService#generateResponseIfAbsent(String)} is called in process with the
+     * identifier the database assigned to the row. That call owns the language-model request, stores
+     * the generated {@code responses} row and sets its approval flag; nothing here reads or writes that
+     * flag. It is also the guard that keeps this trigger and the scheduled pass from both storing a
+     * reply for one row — see docs/DECISION_LOG.md DL-196.
      *
-     * <p>A failure raised by the call is recorded at {@code ERROR} and is not rethrown; the stored row
-     * is unaffected.
+     * <p>An empty result is recorded at {@code DEBUG}. A failure raised by the call is recorded at
+     * {@code ERROR} and is not rethrown; the stored row is unaffected.
      *
      * @param saved the stored row, never {@code null}
      */
     private void triggerResponseGeneration(Tweet saved) {
         String tweetId = String.valueOf(saved.getId());
+        ResponseDto generated;
         try {
             // Closes the unimplemented trigger at backend/app/tasks/tweet_monitoring.py:L32 — see
             // docs/DECISION_LOG.md
-            ResponseDto generated = responseService.generateResponse(tweetId);
+            // The single background generation entry point — DL-196 — see docs/DECISION_LOG.md
+            Optional<ResponseDto> result = responseService.generateResponseIfAbsent(tweetId);
+            if (result.isEmpty()) {
+                log.debug("Response generation for tweet row {} stored nothing; the row already "
+                        + "carries a response or one is being generated.", tweetId);
+                return;
+            }
+            generated = result.get();
             log.info("Triggered response generation for tweet row {}; stored response {}.",
-                    tweetId, generated == null ? null : generated.id());
+                    tweetId, generated.id());
         } catch (RuntimeException failure) {
             log.error("Triggering response generation for tweet row {} failed with {}.",
-                    tweetId, failure.getClass().getSimpleName());
+                    tweetId, LogSafe.type(failure));
+            return;
+        }
+        mirrorGeneratedResponse(tweetId, generated);
+    }
+
+    /**
+     * Writes the secondary Notion mirror of a generated reply.
+     *
+     * <p>This is the same mirror step {@code task/ResponseGenerationScheduler} performs after its own
+     * generation, so a reply reaches the Notion {@code Response} property by whichever path generated
+     * it. A reply that is absent or carries no content is recorded at {@code WARN} and not mirrored.
+     *
+     * <p>A failure raised by the mirror write is recorded at {@code ERROR} and is not rethrown; the
+     * stored reply is unaffected. The mirror is not re-attempted — see docs/DECISION_LOG.md DL-194.
+     *
+     * @param tweetId   identifier of the stored row the reply belongs to, never {@code null}
+     * @param generated the stored reply, possibly {@code null}
+     */
+    // Implements the documented step "Update Notion database with response"
+    // (documentation/Code Structure.md) on the ingestion path, closing the call to the absent
+    // NotionService.update_tweet_response at backend/app/tasks/response_generation.py:L30 — see
+    // docs/DECISION_LOG.md DL-194
+    private void mirrorGeneratedResponse(String tweetId, ResponseDto generated) {
+        if (generated == null) {
+            log.warn("Generation for tweet row {} yielded no response; the Notion mirror is skipped.",
+                    tweetId);
+            return;
+        }
+        String content = generated.content();
+        if (content == null) {
+            log.warn("Response {} for tweet row {} carries no content; the Notion mirror is skipped.",
+                    generated.id(), tweetId);
+            return;
+        }
+        try {
+            notionService.updateTweetResponse(tweetId, content);
+        } catch (RuntimeException failure) {
+            // service/NotionService owns the failure record — see docs/DECISION_LOG.md DL-197
+            log.debug("Mirroring response {} for tweet row {} to the Notion database failed with {}.",
+                    generated.id(), tweetId, LogSafe.type(failure));
         }
     }
 
     /**
      * Reads the creation time of a delivered record.
      *
-     * <p>An ISO-8601 value carrying an offset is read and normalised to UTC, so
+     * <p>An ISO-8601 value carrying an offset is read and normalised to UTC:
      * {@code 2026-08-03T15:11:52.000Z} yields {@code 2026-08-03T15:11:52}. An absent, blank or
      * unparseable value is recorded at {@code WARN} and the current UTC time is returned in its
-     * place. Every stored row therefore carries a creation time.
+     * place. Every stored row carries a creation time.
      *
      * @param node the {@code created_at} member, possibly a missing node
-     * @return the creation time to store, never {@code null}
+     * @return the creation time to store, or {@code null} when the record supplied none
      */
     private static LocalDateTime readCreatedAt(JsonNode node) {
-        String raw = readString(node);
+        String raw = readTextValue(node);
         if (raw == null) {
-            log.warn("A stream record carries no created_at value; storing the current UTC time.");
-            return LocalDateTime.now(ZoneOffset.UTC);
+            log.warn("A stream record carries no textual {} member; storing no creation time.",
+                    KEY_CREATED_AT);
+            return null;
         }
         try {
             return OffsetDateTime.parse(raw)
@@ -370,7 +398,7 @@ public class TweetStreamListener {
                     .toLocalDateTime();
         } catch (DateTimeParseException failure) {
             log.warn("A stream record carries the unusable created_at value '{}'; storing the "
-                    + "current UTC time.", raw);
+                    + "current UTC time.", LogSafe.logSafe(raw));
             return LocalDateTime.now(ZoneOffset.UTC);
         }
     }
@@ -380,7 +408,8 @@ public class TweetStreamListener {
      *
      * <p>The first entry whose {@value #KEY_TYPE} is {@value #QUOTED_REFERENCE_TYPE} supplies the
      * value. A member that is not an array, an array holding no such entry, and an entry carrying no
-     * identifier each yield {@code null}, which is the stored value of the one nullable column.
+     * identifier each yield {@code null}, the stored value of the nullable {@code quoted_tweet_id}
+     * column.
      *
      * @param arrayNode the {@code referenced_tweets} member, possibly a missing node
      * @return the quoted post's identifier, or {@code null} when the record quotes nothing
@@ -391,8 +420,8 @@ public class TweetStreamListener {
         }
         for (int index = 0; index < arrayNode.size(); index++) {
             JsonNode reference = arrayNode.path(index);
-            if (QUOTED_REFERENCE_TYPE.equals(readString(reference.path(KEY_TYPE)))) {
-                return readString(reference.path(KEY_ID));
+            if (QUOTED_REFERENCE_TYPE.equals(readTextValue(reference.path(KEY_TYPE)))) {
+                return readTextValue(reference.path(KEY_ID));
             }
         }
         return null;
@@ -413,7 +442,7 @@ public class TweetStreamListener {
         }
         List<String> values = new ArrayList<>();
         for (int index = 0; index < arrayNode.size(); index++) {
-            String value = readString(arrayNode.path(index));
+            String value = readTextValue(arrayNode.path(index));
             if (value != null) {
                 values.add(value);
             }
@@ -436,7 +465,7 @@ public class TweetStreamListener {
         }
         List<String> tags = new ArrayList<>();
         for (int index = 0; index < arrayNode.size(); index++) {
-            String tag = readString(arrayNode.path(index).path(KEY_TAG));
+            String tag = readTextValue(arrayNode.path(index).path(KEY_TAG));
             if (tag != null) {
                 tags.add(tag);
             }
@@ -447,52 +476,64 @@ public class TweetStreamListener {
     /**
      * Reads one member as text.
      *
-     * <p>A missing node, a container node, a JSON {@code null} and a blank value each yield
-     * {@code null}. A numeric or boolean value yields its rendered form.
+     * <p>Only a JSON string satisfies the contract. A missing node, a container node, a JSON
+     * {@code null}, a number, a boolean and a blank string each yield {@code null}; a number or a
+     * boolean is never coerced to text.
      *
      * @param node the member to read, possibly a missing node
-     * @return the value the member holds, or {@code null} when it holds none
+     * @return the value the member holds, or {@code null} when it holds no non-blank string
      */
-    private static String readString(JsonNode node) {
-        if (!node.isValueNode() || node.isNull()) {
+    private static String readTextValue(JsonNode node) {
+        if (!node.isTextual()) {
             return null;
         }
-        String value = node.asText();
+        String value = node.textValue();
         return value.isBlank() ? null : value;
     }
 
     /**
      * Reads one member as a whole number.
      *
-     * <p>A missing node, a non-numeric value and a numeric value outside the range of an {@code int}
-     * each yield {@code null}, which {@link TwitterService#meetsPopularityThreshold(Integer)} reads as
-     * a record that does not reach the threshold.
+     * <p>Only an integral JSON number satisfies the contract. A missing node, a non-numeric value, a
+     * fractional value and a value outside the range of an {@code int} each yield {@code null}, which
+     * {@link TwitterService#meetsPopularityThreshold(Integer)} reads as a record that does not reach
+     * the threshold. A fractional value is never truncated to a whole count.
      *
      * @param node the member to read, possibly a missing node
      * @return the value the member holds, or {@code null} when it holds no whole number
      */
     private static Integer readInteger(JsonNode node) {
-        if (node.isNumber() && node.canConvertToInt()) {
-            return node.intValue();
+        if (node.isIntegralNumber() && node.canConvertToInt()) {
+            return Integer.valueOf(node.intValue());
         }
         return null;
     }
 
+    // Payload log redaction — DL-195 — see docs/DECISION_LOG.md
     /**
-     * Renders a prefix of a payload for a log record.
+     * Renders which of the {@link #LOGGABLE_MEMBERS} a payload carries.
      *
-     * <p>The rendered form is cut to {@value #PAYLOAD_EXCERPT_LIMIT} characters and marked with
-     * {@value #TRUNCATION_MARK} when it is longer. No log record carries more than
-     * {@value #PAYLOAD_EXCERPT_LIMIT} characters of a payload.
+     * <p>Only member names appear in the result. No member value, no identifier, no attachment key, no
+     * rule tag and no rendered payload appears, whatever the payload holds. A member is reported as
+     * carried when it is present and is not JSON {@code null}; the {@code text} member is looked up
+     * inside {@code data}, matching where the record declares it.
      *
-     * @param payload the payload to render, never {@code null}
-     * @return a prefix of the rendered payload, never {@code null}
+     * @param payload the payload to describe, never {@code null}
+     * @return the carried member names in declaration order, or {@code none} when the payload carries
+     *         no member of the allowlist
      */
-    private static String excerpt(JsonNode payload) {
-        String rendered = payload.toString();
-        if (rendered.length() <= PAYLOAD_EXCERPT_LIMIT) {
-            return rendered;
+    private static String presentMembers(JsonNode payload) {
+        JsonNode data = payload.path(KEY_DATA);
+        List<String> carried = new ArrayList<>();
+        for (String member : LOGGABLE_MEMBERS) {
+            JsonNode found = KEY_DATA.equals(member) ? data : data.path(member);
+            if (found.isMissingNode() || found.isNull()) {
+                found = payload.path(member);
+            }
+            if (!found.isMissingNode() && !found.isNull()) {
+                carried.add(member);
+            }
         }
-        return rendered.substring(0, PAYLOAD_EXCERPT_LIMIT).concat(TRUNCATION_MARK);
+        return carried.isEmpty() ? "none" : String.join(", ", carried);
     }
 }

@@ -11,8 +11,16 @@
 #
 # scanner.auth.password-hash below is a bcrypt hash of the plaintext `test-password`.
 #
-# see docs/DECISION_LOG.md — DL-009, DL-016, DL-020, DL-026, DL-027, DL-029, DL-033, DL-034, DL-042
-# and DL-044
+# BUILD-ONLY PROFILE. The scanner.jwt.secret and scanner.auth.password-hash values below are real,
+# usable credentials scoped to `mvn clean verify`. This profile must never be activated in a
+# deployed revision: the deployment supplies SECRET_KEY and AUTH_PASSWORD_HASH, and neither
+# application.yml value carries a default.
+#
+# scanner.twitter.consumer-key and scanner.twitter.consumer-secret are deliberately left blank so
+# task/TweetStreamClient takes its blank-credential path and the build performs no X network call.
+#
+# see docs/DECISION_LOG.md — DL-009, DL-016, DL-020, DL-026, DL-027, DL-029, DL-033, DL-034, DL-042,
+# DL-044 and DL-061
 
 # Ported from backend/app/db/database.py:L5-13 (faithful port) — see docs/DECISION_LOG.md
 spring:
@@ -25,14 +33,13 @@ spring:
     properties:
       hibernate:
         # Net-new (no Python counterpart) — column names at
-        # backend/app/db/models.py:L42-43 — DL-026 — see docs/DECISION_LOG.md
+        # backend/app/db/models.py:L42-43 — DL-061 — see docs/DECISION_LOG.md
         auto_quote_keyword: true
 
 scanner:
   # Key ported from backend/app/core/config.py:L9 and backend/app/db/database.py:L7; test value is
-  # net-new — DL-009, DL-026, DL-027 — see docs/DECISION_LOG.md
-  # NON_KEYWORDS lists the `settings` column names at backend/app/db/models.py:L42-43.
-  database-url: 'jdbc:h2:mem:scanner_test;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;NON_KEYWORDS=KEY,VALUE'
+  # net-new — DL-009, DL-027 — see docs/DECISION_LOG.md
+  database-url: 'jdbc:h2:mem:scanner_test;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE'
   # Ported from backend/app/core/config.py:L10 and backend/app/services/twitter_service.py:L43,L46 (faithful port) — see docs/DECISION_LOG.md
   popularity-threshold: 100
   # Ported from backend/app/core/config.py:L11 and backend/app/tasks/response_generation.py:L50 (faithful port) — see docs/DECISION_LOG.md
@@ -44,10 +51,16 @@ scanner:
     api-secret: test-twitter-api-secret
     # Ported from backend/app/services/twitter_service.py:L12 (faithful port) — DL-031 — see docs/DECISION_LOG.md
     api-secret-key: test-twitter-api-secret-key
-    # Ported from backend/app/tasks/tweet_monitoring.py:L46-47 (faithful port) — DL-031 — see docs/DECISION_LOG.md
-    consumer-key: test-twitter-consumer-key
-    consumer-secret: test-twitter-consumer-secret
+    # Ported from backend/app/tasks/tweet_monitoring.py:L46-47 (faithful port) — DL-031, DL-190 — see
+    # docs/DECISION_LOG.md
+    # Blank under the test profile: task/TweetStreamClient reads these two keys at the head of
+    # start() and reaches no host while either carries no value, so a context-loading test issues no
+    # request to X.
+    consumer-key: ''
+    consumer-secret: ''
     # Ported from backend/app/services/twitter_service.py:L13 and backend/app/tasks/tweet_monitoring.py:L48-49 (faithful port) — DL-046 — see docs/DECISION_LOG.md
+    # OAuth 1.0a user-context components. Declared so every key the retired tree referenced resolves;
+    # the X API v2 read path signs nothing with them.
     access-token: test-twitter-access-token
     access-token-secret: test-twitter-access-token-secret
 
@@ -56,18 +69,30 @@ scanner:
     api-key: test-notion-api-key
     # Ported from backend/app/services/notion_service.py:L24,L35 (faithful port) — see docs/DECISION_LOG.md
     database-id: test-notion-database-id
+    # Net-new (no Python counterpart) — DL-094 — see docs/DECISION_LOG.md
+    api-version: 2022-06-28
+    # Net-new (no Python counterpart) — DL-093 — see docs/DECISION_LOG.md
+    connect-timeout-seconds: 5
+    # Net-new (no Python counterpart) — DL-093 — see docs/DECISION_LOG.md
+    read-timeout-seconds: 10
 
   openai:
     # Ported from backend/app/core/config.py:L8 and backend/app/services/llm_service.py:L9 (faithful port) — see docs/DECISION_LOG.md
     api-key: test-openai-api-key
     # Net-new (no Python counterpart) — DL-033 — see docs/DECISION_LOG.md
     model: gpt-5.6-terra
-    # Ported from backend/app/services/llm_service.py:L22 (faithful port) — DL-034 — see docs/DECISION_LOG.md
-    max-completion-tokens: 150
-    # Ported from backend/app/services/llm_service.py:L25 (faithful port) — see docs/DECISION_LOG.md
-    temperature: 0.7
+    # Ported from backend/app/services/llm_service.py:L22 — DL-034, DL-145 — see docs/DECISION_LOG.md
+    max-completion-tokens: 1000
+    # scanner.openai.temperature is deliberately left unset here, as it is in application.yml — a
+    # reasoning model rejects an explicit temperature — DL-145 — see docs/DECISION_LOG.md
     # Ported from backend/app/services/llm_service.py:L23 (faithful port) — see docs/DECISION_LOG.md
     n: 1
+    # Net-new (no Python counterpart) — DL-145 — see docs/DECISION_LOG.md
+    reasoning-effort: low
+    # Net-new (no Python counterpart) — DL-146 — see docs/DECISION_LOG.md
+    request-timeout-seconds: 30
+    # Net-new (no Python counterpart) — DL-146 — see docs/DECISION_LOG.md
+    max-retries: 2
 
   jwt:
     # Key ported from backend/app/core/security.py:L11; test value is net-new — DL-016 — see docs/DECISION_LOG.md

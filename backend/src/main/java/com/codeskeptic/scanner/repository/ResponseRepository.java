@@ -2,10 +2,15 @@ package com.codeskeptic.scanner.repository;
 
 import com.codeskeptic.scanner.entity.Response;
 import com.codeskeptic.scanner.entity.Tweet;
+import jakarta.persistence.LockModeType;
+import java.util.Optional;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 /**
  * Spring Data JPA repository for the {@link Response} entity, which maps the {@code responses}
@@ -16,7 +21,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * interface already parsed; it is carried as a {@link String} only at the wire boundary — see
  * docs/DECISION_LOG.md DL-023 and DL-048.
  *
- * <p>Two members are declared below. Every other operation the consumers perform is inherited from
+ * <p>Three members are declared below. Every other operation the consumers perform is inherited from
  * {@link JpaRepository}:
  *
  * <ul>
@@ -56,8 +61,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * Page<Response> page = responseRepository.findAll(PageRequest.of(wirePage - 1, perPage));
  * Optional<Response> found = responseRepository.findById(responseId);
  * Response saved = responseRepository.save(response);
- * long totalResponses = responseRepository.count();
- * long approvedResponses = responseRepository.countByIsApprovedTrue();
+ * ResponseRepository.ResponseCounts counts = responseRepository.findResponseCounts();
  * }</pre>
  *
  * @see Response
@@ -65,6 +69,8 @@ import org.springframework.data.jpa.repository.JpaRepository;
 // Ported from backend/app/db/database.py:L10-13 (faithful port) — see docs/DECISION_LOG.md
 // The declared member has no source counterpart: backend/app/api/analytics.py:L3 imported an
 // AnalyticsService that no module defined; the summary metric set is net-new — DL-041 — see
+// docs/DECISION_LOG.md
+// The identifier type parameter is Integer, matching responses.id — DL-070, DL-138 — see
 // docs/DECISION_LOG.md
 public interface ResponseRepository extends JpaRepository<Response, Integer> {
 
@@ -90,23 +96,74 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
     @EntityGraph(attributePaths = "tweet")
     Page<Response> findAll(Pageable pageable);
 
-    // The approved_responses metric of dto/SummaryDto, over the is_approved column at
-    // backend/app/db/models.py:L26 — DL-041 — see docs/DECISION_LOG.md
+    // The total_responses and approved_responses metrics of dto/SummaryDto, over the is_approved
+    // column at backend/app/db/models.py:L26 — DL-041 — see docs/DECISION_LOG.md
     /**
-     * Counts the {@code responses} rows whose {@code is_approved} column holds {@code true}.
+     * Returns the total {@code responses} row count and the approved row count together, read by one
+     * statement.
      *
-     * <p>Spring Data derives the query from this method name: the {@code countBy} subject yields a
-     * row count, the {@code True} keyword yields the predicate, and the remaining
-     * {@code IsApproved} binds to the {@code isApproved} attribute of {@link Response}. The
-     * resulting count excludes a row whose {@code is_approved} is {@code false} and a row whose
-     * {@code is_approved} is {@code null}; {@code AnalyticsService} reports the number of those rows
-     * as {@code pending_responses}, by subtracting this value from {@code count()} — see
-     * docs/DECISION_LOG.md DL-041.
+     * <p>Both counts come from a single aggregate over the {@code responses} table, so the approved
+     * count can never exceed the total count and the {@code pending_responses} metric
+     * {@code AnalyticsService} derives from them can never be negative, whatever concurrent writes
+     * commit while the query runs. Reading the two counts as separate statements does not offer that
+     * guarantee under a read-committed isolation level.
+     *
+     * <p>{@code approved} counts only a row whose {@code is_approved} holds {@code true}: the
+     * {@code case} expression yields {@code null} for {@code false} and for {@code null}, and
+     * {@code count} ignores {@code null}. The expression uses standard JPQL only, so it renders on
+     * every supported vendor.
      *
      * <p>The query reads the {@code responses} table alone.
      *
-     * @return the number of {@code responses} rows marked approved, and {@code 0} when the table
-     *         holds no such row
+     * @return the two counts, never {@code null}; both are {@code 0} for an empty table
      */
     long countByIsApprovedTrue();
+
+    // The existence guard of the single generation owner — DL-196 — see docs/DECISION_LOG.md
+    /**
+     * Reports whether the {@code responses} table already holds a row whose {@code tweet_id} column
+     * names the supplied {@code tweets} row.
+     *
+     * <p>Spring Data derives the query from this method name: the {@code existsBy} subject yields an
+     * existence check, and {@code Tweet} binds to the {@code tweet} association of {@link Response},
+     * whose owning column is {@code tweet_id}. The check loads no row and traverses no association.
+     *
+     * <p>{@code ResponseService} reads it inside the same transaction that inserts a generated row, so
+     * a background pass cannot add a second reply to a row that acquired one while a language model
+     * was answering — see docs/DECISION_LOG.md DL-196.
+     *
+     * @param tweetId the primary key of the {@code tweets} row to test; a {@code null} value reports
+     *                {@code false}
+     * @return {@code true} when at least one {@code responses} row names {@code tweetId}
+     */
+    boolean existsByTweetId(Integer tweetId);
+    // Pessimistic write lock ahead of a partial response update — DL-122 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Returns the {@code responses} row the identifier addresses, holding a write lock on it for the
+     * remainder of the calling transaction.
+     *
+     * <p>{@link LockModeType#PESSIMISTIC_WRITE} makes the read issue a locking select — {@code for
+     * update} on PostgreSQL, MySQL and H2 alike — so a second transaction reading the same row through
+     * this operation waits until the first commits. Every column of the row is therefore read, mutated
+     * and written without another writer observing the intermediate state, which is what keeps the two
+     * independently writable columns {@code content} and {@code is_approved} from overwriting one
+     * another when two {@code PUT /responses/{responseId}} requests are served at the same moment —
+     * DL-122.
+     *
+     * <p>The lock is acquired for the duration of the caller's transaction, so this operation must be
+     * called from inside one; {@code ResponseService.updateResponse} declares
+     * {@link org.springframework.transaction.annotation.Transactional}. It is not called on the read
+     * path, where {@code findById} is used and no lock is taken.
+     *
+     * <p>The row content, order and identifier semantics are those of {@code findById(Integer)}: an
+     * empty {@link java.util.Optional} denotes an identifier that is not present, which the caller
+     * reports with the wire literal of {@code backend/app/api/responses.py:L65}.
+     *
+     * @param id the parsed identifier of the row to lock and read
+     * @return the row, or an empty {@link java.util.Optional} when the identifier is not present
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select r from Response r where r.id = :id")
+    Optional<Response> findByIdForUpdate(@Param("id") Integer id);
 }

@@ -25,7 +25,7 @@ import jakarta.persistence.Table;
 // are declared as JPA quoted identifiers, with the physical column names key and value — DL-061;
 // key declares length = 768 where the source declared no bound — DL-069 — see
 // docs/DECISION_LOG.md
-// equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see
+// equals(Object) and hashCode() are net-new Java persistence mechanics — DL-203 — see
 // docs/DECISION_LOG.md
 @Entity
 @Table(name = "settings")
@@ -97,7 +97,7 @@ public class Setting {
         this.description = description;
     }
 
-    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-203 — see
     // docs/DECISION_LOG.md
     /**
      * Compares two settings by their {@code key} identifier.
@@ -126,7 +126,7 @@ public class Setting {
         return thisKey != null && thisKey.equals(that.getKey());
     }
 
-    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-203 — see
     // docs/DECISION_LOG.md
     /**
      * Returns a hash code derived from the entity type. The value is identical

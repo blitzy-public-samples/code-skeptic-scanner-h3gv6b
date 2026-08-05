@@ -12,7 +12,7 @@ import org.springframework.context.annotation.Configuration;
 import com.zaxxer.hikari.HikariDataSource;
 
 // Ported from backend/app/db/database.py:L5-13 (faithful port) — see docs/DECISION_LOG.md DL-027,
-// DL-028, DL-058.
+// DL-028.
 /**
  * The connection source for the persistence layer.
  *

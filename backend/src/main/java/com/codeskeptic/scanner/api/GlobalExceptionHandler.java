@@ -1,11 +1,17 @@
 package com.codeskeptic.scanner.api;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.TypeMismatchException;
+import org.springframework.boot.web.error.ErrorAttributeOptions;
+import org.springframework.boot.web.servlet.error.DefaultErrorAttributes;
+import org.springframework.boot.web.servlet.error.ErrorAttributes;
+import org.springframework.context.annotation.Bean;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -21,133 +27,67 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.RequestAttributes;
+import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import com.codeskeptic.scanner.dto.ErrorResponse;
+import com.codeskeptic.scanner.util.LogSafe;
 import com.codeskeptic.scanner.exception.BadRequestException;
 import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.exception.ResponseGenerationException;
+import com.codeskeptic.scanner.util.LogSafe;
+
+import jakarta.servlet.RequestDispatcher;
 
 /**
  * Translates an exception raised while a request is being handled into the HTTP status code and the
  * response body the service returns.
  *
- * <p>This class is the service's single exception-to-status translation point. The retired Python tree
- * registered two handlers on the application object — {@code @app.errorhandler(404)} at
- * {@code backend/app/main.py:L31-33} and {@code @app.errorhandler(500)} at {@code :L35-37} — and
- * carried the other eight status/body pairs inline inside the eleven route functions.
+ * <p>Every response body is the single-key {@link ErrorResponse} envelope. The handlers preserve the
+ * source route literals and the global {@code Not found} and {@code Internal server error} literals.
+ * Framework request failures map to 400, 405, 406 or 415; response-write and unexpected failures map
+ * to 500. Authentication failures are handled by the security chain, and servlet error dispatches
+ * are handled by {@link ErrorDispatchController}.
  *
- * <p>A failure answered by {@code HttpServletResponse.sendError(int)} unwinds the current dispatch
- * before any exception can reach this advice, and the container re-dispatches the request to the error
- * page. {@link ErrorDispatchController} answers that dispatch with the same literals declared below,
- * so the two classes together are the whole of the service's error surface — DL-183.
+ * <p>A failure answered by {@code HttpServletResponse.sendError(int)} reaches no handler declared
+ * here; the container re-dispatches the request to the error page, which
+ * {@link ErrorDispatchController} answers with the same literals declared below — DL-183.
  *
  * <p>Every body produced here is an {@link ErrorResponse}: the single-key
- * {@code {"error": <string>}} envelope. The complete set of status and message pairs this class puts
- * on the wire is the following.
+ * {@code {"error": <string>}} envelope. The complete set of status and message pairs it puts on the
+ * wire is the following.
  *
  * <table border="1">
  * <caption>Status and message emitted by each handler</caption>
- * <tr>
- *   <th>Handler</th><th>Status</th><th>Message on the wire</th><th>Source</th>
- * </tr>
- * <tr>
- *   <td>{@link #handleNotFound(NotFoundException)}</td><td>404</td>
- *   <td>{@code Tweet not found}</td><td>{@code backend/app/api/tweets.py:L32}, {@code :L43}</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleNotFound(NotFoundException)}</td><td>404</td>
- *   <td>{@code Response not found}</td><td>{@code backend/app/api/responses.py:L31}</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleNotFound(NotFoundException)}</td><td>404</td>
- *   <td>{@code Response not found or update failed}</td>
- *   <td>{@code backend/app/api/responses.py:L65}</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleNotFound(NotFoundException)}</td><td>404</td>
- *   <td>{@code Setting not found}</td><td>{@code backend/app/api/settings.py:L22}</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleBadRequest(BadRequestException)}</td><td>400</td>
- *   <td>{@code Tweet ID is required}</td><td>{@code backend/app/api/responses.py:L41}</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleBadRequest(BadRequestException)}</td><td>400</td>
- *   <td>{@code Update data is required}</td><td>{@code backend/app/api/responses.py:L57}</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleBadRequest(BadRequestException)}</td><td>400</td>
- *   <td>{@code No value provided}</td><td>{@code backend/app/api/settings.py:L18}</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleResponseGenerationFailure(ResponseGenerationException)}</td><td>500</td>
- *   <td>{@code Failed to generate response}</td><td>{@code backend/app/api/responses.py:L49}</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleMethodArgumentNotValid(MethodArgumentNotValidException)}</td><td>400</td>
- *   <td>{@code Tweet ID is required}</td><td>{@code backend/app/api/responses.py:L41}</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleMethodArgumentNotValid(MethodArgumentNotValidException)}</td><td>400</td>
- *   <td>{@code No value provided}</td><td>{@code backend/app/api/settings.py:L18}</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleNoHandlerFound()}</td><td>404</td>
- *   <td>{@code Not found}</td><td>{@code backend/app/main.py:L33}</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleClientRequestFailure(Exception)}</td><td>400</td>
- *   <td>{@code Bad request}</td><td>net-new — see docs/DECISION_LOG.md DL-092</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleMessageConversionFailure(HttpMessageConversionException)}</td><td>400</td>
- *   <td>{@code Bad request}</td><td>net-new — see docs/DECISION_LOG.md DL-188</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleResponseWriteFailure(HttpMessageNotWritableException)}</td><td>500</td>
- *   <td>{@code Internal server error}</td><td>net-new — see docs/DECISION_LOG.md DL-188</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleMethodNotSupported(HttpRequestMethodNotSupportedException)}</td><td>405</td>
- *   <td>{@code Method not allowed}</td><td>net-new — see docs/DECISION_LOG.md DL-092</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleNotAcceptable(HttpMediaTypeNotAcceptableException)}</td><td>406</td>
- *   <td>{@code Not acceptable}</td><td>net-new — see docs/DECISION_LOG.md DL-092</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleUnsupportedMediaType(HttpMediaTypeNotSupportedException)}</td><td>415</td>
- *   <td>{@code Unsupported media type}</td><td>net-new — see docs/DECISION_LOG.md DL-092</td>
- * </tr>
- * <tr>
- *   <td>{@link #handleUnexpectedException(Exception)}</td><td>500</td>
- *   <td>{@code Internal server error}</td><td>{@code backend/app/main.py:L37}</td>
- * </tr>
  * </table>
+ *
+ * <p>The last row is not an exception handler. This class is also the application's
+ * The servlet container's error path —
+ * {@code server.error.path}, {@code /error} by default — is served here rather than by the
+ * framework-supplied controller, and an error dispatch produces the same single-key envelope as every
+ * other row — DL-184.
  *
  * <p>The three {@code com.codeskeptic.scanner.exception} types declare no {@code @ResponseStatus};
  * their status is assigned here. Their messages are copied through {@link Throwable#getMessage()}
- * unaltered, so each of the eight per-route literals round-trips character-for-character.
+ * unaltered; each of the eight per-route literals round-trips character-for-character.
  *
- * <p>Spring selects a handler by exception type, most specific match first. A client failure Spring
- * MVC raises — a malformed or unbindable body, a missing or unconvertible request value, an
- * unsupported method, an unsupported media type or an unsatisfiable {@code Accept} header — is matched
- * by one of the five framework handlers and keeps the status the framework assigns it;
- * {@link #handleUnexpectedException(Exception)} receives what no earlier handler matches — DL-092,
+ * <p>A client failure Spring MVC raises — a malformed or unbindable body, a missing or unconvertible
+ * request value, an unsupported method, an unsupported media type or an unsatisfiable {@code Accept}
+ * header — is matched by one of the five framework handlers and keeps the status the framework assigns
+ * it; {@link #handleUnexpectedException(Exception)} receives what no earlier handler matches — DL-092,
  * DL-188.
  *
- * <p>Three of those handlers divide the {@link HttpMessageConversionException} hierarchy by the
- * direction of the failure: {@link HttpMessageNotReadableException} and
- * {@link HttpMessageNotWritableException} are each declared on a handler of their own, and the
- * supertype is declared on a third, so a request the converter could not read answers 400 while a
- * response it could not write answers 500 — DL-188.
+ * <p>{@link HttpMessageNotReadableException}, {@link HttpMessageNotWritableException} and their
+ * {@link HttpMessageConversionException} supertype are each declared on a handler of their own: a
+ * request the converter could not read answers 400, a response it could not write answers 500 —
+ * DL-188.
  *
  * <p>Authentication and authorisation failures are answered by the security filter chain, which runs
  * ahead of the {@code DispatcherServlet}; no exception from them reaches this class. A request the
- * chain's firewall rejects is answered with {@code sendError} and therefore reaches
+ * chain's firewall rejects is answered with {@code sendError} and reaches
  * {@link ErrorDispatchController} instead.
  *
  * <p>All state declared here is immutable. The single advice instance is safe to share across
@@ -183,6 +123,19 @@ public class GlobalExceptionHandler {
     private static final String NOT_ACCEPTABLE = "Not acceptable";
 
     /**
+     * The literal each status this advice declares carries, read by
+     * {@code api/ErrorDispatchController} when the container reports a status rather than an
+     * exception. A status absent from this map is answered {@value #INTERNAL_SERVER_ERROR} — DL-184.
+     */
+    private static final Map<HttpStatus, String> ERROR_MESSAGE_BY_STATUS = Map.of(
+            HttpStatus.BAD_REQUEST, BAD_REQUEST,
+            HttpStatus.NOT_FOUND, NOT_FOUND,
+            HttpStatus.METHOD_NOT_ALLOWED, METHOD_NOT_ALLOWED,
+            HttpStatus.NOT_ACCEPTABLE, NOT_ACCEPTABLE,
+            HttpStatus.UNSUPPORTED_MEDIA_TYPE, UNSUPPORTED_MEDIA_TYPE,
+            HttpStatus.INTERNAL_SERVER_ERROR, INTERNAL_SERVER_ERROR);
+
+    /**
      * Rejected-field names that select {@link BadRequestException#TWEET_ID_IS_REQUIRED}.
      *
      * <p>Holds the record component name of {@code com.codeskeptic.scanner.dto.CreateResponseRequest}
@@ -198,12 +151,45 @@ public class GlobalExceptionHandler {
      */
     private static final Set<String> VALUE_FIELD_NAMES = Set.of("value");
 
+    /** JSON key of the single-key envelope declared by {@code dto.ErrorResponse}. */
+    private static final String ERROR_KEY = "error";
+
+    /**
+     * Messages keyed by the status the container recorded, for the four statuses of the
+     * {@code ERROR} dispatch that carry a message of their own.
+     */
+    private static final Map<Integer, String> ERROR_DISPATCH_MESSAGES = Map.of(
+            HttpStatus.NOT_FOUND.value(), NOT_FOUND,
+            HttpStatus.METHOD_NOT_ALLOWED.value(), METHOD_NOT_ALLOWED,
+            HttpStatus.NOT_ACCEPTABLE.value(), NOT_ACCEPTABLE,
+            HttpStatus.UNSUPPORTED_MEDIA_TYPE.value(), UNSUPPORTED_MEDIA_TYPE);
+
+    // Ported from backend/app/main.py:L31-37 (faithful port) — see docs/DECISION_LOG.md DL-092
+    /**
+     * Publishes the error-attribute source that renders this class's envelope on the servlet
+     * {@code ERROR} dispatch.
+     *
+     * <p>The handler methods below translate every exception that reaches the
+     * {@code DispatcherServlet} during a {@code REQUEST} dispatch. A failure answered with
+     * {@code HttpServletResponse.sendError(int)} — which Spring Security's request firewall issues
+     * for a rejected path such as {@code //tweets} — unwinds that dispatch and asks the container to
+     * re-dispatch to the error page. This bean supplies the attributes the framework's own error
+     * controller renders on that second dispatch, so both dispatches put the same single-key envelope
+     * on the wire and neither carries a request path, a timestamp or an exception detail.
+     *
+     * @return the error-attribute source, replacing the framework default
+     */
+    @Bean
+    ErrorAttributes errorEnvelopeAttributes() {
+        return new ErrorEnvelopeAttributes();
+    }
+
     /**
      * Reports an absent entity with HTTP 404 and the exception's own message.
      *
      * <p>Carries the four literals of {@code backend/app/api/tweets.py:L32,L43},
      * {@code backend/app/api/responses.py:L31,L65} and {@code backend/app/api/settings.py:L22}; the
-     * message is passed through unmapped, so the two response-scoped literals stay distinct.
+     * message is passed through unmapped, and the two response-scoped literals stay distinct.
      *
      * @param ex the raised exception; its {@link Throwable#getMessage()} becomes the response body
      * @return HTTP 404 carrying {@code {"error": <ex.getMessage()>}}
@@ -263,9 +249,9 @@ public class GlobalExceptionHandler {
      * <p>Both messages are read from the constants declared on {@link BadRequestException}, the same
      * constants {@link #handleBadRequest(BadRequestException)} passes through.
      *
-     * <p>An unmapped field name yields that field error's own
-     * {@link FieldError#getDefaultMessage()}, and a binding result carrying no field error yields
-     * {@code {"error": null}}.
+     * <p>An unmapped field name and a binding result carrying no field error both yield
+     * {@value #BAD_REQUEST}, so this handler emits one of exactly three messages and no framework
+     * text, no annotation text and no field name reaches the wire.
      *
      * @param ex the raised exception, whose binding result supplies the rejected field names
      * @return HTTP 400 carrying the single-key error envelope
@@ -273,7 +259,8 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ErrorResponse> handleMethodArgumentNotValid(MethodArgumentNotValidException ex) {
         List<FieldError> fieldErrors = ex.getBindingResult().getFieldErrors();
-        String message = fieldErrors.isEmpty() ? null : validationMessageFor(fieldErrors.get(0));
+        String message =
+                fieldErrors.isEmpty() ? BAD_REQUEST : validationMessageFor(fieldErrors.get(0));
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(new ErrorResponse(message));
     }
 
@@ -306,17 +293,23 @@ public class GlobalExceptionHandler {
      * cannot hold ({@link TypeMismatchException}, which is the supertype of the path-variable and
      * query-parameter conversion failures).
      *
+     * <p>A request body repeating a member is one such unreadable body: with
+     * {@code spring.jackson.parser.strict-duplicate-detection} set to {@code true}, the parser reports
+     * {@code {"value":"first","value":"second"}} on {@code PUT /settings/{key}} and
+     * {@code {"username":"admin","password":"a","password":"b"}} on {@code POST /auth/token} as
+     * {@link HttpMessageNotReadableException}, and each answers 400 here — DL-188.
+     *
      * <p>The eight per-route 400 literals are carried by {@link BadRequestException} and answered by
      * {@link #handleBadRequest(BadRequestException)} — DL-092.
      *
-     * @param ex the raised exception; neither its type nor its message reaches the response body
+     * @param ex the raised exception; its message reaches neither the response body nor the log
      * @return HTTP 400 carrying {@code {"error": "Bad request"}}
      */
     // Net-new (no Python counterpart) — DL-092 — see docs/DECISION_LOG.md
     @ExceptionHandler({HttpMessageNotReadableException.class, ServletRequestBindingException.class,
             MissingServletRequestPartException.class, TypeMismatchException.class})
     public ResponseEntity<ErrorResponse> handleClientRequestFailure(Exception ex) {
-        log.debug("Rejecting a malformed request with HTTP 400: {}", ex.getClass().getSimpleName());
+        log.debug("Rejecting a malformed request with HTTP 400: {}", LogSafe.type(ex));
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(new ErrorResponse(BAD_REQUEST));
     }
 
@@ -324,32 +317,34 @@ public class GlobalExceptionHandler {
      * Reports a request body the converter could not bind onto the handler's parameter type with HTTP
      * 400 and the message {@value #BAD_REQUEST}.
      *
-     * <p>{@link HttpMessageConversionException} is the supertype of both
-     * {@link HttpMessageNotReadableException} and {@link HttpMessageNotWritableException}, and each of
-     * those is matched by a handler declaring it directly — this method therefore receives the
-     * supertype alone. {@code AbstractJackson2HttpMessageConverter.readJavaType} raises it, in place of
-     * the readable subtype, for every {@code com.fasterxml.jackson.databind.exc.InvalidDefinitionException}
-     * the binding of a request body produces. One such body is a JSON object repeating a member that
-     * binds to a record component, which the record has no fallback setter or field to accept: the
-     * bodies {@code {"value":"first","value":"second"}} on {@code PUT /settings/{key}} and
+     * <p>This method receives the {@link HttpMessageConversionException} supertype alone;
+     * {@link HttpMessageNotReadableException} and {@link HttpMessageNotWritableException} are each
+     * matched by a handler declaring them directly. {@code AbstractJackson2HttpMessageConverter}
+     * raises the supertype for every
+     * {@code com.fasterxml.jackson.databind.exc.InvalidDefinitionException} the binding of a request
+     * body produces, which includes a JSON object repeating a member that binds to a record
+     * component: {@code {"value":"first","value":"second"}} on {@code PUT /settings/{key}} and
      * {@code {"username":"admin","password":"a","password":"b"}} on {@code POST /auth/token} each
      * reach this method — DL-188.
      *
-     * <p>The status and the message are the ones
-     * {@link #handleClientRequestFailure(Exception)} serves, so a client reads one status and one
-     * literal for every unbindable body. The exception's class and message are written to the log at
-     * {@code WARN}; no part of either, and no part of the request body, reaches the response.
+     * <p>The status and the message are the ones {@link #handleClientRequestFailure(Exception)}
+     * serves.
      *
-     * @param ex the raised exception; neither its type nor its message reaches the response body
+     * <p>Only the exception's class name is written to the log, at {@code WARN}. Neither the class
+     * name, the detail message nor any part of the request body reaches the response — DL-052,
+     * DL-196.
+     *
+     * @param ex the raised exception; its message reaches neither the response body nor the log
      * @return HTTP 400 carrying {@code {"error": "Bad request"}}
      */
-    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-188, DL-196 — see docs/DECISION_LOG.md
     @ExceptionHandler(HttpMessageConversionException.class)
     public ResponseEntity<ErrorResponse> handleMessageConversionFailure(
             HttpMessageConversionException ex) {
 
-        log.warn("Rejecting a request body the converter could not bind with HTTP 400: {}: {}",
-                ex.getClass().getSimpleName(), ex.getMessage());
+        // The message of a binding failure quotes the request body — see docs/DECISION_LOG.md DL-197
+        log.warn("Rejecting a request body the converter could not bind with HTTP 400: {}; detail {}",
+                LogSafe.type(ex), LogSafe.correlation(ex.getMessage()));
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(new ErrorResponse(BAD_REQUEST));
     }
 
@@ -358,16 +353,14 @@ public class GlobalExceptionHandler {
      * {@value #INTERNAL_SERVER_ERROR}.
      *
      * <p>{@link HttpMessageNotWritableException} is raised after a handler has returned, while its
-     * return value is being serialised, so it reports a failure of this service rather than of the
-     * request. Declaring it here keeps it on the status and the message
-     * {@link #handleUnexpectedException(Exception)} serves, which is where it was matched before
-     * {@link #handleMessageConversionFailure(HttpMessageConversionException)} claimed its supertype —
-     * DL-188.
+     * return value is being serialised. It is answered with the status and the message
+     * {@link #handleUnexpectedException(Exception)} serves — DL-188.
      *
-     * <p>The exception is written to the log at {@code ERROR} with its stack trace; neither its type
-     * nor its message reaches the response body.
+     * <p>Only the exception's class name is written to the log, at {@code ERROR}; its message may
+     * carry response-field detail and stays out of the log, and neither its type nor its message
+     * reaches the response body — DL-052.
      *
-     * @param ex the raised exception, recorded in the log
+     * @param ex the raised exception, whose class name is recorded in the log
      * @return HTTP 500 carrying {@code {"error": "Internal server error"}}
      */
     // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
@@ -375,7 +368,8 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleResponseWriteFailure(
             HttpMessageNotWritableException ex) {
 
-        log.error("A response body could not be written; responding HTTP 500", ex);
+        log.error("A response body could not be written; responding HTTP 500: {}",
+                ex.getClass().getSimpleName());
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(new ErrorResponse(INTERNAL_SERVER_ERROR));
     }
@@ -410,7 +404,7 @@ public class GlobalExceptionHandler {
      *
      * <p>See docs/DECISION_LOG.md DL-092.
      *
-     * @param ex the raised exception; neither its type nor its message reaches the response body
+     * @param ex the raised exception; its message reaches neither the response body nor the log
      * @return HTTP 415 carrying {@code {"error": "Unsupported media type"}}
      */
     // Net-new (no Python counterpart) — DL-092 — see docs/DECISION_LOG.md
@@ -429,15 +423,15 @@ public class GlobalExceptionHandler {
      *
      * <p>See docs/DECISION_LOG.md DL-092.
      *
-     * @param ex the raised exception; neither its type nor its message reaches the response body
+     * @param ex the raised exception; its message reaches neither the response body nor the log
      * @return HTTP 406 carrying {@code {"error": "Not acceptable"}}
      */
     // Net-new (no Python counterpart) — DL-092 — see docs/DECISION_LOG.md
     @ExceptionHandler(HttpMediaTypeNotAcceptableException.class)
     public ResponseEntity<ErrorResponse> handleNotAcceptable(HttpMediaTypeNotAcceptableException ex) {
         log.debug("Rejecting a request whose Accept header cannot be satisfied with HTTP 406");
-        // The envelope is written as JSON irrespective of the unsatisfiable Accept header, so the
-        // response always carries a body - DL-092 - see docs/DECISION_LOG.md
+        // The envelope is written as JSON irrespective of the unsatisfiable Accept header - DL-092 -
+        // see docs/DECISION_LOG.md
         return ResponseEntity.status(HttpStatus.NOT_ACCEPTABLE)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(new ErrorResponse(NOT_ACCEPTABLE));
@@ -447,10 +441,9 @@ public class GlobalExceptionHandler {
      * Reports any exception no other handler matches with HTTP 500 and the message
      * {@value #INTERNAL_SERVER_ERROR}.
      *
-     * <p>Reproduces {@code backend/app/main.py:L35-37}. A client failure the framework raises is
-     * matched by an earlier handler — DL-092, DL-188 — so what reaches this method is a failure of
-     * this service. The exception is written to the log at {@code ERROR} with its stack trace; neither
-     * its type nor its message reaches the response body.
+     * <p>Reproduces {@code backend/app/main.py:L35-37}: every exception no earlier handler matches is
+     * answered here. The exception is written to the log at {@code ERROR} with its stack trace;
+     * neither its type nor its message reaches the response body.
      *
      * @param ex the raised exception, recorded in the log
      * @return HTTP 500 carrying {@code {"error": "Internal server error"}}
@@ -467,8 +460,8 @@ public class GlobalExceptionHandler {
      *
      * @param fieldError the rejected field reported by Bean Validation
      * @return {@link BadRequestException#TWEET_ID_IS_REQUIRED} or
-     *         {@link BadRequestException#NO_VALUE_PROVIDED} for a mapped field name, otherwise the
-     *         field error's own default message, which may be {@code null}
+     *         {@link BadRequestException#NO_VALUE_PROVIDED} for a mapped field name, otherwise
+     *         {@value #BAD_REQUEST}; never {@code null} and never the field error's own message
      */
     private static String validationMessageFor(FieldError fieldError) {
         String field = fieldError.getField();
@@ -480,6 +473,76 @@ public class GlobalExceptionHandler {
                 return BadRequestException.NO_VALUE_PROVIDED;
             }
         }
-        return fieldError.getDefaultMessage();
+        return BAD_REQUEST;
+    }
+
+    /**
+     * Resolves the wire message for a status the container recorded on an {@code ERROR} dispatch.
+     *
+     * @param status the recorded status
+     * @return the message to carry under {@value #ERROR_KEY}, or {@code null} when the dispatched
+     *         status carries no body
+     */
+    private static String errorDispatchMessageFor(int status) {
+        if (status == HttpStatus.UNAUTHORIZED.value() || status == HttpStatus.FORBIDDEN.value()) {
+            return null;
+        }
+        String mapped = ERROR_DISPATCH_MESSAGES.get(status);
+        if (mapped != null) {
+            return mapped;
+        }
+        boolean clientError = status >= HttpStatus.BAD_REQUEST.value()
+                && status < HttpStatus.INTERNAL_SERVER_ERROR.value();
+        return clientError ? BAD_REQUEST : INTERNAL_SERVER_ERROR;
+    }
+
+    /**
+     * Renders the single-key error envelope for the servlet {@code ERROR} dispatch.
+     *
+     * <p>Every attribute the framework default contributes — {@code timestamp}, {@code status},
+     * {@code error}, {@code path}, {@code exception}, {@code message}, {@code trace} and
+     * {@code errors} — is replaced by the one key {@value GlobalExceptionHandler#ERROR_KEY} carrying
+     * one of the six literals this class declares, selected by
+     * {@link GlobalExceptionHandler#errorDispatchMessageFor(int)}. A dispatched 401 or 403 yields no
+     * attribute at all, keeping the bodyless shape the security chain produces on the first dispatch.
+     *
+     * <p>The superclass is retained so the framework still records the dispatched exception as a
+     * request attribute; only the rendered attribute map is replaced.
+     */
+    private static final class ErrorEnvelopeAttributes extends DefaultErrorAttributes {
+
+        /**
+         * Returns the attribute map rendered for the dispatched failure.
+         *
+         * @param webRequest the dispatched request, read only for the recorded status
+         * @param options    the framework's inclusion options; this implementation ignores them and
+         *                   contributes no optional attribute
+         * @return an immutable map holding at most the single key
+         *         {@value GlobalExceptionHandler#ERROR_KEY}
+         */
+        @Override
+        public Map<String, Object> getErrorAttributes(WebRequest webRequest,
+                ErrorAttributeOptions options) {
+            int status = recordedStatus(webRequest);
+            String message = errorDispatchMessageFor(status);
+            log.debug("Rendering the error envelope for a dispatched status of {}", status);
+            return (message == null) ? Map.of() : Map.of(ERROR_KEY, message);
+        }
+
+        /**
+         * Reads the status the container recorded for the failure being dispatched.
+         *
+         * @param webRequest the dispatched request
+         * @return the recorded status, or {@link HttpStatus#INTERNAL_SERVER_ERROR}'s value when the
+         *         attribute is absent or does not hold an integer
+         */
+        private static int recordedStatus(WebRequest webRequest) {
+            Object recorded = webRequest.getAttribute(RequestDispatcher.ERROR_STATUS_CODE,
+                    RequestAttributes.SCOPE_REQUEST);
+            if (recorded instanceof Integer value) {
+                return value;
+            }
+            return HttpStatus.INTERNAL_SERVER_ERROR.value();
+        }
     }
 }

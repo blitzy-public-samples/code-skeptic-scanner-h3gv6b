@@ -3,6 +3,19 @@
 # Ported from backend/app/main.py:L53 (faithful port) — DL-029 — see docs/DECISION_LOG.md
 server:
   port: ${PORT:5000}
+  # Net-new (no Python counterpart) — see docs/DECISION_LOG.md
+  # The platform terminates TLS and forwards X-Forwarded-Proto. With this strategy the request
+  # reports the forwarded scheme, so HttpServletRequest.isSecure() is true behind that terminator and
+  # Spring Security's Strict-Transport-Security writer emits its header.
+  forward-headers-strategy: ${FORWARD_HEADERS_STRATEGY:framework}
+
+# Net-new (the retired tree configured no logging framework) — DL-052 — see docs/DECISION_LOG.md
+# Spring Boot's default root level is INFO. This key names the application logger explicitly so the
+# DEBUG diagnostics of the ingestion, scheduling and adapter paths are reachable by configuration
+# alone, without a logback or log4j document.
+logging:
+  level:
+    com.codeskeptic.scanner: ${SCANNER_LOG_LEVEL:INFO}
 
 # Ported from backend/app/main.py:L15-39 and backend/app/db/database.py:L5-13 (faithful port) — see docs/DECISION_LOG.md
 spring:
@@ -11,6 +24,12 @@ spring:
     web-application-type: servlet
   # spring.datasource.url / .username / .password / .driver-class-name — not set — DL-027 — see docs/DECISION_LOG.md
   # spring.jackson.property-naming-strategy — not set — DL-022 — see docs/DECISION_LOG.md
+  jackson:
+    parser:
+      # Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
+      # A request body repeating a member is reported as unreadable input, answering
+      # 400 {"error": "Bad request"}.
+      strict-duplicate-detection: true
   jpa:
     hibernate:
       # Net-new (no Python counterpart) — DL-026 — see docs/DECISION_LOG.md
@@ -20,8 +39,8 @@ spring:
     # spring.jpa.database-platform — not set — DL-027 — see docs/DECISION_LOG.md
     properties:
       hibernate:
-        # Net-new (no Python counterpart) — column names at
-        # backend/app/db/models.py:L42-43 — DL-061 — see docs/DECISION_LOG.md
+        # Net-new (no Python counterpart). Required because the settings table declares the
+        # reserved-word column names key and value at backend/app/db/models.py:L42-43
         auto_quote_keyword: true
 
 scanner:
@@ -62,29 +81,38 @@ scanner:
     api-key: ${OPENAI_API_KEY:}
     # Net-new (no Python counterpart) — DL-033 — see docs/DECISION_LOG.md
     model: gpt-5.6-terra
-    # Ported from backend/app/services/llm_service.py:L22 (faithful port) — DL-034 — see docs/DECISION_LOG.md
-    max-completion-tokens: 150
-    # Ported from backend/app/services/llm_service.py:L25 (faithful port) — see docs/DECISION_LOG.md
-    temperature: 0.7
+    # Ported from backend/app/services/llm_service.py:L22 — DL-034, DL-145 — see docs/DECISION_LOG.md
+    # Source value: 150. A reasoning model spends this budget on reasoning as well as on visible
+    # output, so the default is raised above the source literal.
+    max-completion-tokens: ${OPENAI_MAX_COMPLETION_TOKENS:1000}
+    # Ported from backend/app/services/llm_service.py:L25 — DL-145 — see docs/DECISION_LOG.md
+    # Source value: 0.7. scanner.openai.temperature is deliberately not set here: a reasoning model
+    # accepts only its own default temperature and rejects any explicit value with HTTP 400, so
+    # nothing is sent on the request unless a deployment supplies SCANNER_OPENAI_TEMPERATURE.
+    # Accepted range when supplied: 0 to 2 inclusive; the value is range-checked at the request.
     # Ported from backend/app/services/llm_service.py:L23 (faithful port) — see docs/DECISION_LOG.md
-    n: 1
+    n: ${OPENAI_N:1}
     # Net-new (no Python counterpart) — DL-145 — see docs/DECISION_LOG.md
-    # Accepted values: none, minimal, low, medium, high, xhigh, max. Blank omits the parameter.
-    reasoning-effort: ${OPENAI_REASONING_EFFORT:minimal}
+    # Accepted by the configured model: none, low, medium, high, xhigh. A blank value omits the
+    # parameter. Measured against gpt-5.6-terra: minimal and max are answered HTTP 400
+    # unsupported_value — see docs/DECISION_LOG.md DL-145.
+    reasoning-effort: ${OPENAI_REASONING_EFFORT:low}
     # Net-new (no Python counterpart) — DL-146 — see docs/DECISION_LOG.md
     request-timeout-seconds: ${OPENAI_REQUEST_TIMEOUT_SECONDS:30}
-    # Net-new (no Python counterpart) — DL-146 — see docs/DECISION_LOG.md
+    # Net-new (no Python counterpart) — DL-146, DL-202 — see docs/DECISION_LOG.md
+    # Accepted range: 0 to 5 inclusive, where 0 disables retrying. The first request fails
+    # outside it.
     max-retries: ${OPENAI_MAX_RETRIES:2}
 
   jwt:
     # Ported from backend/app/core/security.py:L11 (faithful port) — DL-016, DL-141, DL-184, DL-185 — see docs/DECISION_LOG.md
-    # Minimum length: 32 bytes, the floor HS256 requires. Startup fails below it.
+    # Minimum length: 32 bytes. Startup fails below it.
     # Declared with no default: SECRET_KEY must be supplied. Startup fails when it is unset, blank or
     # still the unresolved text ${SECRET_KEY}.
     secret: ${SECRET_KEY}
     # Ported from backend/app/core/security.py:L11 (faithful port) — DL-015, DL-141, DL-184 — see docs/DECISION_LOG.md
-    # Accepted value: HS256, in any letter case. It is the only algorithm this service signs or verifies
-    # with, and any other value — HS384, HS512, RS256, none — refuses to start. Blank keeps HS256.
+    # Accepted value: HS256, in any letter case. Any other value — HS384, HS512, RS256, none — refuses
+    # to start. Blank keeps HS256.
     algorithm: ${ALGORITHM:HS256}
     # Ported from backend/app/core/security.py:L9-10 (faithful port) — DL-017, DL-142 — see docs/DECISION_LOG.md
     # Accepted range: 1 to 60 minutes inclusive. Startup fails outside it.

@@ -117,6 +117,11 @@ public record ScannerProperties(
      * {@code access-token} and {@code access-token-secret} are the retained OAuth 1.0a user-context
      * components, declared with empty defaults in {@code application.yml} — DL-046.
      *
+     * <p>{@code task/TweetStreamClient} reads {@code consumerKey} and {@code consumerSecret} for the
+     * app-only client-credentials exchange — DL-046. The remaining five components are declared so
+     * that every key the retired tree referenced resolves; the v2 read path signs nothing with them
+     * and no production code reads them — DL-031.
+     *
      * <p>Every component of this group is a credential and every one is redacted by
      * {@link #toString()}.
      *
@@ -187,8 +192,9 @@ public record ScannerProperties(
      *
      * <p>The credential and the database identifier are redacted by {@link #toString()}.
      *
-     * <p>{@code config/RestClientConfig} reads {@code apiVersion}, {@code connectTimeoutSeconds} and
-     * {@code readTimeoutSeconds} as it publishes the transport — DL-150, DL-151.
+     * <p>{@code config/RestClientConfig} reads {@code apiVersion} for the {@code Notion-Version}
+     * header, and {@code connectTimeoutSeconds} and {@code readTimeoutSeconds} for the request
+     * factory, as it publishes the transport — DL-150, DL-151.
      *
      * @param apiKey value of {@code scanner.notion.api-key}
      * @param databaseId value of {@code scanner.notion.database-id}
@@ -240,25 +246,36 @@ public record ScannerProperties(
      * The {@code scanner.openai} group: the OpenAI credential, the four call parameters and the three
      * transport and reasoning settings. Per-component provenance is recorded inline below.
      *
-     * <p>The three numeric call parameters transcribe the literals passed to
+     * <p>The three numeric call parameters name the literals passed to
      * {@code Completion.create(...)} at {@code backend/app/services/llm_service.py:L22-25}:
-     * {@code max_tokens=150}, {@code n=1} and {@code temperature=0.7}.
+     * {@code max_tokens=150}, {@code n=1} and {@code temperature=0.7}. Of those,
+     * {@code maxCompletionTokens} and {@code n} carry defaults; {@code temperature} carries none, so
+     * it is {@code null} unless a deployment sets it — DL-145.
+     *
+     * <p>{@code service/LlmService} reads every component of this group.
+     * {@code maxCompletionTokens}, {@code n}, {@code temperature}, {@code requestTimeoutSeconds} and
+     * {@code maxRetries} are range-checked there, and {@code reasoningEffort} is carried on the
+     * request when it is not blank — DL-145, DL-146.
      *
      * <p>{@code service/LlmService} validates {@code reasoningEffort},
      * {@code requestTimeoutSeconds} and {@code maxRetries} on the path that creates the client and
-     * builds the request — DL-145, DL-146.
+     * builds the request — DL-088, DL-089.
      *
      * @param apiKey value of {@code scanner.openai.api-key}, redacted by {@link #toString()}
      * @param model value of {@code scanner.openai.model}
      * @param maxCompletionTokens value of {@code scanner.openai.max-completion-tokens}, default
-     *     {@code 150}
-     * @param temperature value of {@code scanner.openai.temperature}, default {@code 0.7}
+     *     {@code 1000}
+     * @param temperature value of {@code scanner.openai.temperature}, or {@code null} when the key
+     *     is not set
      * @param n value of {@code scanner.openai.n}, default {@code 1}
      * @param reasoningEffort value of {@code scanner.openai.reasoning-effort}, default
-     *     {@code minimal}; blank omits the parameter from the request
+     *     {@code minimal}; sent as the request's reasoning effort, and blank omits the parameter from
+     *     the request
      * @param requestTimeoutSeconds value of {@code scanner.openai.request-timeout-seconds}, default
-     *     {@code 30}
-     * @param maxRetries value of {@code scanner.openai.max-retries}, default {@code 2}
+     *     {@code 30}; accepted range 1 to 300 seconds inclusive, checked by {@code service/LlmService} on first use
+     *     — see docs/DECISION_LOG.md DL-202
+     * @param maxRetries value of {@code scanner.openai.max-retries}, default {@code 2}; accepted range
+     *     0 to 5 inclusive, checked by {@code service/LlmService} on first use — see docs/DECISION_LOG.md DL-202
      */
     public record Openai(
 
@@ -272,23 +289,28 @@ public record ScannerProperties(
 
             // scanner.openai.max-completion-tokens — max_tokens=150 at
             // backend/app/services/llm_service.py:L22 — DL-034
-            @DefaultValue("150") long maxCompletionTokens,
+            @DefaultValue("1000") long maxCompletionTokens,
 
             // scanner.openai.temperature — temperature=0.7 at
-            // backend/app/services/llm_service.py:L25
-            @DefaultValue("0.7") double temperature,
+            // backend/app/services/llm_service.py:L25; declared with no default — DL-145
+            Double temperature,
 
             // scanner.openai.n — n=1 at backend/app/services/llm_service.py:L23
             @DefaultValue("1") long n,
 
             // scanner.openai.reasoning-effort — net-new: the source's completions call at
-            // backend/app/services/llm_service.py:L19-26 had no reasoning parameter — DL-145
+            // backend/app/services/llm_service.py:L19-26 had no reasoning parameter. Read by
+            // service/LlmService.reasoningEffort() — DL-145
             @DefaultValue("minimal") String reasoningEffort,
 
-            // scanner.openai.request-timeout-seconds — net-new: the source set no timeout — DL-146
+            // scanner.openai.request-timeout-seconds — net-new: the source set no timeout.
+            // Accepted range 1..300 seconds; service/LlmService refuses the first request outside
+            // it — DL-146, DL-202
             @DefaultValue("30") long requestTimeoutSeconds,
 
-            // scanner.openai.max-retries — net-new: the source set no retry policy — DL-146
+            // scanner.openai.max-retries — net-new: the source set no retry policy.
+            // Accepted range 0..5; service/LlmService refuses the first request outside it —
+            // DL-146, DL-202
             @DefaultValue("2") int maxRetries) {
 
         /**
@@ -319,13 +341,12 @@ public record ScannerProperties(
      * and {@code algorithm} with the default {@code HS256} — DL-015.
      *
      * <p>Binding accepts any value each component's type admits; {@code security/JwtService}
-     * validates all three as it is constructed, so an unsupported algorithm — DL-015 — a secret
-     * shorter than that algorithm's key length — DL-141 — or a lifetime outside 1 … 60 minutes —
-     * DL-142 — fails startup.
+     * validates all three as it is constructed, so an algorithm other than {@code HS256} — DL-015,
+     * DL-108, DL-184 — a secret shorter than 32 bytes — DL-186 — or a lifetime outside 1 … 60
+     * minutes — DL-142 — fails startup.
      *
      * @param secret value of {@code scanner.jwt.secret}, redacted by {@link #toString()}
-     * @param algorithm value of {@code scanner.jwt.algorithm}, one of {@code HS256}, {@code HS384}
-     *     and {@code HS512}
+     * @param algorithm value of {@code scanner.jwt.algorithm}, {@code HS256} in any letter case
      * @param expirationMinutes value of {@code scanner.jwt.expiration-minutes}, default {@code 60},
      *     accepted range 1 … 60
      */

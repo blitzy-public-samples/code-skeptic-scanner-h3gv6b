@@ -21,17 +21,23 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.web.servlet.error.BasicErrorController;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.web.servlet.error.ErrorController;
 import org.springframework.context.ApplicationContext;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.security.web.header.HeaderWriter;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 import com.codeskeptic.scanner.dto.ErrorResponse;
+import com.codeskeptic.scanner.security.SecurityConfig;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -42,10 +48,9 @@ import jakarta.servlet.RequestDispatcher;
 /**
  * Exercises the error-page controller that answers the servlet {@code ERROR} dispatch.
  *
- * <p>The outer class drives the controller directly, which is where the whole status-to-message map is
- * covered. The nested slice drives it through the real {@code DispatcherServlet} so the mapped path,
- * the JSON rendering and the withdrawal of Spring Boot's own error controller are observed rather than
- * inferred.
+ * <p>The outer class drives the controller directly across the status-to-message map. The nested
+ * slice drives it through the real {@code DispatcherServlet} and observes the mapped path, JSON
+ * rendering and withdrawal of Spring Boot's own error controller.
  */
 @DisplayName("ErrorDispatchController")
 class ErrorDispatchControllerTest {
@@ -80,10 +85,15 @@ class ErrorDispatchControllerTest {
 
     private ObjectMapper objectMapper;
 
+    /** The response the controller writes the shared header policy onto. */
+    private MockHttpServletResponse servletResponse;
+
     @BeforeEach
     void setUp() {
-        controller = new ErrorDispatchController();
+        controller = new ErrorDispatchController(
+                SecurityConfig.defaultTransportSecurityHeaderWriter());
         objectMapper = new ObjectMapper();
+        servletResponse = new MockHttpServletResponse();
     }
 
     @Test
@@ -98,7 +108,7 @@ class ErrorDispatchControllerTest {
         MockHttpServletRequest request = new MockHttpServletRequest("GET", ERROR_PATH);
         request.setDispatcherType(DispatcherType.REQUEST);
 
-        ResponseEntity<ErrorResponse> response = controller.handleError(request);
+        ResponseEntity<ErrorResponse> response = controller.handleError(request, servletResponse);
 
         assertThat(response.getStatusCode().value()).isEqualTo(404);
         assertSingleKeyEnvelope(response, NOT_FOUND);
@@ -111,7 +121,7 @@ class ErrorDispatchControllerTest {
         MockHttpServletRequest request = new MockHttpServletRequest(method, ERROR_PATH);
         request.setDispatcherType(DispatcherType.REQUEST);
 
-        ResponseEntity<ErrorResponse> response = controller.handleError(request);
+        ResponseEntity<ErrorResponse> response = controller.handleError(request, servletResponse);
 
         assertThat(response.getStatusCode().value()).isEqualTo(404);
         assertSingleKeyEnvelope(response, NOT_FOUND);
@@ -138,7 +148,7 @@ class ErrorDispatchControllerTest {
     void keepsTheDispatched4xxStatusAndCarriesTheMappedLiteral(int dispatched, String expected)
             throws Exception {
 
-        ResponseEntity<ErrorResponse> response = controller.handleError(errorDispatch(dispatched));
+        ResponseEntity<ErrorResponse> response = controller.handleError(errorDispatch(dispatched), servletResponse);
 
         assertThat(response.getStatusCode().value()).isEqualTo(dispatched);
         assertSingleKeyEnvelope(response, expected);
@@ -150,7 +160,7 @@ class ErrorDispatchControllerTest {
     void reports500WithInternalServerErrorEnvelopeForADispatched5xxStatus(int dispatched)
             throws Exception {
 
-        ResponseEntity<ErrorResponse> response = controller.handleError(errorDispatch(dispatched));
+        ResponseEntity<ErrorResponse> response = controller.handleError(errorDispatch(dispatched), servletResponse);
 
         assertThat(response.getStatusCode().value()).isEqualTo(500);
         assertSingleKeyEnvelope(response, INTERNAL_SERVER_ERROR);
@@ -160,19 +170,19 @@ class ErrorDispatchControllerTest {
     @ValueSource(ints = {401, 403})
     @DisplayName("keeps a dispatched 401 or 403 bare, matching the security chain")
     void keepsADispatched401Or403Bare(int dispatched) {
-        ResponseEntity<ErrorResponse> response = controller.handleError(errorDispatch(dispatched));
+        ResponseEntity<ErrorResponse> response = controller.handleError(errorDispatch(dispatched), servletResponse);
 
         assertThat(response.getStatusCode().value()).isEqualTo(dispatched);
         assertThat(response.getBody()).isNull();
         assertThat(response.getHeaders().getContentType()).isNull();
-        assertThat(response.getHeaders().keySet()).containsAll(RESTATED_SECURITY_HEADERS);
+        assertThat(servletResponse.getHeaderNames()).containsAll(RESTATED_SECURITY_HEADERS);
     }
 
     @ParameterizedTest
     @ValueSource(ints = {200, 201, 204, 302, 304, 399})
     @DisplayName("reports 500 when the dispatched status is not an error status")
     void reports500WhenTheDispatchedStatusIsNotAnErrorStatus(int dispatched) throws Exception {
-        ResponseEntity<ErrorResponse> response = controller.handleError(errorDispatch(dispatched));
+        ResponseEntity<ErrorResponse> response = controller.handleError(errorDispatch(dispatched), servletResponse);
 
         assertThat(response.getStatusCode().value()).isEqualTo(500);
         assertSingleKeyEnvelope(response, INTERNAL_SERVER_ERROR);
@@ -184,7 +194,7 @@ class ErrorDispatchControllerTest {
         MockHttpServletRequest request = new MockHttpServletRequest("GET", ERROR_PATH);
         request.setDispatcherType(DispatcherType.ERROR);
 
-        ResponseEntity<ErrorResponse> response = controller.handleError(request);
+        ResponseEntity<ErrorResponse> response = controller.handleError(request, servletResponse);
 
         assertThat(response.getStatusCode().value()).isEqualTo(500);
         assertSingleKeyEnvelope(response, INTERNAL_SERVER_ERROR);
@@ -197,7 +207,7 @@ class ErrorDispatchControllerTest {
         request.setDispatcherType(DispatcherType.ERROR);
         request.setAttribute(RequestDispatcher.ERROR_STATUS_CODE, "400");
 
-        ResponseEntity<ErrorResponse> response = controller.handleError(request);
+        ResponseEntity<ErrorResponse> response = controller.handleError(request, servletResponse);
 
         assertThat(response.getStatusCode().value()).isEqualTo(500);
         assertSingleKeyEnvelope(response, INTERNAL_SERVER_ERROR);
@@ -220,7 +230,7 @@ class ErrorDispatchControllerTest {
         request.setAttribute(RequestDispatcher.ERROR_MESSAGE, "rejected " + failedPath);
         request.setAttribute(RequestDispatcher.ERROR_EXCEPTION, new IllegalStateException(failedPath));
 
-        ResponseEntity<ErrorResponse> response = controller.handleError(request);
+        ResponseEntity<ErrorResponse> response = controller.handleError(request, servletResponse);
 
         assertThat(response.getStatusCode().value()).isEqualTo(400);
         assertSingleKeyEnvelope(response, BAD_REQUEST);
@@ -232,12 +242,12 @@ class ErrorDispatchControllerTest {
     void carriesNoMessageTextOfItsOwnBeyondTheSixSharedLiterals() throws Exception {
         List<String> emitted = new java.util.ArrayList<>();
         for (int status : new int[] {400, 401, 403, 404, 405, 406, 415, 418, 500, 503}) {
-            ErrorResponse body = controller.handleError(errorDispatch(status)).getBody();
+            ErrorResponse body = controller.handleError(errorDispatch(status), servletResponse).getBody();
             if (body != null) {
                 emitted.add(body.error());
             }
         }
-        emitted.add(controller.handleError(directRequest()).getBody().error());
+        emitted.add(controller.handleError(directRequest(), servletResponse).getBody().error());
 
         assertThat(emitted).isNotEmpty().allSatisfy(message -> assertThat(message)
                 .isIn(NOT_FOUND, INTERNAL_SERVER_ERROR, BAD_REQUEST, METHOD_NOT_ALLOWED,
@@ -247,7 +257,7 @@ class ErrorDispatchControllerTest {
     @Test
     @DisplayName("pins the body to application/json so an Accept header cannot select another type")
     void pinsTheBodyToApplicationJson() {
-        ResponseEntity<ErrorResponse> response = controller.handleError(errorDispatch(400));
+        ResponseEntity<ErrorResponse> response = controller.handleError(errorDispatch(400), servletResponse);
 
         assertThat(response.getHeaders().getContentType()).isNotNull();
         assertThat(response.getHeaders().getContentType().isCompatibleWith(MediaType.APPLICATION_JSON))
@@ -255,18 +265,60 @@ class ErrorDispatchControllerTest {
     }
 
     @Test
-    @DisplayName("restates the security header set on every response it builds")
-    void restatesTheSecurityHeaderSetOnEveryResponseItBuilds() {
-        ResponseEntity<ErrorResponse> response = controller.handleError(errorDispatch(400));
+    @DisplayName("writes the shared security header set onto every response it answers")
+    void writesTheSharedSecurityHeaderSetOntoEveryResponseItAnswers() {
+        controller.handleError(errorDispatch(400), servletResponse);
 
-        assertThat(response.getHeaders().keySet()).containsAll(RESTATED_SECURITY_HEADERS);
-        assertThat(response.getHeaders().getFirst("X-Content-Type-Options")).isEqualTo("nosniff");
-        assertThat(response.getHeaders().getFirst("X-Frame-Options")).isEqualTo("DENY");
-        assertThat(response.getHeaders().getFirst("X-XSS-Protection")).isEqualTo("0");
-        assertThat(response.getHeaders().getCacheControl())
+        assertThat(servletResponse.getHeaderNames()).containsAll(RESTATED_SECURITY_HEADERS);
+        assertThat(servletResponse.getHeader("X-Content-Type-Options")).isEqualTo("nosniff");
+        assertThat(servletResponse.getHeader("X-Frame-Options")).isEqualTo("DENY");
+        assertThat(servletResponse.getHeader("X-XSS-Protection")).isEqualTo("0");
+        assertThat(servletResponse.getHeader(HttpHeaders.CACHE_CONTROL))
                 .isEqualTo("no-cache, no-store, max-age=0, must-revalidate");
-        assertThat(response.getHeaders().getPragma()).isEqualTo("no-cache");
-        assertThat(response.getHeaders().getFirst(HttpHeaders.EXPIRES)).isEqualTo("0");
+        assertThat(servletResponse.getHeader(HttpHeaders.PRAGMA)).isEqualTo("no-cache");
+        assertThat(servletResponse.getHeader(HttpHeaders.EXPIRES)).isEqualTo("0");
+    }
+
+    // HeaderWriterFilter writes this set on the REQUEST dispatch, so the ERROR dispatch restates it
+    // onto a response that already carries it — DL-194 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("leaves every restated header single-valued when the request dispatch wrote it first")
+    void leavesEveryRestatedHeaderSingleValuedWhenTheRequestDispatchWroteItFirst() {
+        SecurityConfig.defaultTransportSecurityHeaderWriter()
+                .writeHeaders(errorDispatch(404), servletResponse);
+
+        controller.handleError(errorDispatch(404), servletResponse);
+
+        assertThat(servletResponse.getHeaderNames()).containsAll(RESTATED_SECURITY_HEADERS);
+        for (String header : RESTATED_SECURITY_HEADERS) {
+            assertThat(servletResponse.getHeaders(header))
+                    .as("values of %s", header)
+                    .hasSize(1);
+        }
+    }
+
+    // Spring Security 6.5.11 splits into two writer families: XContentTypeOptionsHeaderWriter,
+    // XXssProtectionHeaderWriter, CacheControlHeadersWriter and HstsHeaderWriter skip a name the
+    // response already carries, while XFrameOptionsHeaderWriter in DENY mode calls setHeader
+    // unconditionally — DL-194 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("adds no second value to a header already carrying a different value")
+    void addsNoSecondValueToAHeaderAlreadyCarryingADifferentValue() {
+        servletResponse.setHeader("X-Frame-Options", "SAMEORIGIN");
+        servletResponse.setHeader("X-Content-Type-Options", "nosniff");
+
+        controller.handleError(errorDispatch(500), servletResponse);
+
+        assertThat(servletResponse.getHeaders("X-Frame-Options")).containsExactly("DENY");
+        assertThat(servletResponse.getHeaders("X-Content-Type-Options")).containsExactly("nosniff");
+    }
+
+    @Test
+    @DisplayName("writes the security header set for a direct request as well")
+    void writesTheSecurityHeaderSetForADirectRequestAsWell() {
+        controller.handleError(directRequest(), servletResponse);
+
+        assertThat(servletResponse.getHeaderNames()).containsAll(RESTATED_SECURITY_HEADERS);
     }
 
     private MockHttpServletRequest errorDispatch(int recordedStatus) {
@@ -294,15 +346,33 @@ class ErrorDispatchControllerTest {
     }
 
     /**
+     * Supplies the transport-security header policy to the {@code @WebMvcTest} slice.
+     *
+     * <p>{@code @WebMvcTest} loads controllers only, so {@link SecurityConfig} — which publishes the
+     * policy in the running application — is not part of the sliced context. This declares the same
+     * policy instance the application uses, from the same factory.
+     */
+    @TestConfiguration
+    static class TransportSecurityHeaderPolicy {
+
+        @Bean
+        HeaderWriter transportSecurityHeaderWriter() {
+            return SecurityConfig.defaultTransportSecurityHeaderWriter();
+        }
+    }
+
+    /**
      * Drives the controller through the real {@code DispatcherServlet}.
      *
-     * <p>The security filters are switched off because this slice asserts the error rendering and not
-     * the filter chain; the chain's own behaviour on this path is covered by {@code AuthControllerTest}.
+     * <p>Security filters are disabled on this slice by
+     * {@link AutoConfigureMockMvc#addFilters()}. The filter chain's behaviour on the {@code /error}
+     * path is asserted by {@code AuthControllerTest} — DL-194.
      */
     @Nested
     @WebMvcTest(ErrorDispatchController.class)
     @AutoConfigureMockMvc(addFilters = false)
     @ActiveProfiles("test")
+    @Import(TransportSecurityHeaderPolicy.class)
     @DisplayName("through the DispatcherServlet")
     class ThroughTheDispatcherServlet {
 

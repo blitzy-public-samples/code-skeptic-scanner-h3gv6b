@@ -31,8 +31,12 @@ import com.google.cloud.language.v1.Document;
 import com.google.cloud.language.v1.LanguageServiceClient;
 import com.google.cloud.language.v1.Sentiment;
 
-// Ported from backend/app/services/sentiment_analysis.py:L5-35 (faithful port) — see
-// docs/DECISION_LOG.md DL-062
+// Faithful-port coverage: the plain-text english document and document-sentiment score read at
+// backend/app/services/sentiment_analysis.py:L12-24, and the doubt-rating formula and clamp at
+// :L29,L32 — see docs/DECISION_LOG.md DL-036
+// Net-new completion coverage: non-finite and out-of-range sentiment scores, null and blank text,
+// provider-failure recovery, the client lifecycle, the accessor seam and the absence of any
+// publishing operation — see docs/DECISION_LOG.md DL-062
 // Replaces backend/tests/test_services.py:L54-65 — see docs/DECISION_LOG.md
 /**
  * Exercises the two operations {@link SentimentAnalysisService} exposes:

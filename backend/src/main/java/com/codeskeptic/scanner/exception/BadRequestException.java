@@ -25,7 +25,7 @@ package com.codeskeptic.scanner.exception;
  * through {@link RuntimeException} and declares a fixed {@code serialVersionUID}.
  */
 // Ported from the inline HTTP 400 branches at backend/app/api/responses.py:L41,L57 and
-// backend/app/api/settings.py:L18 (faithful port) — see docs/DECISION_LOG.md
+// backend/app/api/settings.py:L18 (faithful port) — DL-212 — see docs/DECISION_LOG.md
 public final class BadRequestException extends RuntimeException {
 
     private static final long serialVersionUID = 1L;

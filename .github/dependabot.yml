@@ -1,0 +1,46 @@
+# Dependency-update detection for the artifacts this project declares.
+#
+# Net-new file (no counterpart on the source branch, which carried no dependency manifest at all)
+# - see backend/docs/DECISION_LOG.md DL-004, DL-082, DL-103 and DL-171.
+#
+# Two ecosystems are watched:
+#   maven at /backend           - the coordinates backend/pom.xml declares, and the version-override
+#                                 properties whose recorded update policy is to remove the override
+#                                 once the managed version reaches it (DL-082, DL-171).
+#   github-actions at /         - every action reference in .github/workflows is pinned to a commit
+#                                 SHA (DL-103), and a pinned SHA does not move on its own.
+#
+# npm at /frontend is not watched: frontend/** is out of scope and never modified, and the frontend
+# CI inputs are frozen - see backend/docs/DECISION_LOG.md DL-135.
+#
+# A proposal opened here changes nothing on its own. The Spring Boot line is held at the version
+# backend/pom.xml declares - see backend/docs/DECISION_LOG.md DL-003.
+
+version: 2
+
+updates:
+  - package-ecosystem: maven
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
+      include: scope
+    labels:
+      - dependencies
+      - backend
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+      include: scope
+    labels:
+      - dependencies
+      - ci

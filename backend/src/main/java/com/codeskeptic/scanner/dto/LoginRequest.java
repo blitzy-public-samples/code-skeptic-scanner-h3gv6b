@@ -7,7 +7,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  *
  * <p>Wire shape: {@code {"username": "...", "password": "..."}}
  *
- * <p>Neither component declares a Bean Validation constraint, so a JSON member that is absent, or
+ * <p>Neither component declares a Bean Validation constraint. A JSON member that is absent, or
  * present with a JSON {@code null}, binds to {@code null}.
  *
  * <p>Each component is read up to a length ceiling of 256 characters. The ceiling is applied by

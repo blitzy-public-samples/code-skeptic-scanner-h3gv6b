@@ -1,10 +1,13 @@
 package com.codeskeptic.scanner.repository;
 
 import com.codeskeptic.scanner.entity.Tweet;
+import jakarta.persistence.LockModeType;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -49,6 +52,8 @@ import org.springframework.data.repository.query.Param;
  * @see Tweet
  */
 // Ported from backend/app/db/database.py:L10-13 (faithful port) — see docs/DECISION_LOG.md
+// The identifier type parameter is Integer, matching tweets.id — DL-070, DL-138 — see
+// docs/DECISION_LOG.md
 public interface TweetRepository extends JpaRepository<Tweet, Integer> {
 
     /**
@@ -69,6 +74,27 @@ public interface TweetRepository extends JpaRepository<Tweet, Integer> {
     // Ported from backend/app/tasks/response_generation.py:L43, whose expression was
     // `Tweet.query.filter(Tweet.response == None).all()` (faithful port) — see docs/DECISION_LOG.md
     List<Tweet> findByResponsesIsEmpty();
+
+    // The per-tweet claim of service/ResponseService.generateResponseIfAbsent — DL-190 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Returns one {@code tweets} row, holding a write lock on it until the surrounding transaction
+     * ends.
+     *
+     * <p>{@link LockModeType#PESSIMISTIC_WRITE} makes the provider append {@code for update} to the
+     * select: a second transaction asking for the same row waits here until the first commits or rolls
+     * back. A caller must hold a transaction, and the lock covers only the row this identifier
+     * names.
+     *
+     * <p>The {@code responses} collection of the returned {@link Tweet} is not initialised by this
+     * call. An empty {@link Optional} denotes a row that is not present, and no lock is then held.
+     *
+     * @param id identifier of the row to lock, never {@code null}
+     * @return the row, or an empty {@link Optional} when the identifier names none
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select t from Tweet t where t.id = :id")
+    Optional<Tweet> findByIdForUpdate(@Param("id") Integer id);
 
     /**
      * Returns the mean of the {@code tweets.doubt_rating} column over every row of the table.
@@ -115,7 +141,8 @@ public interface TweetRepository extends JpaRepository<Tweet, Integer> {
      *
      * <p>{@code AnalyticsService} derives {@code since} from the configuration property
      * {@code scanner.analytics.trend-window-days}, default 30, and maps each element onto a
-     * {@code TrendsDto.TrendPoint} — see docs/DECISION_LOG.md DL-042.
+     * {@code TrendsDto.TrendPoint} — see docs/DECISION_LOG.md DL-042. The bucketing expression, its
+     * portability and this projection are DL-213.
      *
      * @param since the inclusive lower bound on {@code tweets.created_at}
      * @return the day-bucketed series in ascending day order; an empty list when no row falls inside
@@ -123,7 +150,7 @@ public interface TweetRepository extends JpaRepository<Tweet, Integer> {
      */
     // Net-new (no Python counterpart: the AnalyticsService imported at
     // backend/app/api/analytics.py:L3 did not exist and get_trends() at :L13-14 took no argument;
-    // the columns are backend/app/db/models.py:L12-14) — DL-042 — see docs/DECISION_LOG.md
+    // the columns are backend/app/db/models.py:L12-14) — DL-042, DL-213 — see docs/DECISION_LOG.md
     @Query("""
             select cast(t.createdAt as LocalDate) as bucketDate,
                    count(t) as tweetCount,
@@ -142,9 +169,9 @@ public interface TweetRepository extends JpaRepository<Tweet, Integer> {
      *
      * <p>A closed projection over the {@code tweets} table. Spring Data binds each accessor to the
      * select alias of the same name, and the four values populate a {@code TrendsDto.TrendPoint} —
-     * see docs/DECISION_LOG.md DL-042.
+     * see docs/DECISION_LOG.md DL-213.
      */
-    // Net-new (no Python counterpart; shape of TrendsDto.TrendPoint) — DL-042 — see
+    // Net-new (no Python counterpart; shape of TrendsDto.TrendPoint) — DL-213 — see
     // docs/DECISION_LOG.md
     interface DailyTrend {
 

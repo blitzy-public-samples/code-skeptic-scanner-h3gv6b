@@ -2,6 +2,10 @@ package com.codeskeptic.scanner.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.hamcrest.Matchers.hasSize;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
@@ -11,6 +15,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.time.Duration;
+import java.time.LocalDateTime;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,6 +36,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
@@ -61,8 +67,13 @@ import org.springframework.web.cors.CorsConfigurationSource;
 import com.codeskeptic.scanner.config.CorsConfig;
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.LoginRequest;
+import com.codeskeptic.scanner.dto.PaginatedTweetsDto;
+import com.codeskeptic.scanner.dto.PaginationDto;
+import com.codeskeptic.scanner.dto.TweetDto;
 import com.codeskeptic.scanner.dto.TokenResponse;
 import com.codeskeptic.scanner.security.JwtService;
+import com.codeskeptic.scanner.service.SentimentAnalysisService;
+import com.codeskeptic.scanner.service.TwitterService;
 import com.codeskeptic.scanner.security.SecurityConfig;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -72,86 +83,95 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * Exercises {@link AuthController} — {@code POST /auth/token} — behind the application's
  * servlet security chain.
  *
- * <p>Provenance of the route under test: {@code backend/app/main.py:L26-29} registered four
- * blueprints — {@code tweets_bp}, {@code responses_bp}, {@code settings_bp} and
- * {@code analytics_bp} — and none of them declared an authentication route.
- * {@code create_access_token} at {@code backend/app/core/security.py:L6-12} and the passlib helpers
- * at {@code :L14-18} had no call site in the retired tree, and
- * {@code backend/app/core/config.py:L4-15} declared neither {@code SECRET_KEY} nor
- * {@code ALGORITHM}. {@code backend/tests/test_api.py} carried no authentication test.
- * {@code frontend/src/utils/api.ts:L13-16} sends {@code Authorization: Bearer <token>} on every
- * request it makes.
+ * <p>The route under test has no counterpart in the retired tree: {@code backend/app/main.py:L26-29}
+ * registered four blueprints and none declared an authentication route, and
+ * {@code backend/tests/test_api.py:L1-59} carried no authentication test.
  *
- * <p>The slice registers {@link AuthController}, the real {@link SecurityConfig} filter chain, the
- * real {@link CorsConfig} policy, the real {@link JwtService} and the bound
- * {@link ScannerProperties}, under the {@code test} profile of
+ * <p>The slice registers {@link AuthController} and {@link TweetController}, the real
+ * {@link SecurityConfig} filter chain, the real {@link CorsConfig} policy, the real
+ * {@link JwtService} and the bound {@link ScannerProperties}, under the {@code test} profile of
  * {@code src/test/resources/application-test.yml}. {@link GlobalExceptionHandler} is a
- * {@code @RestControllerAdvice} and is part of every web slice. No collaborator is mocked or
- * stubbed in the application context: each credential check runs through the
- * {@link BCryptPasswordEncoder} of {@link SecurityConfig} against
- * {@code scanner.auth.password-hash}, and each token is minted and verified by the real
- * {@link JwtService}.
+ * {@code @RestControllerAdvice} and is part of every web slice.
+ *
+ * <p>{@link TweetController} is registered so that a minted token reaches a mapped production
+ * handler rather than an unmapped path: {@code GET /tweets} is one of the eleven routes the chain
+ * requires an authenticated principal on, and the assertions on it compare an exact 200 response
+ * body. Only its two business collaborators, {@link TwitterService} and
+ * {@link SentimentAnalysisService}, are replaced by mocks; nothing on the security path is.
+ *
+ * <p>Each credential check runs through the {@link BCryptPasswordEncoder} of
+ * {@link SecurityConfig} against {@code scanner.auth.password-hash}, and each token is minted and
+ * verified by the real {@link JwtService}.
  *
  * <p>Decisions covered by the assertions here are recorded in {@code docs/DECISION_LOG.md} DL-017,
- * DL-018, DL-019, DL-020, DL-021, DL-050 and DL-112 … DL-118; construct-level provenance is
- * recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * DL-018, DL-019, DL-020, DL-021, DL-050 and DL-112 … DL-118.
  */
-@WebMvcTest(AuthController.class)
+@WebMvcTest({ AuthController.class, TweetController.class })
 @ActiveProfiles("test")
 @Import({ SecurityConfig.class, CorsConfig.class, JwtService.class })
 @EnableConfigurationProperties(ScannerProperties.class)
 @DisplayName("AuthController POST /auth/token")
 class AuthControllerTest {
 
-    /** The one route this class exercises directly; unprefixed, with no version segment. */
     private static final String TOKEN_ENDPOINT = "/auth/token";
 
-    /** A route the chain requires an authenticated principal on. */
+    /** The token route spelled with a percent-encoded letter; it decodes to {@value #TOKEN_ENDPOINT}. */
+    private static final java.net.URI ENCODED_TOKEN_ENDPOINT =
+            java.net.URI.create("/auth/%74oken");
+
     private static final String PROTECTED_ENDPOINT = "/tweets";
 
-    /** The route Spring Security installs when logout is left enabled. */
     private static final String LOGOUT_ENDPOINT = "/logout";
 
-    /** Plaintext whose bcrypt hash {@code application-test.yml} publishes. */
     private static final String TEST_PASSWORD = "test-password";
 
-    /** A plaintext that does not match the published hash. */
     private static final String WRONG_PASSWORD = "wrong-password";
 
-    /** A principal name the credential store does not hold. */
     private static final String UNKNOWN_USERNAME = "nobody";
 
-    /** Name {@link SecurityConfig} applies when {@code scanner.auth.username} carries nothing. */
     private static final String BUILT_IN_USERNAME = "admin";
 
-    /** Value of {@code expires_in} for {@code scanner.jwt.expiration-minutes: 60}. */
     private static final long EXPECTED_EXPIRES_IN_SECONDS = 3_600L;
 
-    /** Value of {@code scanner.jwt.expiration-minutes} the {@code test} profile publishes. */
     private static final long EXPECTED_EXPIRATION_MINUTES = 60L;
 
-    /** Longest credential member {@link AuthController} carries to the manager — DL-118. */
     private static final int CREDENTIAL_LENGTH_CEILING = 256;
 
-    /** Largest encoded body {@link SecurityConfig} accepts on the token route — DL-118. */
     private static final int LOGIN_BODY_BYTE_CEILING = 4_096;
 
-    /** Number of radix-64 characters in the salt-and-digest tail of a bcrypt hash. */
     private static final int BCRYPT_TAIL_LENGTH = 53;
 
-    /** Slack allowed when comparing the {@code exp} claim against the expected instant. */
     private static final Duration EXPIRY_TOLERANCE = Duration.ofSeconds(30);
 
-    /** The three members {@code TokenResponse} serializes, in {@code snake_case}. */
     private static final String ACCESS_TOKEN = "access_token";
     private static final String TOKEN_TYPE = "token_type";
     private static final String EXPIRES_IN = "expires_in";
+
+    /** Wire identifier of the single row the stubbed protected route renders. */
+    private static final String PROTECTED_TWEET_ID = "4711";
+
+    /** {@code content} of that row. */
+    private static final String PROTECTED_TWEET_CONTENT = "AI coding tools are overhyped";
+
+    /** {@code like_count} of that row. */
+    private static final int PROTECTED_TWEET_LIKE_COUNT = 142;
+
+    /** {@code doubt_rating} of that row. */
+    private static final double PROTECTED_TWEET_DOUBT_RATING = 7.5d;
 
     @Autowired
     private MockMvc mockMvc;
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    /** Business collaborator of {@link TweetController}; the only mock on the protected route. */
+    @MockitoBean
+    private TwitterService twitterService;
+
+    /** Second business collaborator of {@link TweetController}, unused by {@code GET /tweets}. */
+    @MockitoBean
+    private SentimentAnalysisService sentimentAnalysisService;
 
     @Autowired
     private ScannerProperties properties;
@@ -346,7 +366,6 @@ class AuthControllerTest {
                         .content("{}"))
                 .andExpect(status().isUnauthorized())
                 .andExpect(content().string(""))
-                .andExpect(jsonPath("$.error").doesNotExist())
                 .andReturn();
 
         String body = result.getResponse().getContentAsString();
@@ -438,6 +457,39 @@ class AuthControllerTest {
         assertBareUnauthorized(result);
     }
 
+    // The ceiling is driven by the same matcher the permitAll rule consults; an encoded spelling of
+    // the path is bounded identically — DL-118 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("bounds an oversized body on a percent-encoded spelling of the token path")
+    void boundsAnOversizedBodyOnAnEncodedTokenPath() throws Exception {
+        String padded = "{\"username\":\"" + configuredUsername()
+                + "\",\"password\":\"" + TEST_PASSWORD
+                + "\",\"padding\":\"" + "x".repeat(LOGIN_BODY_BYTE_CEILING) + "\"}";
+
+        MvcResult result = mockMvc.perform(post(ENCODED_TOKEN_ENDPOINT)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(padded))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().string(""))
+                .andReturn();
+
+        assertThat(padded.length()).isGreaterThan(LOGIN_BODY_BYTE_CEILING);
+        assertBareUnauthorized(result);
+    }
+
+    // The encoded spelling reaches the same handler, so the ceiling is the only thing under test
+    // above — DL-118 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("issues a token on a percent-encoded spelling of the token path")
+    void issuesATokenOnAnEncodedTokenPath() throws Exception {
+        mockMvc.perform(post(ENCODED_TOKEN_ENDPOINT)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(credentialBody(configuredUsername(), TEST_PASSWORD)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access_token").isNotEmpty())
+                .andExpect(jsonPath("$.token_type").value("bearer"));
+    }
+
     @Test
     @DisplayName("returns the bad request envelope for malformed JSON")
     void returnsTheBadRequestEnvelopeForMalformedJson() throws Exception {
@@ -446,6 +498,51 @@ class AuthControllerTest {
                         .content("{\"username\":"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error").value("Bad request"));
+    }
+
+    // Net-new (no Python counterpart) — DL-188, DL-193 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {0}")
+    @ValueSource(strings = {
+        "{\"username\":\"admin\",\"password\":\"a\",\"password\":\"b\"}",
+        "{\"username\":\"admin\",\"password\":\"a\",\"username\":\"root\"}"
+    })
+    @DisplayName("reports a body repeating a credential member after the record is complete with 400 "
+            + "and never 500, and repeats no submitted value")
+    void reportsABodyRepeatingACredentialMemberAfterCompletionWith400(String body) throws Exception {
+        String rendered = mockMvc.perform(post(TOKEN_ENDPOINT)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$.error").value("Bad request"))
+                .andReturn()
+                .getResponse()
+                .getContentAsString();
+
+        assertThat(rendered).doesNotContain("password");
+        assertThat(rendered).doesNotContain("username");
+        assertThat(rendered).doesNotContain("fallback");
+    }
+
+    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {0}")
+    @ValueSource(strings = {
+        "{\"username\":\"admin\",\"username\":\"root\",\"password\":\"a\"}",
+        "{\"password\":\"a\",\"password\":\"b\"}"
+    })
+    @DisplayName("answers a body repeating a credential member as an unreadable body, never with a "
+            + "validation envelope and never leaking the member")
+    void bindsABodyRepeatingACredentialMemberBeforeCompletion(String body) throws Exception {
+        MvcResult result = mockMvc.perform(post(TOKEN_ENDPOINT)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest())
+                .andReturn();
+
+        String rendered = result.getResponse().getContentAsString();
+        assertThat(rendered).isEqualTo("{\"error\":\"Bad request\"}");
+        assertThat(rendered).doesNotContain("password");
+        assertThat(rendered).doesNotContain("username");
     }
 
     @Test
@@ -483,19 +580,46 @@ class AuthControllerTest {
     }
 
     @Test
-    @DisplayName("carries a minted token past the filter chain on a protected route")
-    void carriesAMintedTokenPastTheFilterChainOnAProtectedRoute() throws Exception {
-        String token = mintedToken();
+    @DisplayName("carries a minted token into the mapped handler of a protected route and answers it "
+            + "with 200 and the handler's own body")
+    void carriesAMintedTokenIntoTheMappedHandlerOfAProtectedRoute() throws Exception {
+        when(twitterService.getPaginatedTweets(1, 10)).thenReturn(onePageOfTweets());
 
-        MvcResult result = mockMvc.perform(get(PROTECTED_ENDPOINT)
-                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+        mockMvc.perform(get(PROTECTED_ENDPOINT)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + mintedToken()))
+                .andExpect(status().isOk())
                 .andExpect(header().doesNotExist(HttpHeaders.WWW_AUTHENTICATE))
-                .andReturn();
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.tweets", hasSize(1)))
+                .andExpect(jsonPath("$.tweets[0].id").value(PROTECTED_TWEET_ID))
+                .andExpect(jsonPath("$.tweets[0].content").value(PROTECTED_TWEET_CONTENT))
+                .andExpect(jsonPath("$.tweets[0].like_count").value(PROTECTED_TWEET_LIKE_COUNT))
+                .andExpect(jsonPath("$.tweets[0].doubt_rating").value(PROTECTED_TWEET_DOUBT_RATING))
+                .andExpect(jsonPath("$.pagination.page").value(1))
+                .andExpect(jsonPath("$.pagination.per_page").value(10))
+                .andExpect(jsonPath("$.pagination.total").value(1))
+                .andExpect(jsonPath("$.pagination.total_pages").value(1));
 
-        assertThat(result.getResponse().getStatus())
-                .isNotEqualTo(HttpStatus.UNAUTHORIZED.value());
-        assertThat(result.getResponse().getStatus())
-                .isNotEqualTo(HttpStatus.FORBIDDEN.value());
+        verify(twitterService).getPaginatedTweets(1, 10);
+    }
+
+    @Test
+    @DisplayName("reaches no handler of a protected route when no token is presented")
+    void reachesNoHandlerOfAProtectedRouteWhenNoTokenIsPresented() throws Exception {
+        mockMvc.perform(get(PROTECTED_ENDPOINT)).andExpect(status().isUnauthorized());
+
+        verifyNoInteractions(twitterService, sentimentAnalysisService);
+    }
+
+    @Test
+    @DisplayName("reaches no handler of a protected route when the token is not the one this service "
+            + "minted")
+    void reachesNoHandlerOfAProtectedRouteWhenTheTokenIsNotTheOneThisServiceMinted() throws Exception {
+        mockMvc.perform(get(PROTECTED_ENDPOINT)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer header.payload.signature"))
+                .andExpect(status().isUnauthorized());
+
+        verifyNoInteractions(twitterService, sentimentAnalysisService);
     }
 
     @ParameterizedTest(name = "[{index}] Authorization: {0}")
@@ -854,32 +978,15 @@ class AuthControllerTest {
         }
     }
 
-    /**
-     * The configured principal name, read from {@code scanner.auth.username}.
-     *
-     * @return the value the {@code test} profile publishes
-     */
     private String configuredUsername() {
         return properties.auth().username();
     }
 
-    /**
-     * The salt-and-digest tail of the configured bcrypt hash.
-     *
-     * @return the last {@value #BCRYPT_TAIL_LENGTH} characters of
-     *     {@code scanner.auth.password-hash}
-     */
     private String configuredHashTail() {
         String configured = properties.auth().passwordHash();
         return configured.substring(configured.length() - BCRYPT_TAIL_LENGTH);
     }
 
-    /**
-     * A {@link SecurityConfig} over the bound configuration with the password hash replaced.
-     *
-     * @param passwordHash the value to bind as {@code scanner.auth.password-hash}
-     * @return a configuration instance holding the real {@link JwtService} and CORS policy
-     */
     private SecurityConfig securityConfigWith(String passwordHash) {
         return securityConfigWith(configuredUsername(), passwordHash);
     }
@@ -952,12 +1059,6 @@ class AuthControllerTest {
                 .andReturn();
     }
 
-    /**
-     * Mints a token for the configured credential through {@code POST /auth/token}.
-     *
-     * @return the value of the {@code access_token} member
-     * @throws Exception if the request cannot be performed or the status is not 200
-     */
     private String mintedToken() throws Exception {
         Object accessToken = readBody(requestToken(configuredUsername(), TEST_PASSWORD))
                 .get(ACCESS_TOKEN);
@@ -967,24 +1068,11 @@ class AuthControllerTest {
         return (String) accessToken;
     }
 
-    /**
-     * Reads a JSON response body as a map of its members.
-     *
-     * @param result the completed result whose body is read
-     * @return the body's members, keyed by their wire names
-     * @throws Exception if the body cannot be read
-     */
     private Map<String, Object> readBody(MvcResult result) throws Exception {
         return objectMapper.readValue(result.getResponse().getContentAsString(),
                 new TypeReference<Map<String, Object>>() { });
     }
 
-    /**
-     * Asserts that a result carries status 401, an empty body and no {@code error} member.
-     *
-     * @param result the completed result to assert on
-     * @throws Exception if the body cannot be read
-     */
     private void assertBareUnauthorized(MvcResult result) throws Exception {
         assertThat(result.getResponse().getStatus()).isEqualTo(HttpStatus.UNAUTHORIZED.value());
         assertThat(result.getResponse().getStatus()).isNotEqualTo(HttpStatus.FORBIDDEN.value());
@@ -1002,14 +1090,11 @@ class AuthControllerTest {
      */
     private static final class RecordingAuthenticationManager implements AuthenticationManager {
 
-        /** Number of times {@link #authenticate(Authentication)} has been called. */
-        private final AtomicInteger invocations = new AtomicInteger();
+            private final AtomicInteger invocations = new AtomicInteger();
 
-        /** Principal name of the authentication returned on the accepting path. */
-        private final String resolvedPrincipalName;
+            private final String resolvedPrincipalName;
 
-        /** Raised on every call when present. */
-        private final AuthenticationException rejection;
+            private final AuthenticationException rejection;
 
         private RecordingAuthenticationManager(String resolvedPrincipalName,
                 AuthenticationException rejection) {
@@ -1017,23 +1102,11 @@ class AuthControllerTest {
             this.rejection = rejection;
         }
 
-        /**
-         * Builds a manager that authenticates every credential as the given principal.
-         *
-         * @param resolvedPrincipalName the name carried by the returned authentication
-         * @return the manager
-         */
-        private static RecordingAuthenticationManager accepting(String resolvedPrincipalName) {
+            private static RecordingAuthenticationManager accepting(String resolvedPrincipalName) {
             return new RecordingAuthenticationManager(resolvedPrincipalName, null);
         }
 
-        /**
-         * Builds a manager that raises the given failure for every credential.
-         *
-         * @param rejection the exception raised on every call
-         * @return the manager
-         */
-        private static RecordingAuthenticationManager rejecting(AuthenticationException rejection) {
+            private static RecordingAuthenticationManager rejecting(AuthenticationException rejection) {
             return new RecordingAuthenticationManager(null, rejection);
         }
 
@@ -1046,14 +1119,22 @@ class AuthControllerTest {
             return new UsernamePasswordAuthenticationToken(resolvedPrincipalName, null, List.of());
         }
 
-        /**
-         * Reports how many times this manager was reached.
-         *
-         * @return the invocation count
-         */
-        private int invocations() {
+            private int invocations() {
             return invocations.get();
         }
     }
 
+
+    /**
+     * Builds the envelope the stubbed {@link TwitterService} returns for {@code GET /tweets}.
+     *
+     * @return one page carrying one row
+     */
+    private static PaginatedTweetsDto onePageOfTweets() {
+        TweetDto row = new TweetDto(PROTECTED_TWEET_ID, PROTECTED_TWEET_CONTENT,
+                PROTECTED_TWEET_LIKE_COUNT, LocalDateTime.of(2026, 1, 2, 3, 4, 5),
+                PROTECTED_TWEET_DOUBT_RATING, List.of("media-key-1"), null, "9001",
+                List.of("GPT-4"));
+        return new PaginatedTweetsDto(List.of(row), new PaginationDto(1, 10, 1L, 1));
+    }
 }

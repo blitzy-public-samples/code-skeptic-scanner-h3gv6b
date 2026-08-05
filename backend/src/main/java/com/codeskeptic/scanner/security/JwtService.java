@@ -6,9 +6,8 @@ import java.time.Instant;
 import java.util.Date;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
-import java.util.regex.Pattern;
+import java.util.Optional;
 
 import javax.crypto.SecretKey;
 
@@ -17,6 +16,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
+import com.codeskeptic.scanner.util.ConfiguredValues;
 
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jws;
@@ -32,11 +32,9 @@ import io.jsonwebtoken.security.Keys;
 /**
  * Mints and parses the compact JWS this service issues to its own clients.
  *
- * <p>Four operations are exposed. {@link #generateToken(String)} mints a token for a principal name,
- * replacing {@code create_access_token(data, expires_delta)} at
- * {@code backend/app/core/security.py:L6-12}. {@link #extractUsername(String)} and
- * {@link #extractExpiration(String)} verify a presented token and read one claim from it.
- * {@link #getExpirationSeconds()} reports the configured token lifetime converted to seconds.
+ * <p>{@link #generateToken(String)} emits HS256 tokens carrying {@code sub}, {@code iat} and
+ * {@code exp}. The extraction methods verify the signature, algorithm and required claims and return
+ * {@link Optional#empty()} for an invalid token. Configuration validation occurs in the constructor.
  *
  * <p>Every minted token carries exactly three claims — {@code sub}, {@code iat} and {@code exp} —
  * and is signed with HS256 — DL-015, DL-018. The signing key is derived once, at construction, from
@@ -54,11 +52,16 @@ import io.jsonwebtoken.security.Keys;
  * nothing — it is absent, blank, or still holds the unresolved {@code ${SECRET_KEY}} placeholder
  * text an unset environment variable leaves behind — DL-016, DL-185, DL-186 — when it supplies
  * fewer than the {@value #MINIMUM_SECRET_BYTES} bytes {@value #REQUIRED_ALGORITHM} requires —
- * DL-141, DL-186 — when {@code scanner.jwt.algorithm} names anything other than
- * {@value #REQUIRED_ALGORITHM} — DL-108 — and when {@code scanner.jwt.expiration-minutes} lies
- * outside {@value #MINIMUM_EXPIRATION_MINUTES}..{@value #MAXIMUM_EXPIRATION_MINUTES} — DL-110.
- * Every one of those messages names the property at fault together with the environment variable
- * that supplies it, and none reproduces the configured value — DL-111, DL-186.
+ * DL-186 — when {@code scanner.jwt.algorithm} names anything other than
+ * {@value #REQUIRED_ALGORITHM} — DL-015, DL-108, DL-184 — and when
+ * {@code scanner.jwt.expiration-minutes} lies outside
+ * {@value #MINIMUM_EXPIRATION_MINUTES}..{@value #MAXIMUM_EXPIRATION_MINUTES} — DL-110. Every one of
+ * those messages names the property at fault together with the environment variable that supplies
+ * it, and none reproduces the configured value — DL-111, DL-186.
+ *
+ * <p>A presented token is accepted only when its signature verifies, its {@code alg} header names
+ * HS256, and it carries a non-blank {@code sub}, an {@code iat} and an {@code exp} that is later
+ * than that {@code iat} — DL-083. Any other token is rejected.
  *
  * <p>No jjwt type appears in any signature here and no jjwt exception leaves this class: both
  * extraction methods answer {@link Optional#empty()} for every token they cannot accept. Neither the
@@ -68,14 +71,12 @@ import io.jsonwebtoken.security.Keys;
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-014 … DL-018 and
  * DL-108 … DL-111; construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  *
- * <p>This is a singleton bean. All three fields are {@code final} and hold immutable or
- * thread-safe state — {@link JwtParser} instances are immutable once built — so every member
- * declared here is safe for concurrent use.
+ * <p>This is a singleton bean and is thread-safe. All three fields are {@code final} and hold
+ * immutable or thread-safe state.
  */
 @Service
 public class JwtService {
 
-    // Logging baseline — DL-052 — see docs/DECISION_LOG.md
     private static final Logger log = LoggerFactory.getLogger(JwtService.class);
 
     /**
@@ -90,31 +91,17 @@ public class JwtService {
     /** Largest accepted value of {@code scanner.jwt.expiration-minutes} — DL-110. */
     private static final long MAXIMUM_EXPIRATION_MINUTES = 60L;
 
+
     /** Multiplier applied by {@link #getExpirationSeconds()} to the configured lifetime in minutes. */
     private static final long SECONDS_PER_MINUTE = 60L;
 
-    /**
-     * Shortest accepted {@code scanner.jwt.secret}, in bytes of its UTF-8 encoding. HS256 requires a
-     * key of {@value #MINIMUM_SECRET_BYTES} bytes — DL-186.
-     */
+    /** Shortest accepted {@code scanner.jwt.secret}, in bytes of its UTF-8 encoding — DL-186. */
     private static final int MINIMUM_SECRET_BYTES = 32;
 
-    /** Bits per byte, applied when a rejected secret's length is reported in bits — DL-186. */
+    /** Bits per byte used in secret-length diagnostics — DL-186. */
     private static final int BITS_PER_BYTE = 8;
 
-    /**
-     * Shape of a Spring property placeholder that resolved to nothing. Configuration binding leaves
-     * such a placeholder in place as literal text when the environment variable behind it is absent,
-     * so the bound value is neither {@code null} nor blank — DL-186.
-     */
-    private static final Pattern UNRESOLVED_PLACEHOLDER =
-            Pattern.compile("^\\$\\{.*}$", Pattern.DOTALL);
 
-    /**
-     * Message of the {@link IllegalStateException} raised when {@code scanner.jwt.secret} carries
-     * nothing: it is absent, blank, or an unresolved {@code ${SECRET_KEY}} placeholder — DL-016,
-     * DL-186.
-     */
     private static final String MISSING_SECRET_MESSAGE =
             "scanner.jwt.secret is not configured; supply it through the SECRET_KEY environment "
                     + "variable. It has no default value.";
@@ -131,14 +118,13 @@ public class JwtService {
 
     /**
      * Parser built once at construction. Its signature-algorithm registry holds
-     * {@value #REQUIRED_ALGORITHM} only, so a token whose header names any other algorithm is
-     * rejected before its signature is checked — DL-108.
+     * {@value #REQUIRED_ALGORITHM} only; a token whose header names any other algorithm is rejected
+     * before its signature is checked — DL-108.
      */
     private final JwtParser parser;
 
     /**
-     * Token lifetime in minutes, bound from {@code scanner.jwt.expiration-minutes} and guaranteed to
-     * lie within {@value #MINIMUM_EXPIRATION_MINUTES}..{@value #MAXIMUM_EXPIRATION_MINUTES}.
+     * Validated token lifetime from {@code scanner.jwt.expiration-minutes}.
      */
     private final long expirationMinutes;
 
@@ -162,8 +148,6 @@ public class JwtService {
     public JwtService(ScannerProperties properties) {
         Objects.requireNonNull(properties, "properties must not be null");
 
-        // A null jwt group, a null secret, a blank secret and a secret still holding the unresolved
-        // placeholder text are all read here as an unsupplied secret — DL-185, DL-186.
         ScannerProperties.Jwt jwtProperties = properties.jwt();
         String secret = requireConfiguredSecret(
                 (jwtProperties == null) ? null : jwtProperties.secret());
@@ -184,12 +168,12 @@ public class JwtService {
     /**
      * Mints a signed token for the given principal name.
      *
-     * <p>The token carries exactly the {@code sub}, {@code iat} and {@code exp} claims — DL-018. The
-     * source copied an arbitrary caller-supplied dictionary into the claim set at
-     * {@code backend/app/core/security.py:L8}. {@code exp} is {@code iat} advanced by the configured
-     * lifetime, which reproduces {@code datetime.utcnow() + expires_delta} at
-     * {@code backend/app/core/security.py:L9-10}. {@link Instant#now()} is read once, and both
-     * claims derive from that single instant.
+     * <p>The token carries exactly the {@code sub}, {@code iat} and {@code exp} claims, in place of
+     * the caller-supplied dictionary copied into the claim set at
+     * {@code backend/app/core/security.py:L8} — DL-018. {@code exp} is {@code iat} advanced by the
+     * configured lifetime, reproducing {@code datetime.utcnow() + expires_delta} at
+     * {@code backend/app/core/security.py:L9-10}. {@link Instant#now()} is read once and both claims
+     * derive from that single instant.
      *
      * @param username the principal name to carry in the {@code sub} claim; must be neither
      *     {@code null} nor blank
@@ -311,25 +295,19 @@ public class JwtService {
     /**
      * Confirms that a configured secret carries key material HS256 can use.
      *
-     * <p>Three values are read as an unsupplied secret and all three raise the same message:
-     * {@code null}, a blank value, and an unresolved {@code ${SECRET_KEY}} placeholder. The third
-     * arrives when the environment variable behind the placeholder is absent, because configuration
-     * binding leaves the placeholder in place as literal text rather than failing — DL-186.
-     *
-     * <p>A value present but shorter than {@value #MINIMUM_SECRET_BYTES} bytes is rejected before it
-     * reaches {@link Keys#hmacShaKeyFor(byte[])} — DL-141, DL-186. Neither failure message reproduces
-     * any part of the configured value — DL-111.
+     * <p>{@code null}, a blank value and an unresolved {@code ${SECRET_KEY}} placeholder are all read
+     * as an unsupplied secret and raise the same message — DL-186. A value shorter than
+     * {@value #MINIMUM_SECRET_BYTES} bytes is rejected before it reaches
+     * {@link Keys#hmacShaKeyFor(byte[])} — DL-141. Neither failure message reproduces any part of the
+     * configured value — DL-111.
      *
      * @param configuredSecret value of {@code scanner.jwt.secret}, which may be {@code null}
-     * @return {@code configuredSecret}, guaranteed non-blank and at least
-     *     {@value #MINIMUM_SECRET_BYTES} bytes long in UTF-8
+     * @return the validated secret
      * @throws IllegalStateException if the value carries nothing or is shorter than
      *     {@value #MINIMUM_SECRET_BYTES} bytes
      */
     private static String requireConfiguredSecret(String configuredSecret) {
-        if (configuredSecret == null
-                || configuredSecret.isBlank()
-                || isUnresolvedPlaceholder(configuredSecret)) {
+        if (ConfiguredValues.isUnset(configuredSecret)) {
             throw new IllegalStateException(MISSING_SECRET_MESSAGE);
         }
 
@@ -345,24 +323,6 @@ public class JwtService {
         return configuredSecret;
     }
 
-    /**
-     * Reports whether a configured value still holds the property placeholder that should have
-     * supplied it.
-     *
-     * <p>{@code scanner.jwt.secret} is declared as {@code ${SECRET_KEY}} with no default. The
-     * {@code @ConfigurationProperties} binder resolves placeholders through a resolver that leaves an
-     * unresolvable one in place rather than failing, so an unset {@code SECRET_KEY} binds the literal
-     * thirteen-character text {@code ${SECRET_KEY}} — a value that is neither {@code null} nor blank.
-     * Recognising that shape, ignoring surrounding whitespace, is what keeps the guard in
-     * {@link #requireConfiguredSecret(String)} reachable — DL-185, DL-186.
-     *
-     * @param value the bound value, never {@code null} when this is called
-     * @return {@code true} when the value, ignoring surrounding whitespace, opens with a dollar sign
-     *     followed by an opening brace and closes with a closing brace
-     */
-    private static boolean isUnresolvedPlaceholder(String value) {
-        return UNRESOLVED_PLACEHOLDER.matcher(value.trim()).matches();
-    }
 
     /**
      * Confirms that a configured algorithm name is {@value #REQUIRED_ALGORITHM}.
@@ -390,8 +350,7 @@ public class JwtService {
      * Confirms that a configured token lifetime lies within the accepted range.
      *
      * @param configuredMinutes value of {@code scanner.jwt.expiration-minutes}
-     * @return {@code configuredMinutes}, guaranteed to lie within
-     *     {@value #MINIMUM_EXPIRATION_MINUTES}..{@value #MAXIMUM_EXPIRATION_MINUTES}
+     * @return the validated lifetime
      * @throws IllegalStateException if the value lies outside that range
      */
     private static long requireSupportedLifetime(long configuredMinutes) {

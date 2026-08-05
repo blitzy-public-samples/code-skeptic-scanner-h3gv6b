@@ -364,7 +364,9 @@ public class TweetStreamListener {
      *
      * <p>This is the same mirror step {@code task/ResponseGenerationScheduler} performs after its own
      * generation, so a reply reaches the Notion {@code Response} property by whichever path generated
-     * it. A reply that is absent or carries no content is recorded at {@code WARN} and not mirrored.
+     * it. An absent reply is recorded at {@code WARN} and not mirrored; a reply that is present
+     * carries content, since {@code dto/ResponseDto} rejects a {@code null} value for it — see
+     * docs/DECISION_LOG.md DL-080.
      *
      * <p>A failure raised by the mirror write is recorded at {@code ERROR} and is not rethrown; the
      * stored reply is unaffected. The mirror is not re-attempted — see docs/DECISION_LOG.md DL-194.
@@ -382,12 +384,8 @@ public class TweetStreamListener {
                     tweetId);
             return;
         }
+        // dto/ResponseDto rejects a null content — DL-080 — see docs/DECISION_LOG.md
         String content = generated.content();
-        if (content == null) {
-            log.warn("Response {} for tweet row {} carries no content; the Notion mirror is skipped.",
-                    generated.id(), tweetId);
-            return;
-        }
         try {
             notionService.updateTweetResponse(tweetId, content);
         } catch (RuntimeException failure) {

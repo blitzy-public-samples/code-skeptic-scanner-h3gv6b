@@ -10,8 +10,11 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.web.servlet.error.BasicErrorController;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.web.servlet.error.ErrorAttributes;
+import org.springframework.boot.web.servlet.error.ErrorController;
 import org.springframework.context.ApplicationContext;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -21,11 +24,11 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.cors.CorsConfigurationSource;
 
 import com.codeskeptic.scanner.api.AnalyticsController;
 import com.codeskeptic.scanner.api.AuthController;
-import com.codeskeptic.scanner.api.ErrorDispatchController;
 import com.codeskeptic.scanner.api.GlobalExceptionHandler;
 import com.codeskeptic.scanner.api.ResponseController;
 import com.codeskeptic.scanner.api.SettingController;
@@ -110,7 +113,6 @@ class ScannerApplicationTests {
                 Arguments.of("SettingController", SettingController.class),
                 Arguments.of("AnalyticsController", AnalyticsController.class),
                 Arguments.of("AuthController", AuthController.class),
-                Arguments.of("ErrorDispatchController", ErrorDispatchController.class),
                 Arguments.of("GlobalExceptionHandler", GlobalExceptionHandler.class),
                 Arguments.of("TwitterService", TwitterService.class),
                 Arguments.of("SentimentAnalysisService", SentimentAnalysisService.class),
@@ -193,6 +195,51 @@ class ScannerApplicationTests {
     @DisplayName("leaves ingestion stopped when the X consumer credentials carry nothing")
     void leavesIngestionStoppedWhenTheXConsumerCredentialsCarryNothing() {
         assertThat(context.getBean(TweetStreamClient.class).isRunning()).isFalse();
+    }
+
+    // The error-dispatch strategy of DL-183 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("keeps the framework error controller and replaces only its attribute source")
+    void keepsTheFrameworkErrorControllerAndReplacesOnlyItsAttributeSource() {
+        assertThat(context.getBeansOfType(ErrorController.class).values())
+                .singleElement()
+                .isInstanceOf(BasicErrorController.class);
+        assertThat(context.getBeansOfType(ErrorAttributes.class)).hasSize(1);
+        assertThat(context.getBean(ErrorAttributes.class).getClass().getEnclosingClass())
+                .isEqualTo(GlobalExceptionHandler.class);
+    }
+
+    // The api package of AAP 0.3.1 — DL-183 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("declares no request-mapped class in the api package beyond the five controllers")
+    void declaresNoRequestMappedClassInTheApiPackageBeyondTheFiveControllers() {
+        assertThat(context.getBeanNamesForAnnotation(RestController.class))
+                .containsExactlyInAnyOrder("tweetController", "responseController",
+                        "settingController", "analyticsController", "authController");
+    }
+
+    // The measured consequence DL-183 records for a direct request to the error path — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("answers a direct request to the error path with the internal server error envelope")
+    void answersADirectRequestToTheErrorPathWithTheInternalServerErrorEnvelope() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(accessToken());
+
+        ResponseEntity<String> response =
+                rest.exchange("/error", HttpMethod.GET, new HttpEntity<>(headers), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(response.getBody()).isEqualTo("{\"error\":\"Internal server error\"}");
+    }
+
+    @Test
+    @DisplayName("answers a direct unauthenticated request to the error path with a bare 401")
+    void answersADirectUnauthenticatedRequestToTheErrorPathWithABare401() {
+        ResponseEntity<String> response = rest.getForEntity("/error", String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(response.getBody()).isNull();
     }
 
     /**

@@ -184,12 +184,13 @@ class TweetControllerTest {
     @Test
     @DisplayName("renders the addressed row unwrapped")
     void rendersTheAddressedRowUnwrapped() throws Exception {
-        when(twitterService.getTweet(TWEET_ID)).thenReturn(tweet(null));
+        when(twitterService.getTweet(TWEET_ID)).thenReturn(tweet(3.5d));
 
         mockMvc.perform(get("/tweets/" + TWEET_ID).header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value(TWEET_ID))
-                .andExpect(jsonPath("$.like_count").value(120));
+                .andExpect(jsonPath("$.like_count").value(120))
+                .andExpect(jsonPath("$.doubt_rating").value(3.5d));
     }
 
     @ParameterizedTest(name = "[{index}] tweetId={0}")
@@ -210,9 +211,9 @@ class TweetControllerTest {
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("scores a row carrying no doubt rating and records the analysis")
-    void scoresARowCarryingNoDoubtRatingAndRecordsTheAnalysis() throws Exception {
-        when(twitterService.getTweet(TWEET_ID)).thenReturn(tweet(null));
+    @DisplayName("scores the addressed row and records the analysis over the rating it carried")
+    void scoresTheAddressedRowAndRecordsTheAnalysis() throws Exception {
+        when(twitterService.getTweet(TWEET_ID)).thenReturn(tweet(0.0d));
         when(sentimentAnalysisService.analyzeSentiment(anyString())).thenReturn(-0.4d);
 
         mockMvc.perform(post("/tweets/" + TWEET_ID + "/analyze")
@@ -298,8 +299,8 @@ class TweetControllerTest {
     /**
      * Builds the wire form of one {@code tweets} row.
      *
-     * @param doubtRating the value of the {@code doubt_rating} column, or {@code null} for a row that
-     *                    carries none
+     * @param doubtRating the value of the {@code doubt_rating} column; never {@code null}, which the
+     *                    wire record rejects — see docs/DECISION_LOG.md DL-080
      * @return the row
      */
     private static TweetDto tweet(Double doubtRating) {

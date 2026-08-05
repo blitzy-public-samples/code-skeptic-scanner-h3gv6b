@@ -181,9 +181,8 @@ class DatabaseUrlTranslatorTest {
     @Test
     @DisplayName("rejects an unresolved DATABASE_URL placeholder as an unset value")
     void rejectsAnUnresolvedPlaceholder() {
-        // DL-186 — see docs/DECISION_LOG.md
         // Configuration binding leaves the placeholder in place as literal text when the environment
-        // variable is absent — DL-182 — see docs/DECISION_LOG.md
+        // variable is absent — DL-186 — see docs/DECISION_LOG.md
         assertThatThrownBy(() -> DatabaseUrlTranslator.translate("${DATABASE_URL}"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("DATABASE_URL must be set: no database URL was supplied.");

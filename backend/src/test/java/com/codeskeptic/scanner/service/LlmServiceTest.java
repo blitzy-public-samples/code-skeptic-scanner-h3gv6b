@@ -38,8 +38,10 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -1217,6 +1219,92 @@ class LlmServiceTest {
                 .isThrownBy(() -> new ResponseDto(null, TRIMMED_GENERATED_TEXT,
                         LocalDateTime.of(2026, 1, 31, 9, 15), false, TWEET_ID))
                 .withMessage("id must not be null.");
+    }
+
+    // The required fields of backend/app/schema/response.py:L5-9 — AAP TR-6, DL-080 — see
+    // docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("unsetReplyComponents")
+    @DisplayName("rejects a reply record that carries no value for a source-required component")
+    void rejectsAReplyRecordThatCarriesNoValueForASourceRequiredComponent(String wireKey,
+            ThrowingCallable construction) {
+
+        assertThatNullPointerException()
+                .isThrownBy(construction)
+                .withMessage(wireKey + " must not be null.");
+    }
+
+    /**
+     * Names one construction per source-required component of {@code dto/ResponseDto}, each leaving
+     * that component unset.
+     *
+     * @return the wire key and the construction that omits it
+     */
+    private static List<Arguments> unsetReplyComponents() {
+        LocalDateTime generatedAt = LocalDateTime.of(2026, 1, 31, 9, 15);
+        return List.of(
+                Arguments.of("id", (ThrowingCallable) () -> new ResponseDto(
+                        null, TRIMMED_GENERATED_TEXT, generatedAt, false, TWEET_ID)),
+                Arguments.of("content", (ThrowingCallable) () -> new ResponseDto(
+                        "12", null, generatedAt, false, TWEET_ID)),
+                Arguments.of("generated_at", (ThrowingCallable) () -> new ResponseDto(
+                        "12", TRIMMED_GENERATED_TEXT, null, false, TWEET_ID)),
+                Arguments.of("is_approved", (ThrowingCallable) () -> new ResponseDto(
+                        "12", TRIMMED_GENERATED_TEXT, generatedAt, null, TWEET_ID)),
+                Arguments.of("tweet_id", (ThrowingCallable) () -> new ResponseDto(
+                        "12", TRIMMED_GENERATED_TEXT, generatedAt, false, null)));
+    }
+
+    // The required fields of backend/app/schema/tweet.py:L6-14 — AAP TR-6, DL-080 — see
+    // docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("unsetPostComponents")
+    @DisplayName("rejects a post record that carries no value for a source-required component")
+    void rejectsAPostRecordThatCarriesNoValueForASourceRequiredComponent(String wireKey,
+            ThrowingCallable construction) {
+
+        assertThatNullPointerException()
+                .isThrownBy(construction)
+                .withMessage(wireKey + " must not be null.");
+    }
+
+    /**
+     * Names one construction per source-required component of {@code dto/TweetDto}, each leaving that
+     * component unset.
+     *
+     * @return the wire key and the construction that omits it
+     */
+    private static List<Arguments> unsetPostComponents() {
+        return List.of(
+                Arguments.of("id", (ThrowingCallable) () -> new TweetDto(
+                        null, TWEET_CONTENT, LIKE_COUNT, CREATED_AT, DOUBT_RATING, MEDIA, null,
+                        USER_ID, AI_TOOLS_MENTIONED)),
+                Arguments.of("content", (ThrowingCallable) () -> new TweetDto(
+                        TWEET_ID, null, LIKE_COUNT, CREATED_AT, DOUBT_RATING, MEDIA, null,
+                        USER_ID, AI_TOOLS_MENTIONED)),
+                Arguments.of("like_count", (ThrowingCallable) () -> new TweetDto(
+                        TWEET_ID, TWEET_CONTENT, null, CREATED_AT, DOUBT_RATING, MEDIA, null,
+                        USER_ID, AI_TOOLS_MENTIONED)),
+                Arguments.of("created_at", (ThrowingCallable) () -> new TweetDto(
+                        TWEET_ID, TWEET_CONTENT, LIKE_COUNT, null, DOUBT_RATING, MEDIA, null,
+                        USER_ID, AI_TOOLS_MENTIONED)),
+                Arguments.of("doubt_rating", (ThrowingCallable) () -> new TweetDto(
+                        TWEET_ID, TWEET_CONTENT, LIKE_COUNT, CREATED_AT, null, MEDIA, null,
+                        USER_ID, AI_TOOLS_MENTIONED)),
+                Arguments.of("user_id", (ThrowingCallable) () -> new TweetDto(
+                        TWEET_ID, TWEET_CONTENT, LIKE_COUNT, CREATED_AT, DOUBT_RATING, MEDIA, null,
+                        null, AI_TOOLS_MENTIONED)));
+    }
+
+    // backend/app/schema/tweet.py:L12 is the sole Optional[str] field — AAP TR-6, DL-080 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("accepts a post record that carries no quoted post identifier")
+    void acceptsAPostRecordThatCarriesNoQuotedPostIdentifier() {
+        TweetDto withoutAQuote = new TweetDto(TWEET_ID, TWEET_CONTENT, LIKE_COUNT, CREATED_AT,
+                DOUBT_RATING, MEDIA, null, USER_ID, AI_TOOLS_MENTIONED);
+
+        assertThat(withoutAQuote.quotedTweetId()).isNull();
     }
 
     @Test

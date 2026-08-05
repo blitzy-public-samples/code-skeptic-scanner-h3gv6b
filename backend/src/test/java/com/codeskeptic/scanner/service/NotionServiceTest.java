@@ -817,6 +817,42 @@ class NotionServiceTest {
                 .containsExactly(MATCHED_PAGE_ID, TWEET_ID);
     }
 
+    // A page carrying no value for a source-required component has no wire form — DL-080, DL-219 —
+    // see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {0}")
+    @ValueSource(strings = {PROPERTY_CONTENT, PROPERTY_AUTHOR, PROPERTY_TIMESTAMP,
+            PROPERTY_DOUBT_RATING, PROPERTY_ENGAGEMENT})
+    @DisplayName("skips a mirrored page that omits a property the wire record declares required")
+    void skipsAMirroredPageThatOmitsARequiredProperty(String omitted) {
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+        service.storeTweet(tweet());
+        ObjectNode withoutARequiredProperty =
+                ((ObjectNode) storedProperties().deepCopy()).without(omitted);
+
+        stubDatabaseQueryReturning(queryResultCarrying(
+                pageCarrying(MATCHED_PAGE_ID, withoutARequiredProperty)));
+
+        assertThat(service.getTweets(LIMIT, START_CURSOR)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("reads only the complete pages of a response holding one incomplete page")
+    void readsOnlyTheCompletePagesOfAResponseHoldingOneIncompletePage() {
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+        service.storeTweet(tweet());
+        ObjectNode withoutContent =
+                ((ObjectNode) storedProperties().deepCopy()).without(PROPERTY_CONTENT);
+
+        stubDatabaseQueryReturning(queryResultCarrying(
+                pageCarrying(MATCHED_PAGE_ID, withoutContent),
+                pageCarrying(CREATED_PAGE_ID, storedProperties())));
+
+        assertThat(service.getTweets(LIMIT, START_CURSOR)).extracting(TweetDto::id)
+                .containsExactly(TWEET_ID);
+    }
+
     // backend/app/schema/tweet.py:L12 is the sole Optional[str] field — DL-080 — see
     // docs/DECISION_LOG.md
     @Test

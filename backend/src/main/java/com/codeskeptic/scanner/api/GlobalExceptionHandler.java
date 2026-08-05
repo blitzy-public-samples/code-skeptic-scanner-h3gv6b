@@ -34,7 +34,6 @@ import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import com.codeskeptic.scanner.dto.ErrorResponse;
-import com.codeskeptic.scanner.util.LogSafe;
 import com.codeskeptic.scanner.exception.BadRequestException;
 import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.exception.ResponseGenerationException;
@@ -50,11 +49,11 @@ import jakarta.servlet.RequestDispatcher;
  * source route literals and the global {@code Not found} and {@code Internal server error} literals.
  * Framework request failures map to 400, 405, 406 or 415; response-write and unexpected failures map
  * to 500. Authentication failures are handled by the security chain, and servlet error dispatches
- * are handled by {@link ErrorDispatchController}.
+ * are rendered by the {@link ErrorAttributes} bean {@link #errorEnvelopeAttributes()} declares.
  *
  * <p>A failure answered by {@code HttpServletResponse.sendError(int)} reaches no handler declared
- * here; the container re-dispatches the request to the error page, which
- * {@link ErrorDispatchController} answers with the same literals declared below — DL-183.
+ * here; the container re-dispatches the request to the error page, where Spring Boot's own error
+ * controller renders the attributes that bean returns — the same literals declared below — DL-183.
  *
  * <p>Every body produced here is an {@link ErrorResponse}: the single-key
  * {@code {"error": <string>}} envelope. The complete set of status and message pairs it puts on the
@@ -62,13 +61,39 @@ import jakarta.servlet.RequestDispatcher;
  *
  * <table border="1">
  * <caption>Status and message emitted by each handler</caption>
+ * <tr><th>Handler</th><th>Status</th><th>Message on the wire</th></tr>
+ * <tr><td>{@link #handleNotFound(NotFoundException)}</td><td>404</td>
+ *   <td>the exception's own message — one of the five per-route 404 literals</td></tr>
+ * <tr><td>{@link #handleBadRequest(BadRequestException)}</td><td>400</td>
+ *   <td>the exception's own message — one of the three per-route 400 literals</td></tr>
+ * <tr><td>{@link #handleResponseGenerationFailure(ResponseGenerationException)}</td><td>500</td>
+ *   <td>{@code Failed to generate response}</td></tr>
+ * <tr><td>{@link #handleMethodArgumentNotValid(MethodArgumentNotValidException)}</td><td>400</td>
+ *   <td>{@code Tweet ID is required}, {@code No value provided} or {@value #BAD_REQUEST}</td></tr>
+ * <tr><td>{@link #handleNoHandlerFound()}</td><td>404</td><td>{@value #NOT_FOUND}</td></tr>
+ * <tr><td>{@link #handleClientRequestFailure(Exception)}</td><td>400</td>
+ *   <td>{@value #BAD_REQUEST}</td></tr>
+ * <tr><td>{@link #handleMessageConversionFailure(HttpMessageConversionException)}</td><td>400</td>
+ *   <td>{@value #BAD_REQUEST}</td></tr>
+ * <tr><td>{@link #handleMethodNotSupported(HttpRequestMethodNotSupportedException)}</td><td>405</td>
+ *   <td>{@value #METHOD_NOT_ALLOWED}, with an {@code Allow} header</td></tr>
+ * <tr><td>{@link #handleNotAcceptable(HttpMediaTypeNotAcceptableException)}</td><td>406</td>
+ *   <td>{@value #NOT_ACCEPTABLE}</td></tr>
+ * <tr><td>{@link #handleUnsupportedMediaType(HttpMediaTypeNotSupportedException)}</td><td>415</td>
+ *   <td>{@value #UNSUPPORTED_MEDIA_TYPE}</td></tr>
+ * <tr><td>{@link #handleResponseWriteFailure(HttpMessageNotWritableException)}</td><td>500</td>
+ *   <td>{@value #INTERNAL_SERVER_ERROR}</td></tr>
+ * <tr><td>{@link #handleUnexpectedException(Exception)}</td><td>500</td>
+ *   <td>{@value #INTERNAL_SERVER_ERROR}</td></tr>
  * </table>
  *
- * <p>The last row is not an exception handler. This class is also the application's
- * The servlet container's error path —
- * {@code server.error.path}, {@code /error} by default — is served here rather than by the
- * framework-supplied controller, and an error dispatch produces the same single-key envelope as every
- * other row — DL-184.
+ * <p>This class also owns the body of the servlet {@code ERROR} dispatch. The error path
+ * {@code server.error.path} names — {@code /error} by default — stays with the framework-supplied
+ * controller, and the {@link ErrorAttributes} bean below replaces the attributes it renders, so an
+ * error dispatch produces the same single-key envelope as every row above — DL-183. A dispatched 401
+ * or 403 yields no attribute and therefore no body; 404, 405, 406 and 415 each yield their literal
+ * from the table; any other 4xx yields {@value #BAD_REQUEST} and anything else yields
+ * {@value #INTERNAL_SERVER_ERROR}.
  *
  * <p>The three {@code com.codeskeptic.scanner.exception} types declare no {@code @ResponseStatus};
  * their status is assigned here. Their messages are copied through {@link Throwable#getMessage()}
@@ -87,8 +112,8 @@ import jakarta.servlet.RequestDispatcher;
  *
  * <p>Authentication and authorisation failures are answered by the security filter chain, which runs
  * ahead of the {@code DispatcherServlet}; no exception from them reaches this class. A request the
- * chain's firewall rejects is answered with {@code sendError} and reaches
- * {@link ErrorDispatchController} instead.
+ * chain's firewall rejects is answered with {@code sendError} and reaches the {@code ERROR} dispatch
+ * instead, where {@link #errorEnvelopeAttributes()} supplies the body.
  *
  * <p>All state declared here is immutable. The single advice instance is safe to share across
  * concurrent requests.
@@ -121,19 +146,6 @@ public class GlobalExceptionHandler {
 
     /** Message served with HTTP 406 — see docs/DECISION_LOG.md DL-092. */
     private static final String NOT_ACCEPTABLE = "Not acceptable";
-
-    /**
-     * The literal each status this advice declares carries, read by
-     * {@code api/ErrorDispatchController} when the container reports a status rather than an
-     * exception. A status absent from this map is answered {@value #INTERNAL_SERVER_ERROR} — DL-184.
-     */
-    private static final Map<HttpStatus, String> ERROR_MESSAGE_BY_STATUS = Map.of(
-            HttpStatus.BAD_REQUEST, BAD_REQUEST,
-            HttpStatus.NOT_FOUND, NOT_FOUND,
-            HttpStatus.METHOD_NOT_ALLOWED, METHOD_NOT_ALLOWED,
-            HttpStatus.NOT_ACCEPTABLE, NOT_ACCEPTABLE,
-            HttpStatus.UNSUPPORTED_MEDIA_TYPE, UNSUPPORTED_MEDIA_TYPE,
-            HttpStatus.INTERNAL_SERVER_ERROR, INTERNAL_SERVER_ERROR);
 
     /**
      * Rejected-field names that select {@link BadRequestException#TWEET_ID_IS_REQUIRED}.

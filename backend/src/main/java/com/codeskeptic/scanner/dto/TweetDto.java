@@ -3,6 +3,7 @@ package com.codeskeptic.scanner.dto;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
@@ -18,13 +19,18 @@ import java.util.stream.Collectors;
  * while the columns are single delimited {@code Column(String)} values at
  * {@code backend/app/db/models.py:L15} and {@code :L18} — see docs/DECISION_LOG.md DL-024.
  *
- * <p>Null policy — see docs/DECISION_LOG.md DL-080. The seven scalar components accept {@code null},
- * matching the columns {@code backend/app/db/models.py:L10-18} declares without
- * {@code nullable=False}, and a {@code null} is carried to the wire as JSON {@code null}.
- * {@code likeCount} and {@code doubtRating} are boxed. The two {@link List} components are never
- * {@code null}: the canonical constructor replaces {@code null} with an empty list and replaces a
- * supplied list with an unmodifiable copy, so a list the caller later mutates does not change this
- * record.
+ * <p>Null policy — see docs/DECISION_LOG.md DL-080. {@code backend/app/schema/tweet.py:L6-14}
+ * declares eight fields required and {@code quoted_tweet_id} the sole {@code Optional[str]}, so the
+ * canonical constructor rejects a {@code null} {@code id}, {@code content}, {@code likeCount},
+ * {@code createdAt}, {@code doubtRating} and {@code userId} with {@link NullPointerException}, and
+ * {@code quotedTweetId} is the one component that may be {@code null}. {@code likeCount} and
+ * {@code doubtRating} are boxed, and a {@code null} value for either is rejected rather than read as
+ * {@code 0}. No scalar is trimmed, rounded, defaulted or substituted. The {@code tweets} columns stay
+ * nullable — see docs/DECISION_LOG.md DL-080.
+ *
+ * <p>The two {@link List} components are never {@code null}: the canonical constructor replaces
+ * {@code null} with an empty list and replaces a supplied list with an unmodifiable copy, so a list
+ * the caller later mutates does not change this record.
  *
  * <p>Serialised form:
  *
@@ -33,27 +39,27 @@ import java.util.stream.Collectors;
  *  "media":[],"quoted_tweet_id":null,"user_id":"...","ai_tools_mentioned":[]}
  * }</pre>
  *
- * @param id post identifier, serialised as a string ({@code backend/app/schema/tweet.py:L6}); may be
+ * @param id post identifier, serialised as a string ({@code backend/app/schema/tweet.py:L6}); never
  *     {@code null}
- * @param content post body text ({@code backend/app/schema/tweet.py:L7}); may be {@code null}
+ * @param content post body text ({@code backend/app/schema/tweet.py:L7}); never {@code null}
  * @param likeCount number of likes recorded for the post
- *     ({@code backend/app/schema/tweet.py:L8}); may be {@code null}
- * @param createdAt time the post was created ({@code backend/app/schema/tweet.py:L9}); may be
+ *     ({@code backend/app/schema/tweet.py:L8}); never {@code null}
+ * @param createdAt time the post was created ({@code backend/app/schema/tweet.py:L9}); never
  *     {@code null}
- * @param doubtRating doubt rating on a 0-10 scale ({@code backend/app/schema/tweet.py:L10}); may be
+ * @param doubtRating doubt rating on a 0-10 scale ({@code backend/app/schema/tweet.py:L10}); never
  *     {@code null}
  * @param media media references attached to the post ({@code backend/app/schema/tweet.py:L11});
  *     never {@code null}
  * @param quotedTweetId identifier of the quoted post; the sole {@code Optional[str]} field in the
  *     source ({@code backend/app/schema/tweet.py:L12}); may be {@code null}
- * @param userId identifier of the post author ({@code backend/app/schema/tweet.py:L13}); may be
+ * @param userId identifier of the post author ({@code backend/app/schema/tweet.py:L13}); never
  *     {@code null}
  * @param aiToolsMentioned names of the AI tools named in the post
  *     ({@code backend/app/schema/tweet.py:L14}); never {@code null}
  */
 // Ported from backend/app/schema/tweet.py:L5-14 (faithful port) — see docs/DECISION_LOG.md
-// Boxed like_count and doubt_rating, and the nullable scalar contract, are recorded as DL-080 — see
-// docs/DECISION_LOG.md
+// Boxed like_count and doubt_rating, and the required-versus-optional contract of AAP TR-6, are
+// recorded as DL-080 — see docs/DECISION_LOG.md
 public record TweetDto(
 
         @JsonProperty("id") String id,
@@ -76,14 +82,29 @@ public record TweetDto(
         @JsonProperty("ai_tools_mentioned") List<String> aiToolsMentioned) {
 
     /**
-     * Normalises the two list components and leaves every scalar component exactly as supplied.
+     * Rejects a {@code null} value for a component the source schema declares required and
+     * normalises the two list components.
+     *
+     * <p>The six source-required scalars are rejected; {@code quotedTweetId}, the sole
+     * {@code Optional[str]} field of {@code backend/app/schema/tweet.py:L12}, is not. No scalar is
+     * defaulted, trimmed, rounded or substituted.
      *
      * <p>{@code media} and {@code aiToolsMentioned} become an empty unmodifiable list when
-     * {@code null} and an unmodifiable copy otherwise; a {@code null} element is dropped. No scalar
-     * component is rejected, defaulted, trimmed, rounded or substituted — see
-     * docs/DECISION_LOG.md DL-080.
+     * {@code null} and an unmodifiable copy otherwise; a {@code null} element is dropped — see
+     * docs/DECISION_LOG.md DL-024.
+     *
+     * @throws NullPointerException if {@code id}, {@code content}, {@code likeCount},
+     *     {@code createdAt}, {@code doubtRating} or {@code userId} is {@code null}
      */
+    // The required fields of backend/app/schema/tweet.py:L6-14 — AAP TR-6, DL-080 — see
+    // docs/DECISION_LOG.md
     public TweetDto {
+        Objects.requireNonNull(id, "id must not be null.");
+        Objects.requireNonNull(content, "content must not be null.");
+        Objects.requireNonNull(likeCount, "like_count must not be null.");
+        Objects.requireNonNull(createdAt, "created_at must not be null.");
+        Objects.requireNonNull(doubtRating, "doubt_rating must not be null.");
+        Objects.requireNonNull(userId, "user_id must not be null.");
         media = unmodifiableCopy(media);
         aiToolsMentioned = unmodifiableCopy(aiToolsMentioned);
     }

@@ -1,6 +1,7 @@
 package com.codeskeptic.scanner.task;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -100,16 +101,15 @@ class ResponseGenerationSchedulerTest {
             verify(notionService, never()).updateTweetResponse(anyString(), anyString());
         }
 
+        // dto/ResponseDto rejects a null content — AAP TR-6, DL-080 — see docs/DECISION_LOG.md
         @Test
-        @DisplayName("mirrors nothing when the generated reply carries no content")
-        void mirrorsNothingWithoutContent() {
-            when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(candidate()));
-            when(responseService.generateResponseIfAbsent(anyString()))
-                    .thenReturn(Optional.of(reply(null)));
+        @DisplayName("cannot be handed a generated reply that carries no content")
+        void cannotBeHandedAGeneratedReplyThatCarriesNoContent() {
+            assertThatNullPointerException()
+                    .isThrownBy(() -> reply(null))
+                    .withMessage("content must not be null.");
 
-            scheduler.generatePendingResponses();
-
-            verify(notionService, never()).updateTweetResponse(anyString(), anyString());
+            verifyNoInteractions(notionService);
         }
 
         @Test

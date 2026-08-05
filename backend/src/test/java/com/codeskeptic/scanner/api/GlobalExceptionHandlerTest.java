@@ -1026,7 +1026,7 @@ class GlobalExceptionHandlerTest {
     }
 
     // -----------------------------------------------------------------------
-    // The servlet container's error path — DL-184 — see docs/DECISION_LOG.md
+    // The servlet container's error path — DL-183 — see docs/DECISION_LOG.md
     // -----------------------------------------------------------------------
 
     @ParameterizedTest(name = "an error dispatch recording {0} returns {0} carrying {1}")

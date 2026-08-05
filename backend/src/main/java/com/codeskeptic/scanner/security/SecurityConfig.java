@@ -9,7 +9,6 @@ import java.nio.charset.IllegalCharsetNameException;
 import java.nio.charset.StandardCharsets;
 import java.nio.charset.UnsupportedCharsetException;
 import java.util.Collections;
-import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -38,13 +37,6 @@ import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
-import org.springframework.security.web.header.HeaderWriter;
-import org.springframework.security.web.header.writers.CacheControlHeadersWriter;
-import org.springframework.security.web.header.writers.CompositeHeaderWriter;
-import org.springframework.security.web.header.writers.HstsHeaderWriter;
-import org.springframework.security.web.header.writers.XContentTypeOptionsHeaderWriter;
-import org.springframework.security.web.header.writers.XXssProtectionHeaderWriter;
-import org.springframework.security.web.header.writers.frameoptions.XFrameOptionsHeaderWriter;
 import org.springframework.security.web.context.RequestAttributeSecurityContextRepository;
 import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
@@ -116,10 +108,10 @@ import jakarta.servlet.http.HttpServletResponse;
  * <p>Two request-body bounds are enforced inside the chain, both before any converter reads a body.
  * {@code POST /auth/token} accepts at most 4096 encoded bytes and answers a larger body with the
  * route's own empty 401 — DL-118. Every other request that carries a body accepts at most 65536
- * encoded bytes and answers a larger body with 400 and {@code {"error":"Bad request"}}, the body
- * {@code com.codeskeptic.scanner.api.ErrorDispatchController} renders for a dispatched 400 —
- * DL-183. The second bound runs after authorization: an unauthenticated request is answered with the
- * bare 401 first.
+ * encoded bytes and answers a larger body with 400 and {@code {"error":"Bad request"}}, the body the
+ * {@code ErrorAttributes} bean of {@code com.codeskeptic.scanner.api.GlobalExceptionHandler} renders
+ * for a dispatched 400 — DL-183. The second bound runs after authorization: an unauthenticated
+ * request is answered with the bare 401 first.
  *
  * <p>Response headers are the Spring Security defaults, with {@code Strict-Transport-Security}
  * declared explicitly at the values the framework's own writer carries — a one-year lifetime,
@@ -346,47 +338,6 @@ public class SecurityConfig {
         return http.build();
     }
 
-    // Net-new (no Python counterpart) — DL-194 — see docs/DECISION_LOG.md
-    /**
-     * Publishes the transport-security header policy of this application, as one writer.
-     *
-     * <p>The composed writers are the ones Spring Security's {@code HeadersConfigurer} applies by
-     * default, in its order: {@code X-Content-Type-Options}, {@code X-XSS-Protection},
-     * the cache directives {@code Cache-Control}, {@code Pragma} and {@code Expires},
-     * {@code Strict-Transport-Security} on a secure request only, and {@code X-Frame-Options}. This
-     * class customises none of them, so the chain's {@code HeaderWriterFilter} and this bean apply the
-     * same policy from the same declaration — DL-194.
-     *
-     * <p>Each composed writer either skips a name the response already carries or replaces its value
-     * through {@code setHeader}, so applying this bean to a response the chain has already written
-     * leaves each header with exactly one value.
-     * {@code com.codeskeptic.scanner.api.ErrorDispatchController} applies it on the servlet
-     * {@code ERROR} dispatch, which {@code HeaderWriterFilter} skips.
-     *
-     * @return the composed policy; never {@code null}
-     */
-    @Bean
-    public HeaderWriter transportSecurityHeaderWriter() {
-        return defaultTransportSecurityHeaderWriter();
-    }
-
-    /**
-     * Builds the policy {@link #transportSecurityHeaderWriter()} publishes.
-     *
-     * <p>Declared on this class so the policy has one declaration site: the bean above returns it, and
-     * a caller outside the container obtains the same composition — DL-194.
-     *
-     * @return a writer composing Spring Security's default header writers; never {@code null}
-     */
-    public static HeaderWriter defaultTransportSecurityHeaderWriter() {
-        return new CompositeHeaderWriter(List.of(
-                new XContentTypeOptionsHeaderWriter(),
-                new XXssProtectionHeaderWriter(),
-                new CacheControlHeadersWriter(),
-                new HstsHeaderWriter(),
-                new XFrameOptionsHeaderWriter()));
-    }
-
     // Net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-112
     /**
      * Publishes the context store the chain reads and {@link JwtAuthenticationFilter} writes.
@@ -608,10 +559,11 @@ public class SecurityConfig {
      * {@value #MAXIMUM_REQUEST_BODY_BYTES} plus one bytes, and rejected if that many arrive. An
      * accepted body is replayed to Spring MVC through {@link CachedBodyRequest}.
      *
-     * <p>Rejection calls {@link HttpServletResponse#sendError(int)} with 400, which dispatches to
-     * {@code api.ErrorDispatchController} and answers {@code {"error":"Bad request"}} — the same
-     * status and the same body {@code api.GlobalExceptionHandler} returns for a request the
-     * converters cannot read. No wire literal is written here — DL-183.
+     * <p>Rejection calls {@link HttpServletResponse#sendError(int)} with 400, which the container
+     * re-dispatches to the framework's own error controller; the {@code ErrorAttributes} bean of
+     * {@code api.GlobalExceptionHandler} renders {@code {"error":"Bad request"}} there — the same
+     * status and the same body that advice returns for a request the converters cannot read. No wire
+     * literal is written here — DL-183.
      */
     private static final class RequestBodyLimitFilter extends OncePerRequestFilter {
 

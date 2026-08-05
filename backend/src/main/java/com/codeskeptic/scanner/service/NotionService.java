@@ -754,8 +754,9 @@ public class NotionService {
      * reported as an adapter failure; an empty {@code results} array yields an empty list — see
      * docs/DECISION_LOG.md DL-089.
      *
-     * <p>A page {@link #toTweetDto(JsonNode)} does not recognise as a mirrored post is reported at
-     * {@code WARN} and left out of the list.
+     * <p>A page {@link #toTweetDto(JsonNode)} does not recognise as a mirrored post, and a page that
+     * carries no value for a component the wire record declares required, are each counted and
+     * reported once at {@code WARN} and left out of the list — see docs/DECISION_LOG.md DL-219.
      *
      * @param response the parsed query response, or {@code null} when the body was empty
      * @return the mapped posts; never {@code null} and never modifiable
@@ -775,8 +776,8 @@ public class NotionService {
             tweets.add(tweet);
         }
         if (skipped > 0) {
-            log.warn("{} Notion page(s) carried no mirrored tweet identifier and were skipped",
-                    skipped);
+            log.warn("{} Notion page(s) carried no identifier or no value for a required mirrored "
+                    + "property and were skipped", skipped);
         }
         return List.copyOf(tweets);
     }
@@ -810,22 +811,26 @@ public class NotionService {
      * Maps one Notion page onto a {@link TweetDto}, reading the property map written by
      * {@link #buildProperties(TweetDto)} in reverse.
      *
-     * <p>The six mirrored components are read back — see docs/DECISION_LOG.md DL-088. A property the
-     * page does not carry yields a {@code null} component. {@code media} and
-     * {@code aiToolsMentioned} are never mirrored, so each reads back as an empty list, and
+     * <p>The six mirrored components are read back — see docs/DECISION_LOG.md DL-088. {@code media}
+     * and {@code aiToolsMentioned} are never mirrored, so each reads back as an empty list, and
      * {@code quotedTweetId} reads back as {@code null} — see docs/DECISION_LOG.md DL-090.
      *
      * <p>The {@code Tweet Id} property identifies a page as a mirrored post. A page whose
-     * {@code Tweet Id} carries no text falls back to the Notion page identifier, so every page in a
-     * query response maps to a post — see docs/DECISION_LOG.md DL-090.
+     * {@code Tweet Id} carries no text falls back to the Notion page identifier — see
+     * docs/DECISION_LOG.md DL-090.
+     *
+     * <p>{@link TweetDto} rejects a {@code null} value for the six components
+     * {@code backend/app/schema/tweet.py:L6-14} declares required, so a page that does not carry all
+     * five mirrored required properties has no wire form and is skipped rather than substituted or
+     * raised — see docs/DECISION_LOG.md DL-219.
      *
      * @param page one element of a query response's {@code results} array; not {@code null}
-     * @return the mapped post, or {@code null} when the page carries neither a mirrored tweet
-     *         identifier nor a page identifier
+     * @return the mapped post, or {@code null} when the page carries no identifier at all or carries
+     *         no value for a component the wire record declares required
      */
     // Replaces the reconstruction at backend/app/services/notion_service.py:L44-50, which indexed
     // [0] directly and read four properties fed from fields the source model never declared —
-    // DL-088, DL-090 — see docs/DECISION_LOG.md
+    // DL-088, DL-090, DL-219 — see docs/DECISION_LOG.md
     private static TweetDto toTweetDto(JsonNode page) {
         JsonNode properties = page.path(KEY_PROPERTIES);
 
@@ -837,17 +842,28 @@ public class NotionService {
                 return null;
             }
         }
-        Double engagement = readNumber(properties, PROPERTY_ENGAGEMENT);
+        String content = readText(properties, PROPERTY_CONTENT, KEY_TITLE);
+        Integer likeCount = narrowedEngagement(readNumber(properties, PROPERTY_ENGAGEMENT));
+        LocalDateTime createdAt = readTimestamp(properties);
+        Double doubtRating = readNumber(properties, PROPERTY_DOUBT_RATING);
+        String userId = readText(properties, PROPERTY_AUTHOR, KEY_RICH_TEXT);
+
+        // The required fields of backend/app/schema/tweet.py:L6-14 — DL-080, DL-219 — see
+        // docs/DECISION_LOG.md
+        if (content == null || likeCount == null || createdAt == null || doubtRating == null
+                || userId == null) {
+            return null;
+        }
 
         return new TweetDto(
                 id,
-                readText(properties, PROPERTY_CONTENT, KEY_TITLE),
-                narrowedEngagement(engagement),
-                readTimestamp(properties),
-                readNumber(properties, PROPERTY_DOUBT_RATING),
+                content,
+                likeCount,
+                createdAt,
+                doubtRating,
                 List.of(),
                 null,
-                readText(properties, PROPERTY_AUTHOR, KEY_RICH_TEXT),
+                userId,
                 List.of());
     }
 

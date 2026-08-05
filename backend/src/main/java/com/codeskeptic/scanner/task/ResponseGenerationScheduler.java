@@ -212,10 +212,10 @@ public class ResponseGenerationScheduler {
      *
      * <p>Nothing is stored and nothing is mirrored when
      * {@link ResponseService#generateResponseIfAbsent(String)} reports an empty result, which means the
-     * row was answered elsewhere — see docs/DECISION_LOG.md DL-195. The mirror step alone is skipped,
-     * with a warning, when a stored reply carries no content, and a mirror rejection is recorded
-     * without failing the candidate; the stored reply is left in place in every case and the mirror is
-     * not re-attempted — see docs/DECISION_LOG.md DL-194.
+     * row was answered elsewhere — see docs/DECISION_LOG.md DL-195. A stored reply always carries
+     * content: {@code dto/ResponseDto} rejects a {@code null} value for it (DL-080). A mirror
+     * rejection is recorded without failing the candidate, the stored reply is left in place in every
+     * case, and the mirror is not re-attempted — see docs/DECISION_LOG.md DL-194.
      *
      * @param tweetId identifier of the {@code tweets} row to reply to; never {@code null} or empty
      * @return {@code true} when this pass stored a reply, {@code false} when the row was answered
@@ -242,13 +242,8 @@ public class ResponseGenerationScheduler {
         }
 
         ResponseDto generated = result.get();
+        // dto/ResponseDto rejects a null content — DL-080 — see docs/DECISION_LOG.md
         String content = generated.content();
-        if (content == null) {
-            log.warn("Response {} for tweet {} carries no content; the Notion mirror is skipped",
-                    generated.id(), tweetId);
-            return true;
-
-        }
 
         // Identifier and length only; the generated text is not recorded — see
         // docs/DECISION_LOG.md DL-052

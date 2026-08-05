@@ -49,6 +49,7 @@ import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
+import com.codeskeptic.scanner.util.QueryParameters;
 
 // Net-new completion coverage: three of the four operations under test were called by
 // backend/app/api/tweets.py:L16,L27,L50 but absent from the source class, and
@@ -873,6 +874,54 @@ class TwitterServiceTest {
                 serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, 500);
 
         assertThat(rendered.pagination().perPage()).isEqualTo(500);
+    }
+
+    // The source applied no upper bound to per_page at backend/app/api/tweets.py:L13 — DL-193
+    @ParameterizedTest(name = "per_page {0} is requested as {0}")
+    @ValueSource(ints = {1, 99, 100, 101, 1_000, 10_000, Integer.MAX_VALUE})
+    @DisplayName("requests the page size it was given however large it is")
+    void requestsThePageSizeItWasGivenHoweverLargeItIs(int perPage) {
+        when(tweetRepository.findAll(any(Pageable.class))).thenReturn(emptyPage());
+        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+
+        serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+
+        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
+        verify(tweetRepository).findAll(pageRequest.capture());
+        assertThat(pageRequest.getValue().getPageSize()).isEqualTo(perPage);
+    }
+
+    // The values api.TweetController derives from a malformed page or per_page — DL-193
+    @ParameterizedTest(name = "\"{0}\" reads as page {1} of size {2}")
+    @CsvSource(nullValues = "NULL", value = {
+            "NULL,NULL,1,10",
+            "'','',1,10",
+            "'  ','  ',1,10",
+            "abc,abc,1,10",
+            "3.5,7.5,1,10",
+            "99999999999999999999,99999999999999999999,1,10",
+            "' 3 ',' 25 ',3,25",
+            "+4,+5,4,5"
+    })
+    @DisplayName("reads a malformed page or per_page as the default the source declared")
+    void readsAMalformedPageOrPerPageAsTheDefaultTheSourceDeclared(String rawPage, String rawPerPage,
+            int expectedPage, int expectedPerPage) {
+
+        int page = QueryParameters.intOrDefault(rawPage, 1);
+        int perPage = QueryParameters.intOrDefault(rawPerPage, 10);
+
+        assertThat(page).isEqualTo(expectedPage);
+        assertThat(perPage).isEqualTo(expectedPerPage);
+
+        when(tweetRepository.findAll(any(Pageable.class))).thenReturn(emptyPage());
+        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+
+        serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(page, perPage);
+
+        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
+        verify(tweetRepository).findAll(pageRequest.capture());
+        assertThat(pageRequest.getValue().getPageNumber()).isEqualTo(expectedPage - 1);
+        assertThat(pageRequest.getValue().getPageSize()).isEqualTo(expectedPerPage);
     }
 
     // -----------------------------------------------------------------------

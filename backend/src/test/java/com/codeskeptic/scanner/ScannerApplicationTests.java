@@ -10,7 +10,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.web.servlet.error.BasicErrorController;
+import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.web.servlet.error.ErrorAttributes;
@@ -38,6 +40,7 @@ import com.codeskeptic.scanner.repository.AiToolRepository;
 import com.codeskeptic.scanner.repository.ResponseRepository;
 import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.repository.TweetRepository;
+import com.codeskeptic.scanner.security.JwtService;
 import com.codeskeptic.scanner.service.AnalyticsService;
 import com.codeskeptic.scanner.service.LlmService;
 import com.codeskeptic.scanner.service.NotionService;
@@ -50,7 +53,7 @@ import com.codeskeptic.scanner.task.TweetStreamClient;
 import com.codeskeptic.scanner.task.TweetStreamListener;
 
 // Replaces backend/tests/test_api.py, which imported fastapi.testclient at :L2 against a Flask
-// application and could not be collected \u2014 see docs/DECISION_LOG.md DL-021, DL-115
+// application and could not be collected — see docs/DECISION_LOG.md DL-021, DL-115
 /**
  * Proves the whole application context assembles and that the route surface is the one the retired
  * blueprints served.
@@ -68,7 +71,12 @@ import com.codeskeptic.scanner.task.TweetStreamListener;
  * <p>Each of the eleven routes the four Flask blueprints served at
  * {@code backend/app/main.py:L26-29} is addressed without a token and must answer 401 with an empty
  * body and a {@code WWW-Authenticate: Bearer} challenge. {@code POST /auth/token} is addressed with
- * the configured credentials and must answer 200 \u2014 DL-019, DL-021, DL-115.
+ * the configured credentials and must answer 200 — DL-019, DL-021, DL-115.
+ *
+ * <p>The composition root itself is asserted here too: one application object, the two annotations
+ * {@code ScannerApplication} declares and no other, and the {@code scanner.popularity-threshold} and
+ * {@code scanner.analytics.trend-window-days} values the {@code test} profile publishes — DL-042,
+ * DL-209.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
@@ -94,6 +102,18 @@ class ScannerApplicationTests {
                 .isNotNull();
     }
 
+    // The composition root of backend/app/main.py:L13-39 — DL-209 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("declares one application object carrying exactly two annotations")
+    void declaresOneApplicationObjectCarryingExactlyTwoAnnotations() {
+        assertThat(context.getBeansOfType(ScannerApplication.class)).hasSize(1);
+        assertThat(context.getBeanNamesForAnnotation(SpringBootApplication.class)).hasSize(1);
+        assertThat(ScannerApplication.class.getDeclaredAnnotations())
+                .extracting(annotation -> annotation.annotationType().getName())
+                .containsExactlyInAnyOrder(SpringBootApplication.class.getName(),
+                        ConfigurationPropertiesScan.class.getName());
+    }
+
     @ParameterizedTest(name = "[{index}] {0}")
     @MethodSource("declaredBeanTypes")
     @DisplayName("publishes one bean of every type the application declares")
@@ -114,6 +134,7 @@ class ScannerApplicationTests {
                 Arguments.of("AnalyticsController", AnalyticsController.class),
                 Arguments.of("AuthController", AuthController.class),
                 Arguments.of("GlobalExceptionHandler", GlobalExceptionHandler.class),
+                Arguments.of("JwtService", JwtService.class),
                 Arguments.of("TwitterService", TwitterService.class),
                 Arguments.of("SentimentAnalysisService", SentimentAnalysisService.class),
                 Arguments.of("NotionService", NotionService.class),
@@ -240,6 +261,19 @@ class ScannerApplicationTests {
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
         assertThat(response.getBody()).isNull();
+    }
+
+    // The popularity gate of backend/app/core/config.py:L10 and
+    // backend/app/services/twitter_service.py:L43,L46 is a faithful port; the observation window of
+    // the argument-less get_trends() at backend/app/api/analytics.py:L14 is net-new — DL-042 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("binds the popularity threshold and the analytics window from the test profile")
+    void bindsThePopularityThresholdAndTheAnalyticsWindowFromTheTestProfile() {
+        ScannerProperties properties = context.getBean(ScannerProperties.class);
+
+        assertThat(properties.popularityThreshold()).isEqualTo(100);
+        assertThat(properties.analytics().trendWindowDays()).isEqualTo(30);
     }
 
     // The three call literals of backend/app/services/llm_service.py:L22-25 are the shipped

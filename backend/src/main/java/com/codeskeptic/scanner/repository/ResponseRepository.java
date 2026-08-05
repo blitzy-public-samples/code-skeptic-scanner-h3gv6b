@@ -96,6 +96,24 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
     @EntityGraph(attributePaths = "tweet")
     Page<Response> findAll(Pageable pageable);
 
+    // Net-new: the idempotency check of the automatic generation path — DL-195 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Reports whether any {@code responses} row is associated with the given {@code tweets} row.
+     *
+     * <p>Spring Data derives the query from this method name: the {@code existsBy} subject yields an
+     * existence check and {@code Tweet_Id} traverses the {@code tweet} association to the
+     * {@code id} of {@link Tweet}, so the predicate is over the {@code responses.tweet_id} column and
+     * the {@code tweets} table is not read.
+     *
+     * <p>{@code ResponseService} calls this while holding the parent row's write lock — DL-195.
+     *
+     * @param tweetId identifier of the parent {@code tweets} row
+     * @return {@code true} when at least one {@code responses} row carries that {@code tweet_id},
+     *         {@code false} when none does
+     */
+    boolean existsByTweet_Id(Integer tweetId);
+
     // The approved_responses metric of dto/SummaryDto, over the is_approved column at
     // backend/app/db/models.py:L26 — DL-041 — see docs/DECISION_LOG.md
     /**

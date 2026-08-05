@@ -3,24 +3,31 @@ package com.codeskeptic.scanner.task;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
 import org.slf4j.LoggerFactory;
 
 import com.codeskeptic.scanner.dto.ResponseDto;
@@ -32,7 +39,7 @@ import com.codeskeptic.scanner.service.ResponseService;
 import com.codeskeptic.scanner.service.SentimentAnalysisService;
 import com.codeskeptic.scanner.service.TwitterService;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
-
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -41,142 +48,285 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 
-// Net-new (no source construct that runs): backend/tests/test_tasks.py:L3 imported
-// `from backend.tasks import monitor_tweets, generate_response`, and neither the module nor either
-// symbol existed — see docs/DECISION_LOG.md
+// Retired test antecedent: backend/tests/test_tasks.py, whose :L3 named a module and two symbols
+// that existed nowhere in the source tree, and whose :L7 and :L12 fixtures patched two further
+// unresolvable roots — see docs/DECISION_LOG.md
+// Unit under test: the TweetListener of backend/app/tasks/tweet_monitoring.py:L8-34 (faithful port
+// of intent), whose on_status at :L15-34 left persistence unimplemented at :L29 and the generation
+// trigger unimplemented at :L32 — see docs/DECISION_LOG.md DL-049
 /**
- * Exercises {@link TweetStreamListener} over synthesized filtered-stream records.
+ * Exercises {@link TweetStreamListener#onStatus(JsonNode)} over synthesized filtered-stream records.
  *
- * <p>Assertions cover the four documented steps, the shapes every wire-required member must carry
- * before a row is stored, and the two secondary Notion mirror writes — the tweet before the trigger
- * and the generated reply after it, each reported at the level DL-224 assigns it.
+ * <p>Collaborators are Mockito mocks under {@code Strictness.STRICT_STUBS}. No application context is
+ * started, no outbound request is issued, no database is reached and no credential is read.
+ *
+ * <p>Assertions cover the four ordered steps, the shapes every wire-required member must carry before
+ * a row is stored, the record-to-column mapping, the identifier handed to the generation trigger, and
+ * the two secondary Notion mirror writes with the level each failure is reported at.
+ *
+ * <p>The doubt rating is obtained from {@link SentimentAnalysisService#calculateDoubtRating(double)}
+ * and this class asserts the value that collaborator reports; the expression producing it is asserted
+ * by {@code service/SentimentAnalysisServiceTest}.
+ *
+ * <p>Decisions covering the behaviour asserted here are recorded in {@code docs/DECISION_LOG.md};
+ * construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  */
+@ExtendWith(MockitoExtension.class)
 @DisplayName("TweetStreamListener")
 class TweetStreamListenerTest {
 
     /** Identifier the stubbed repository assigns to a stored row. */
     private static final int STORED_ID = 7;
 
-    /** Sentiment score the stubbed analysis service reports. */
-    private static final double SCORE = -0.4D;
+    /** Identifier a delivered record carries in {@code data.id}. */
+    private static final String DELIVERED_POST_ID = "1111111111";
 
-    /** Doubt rating the stubbed analysis service derives. */
-    private static final double DOUBT_RATING = 7.0D;
+    /** Like count every accepted record carries. */
+    private static final int POPULAR_LIKE_COUNT = 500;
 
-    /** Valid stream creation time used by records not testing that member. */
+    /** Post text every accepted record carries. */
+    private static final String POST_TEXT = "doubtful";
+
+    /** Sentiment score the stubbed analysis service reports for any text. */
+    private static final double SENTIMENT_SCORE = -0.6D;
+
+    /** Doubt rating the stubbed analysis service reports for {@link #SENTIMENT_SCORE}. */
+    private static final double REPORTED_DOUBT_RATING = 7.25D;
+
+    /** Valid stream creation time carried by records not exercising that member. */
     private static final String CREATED_AT = "2026-08-03T15:11:52.000Z";
 
     /** Stored UTC-local form of {@link #CREATED_AT}. */
     private static final LocalDateTime STORED_CREATED_AT =
             LocalDateTime.of(2026, 8, 3, 15, 11, 52);
 
-    /** Valid author identifier used by records not testing that member. */
+    /** Valid author identifier carried by records not exercising that member. */
     private static final String AUTHOR_ID = "4242";
+
+    /** Identifier of the stored reply the stubbed generation reports. */
+    private static final String GENERATED_ID = "11";
+
+    /** Content of the stored reply the stubbed generation reports. */
+    private static final String GENERATED_CONTENT = "a draft reply";
+
+    /** Generation time of the stored reply the stubbed generation reports. */
+    private static final LocalDateTime GENERATED_AT = LocalDateTime.of(2026, 8, 3, 15, 12, 0);
 
     /** Reads a synthesized record into a tree. */
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    private final TwitterService twitterService = mock(TwitterService.class);
+    @Mock
+    private TwitterService twitterService;
 
-    private final SentimentAnalysisService sentimentAnalysisService =
-            mock(SentimentAnalysisService.class);
+    @Mock
+    private SentimentAnalysisService sentimentAnalysisService;
 
-    private final TweetRepository tweetRepository = mock(TweetRepository.class);
+    @Mock
+    private TweetRepository tweetRepository;
 
-    private final ResponseService responseService = mock(ResponseService.class);
+    @Mock
+    private ResponseService responseService;
 
-    private final NotionService notionService = mock(NotionService.class);
+    @Mock
+    private NotionService notionService;
 
-    private final TweetMapper tweetMapper = mock(TweetMapper.class);
+    @Mock
+    private TweetMapper tweetMapper;
 
+    @InjectMocks
     private TweetStreamListener listener;
 
-    @BeforeEach
-    void createListener() {
-        listener = new TweetStreamListener(twitterService, sentimentAnalysisService, tweetRepository,
-                responseService, notionService, tweetMapper);
-    }
-
     @Nested
-    @DisplayName("payload validation")
-    class PayloadValidation {
+    @DisplayName("record validation")
+    class RecordValidation {
 
         @Test
-        @DisplayName("stores nothing for a null payload")
-        void ignoresANullPayload() {
+        @DisplayName("returns true and stores nothing for a null payload")
+        void returnsTrueAndStoresNothingForANullPayload() {
             assertThat(listener.onStatus(null)).isTrue();
-            verifyNoInteractions(tweetRepository, twitterService, sentimentAnalysisService);
+
+            verifyNoCollaboratorWasReached();
+        }
+
+        @Test
+        @DisplayName("returns true and stores nothing when the record carries no data object")
+        void returnsTrueAndStoresNothingWhenTheRecordCarriesNoDataObject() {
+            JsonNode record = read("{\"matching_rules\":[{\"id\":\"r1\",\"tag\":\"GPT-4\"}]}");
+
+            assertThat(listener.onStatus(record)).isTrue();
+
+            verifyNoCollaboratorWasReached();
         }
 
         @Test
         @DisplayName("stores nothing when the text member is a boolean")
-        void rejectsANonTextualText() {
+        void storesNothingWhenTheTextMemberIsABoolean() {
             JsonNode record = read("{\"data\":{\"text\":true,"
-                    + "\"public_metrics\":{\"like_count\":500}}}");
+                    + "\"created_at\":\"" + CREATED_AT + "\","
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
+                    + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "}}}");
 
             assertThat(listener.onStatus(record)).isTrue();
 
-            verify(tweetRepository, never()).save(any());
-            verifyNoInteractions(twitterService);
+            verifyNoCollaboratorWasReached();
         }
 
         @Test
         @DisplayName("stores nothing when the text member is a number")
-        void rejectsANumericText() {
+        void storesNothingWhenTheTextMemberIsANumber() {
             JsonNode record = read("{\"data\":{\"text\":1234,"
-                    + "\"public_metrics\":{\"like_count\":500}}}");
+                    + "\"created_at\":\"" + CREATED_AT + "\","
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
+                    + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "}}}");
 
             assertThat(listener.onStatus(record)).isTrue();
 
-            verify(tweetRepository, never()).save(any());
+            verifyNoCollaboratorWasReached();
         }
 
         @Test
-        @DisplayName("skips a fractional required like count instead of truncating it")
-        void rejectsAFractionalLikeCount() {
-            JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
+        @DisplayName("stores nothing when the text member holds only whitespace")
+        void storesNothingWhenTheTextMemberHoldsOnlyWhitespace() {
+            JsonNode record = read("{\"data\":{\"text\":\"   \","
+                    + "\"created_at\":\"" + CREATED_AT + "\","
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
+                    + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "}}}");
+
+            assertThat(listener.onStatus(record)).isTrue();
+
+            verifyNoCollaboratorWasReached();
+        }
+
+        @Test
+        @DisplayName("stores nothing when the required like count is fractional")
+        void storesNothingWhenTheRequiredLikeCountIsFractional() {
+            JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
                     + "\"created_at\":\"" + CREATED_AT + "\","
                     + "\"author_id\":\"" + AUTHOR_ID + "\","
                     + "\"public_metrics\":{\"like_count\":100.9}}}");
 
             assertThat(listener.onStatus(record)).isTrue();
 
-            verify(tweetRepository, never()).save(any());
-            verifyNoInteractions(twitterService, sentimentAnalysisService);
+            verifyNoCollaboratorWasReached();
         }
 
         @Test
-        @DisplayName("skips a record whose required like count is absent")
-        void rejectsAnAbsentLikeCount() {
-            JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
+        @DisplayName("stores nothing when the required like count is absent")
+        void storesNothingWhenTheRequiredLikeCountIsAbsent() {
+            JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
                     + "\"created_at\":\"" + CREATED_AT + "\","
                     + "\"author_id\":\"" + AUTHOR_ID + "\"}}");
 
             assertThat(listener.onStatus(record)).isTrue();
 
-            verify(tweetRepository, never()).save(any());
-            verifyNoInteractions(twitterService, sentimentAnalysisService);
+            verifyNoCollaboratorWasReached();
         }
 
         @Test
-        @DisplayName("skips a required like count carried as a string")
-        void rejectsAStringLikeCount() {
-            JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
+        @DisplayName("stores nothing when the required like count is carried as a string")
+        void storesNothingWhenTheRequiredLikeCountIsCarriedAsAString() {
+            JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
                     + "\"created_at\":\"" + CREATED_AT + "\","
                     + "\"author_id\":\"" + AUTHOR_ID + "\","
                     + "\"public_metrics\":{\"like_count\":\"500\"}}}");
 
             assertThat(listener.onStatus(record)).isTrue();
 
-            verify(tweetRepository, never()).save(any());
-            verifyNoInteractions(twitterService, sentimentAnalysisService);
+            verifyNoCollaboratorWasReached();
         }
 
         @Test
-        @DisplayName("offers an integral like count to the popularity gate")
-        void acceptsAnIntegralLikeCount() {
-            acceptEverything();
-            JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
+        @DisplayName("stores nothing when the required author_id is a number")
+        void storesNothingWhenTheRequiredAuthorIdIsANumber() {
+            JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
+                    + "\"created_at\":\"" + CREATED_AT + "\","
+                    + "\"author_id\":4242,"
+                    + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "}}}");
+
+            assertThat(listener.onStatus(record)).isTrue();
+
+            verifyNoCollaboratorWasReached();
+        }
+
+        @Test
+        @DisplayName("stores nothing when the required author_id is absent")
+        void storesNothingWhenTheRequiredAuthorIdIsAbsent() {
+            JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
+                    + "\"created_at\":\"" + CREATED_AT + "\","
+                    + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "}}}");
+
+            assertThat(listener.onStatus(record)).isTrue();
+
+            verifyNoCollaboratorWasReached();
+        }
+
+        @Test
+        @DisplayName("stores nothing when the required author_id holds only whitespace")
+        void storesNothingWhenTheRequiredAuthorIdHoldsOnlyWhitespace() {
+            JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
+                    + "\"created_at\":\"" + CREATED_AT + "\","
+                    + "\"author_id\":\"   \","
+                    + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "}}}");
+
+            assertThat(listener.onStatus(record)).isTrue();
+
+            verifyNoCollaboratorWasReached();
+        }
+
+        // Every stored row carries a creation time — see docs/DECISION_LOG.md DL-223
+        @Test
+        @DisplayName("stores nothing when the required creation time is absent")
+        void storesNothingWhenTheRequiredCreationTimeIsAbsent() {
+            JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
+                    + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "}}}");
+
+            assertThat(listener.onStatus(record)).isTrue();
+
+            verifyNoCollaboratorWasReached();
+        }
+
+        @Test
+        @DisplayName("stores nothing when the required creation time is not ISO-8601")
+        void storesNothingWhenTheRequiredCreationTimeIsNotIso8601() {
+            JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
+                    + "\"created_at\":\"garbage\","
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
+                    + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "}}}");
+
+            assertThat(listener.onStatus(record)).isTrue();
+
+            verifyNoCollaboratorWasReached();
+        }
+
+        @Test
+        @DisplayName("stores nothing when the required creation time is a number")
+        void storesNothingWhenTheRequiredCreationTimeIsANumber() {
+            JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
+                    + "\"created_at\":1756900000,"
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
+                    + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "}}}");
+
+            assertThat(listener.onStatus(record)).isTrue();
+
+            verifyNoCollaboratorWasReached();
+        }
+    }
+
+    // The gate reads the threshold at backend/app/services/twitter_service.py:L43 and compares
+    // inclusively at :L46; the source called an absent meets_popularity_threshold at
+    // backend/app/tasks/tweet_monitoring.py:L17 — see docs/DECISION_LOG.md
+    @Nested
+    @DisplayName("popularity gate")
+    class PopularityGate {
+
+        @Test
+        @DisplayName("offers an integral like count to the popularity gate and stores it")
+        void offersAnIntegralLikeCountToThePopularityGateAndStoresIt() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
                     + "\"created_at\":\"" + CREATED_AT + "\","
                     + "\"author_id\":\"" + AUTHOR_ID + "\","
                     + "\"public_metrics\":{\"like_count\":100}}}");
@@ -184,14 +334,14 @@ class TweetStreamListenerTest {
             assertThat(listener.onStatus(record)).isTrue();
 
             verify(twitterService).meetsPopularityThreshold(100);
-            assertThat(storedTweet().getLikeCount()).isEqualTo(100);
+            assertThat(storedRow().getLikeCount()).isEqualTo(100);
         }
 
         @Test
-        @DisplayName("stores nothing when the popularity gate reports false")
-        void honoursThePopularityGate() {
-            when(twitterService.meetsPopularityThreshold(any())).thenReturn(false);
-            JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
+        @DisplayName("returns true and stores nothing when the popularity gate reports false")
+        void returnsTrueAndStoresNothingWhenThePopularityGateReportsFalse() {
+            stubGateRejects();
+            JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
                     + "\"created_at\":\"" + CREATED_AT + "\","
                     + "\"author_id\":\"" + AUTHOR_ID + "\","
                     + "\"public_metrics\":{\"like_count\":1}}}");
@@ -199,206 +349,347 @@ class TweetStreamListenerTest {
             assertThat(listener.onStatus(record)).isTrue();
 
             verify(twitterService).meetsPopularityThreshold(1);
-            verify(tweetRepository, never()).save(any());
-            verifyNoInteractions(sentimentAnalysisService, notionService, responseService);
+            verifyNoMoreInteractions(twitterService);
+            verifyNoInteractions(sentimentAnalysisService, tweetRepository, responseService,
+                    notionService, tweetMapper);
         }
     }
 
+    // The four steps of on_status at backend/app/tasks/tweet_monitoring.py:L15-34 — see
+    // docs/DECISION_LOG.md
     @Nested
-    @DisplayName("creation time")
-    class CreationTime {
+    @DisplayName("ingestion pipeline")
+    class IngestionPipeline {
 
         @Test
-        @DisplayName("normalises an offset-bearing ISO-8601 value to UTC")
-        void normalisesAnIsoValue() {
-            acceptEverything();
-            JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
-                    + "\"created_at\":\"2026-08-03T17:11:52.000+02:00\","
-                    + "\"author_id\":\"" + AUTHOR_ID + "\","
-                    + "\"public_metrics\":{\"like_count\":500}}}");
+        @DisplayName("evaluates the gate, then the sentiment, then stores the row")
+        void evaluatesTheGateThenTheSentimentThenStoresTheRow() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
 
-            listener.onStatus(record);
+            assertThat(listener.onStatus(popularRecord())).isTrue();
 
-            assertThat(storedTweet().getCreatedAt())
-                    .isEqualTo(LocalDateTime.of(2026, 8, 3, 15, 11, 52));
-        }
-
-        // Every stored row carries a creation time — see docs/DECISION_LOG.md DL-223
-        @Test
-        @DisplayName("skips the record when the required creation time is absent")
-        void skipsTheRecordWhenCreationTimeIsAbsent() {
-            acceptEverything();
-            JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
-                    + "\"author_id\":\"" + AUTHOR_ID + "\","
-                    + "\"public_metrics\":{\"like_count\":500}}}");
-
-            assertThat(listener.onStatus(record)).isTrue();
-
-            verify(tweetRepository, never()).save(any());
-            verifyNoInteractions(sentimentAnalysisService, notionService, responseService);
+            InOrder pipeline = inOrder(twitterService, sentimentAnalysisService, tweetRepository);
+            pipeline.verify(twitterService).meetsPopularityThreshold(POPULAR_LIKE_COUNT);
+            pipeline.verify(sentimentAnalysisService).analyzeSentiment(POST_TEXT);
+            pipeline.verify(sentimentAnalysisService).calculateDoubtRating(SENTIMENT_SCORE);
+            pipeline.verify(tweetRepository).save(any(Tweet.class));
+            pipeline.verifyNoMoreInteractions();
         }
 
         @Test
-        @DisplayName("skips the record when the required creation time is not ISO-8601")
-        void skipsTheRecordWhenCreationTimeIsUnparseable() {
-            acceptEverything();
-            JsonNode record = read("{\"data\":{\"text\":\"doubtful\",\"created_at\":\"garbage\","
-                    + "\"author_id\":\"" + AUTHOR_ID + "\","
-                    + "\"public_metrics\":{\"like_count\":500}}}");
+        @DisplayName("stores the doubt rating the analysis service reports for the forwarded score")
+        void storesTheDoubtRatingTheAnalysisServiceReportsForTheForwardedScore() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
 
-            assertThat(listener.onStatus(record)).isTrue();
+            assertThat(listener.onStatus(popularRecord())).isTrue();
 
-            verify(tweetRepository, never()).save(any());
-            verifyNoInteractions(sentimentAnalysisService, notionService, responseService);
+            verify(sentimentAnalysisService).analyzeSentiment(POST_TEXT);
+            verify(sentimentAnalysisService).calculateDoubtRating(SENTIMENT_SCORE);
+            assertThat(storedRow().getDoubtRating()).isEqualTo(REPORTED_DOUBT_RATING);
         }
 
         @Test
-        @DisplayName("skips the record when the required creation time is numeric")
-        void skipsTheRecordWhenCreationTimeIsNumeric() {
-            acceptEverything();
-            JsonNode record = read("{\"data\":{\"text\":\"doubtful\",\"created_at\":1756900000,"
-                    + "\"author_id\":\"" + AUTHOR_ID + "\","
-                    + "\"public_metrics\":{\"like_count\":500}}}");
+        @DisplayName("returns true and stores nothing when the doubt rating cannot be obtained")
+        void returnsTrueAndStoresNothingWhenTheDoubtRatingCannotBeObtained() {
+            stubGateAccepts();
+            when(sentimentAnalysisService.analyzeSentiment(anyString()))
+                    .thenThrow(new IllegalStateException("analysis unavailable"));
+
+            assertThat(listener.onStatus(popularRecord())).isTrue();
+
+            verifyNoInteractions(tweetRepository, responseService, notionService, tweetMapper);
+        }
+
+        // Ingestion matches no delivered identifier against the table — see docs/DECISION_LOG.md
+        // DL-049
+        @Test
+        @DisplayName("stores twice when the same record arrives twice")
+        void storesTwiceWhenTheSameRecordArrivesTwice() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            JsonNode record = popularRecord();
 
             assertThat(listener.onStatus(record)).isTrue();
+            assertThat(listener.onStatus(record)).isTrue();
 
-            verify(tweetRepository, never()).save(any());
-            verifyNoInteractions(sentimentAnalysisService, notionService, responseService);
+            verify(tweetRepository, times(2)).save(any(Tweet.class));
         }
     }
 
+    // The columns of backend/app/db/models.py:L10-18, in place of the id, text, user and sentiment
+    // arguments at backend/app/tasks/tweet_monitoring.py:L22-28 — see docs/DECISION_LOG.md
     @Nested
     @DisplayName("stored columns")
     class StoredColumns {
 
         @Test
         @DisplayName("maps every delivered member onto its column")
-        void mapsEveryMember() {
-            acceptEverything();
-            JsonNode record = read("{\"data\":{\"text\":\"GPT-4 doubts\",\"author_id\":\"4242\","
-                    + "\"created_at\":\"" + CREATED_AT + "\","
-                    + "\"public_metrics\":{\"like_count\":500},"
-                    + "\"attachments\":{\"media_keys\":[\"m1\",\"m2\"]},"
-                    + "\"referenced_tweets\":[{\"type\":\"replied_to\",\"id\":\"1\"},"
-                    + "{\"type\":\"quoted\",\"id\":\"99\"}]},"
-                    + "\"matching_rules\":[{\"id\":\"r1\",\"tag\":\"GPT-4\"},"
-                    + "{\"id\":\"r2\",\"tag\":\"AI coding tool\"}]}");
+        void mapsEveryDeliveredMemberOntoItsColumn() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
 
-            listener.onStatus(record);
+            assertThat(listener.onStatus(fullRecord())).isTrue();
 
-            Tweet stored = storedTweet();
+            Tweet stored = storedRow();
             assertThat(stored.getContent()).isEqualTo("GPT-4 doubts");
-            assertThat(stored.getUserId()).isEqualTo("4242");
+            assertThat(stored.getLikeCount()).isEqualTo(POPULAR_LIKE_COUNT);
             assertThat(stored.getCreatedAt()).isEqualTo(STORED_CREATED_AT);
-            assertThat(stored.getDoubtRating()).isEqualTo(DOUBT_RATING);
-            assertThat(stored.getMedia()).containsExactly("m1", "m2");
+            assertThat(stored.getDoubtRating()).isEqualTo(REPORTED_DOUBT_RATING);
+            assertThat(stored.getUserId()).isEqualTo(AUTHOR_ID);
+            assertThat(stored.getMedia()).containsExactly("media-1", "media-2");
             assertThat(stored.getQuotedTweetId()).isEqualTo("99");
             assertThat(stored.getAiToolsMentioned()).containsExactly("GPT-4", "AI coding tool");
         }
 
-        // A row with no author identifier has no wire form — see docs/DECISION_LOG.md DL-223
         @Test
-        @DisplayName("skips the record when the required author_id is numeric")
-        void rejectsANumericAuthorId() {
-            acceptEverything();
-            JsonNode record = read("{\"data\":{\"text\":\"doubtful\",\"author_id\":4242,"
+        @DisplayName("stores no quoted identifier when the only reference is a reply")
+        void storesNoQuotedIdentifierWhenTheOnlyReferenceIsAReply() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
                     + "\"created_at\":\"" + CREATED_AT + "\","
-                    + "\"public_metrics\":{\"like_count\":500}}}");
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
+                    + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "},"
+                    + "\"referenced_tweets\":[{\"type\":\"replied_to\",\"id\":\"1\"}]}}");
 
             assertThat(listener.onStatus(record)).isTrue();
 
-            verify(tweetRepository, never()).save(any());
-            verifyNoInteractions(sentimentAnalysisService, notionService, responseService);
+            assertThat(storedRow().getQuotedTweetId()).isNull();
         }
 
         @Test
-        @DisplayName("skips the record when the required author_id is absent")
-        void rejectsAnAbsentAuthorId() {
-            acceptEverything();
-            JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
+        @DisplayName("reads the rule tags from the root of the record")
+        void readsTheRuleTagsFromTheRootOfTheRecord() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
                     + "\"created_at\":\"" + CREATED_AT + "\","
-                    + "\"public_metrics\":{\"like_count\":500}}}");
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
+                    + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "},"
+                    + "\"matching_rules\":[{\"id\":\"r9\",\"tag\":\"nested\"}]},"
+                    + "\"matching_rules\":[{\"id\":\"r1\",\"tag\":\"GPT-4\"}]}");
 
             assertThat(listener.onStatus(record)).isTrue();
 
-            verify(tweetRepository, never()).save(any());
-            verifyNoInteractions(sentimentAnalysisService, notionService, responseService);
+            assertThat(storedRow().getAiToolsMentioned()).containsExactly("GPT-4");
         }
 
         @Test
-        @DisplayName("skips the record when the required author_id is blank")
-        void rejectsABlankAuthorId() {
-            acceptEverything();
-            JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
-                    + "\"created_at\":\"" + CREATED_AT + "\","
-                    + "\"author_id\":\"   \","
-                    + "\"public_metrics\":{\"like_count\":500}}}");
+        @DisplayName("stores empty column values when the record declares no optional member")
+        void storesEmptyColumnValuesWhenTheRecordDeclaresNoOptionalMember() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
 
-            assertThat(listener.onStatus(record)).isTrue();
+            assertThat(listener.onStatus(popularRecord())).isTrue();
 
-            verify(tweetRepository, never()).save(any());
-            verifyNoInteractions(sentimentAnalysisService, notionService, responseService);
+            Tweet stored = storedRow();
+            assertThat(stored.getMedia()).isEmpty();
+            assertThat(stored.getAiToolsMentioned()).isEmpty();
+            assertThat(stored.getQuotedTweetId()).isNull();
+            assertThat(stored.getContent()).isEqualTo(POST_TEXT);
         }
 
         @Test
-        @DisplayName("maps every stored ingested row through the real tweet mapper")
-        void mapsEveryStoredIngestedRowThroughTheRealTweetMapper() {
-            acceptEverything();
-            TweetStreamListener listenerWithRealMapper =
-                    new TweetStreamListener(twitterService, sentimentAnalysisService, tweetRepository,
-                            responseService, notionService, new TweetMapper());
+        @DisplayName("touches no response of the stored row")
+        void touchesNoResponseOfTheStoredRow() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+
+            assertThat(listener.onStatus(fullRecord())).isTrue();
+
+            assertThat(storedRow().getResponses()).isEmpty();
+        }
+
+        // The absent to_dict() at backend/app/api/tweets.py:L19 — see docs/DECISION_LOG.md
+        @Test
+        @DisplayName("mirrors the stored row through the real tweet mapper")
+        void mirrorsTheStoredRowThroughTheRealTweetMapper() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            TweetStreamListener listenerWithRealMapper = new TweetStreamListener(twitterService,
+                    sentimentAnalysisService, tweetRepository, responseService, notionService,
+                    new TweetMapper());
 
             assertThat(listenerWithRealMapper.onStatus(popularRecord())).isTrue();
 
             ArgumentCaptor<TweetDto> mirrored = ArgumentCaptor.forClass(TweetDto.class);
             verify(notionService).storeTweet(mirrored.capture());
-            assertThat(mirrored.getValue().id()).isEqualTo(String.valueOf(STORED_ID));
-            assertThat(mirrored.getValue().content()).isEqualTo("doubtful");
-            assertThat(mirrored.getValue().likeCount()).isEqualTo(500);
-            assertThat(mirrored.getValue().createdAt()).isEqualTo(STORED_CREATED_AT);
-            assertThat(mirrored.getValue().doubtRating()).isEqualTo(DOUBT_RATING);
-            assertThat(mirrored.getValue().userId()).isEqualTo(AUTHOR_ID);
+            TweetDto wireForm = mirrored.getValue();
+            assertThat(wireForm.id()).isEqualTo(String.valueOf(STORED_ID));
+            assertThat(wireForm.content()).isEqualTo(POST_TEXT);
+            assertThat(wireForm.likeCount()).isEqualTo(POPULAR_LIKE_COUNT);
+            assertThat(wireForm.createdAt()).isEqualTo(STORED_CREATED_AT);
+            assertThat(wireForm.doubtRating()).isEqualTo(REPORTED_DOUBT_RATING);
+            assertThat(wireForm.userId()).isEqualTo(AUTHOR_ID);
+            assertThat(wireForm.media()).isEmpty();
+            assertThat(wireForm.aiToolsMentioned()).isEmpty();
+            assertThat(wireForm.quotedTweetId()).isNull();
         }
     }
 
+    // Closes the unimplemented persistence at backend/app/tasks/tweet_monitoring.py:L29 and the
+    // unimplemented generation trigger at :L32 — see docs/DECISION_LOG.md
+    @Nested
+    @DisplayName("response generation trigger")
+    class ResponseGenerationTrigger {
+
+        @Test
+        @DisplayName("stores the row and triggers generation with the identifier assigned to it")
+        void storesTheRowAndTriggersGenerationWithTheIdentifierAssignedToIt() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            stubGeneration(false);
+
+            assertThat(listener.onStatus(fullRecord())).isTrue();
+
+            verify(tweetRepository).save(any(Tweet.class));
+            verify(responseService).generateResponseIfAbsent(String.valueOf(STORED_ID));
+            verify(responseService, never()).generateResponseIfAbsent(DELIVERED_POST_ID);
+            verifyNoMoreInteractions(responseService);
+        }
+
+        // TwitterService carries no publish operation and none is reached — IR7 — see
+        // docs/DECISION_LOG.md
+        @Test
+        @DisplayName("reaches the popularity gate and no other Twitter operation")
+        void reachesThePopularityGateAndNoOtherTwitterOperation() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            stubGeneration(false);
+
+            assertThat(listener.onStatus(popularRecord())).isTrue();
+
+            verify(twitterService).meetsPopularityThreshold(POPULAR_LIKE_COUNT);
+            verifyNoMoreInteractions(twitterService);
+        }
+
+        // The approval flag of backend/app/db/models.py:L26 is read by a human reviewer — IR7 — see
+        // docs/DECISION_LOG.md
+        @ParameterizedTest(name = "is_approved={0}")
+        @ValueSource(booleans = {false, true})
+        @DisplayName("performs the same interactions whichever approval flag the reply carries")
+        void performsTheSameInteractionsWhicheverApprovalFlagTheReplyCarries(boolean approved) {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            stubWireForm();
+            stubGeneration(approved);
+
+            assertThat(listener.onStatus(popularRecord())).isTrue();
+
+            verify(twitterService).meetsPopularityThreshold(POPULAR_LIKE_COUNT);
+            verify(sentimentAnalysisService).analyzeSentiment(POST_TEXT);
+            verify(sentimentAnalysisService).calculateDoubtRating(SENTIMENT_SCORE);
+            verify(tweetRepository).save(any(Tweet.class));
+            verify(tweetMapper).toDto(any(Tweet.class));
+            verify(notionService).storeTweet(any(TweetDto.class));
+            verify(responseService).generateResponseIfAbsent(String.valueOf(STORED_ID));
+            verify(notionService).updateTweetResponse(String.valueOf(STORED_ID), GENERATED_CONTENT);
+            verifyNoMoreInteractions(twitterService, sentimentAnalysisService, tweetRepository,
+                    tweetMapper, notionService, responseService);
+        }
+    }
+
+    // Ported from store_tweet at backend/app/services/notion_service.py:L12-28 and from the call to
+    // the absent NotionService.update_tweet_response at
+    // backend/app/tasks/response_generation.py:L30 — see docs/DECISION_LOG.md DL-194
     @Nested
     @DisplayName("Notion mirrors")
     class NotionMirrors {
 
         @Test
-        @DisplayName("mirrors the tweet and then the generated reply")
-        void mirrorsBothTheTweetAndTheReply() {
-            acceptEverything();
+        @DisplayName("mirrors the stored row, then triggers generation, then mirrors the reply")
+        void mirrorsTheStoredRowThenTriggersGenerationThenMirrorsTheReply() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            stubWireForm();
+            stubGeneration(false);
 
             assertThat(listener.onStatus(popularRecord())).isTrue();
 
-            verify(notionService).storeTweet(any(TweetDto.class));
-            verify(responseService).generateResponseIfAbsent(String.valueOf(STORED_ID));
-            verify(notionService).updateTweetResponse(String.valueOf(STORED_ID), "a draft reply");
+            InOrder mirrors = inOrder(notionService, responseService);
+            mirrors.verify(notionService).storeTweet(any(TweetDto.class));
+            mirrors.verify(responseService).generateResponseIfAbsent(String.valueOf(STORED_ID));
+            mirrors.verify(notionService)
+                    .updateTweetResponse(String.valueOf(STORED_ID), GENERATED_CONTENT);
+            mirrors.verifyNoMoreInteractions();
         }
 
         @Test
-        @DisplayName("still triggers generation when the tweet mirror fails")
-        void keepsGoingWhenTheTweetMirrorFails() {
-            acceptEverything();
-            when(notionService.storeTweet(any())).thenThrow(new IllegalStateException("mirror down"));
+        @DisplayName("keeps the stored row and triggers generation when the row mirror fails")
+        void keepsTheStoredRowAndTriggersGenerationWhenTheRowMirrorFails() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            stubWireForm();
+            stubGeneration(false);
+            when(notionService.storeTweet(any(TweetDto.class)))
+                    .thenThrow(new IllegalStateException("the mirror is unavailable"));
 
             assertThat(listener.onStatus(popularRecord())).isTrue();
 
+            verify(tweetRepository).save(any(Tweet.class));
             verify(responseService).generateResponseIfAbsent(String.valueOf(STORED_ID));
-            verify(notionService).updateTweetResponse(String.valueOf(STORED_ID), "a draft reply");
+            verify(notionService).updateTweetResponse(String.valueOf(STORED_ID), GENERATED_CONTENT);
         }
 
         @Test
-        @DisplayName("mirrors no reply when generation fails")
-        void mirrorsNoReplyWhenGenerationFails() {
-            acceptEverything();
+        @DisplayName("keeps the stored row and mirrors no reply when generation fails")
+        void keepsTheStoredRowAndMirrorsNoReplyWhenGenerationFails() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
             when(responseService.generateResponseIfAbsent(anyString()))
-                    .thenThrow(new IllegalStateException("model down"));
+                    .thenThrow(new IllegalStateException("the model is unavailable"));
 
             assertThat(listener.onStatus(popularRecord())).isTrue();
 
+            verify(tweetRepository).save(any(Tweet.class));
             verify(notionService, never()).updateTweetResponse(anyString(), anyString());
+        }
+
+        @Test
+        @DisplayName("mirrors no reply when the stored row already carried one")
+        void mirrorsNoReplyWhenTheStoredRowAlreadyCarriedOne() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            when(responseService.generateResponseIfAbsent(anyString())).thenReturn(Optional.empty());
+
+            assertThat(listener.onStatus(popularRecord())).isTrue();
+
+            verify(tweetRepository).save(any(Tweet.class));
+            verify(notionService, never()).updateTweetResponse(anyString(), anyString());
+        }
+
+        @Test
+        @DisplayName("keeps the stored row and the stored reply when the reply mirror fails")
+        void keepsTheStoredRowAndTheStoredReplyWhenTheReplyMirrorFails() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            stubGeneration(false);
+            doThrow(new IllegalStateException("the mirror is unavailable"))
+                    .when(notionService).updateTweetResponse(anyString(), anyString());
+
+            assertThat(listener.onStatus(popularRecord())).isTrue();
+
+            verify(tweetRepository).save(any(Tweet.class));
+            verify(notionService).updateTweetResponse(String.valueOf(STORED_ID), GENERATED_CONTENT);
         }
 
         // dto/ResponseDto rejects a null content — AAP TR-6, DL-080 — see docs/DECISION_LOG.md
@@ -406,47 +697,23 @@ class TweetStreamListenerTest {
         @DisplayName("cannot be handed a generated reply that carries no content")
         void cannotBeHandedAGeneratedReplyThatCarriesNoContent() {
             assertThatNullPointerException()
-                    .isThrownBy(() -> new ResponseDto("11", null, LocalDateTime.now(),
+                    .isThrownBy(() -> new ResponseDto(GENERATED_ID, null, GENERATED_AT,
                             Boolean.FALSE, String.valueOf(STORED_ID)))
                     .withMessage("content must not be null.");
 
             verifyNoInteractions(notionService);
         }
 
-        @Test
-        @DisplayName("mirrors no reply when the row already carried one")
-        void mirrorsNoReplyWhenTheClaimIsLost() {
-            acceptEverything();
-            when(responseService.generateResponseIfAbsent(anyString()))
-                    .thenReturn(Optional.empty());
-
-            assertThat(listener.onStatus(popularRecord())).isTrue();
-
-            verify(tweetRepository).save(any(Tweet.class));
-            verify(notionService, never()).updateTweetResponse(anyString(), anyString());
-        }
-
-        @Test
-        @DisplayName("leaves the stored rows in place when the reply mirror fails")
-        void keepsRowsWhenTheReplyMirrorFails() {
-            acceptEverything();
-            org.mockito.Mockito.doThrow(new IllegalStateException("mirror down"))
-                    .when(notionService).updateTweetResponse(anyString(), anyString());
-
-            assertThat(listener.onStatus(popularRecord())).isTrue();
-
-            verify(tweetRepository).save(any(Tweet.class));
-        }
-
         // Mirror-preparation failures are reported here — see docs/DECISION_LOG.md DL-224
         @Test
-        @DisplayName("reports a failed wire-form preparation at WARN and still triggers generation")
-        void reportsAFailedWireFormPreparation() {
-            acceptEverything();
-            when(tweetMapper.toDto(any(Tweet.class)))
-                    .thenThrow(new IllegalStateException("A tweets row carrying no user_id has no "
-                            + "wire form."));
-            ListAppender<ILoggingEvent> recorded = attachListenerAppender();
+        @DisplayName("names a failed wire-form preparation at WARN and still triggers generation")
+        void namesAFailedWireFormPreparationAtWarnAndStillTriggersGeneration() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            when(tweetMapper.toDto(any(Tweet.class))).thenThrow(new IllegalStateException(
+                    "A tweets row carrying no user_id has no wire form."));
+            ListAppender<ILoggingEvent> recorded = attachRecordingAppender();
             try {
                 assertThat(listener.onStatus(popularRecord())).isTrue();
 
@@ -461,18 +728,23 @@ class TweetStreamListenerTest {
                         .contains("IllegalStateException")
                         .doesNotContain("user_id");
             } finally {
-                detachListenerAppender(recorded);
+                detachRecordingAppender(recorded);
             }
             verify(notionService, never()).storeTweet(any(TweetDto.class));
             verify(responseService).generateResponseIfAbsent(String.valueOf(STORED_ID));
         }
 
+        // service/NotionService owns the adapter failure record — see docs/DECISION_LOG.md DL-224
         @Test
-        @DisplayName("keeps the adapter's own failure at DEBUG")
-        void keepsTheAdapterFailureAtDebug() {
-            acceptEverything();
-            when(notionService.storeTweet(any())).thenThrow(new IllegalStateException("mirror down"));
-            ListAppender<ILoggingEvent> recorded = attachListenerAppender();
+        @DisplayName("names a failed row mirror below WARN")
+        void namesAFailedRowMirrorBelowWarn() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            stubWireForm();
+            when(notionService.storeTweet(any(TweetDto.class)))
+                    .thenThrow(new IllegalStateException("the mirror is unavailable"));
+            ListAppender<ILoggingEvent> recorded = attachRecordingAppender();
             try {
                 assertThat(listener.onStatus(popularRecord())).isTrue();
 
@@ -481,18 +753,144 @@ class TweetStreamListenerTest {
                         .map(ILoggingEvent::getFormattedMessage)
                         .filter(message -> message.contains("Notion"))
                         .toList()).isEmpty();
+                assertThat(recorded.list.stream()
+                        .filter(event -> event.getLevel() == Level.DEBUG)
+                        .map(ILoggingEvent::getFormattedMessage)
+                        .filter(message -> message.startsWith("Mirroring tweet row"))
+                        .toList()).hasSize(1);
             } finally {
-                detachListenerAppender(recorded);
+                detachRecordingAppender(recorded);
             }
         }
     }
 
     /**
-     * Attaches a recording appender to the logger of the class under test.
+     * Reports that the popularity gate accepts every like count offered to it.
+     */
+    private void stubGateAccepts() {
+        when(twitterService.meetsPopularityThreshold(any())).thenReturn(true);
+    }
+
+    /**
+     * Reports that the popularity gate rejects every like count offered to it.
+     */
+    private void stubGateRejects() {
+        when(twitterService.meetsPopularityThreshold(any())).thenReturn(false);
+    }
+
+    /**
+     * Reports {@link #SENTIMENT_SCORE} for any text, and {@link #REPORTED_DOUBT_RATING} only for
+     * exactly that score.
+     */
+    private void stubSentiment() {
+        when(sentimentAnalysisService.analyzeSentiment(anyString())).thenReturn(SENTIMENT_SCORE);
+        when(sentimentAnalysisService.calculateDoubtRating(SENTIMENT_SCORE))
+                .thenReturn(REPORTED_DOUBT_RATING);
+    }
+
+    /**
+     * Assigns {@link #STORED_ID} to the row offered for storage and returns it, as an insert of a new
+     * entity does.
+     */
+    private void stubSave() {
+        when(tweetRepository.save(any(Tweet.class))).thenAnswer(invocation -> {
+            Tweet candidate = invocation.getArgument(0);
+            candidate.setId(STORED_ID);
+            return candidate;
+        });
+    }
+
+    /**
+     * Reports a wire form for any stored row.
+     */
+    private void stubWireForm() {
+        when(tweetMapper.toDto(any(Tweet.class))).thenReturn(new TweetDto(
+                String.valueOf(STORED_ID), POST_TEXT, POPULAR_LIKE_COUNT, STORED_CREATED_AT,
+                REPORTED_DOUBT_RATING, List.of(), null, AUTHOR_ID, List.of()));
+    }
+
+    /**
+     * Reports a stored reply for the row {@link #STORED_ID} names.
+     *
+     * @param approved value of the stored reply's approval flag
+     */
+    private void stubGeneration(boolean approved) {
+        when(responseService.generateResponseIfAbsent(String.valueOf(STORED_ID)))
+                .thenReturn(Optional.of(new ResponseDto(GENERATED_ID, GENERATED_CONTENT,
+                        GENERATED_AT, approved, String.valueOf(STORED_ID))));
+    }
+
+    /**
+     * Captures the single row offered to the repository.
+     *
+     * @return the captured row
+     */
+    private Tweet storedRow() {
+        ArgumentCaptor<Tweet> captor = ArgumentCaptor.forClass(Tweet.class);
+        verify(tweetRepository).save(captor.capture());
+        return captor.getValue();
+    }
+
+    /**
+     * Asserts that no collaborator of the listener was reached.
+     */
+    private void verifyNoCollaboratorWasReached() {
+        verifyNoInteractions(twitterService, sentimentAnalysisService, tweetRepository,
+                responseService, notionService, tweetMapper);
+    }
+
+    /**
+     * Builds a record carrying only the members every accepted record must carry.
+     *
+     * @return the record
+     */
+    private static JsonNode popularRecord() {
+        return read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
+                + "\"created_at\":\"" + CREATED_AT + "\","
+                + "\"author_id\":\"" + AUTHOR_ID + "\","
+                + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "}}}");
+    }
+
+    /**
+     * Builds a record carrying every member the listener reads, including a delivered identifier, two
+     * attachment keys, a replied-to and a quoted reference, and two rule tags at the root.
+     *
+     * @return the record
+     */
+    private static JsonNode fullRecord() {
+        return read("{\"data\":{\"id\":\"" + DELIVERED_POST_ID + "\","
+                + "\"text\":\"GPT-4 doubts\","
+                + "\"author_id\":\"" + AUTHOR_ID + "\","
+                + "\"created_at\":\"" + CREATED_AT + "\","
+                + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "},"
+                + "\"attachments\":{\"media_keys\":[\"media-1\",\"media-2\"]},"
+                + "\"referenced_tweets\":[{\"type\":\"replied_to\",\"id\":\"1\"},"
+                + "{\"type\":\"quoted\",\"id\":\"99\"}]},"
+                + "\"matching_rules\":[{\"id\":\"r1\",\"tag\":\"GPT-4\"},"
+                + "{\"id\":\"r2\",\"tag\":\"AI coding tool\"}]}");
+    }
+
+    /**
+     * Reads a synthesized record into a tree.
+     *
+     * @param record the record to read
+     * @return the parsed tree
+     */
+    private static JsonNode read(String record) {
+        try {
+            return JSON.readTree(record);
+        } catch (JsonProcessingException unparseable) {
+            throw new IllegalStateException("The synthesized record does not parse.", unparseable);
+        }
+    }
+
+    /**
+     * Attaches a recording appender to the logger of the class under test and lowers that logger to
+     * {@code DEBUG}.
      *
      * @return the attached appender
      */
-    private static ListAppender<ILoggingEvent> attachListenerAppender() {
+    private static ListAppender<ILoggingEvent> attachRecordingAppender() {
         Logger logger = (Logger) LoggerFactory.getLogger(TweetStreamListener.class);
         logger.setLevel(Level.DEBUG);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -502,53 +900,15 @@ class TweetStreamListenerTest {
     }
 
     /**
-     * Detaches a recording appender from the logger of the class under test.
+     * Detaches a recording appender from the logger of the class under test and restores that
+     * logger's inherited level.
      *
      * @param appender the appender to detach
      */
-    private static void detachListenerAppender(ListAppender<ILoggingEvent> appender) {
+    private static void detachRecordingAppender(ListAppender<ILoggingEvent> appender) {
         Logger logger = (Logger) LoggerFactory.getLogger(TweetStreamListener.class);
         logger.detachAppender(appender);
         logger.setLevel(null);
         appender.stop();
-    }
-
-    private JsonNode popularRecord() {
-        return read("{\"data\":{\"text\":\"doubtful\","
-                + "\"created_at\":\"" + CREATED_AT + "\","
-                + "\"author_id\":\"" + AUTHOR_ID + "\","
-                + "\"public_metrics\":{\"like_count\":500}}}");
-    }
-
-    private void acceptEverything() {
-        when(twitterService.meetsPopularityThreshold(any())).thenReturn(true);
-        when(sentimentAnalysisService.analyzeSentiment(anyString())).thenReturn(SCORE);
-        when(sentimentAnalysisService.calculateDoubtRating(anyDouble())).thenReturn(DOUBT_RATING);
-        when(tweetRepository.save(any(Tweet.class))).thenAnswer(invocation -> {
-            Tweet candidate = invocation.getArgument(0);
-            candidate.setId(STORED_ID);
-            return candidate;
-        });
-        when(tweetMapper.toDto(any(Tweet.class))).thenReturn(new TweetDto(
-                String.valueOf(STORED_ID), "doubtful", 500, STORED_CREATED_AT, DOUBT_RATING,
-                List.of(), null, AUTHOR_ID, List.of()));
-        when(notionService.storeTweet(any(TweetDto.class))).thenReturn("notion-page-id");
-        when(responseService.generateResponseIfAbsent(eq(String.valueOf(STORED_ID))))
-                .thenReturn(Optional.of(new ResponseDto("11", "a draft reply", LocalDateTime.now(),
-                        Boolean.FALSE, String.valueOf(STORED_ID))));
-    }
-
-    private Tweet storedTweet() {
-        ArgumentCaptor<Tweet> captor = ArgumentCaptor.forClass(Tweet.class);
-        verify(tweetRepository).save(captor.capture());
-        return captor.getValue();
-    }
-
-    private static JsonNode read(String record) {
-        try {
-            return JSON.readTree(record);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException unparseable) {
-            throw new IllegalStateException("The synthesized record does not parse.", unparseable);
-        }
     }
 }

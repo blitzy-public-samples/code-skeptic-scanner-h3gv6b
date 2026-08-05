@@ -69,8 +69,9 @@ public class Response {
 
     // Ported from backend/app/db/models.py:L27-28 (faithful port) — see docs/DECISION_LOG.md
     // This side owns the foreign key declared as ForeignKey('tweets.id').
-    // Fetch type LAZY — DL-162; repository/ResponseRepository attaches an entity graph on its page
-    // read — DL-087 — see docs/DECISION_LOG.md
+    // Fetch type LAZY — DL-162; repository/ResponseRepository reads this column through a projection
+    // on its page read, so no page read traverses this association — DL-197 — see
+    // docs/DECISION_LOG.md
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "tweet_id")
     private Tweet tweet;

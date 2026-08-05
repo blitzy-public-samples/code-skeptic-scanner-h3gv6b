@@ -1,7 +1,6 @@
 package com.codeskeptic.scanner.service;
 
 import java.time.Duration;
-import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
@@ -14,7 +13,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
-import com.codeskeptic.scanner.dto.ResponseDto;
 import com.codeskeptic.scanner.dto.TweetDto;
 import com.codeskeptic.scanner.util.LogSafe;
 import com.openai.client.OpenAIClient;
@@ -32,9 +30,8 @@ import jakarta.annotation.PreDestroy;
  *
  * <p>{@link #generateResponse(TweetDto)} builds the prompt of
  * {@code backend/app/services/llm_service.py:L16}, issues one Chat Completions request and returns
- * the generation result as a {@code dto.ResponseDto}, matching the {@code ResponseSchema} the source
- * returned at {@code :L32}. {@link #closeOpenAiClient()} releases the client when the bean is
- * destroyed. No OpenAI SDK type appears in either signature.
+ * the trimmed generated text. {@link #closeOpenAiClient()} releases the client when the bean is
+ * destroyed. No OpenAI SDK type appears in either signature — DL-081.
  *
  * <p>The {@link OpenAIClient} is created on first use by {@link #openAiClient()}, in place of the
  * {@code Completion.api_key} assignment at {@code backend/app/services/llm_service.py:L9} — DL-085.
@@ -112,11 +109,7 @@ public class LlmService {
     /** Configuration key of the reasoning effort, named by the failure message it can raise. */
     private static final String REASONING_EFFORT_KEY = "scanner.openai.reasoning-effort";
 
-    /**
-     * The reasoning-effort values the OpenAI SDK recognises, rendered for a failure message. Derived
-     * from {@link ReasoningEffort.Value} rather than written out, so the message cannot drift from the
-     * set {@link #resolveReasoningEffort()} accepts.
-     */
+    /** Reasoning-effort values rendered from {@link ReasoningEffort.Value}, excluding {@code _UNKNOWN}. */
     private static final String ACCEPTED_REASONING_EFFORTS =
             Arrays.stream(ReasoningEffort.Value.values())
                     .filter(value -> value != ReasoningEffort.Value._UNKNOWN)
@@ -174,8 +167,8 @@ public class LlmService {
         this.properties = Objects.requireNonNull(properties, "properties must not be null.");
     }
 
-    // Net-new (no Python counterpart: backend/app/services/llm_service.py:L32 returned a dict
-    // carrying content and tweet_id) — DL-080 — see docs/DECISION_LOG.md
+    // The adapter returns generated text; ResponseService owns persistence and the wire record —
+    // DL-081 — see docs/DECISION_LOG.md
     /**
      * Generates a reply to the supplied post and returns the generated text.
      *
@@ -197,8 +190,8 @@ public class LlmService {
      * {@link IllegalStateException}, which the caller renders as the wire literal of
      * {@code backend/app/api/responses.py:L49} — see docs/DECISION_LOG.md DL-083 and DL-145.
      *
-     * <p>A failure raised by the OpenAI client propagates unchanged and is not logged here — see
-     * docs/DECISION_LOG.md DL-084.
+     * <p>A failure raised by the OpenAI client is recorded here under the sanitized adapter policy
+     * and propagates unchanged — see docs/DECISION_LOG.md DL-084.
      *
      * @param tweet the post to reply to; must not be {@code null}
      * @return the trimmed generated text, never {@code null} and never blank
@@ -213,7 +206,7 @@ public class LlmService {
     // Ported from backend/app/services/llm_service.py:L14-32 (faithful port). Chat Completions
     // replaces Completion.create(engine="text-davinci-002", ...) at :L19-26 — see
     // docs/DECISION_LOG.md DL-011, DL-032, DL-033, DL-034, DL-081 and DL-083
-    public ResponseDto generateResponse(TweetDto tweet) {
+    public String generateResponse(TweetDto tweet) {
         Objects.requireNonNull(tweet, "tweet must not be null.");
 
         String prompt = buildPrompt(tweet);
@@ -246,9 +239,7 @@ public class LlmService {
         log.info("Model {} returned {} character(s) of generated text for tweet {}",
                 model, generatedText.length(), LogSafe.logSafe(tweet.id()));
 
-        // The stored row's id is assigned by the database on insert — see docs/DECISION_LOG.md
-        // DL-081
-        return new ResponseDto(null, generatedText, LocalDateTime.now(), Boolean.FALSE, tweet.id());
+        return generatedText;
     }
 
     /**

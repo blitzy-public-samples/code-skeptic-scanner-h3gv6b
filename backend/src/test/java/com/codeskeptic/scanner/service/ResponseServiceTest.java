@@ -1,12 +1,12 @@
 package com.codeskeptic.scanner.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -23,6 +23,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import jakarta.persistence.LockModeType;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -70,10 +75,10 @@ import com.fasterxml.jackson.databind.node.TextNode;
 
 // Net-new coverage of the four call sites at backend/app/api/responses.py:L15,L26,L44,L60, whose
 // service was imported at :L3 and existed nowhere — see docs/DECISION_LOG.md DL-076, DL-084, DL-086,
-// DL-177
+// DL-081 and DL-195
 /**
- * Exercises the four operations of {@link ResponseService}: the page it lists, the row it reads, the
- * row it generates and the row it updates.
+ * Exercises the five operations of {@link ResponseService}: the page it lists, the row it reads, the
+ * route-owned row it generates, the claim-aware background generation path and the row it updates.
  *
  * <p>Five client-visible messages are reachable from this class and each is asserted as its own exact
  * string: {@code Tweet ID is required}, {@code Response not found},
@@ -202,7 +207,7 @@ class ResponseServiceTest {
     void rejectsAnUpdateWhoseBodyCarriesNeitherWritableKey() {
         UpdateResponseRequest emptyBody = new UpdateResponseRequest(null, null);
 
-        assertThat(emptyBody.carriesNoUpdatableField()).isTrue();
+        assertThat(emptyBody.carriesNoWritableValue()).isTrue();
         assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID, emptyBody))
                 .isInstanceOf(BadRequestException.class)
                 .hasMessage("Update data is required");
@@ -333,8 +338,9 @@ class ResponseServiceTest {
         DataIntegrityViolationException rejectedInsert =
                 new DataIntegrityViolationException("could not execute statement [23502]");
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
         when(responseRepository.save(any(Response.class))).thenThrow(rejectedInsert);
 
         Throwable thrown = catchThrowable(() -> service.generateResponse(TWEET_ID));
@@ -363,14 +369,15 @@ class ResponseServiceTest {
                 .isNotEqualTo(BadRequestException.TWEET_ID_IS_REQUIRED);
     }
 
-    // The single background generation entry point — DL-196
+    // The single background generation entry point — DL-195
     @Test
     @DisplayName("stores nothing for a background pass when the row already carries a response")
     void storesNothingForABackgroundPassWhenTheRowAlreadyCarriesAResponse() {
         Tweet subject = tweetCarryingTheKey();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
         when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(true);
 
         Optional<ResponseDto> stored = service.generateResponseIfAbsent(TWEET_ID);
@@ -380,14 +387,15 @@ class ResponseServiceTest {
         verify(responseRepository, never()).save(any(Response.class));
     }
 
-    // The single background generation entry point — DL-196
+    // The single background generation entry point — DL-195
     @Test
     @DisplayName("stores one row for a background pass when the row carries no response")
     void storesOneRowForABackgroundPassWhenTheRowCarriesNoResponse() {
         Tweet subject = tweetCarryingTheKey();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
         when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false);
         when(responseRepository.save(any(Response.class))).thenAnswer(invocation -> {
             Response saved = invocation.getArgument(0);
@@ -404,15 +412,16 @@ class ResponseServiceTest {
         verify(responseRepository).save(any(Response.class));
     }
 
-    // The existence guard shares the transaction that inserts — DL-196
+    // The parent lock and existence guard share the transaction that inserts — DL-195
     @Test
     @DisplayName("tests existence inside the storing transaction, after the model has answered")
     void testsExistenceInsideTheStoringTransactionAfterTheModelHasAnswered() {
         Tweet subject = tweetCarryingTheKey();
         TweetDto subjectDto = tweetDto();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(subjectDto);
-        when(llmService.generateResponse(subjectDto)).thenReturn(generatedDto());
+        when(llmService.generateResponse(subjectDto)).thenReturn(GENERATED_TEXT);
         when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(true);
 
         service.generateResponseIfAbsent(TWEET_ID);
@@ -420,19 +429,20 @@ class ResponseServiceTest {
         InOrder ordering = inOrder(tweetRepository, llmService, responseRepository);
         ordering.verify(tweetRepository).findById(TWEET_KEY);
         ordering.verify(llmService).generateResponse(subjectDto);
-        ordering.verify(tweetRepository).findById(TWEET_KEY);
+        ordering.verify(tweetRepository).findByIdForUpdate(TWEET_KEY);
         ordering.verify(responseRepository).existsByTweetId(TWEET_KEY);
         ordering.verifyNoMoreInteractions();
     }
 
-    // The route path is not guarded — DL-196
+    // The route path takes the parent lock but not the existence guard — DL-195
     @Test
     @DisplayName("does not consult the existence guard on the route path")
     void doesNotConsultTheExistenceGuardOnTheRoutePath() {
         Tweet subject = tweetCarryingTheKey();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
         when(responseRepository.save(any(Response.class))).thenAnswer(invocation -> {
             Response saved = invocation.getArgument(0);
             saved.setId(RESPONSE_KEY);
@@ -446,7 +456,7 @@ class ResponseServiceTest {
         verify(responseRepository).save(any(Response.class));
     }
 
-    // backend/app/api/responses.py:L40-41 applies to the background path too — DL-196
+    // backend/app/api/responses.py:L40-41 applies to the background path too — DL-195
     @Test
     @DisplayName("refuses a background generation request carrying no identifier")
     void refusesABackgroundGenerationRequestCarryingNoIdentifier() {
@@ -466,8 +476,9 @@ class ResponseServiceTest {
     void storesTheGeneratedTextAsAnUnapprovedRowAndReturnsTheStoredRow() {
         Tweet subject = tweetCarryingTheKey();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
         when(responseRepository.save(any(Response.class))).thenAnswer(invocation -> {
             Response saved = invocation.getArgument(0);
             saved.setId(RESPONSE_KEY);
@@ -498,8 +509,9 @@ class ResponseServiceTest {
         Tweet subject = tweetCarryingTheKey();
         TweetDto subjectDto = tweetDto();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(subjectDto);
-        when(llmService.generateResponse(subjectDto)).thenReturn(generatedDto());
+        when(llmService.generateResponse(subjectDto)).thenReturn(GENERATED_TEXT);
         when(responseRepository.save(any(Response.class))).thenAnswer(returnsTheRowWithAnAssignedId());
         when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
 
@@ -510,7 +522,7 @@ class ResponseServiceTest {
         orchestration.verify(tweetRepository).findById(TWEET_KEY);
         orchestration.verify(tweetMapper).toDto(subject);
         orchestration.verify(llmService).generateResponse(subjectDto);
-        orchestration.verify(tweetRepository).findById(TWEET_KEY);
+        orchestration.verify(tweetRepository).findByIdForUpdate(TWEET_KEY);
         orchestration.verify(responseRepository).save(any(Response.class));
         orchestration.verify(responseMapper).toDto(any(Response.class));
         orchestration.verifyNoMoreInteractions();
@@ -523,8 +535,9 @@ class ResponseServiceTest {
         Tweet subject = tweetCarryingTheKey();
         when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(true);
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
 
         assertThat(service.generateResponseIfAbsent(TWEET_ID)).isEmpty();
 
@@ -540,8 +553,9 @@ class ResponseServiceTest {
         Tweet subject = tweetCarryingTheKey();
         when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(true);
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
 
         assertThat(service.generateResponseIfAbsent(TWEET_ID)).isEmpty();
 
@@ -556,8 +570,9 @@ class ResponseServiceTest {
         Tweet subject = tweetCarryingTheKey();
         when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false);
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
         when(responseRepository.save(any(Response.class))).thenAnswer(returnsTheRowWithAnAssignedId());
         when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
 
@@ -571,6 +586,48 @@ class ResponseServiceTest {
         verify(responseRepository).save(any(Response.class));
     }
 
+    // The per-instance claim is keyed by the parsed Integer rather than the raw path text — DL-195.
+    @Test
+    @DisplayName("treats alternate decimal spellings as one in-process generation claim")
+    void treatsAlternateDecimalSpellingsAsOneInProcessGenerationClaim() throws Exception {
+        Tweet subject = tweetCarryingTheKey();
+        CountDownLatch modelEntered = new CountDownLatch(1);
+        CountDownLatch releaseModel = new CountDownLatch(1);
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenAnswer(invocation -> {
+            modelEntered.countDown();
+            if (!releaseModel.await(5, TimeUnit.SECONDS)) {
+                throw new AssertionError("Timed out waiting to release the generated response.");
+            }
+            return GENERATED_TEXT;
+        });
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false);
+        when(responseRepository.save(any(Response.class))).thenAnswer(returnsTheRowWithAnAssignedId());
+        when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Optional<ResponseDto>> first =
+                    executor.submit(() -> service.generateResponseIfAbsent(TWEET_ID));
+            assertThat(modelEntered.await(5, TimeUnit.SECONDS)).isTrue();
+
+            Optional<ResponseDto> alias = service.generateResponseIfAbsent("0" + TWEET_ID);
+
+            assertThat(alias).isEmpty();
+            releaseModel.countDown();
+            assertThat(first.get(5, TimeUnit.SECONDS)).isPresent();
+        } finally {
+            releaseModel.countDown();
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        }
+
+        verify(llmService, times(1)).generateResponse(any(TweetDto.class));
+        verify(responseRepository, times(1)).save(any(Response.class));
+    }
+
     // The route POST /responses is unaffected by the claim — backend/app/api/responses.py:L44 —
     // see docs/DECISION_LOG.md
     @Test
@@ -578,8 +635,9 @@ class ResponseServiceTest {
     void testsNoClaimOnTheReviewerInitiatedRoute() {
         Tweet subject = tweetCarryingTheKey();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
         when(responseRepository.save(any(Response.class))).thenAnswer(returnsTheRowWithAnAssignedId());
         when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
 
@@ -594,8 +652,9 @@ class ResponseServiceTest {
     void associatesTheStoredRowWithTheLoadedTweetAndStoresItUnapproved() {
         Tweet subject = tweetCarryingTheKey();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
         when(responseRepository.save(any(Response.class))).thenAnswer(returnsTheRowWithAnAssignedId());
         when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
 
@@ -622,8 +681,9 @@ class ResponseServiceTest {
         Tweet subject = tweetCarryingTheKey();
         ResponseDto mapped = storedDto();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(generatedDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
         when(responseRepository.save(any(Response.class))).thenAnswer(invocation -> {
             Response submitted = invocation.getArgument(0);
             assertThat(submitted.getId()).isNull();
@@ -685,61 +745,98 @@ class ResponseServiceTest {
         assertThat(written.getIsApproved()).isTrue();
     }
 
-    // Presence decides, not value — DL-082 — see docs/DECISION_LOG.md
+    // A JSON null carries no writable content value — DL-082 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("clears the content when the body carries it as an explicit json null")
-    void clearsTheContentWhenTheBodyCarriesItAsAnExplicitJsonNull() {
+    @DisplayName("rejects an explicit json null as the only content value")
+    void rejectsAnExplicitJsonNullAsTheOnlyContentValue() {
+        UpdateResponseRequest request =
+                new UpdateResponseRequest(NullNode.getInstance(), null);
+
+        assertThat(request.carriesNoWritableValue()).isTrue();
+        assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID, request))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessage("Update data is required");
+
+        verifyNoInteractions(responseRepository, responseMapper);
+    }
+
+    // A JSON null carries no writable approval value — DL-082 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("rejects an explicit json null as the only approval value")
+    void rejectsAnExplicitJsonNullAsTheOnlyApprovalValue() {
+        UpdateResponseRequest request =
+                new UpdateResponseRequest(null, NullNode.getInstance());
+
+        assertThat(request.carriesNoWritableValue()).isTrue();
+        assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID, request))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessage("Update data is required");
+
+        verifyNoInteractions(responseRepository, responseMapper);
+    }
+
+    // Two JSON nulls still carry no writable value — DL-082 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("rejects a body carrying both writable keys as explicit json nulls")
+    void rejectsABodyCarryingBothWritableKeysAsExplicitJsonNulls() {
+        UpdateResponseRequest request =
+                new UpdateResponseRequest(NullNode.getInstance(), NullNode.getInstance());
+
+        assertThat(request.carriesNoWritableValue()).isTrue();
+        assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID, request))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessage("Update data is required");
+
+        verifyNoInteractions(responseRepository, responseMapper);
+    }
+
+    // A valid value is written while an explicit null sibling is ignored — DL-082.
+    @Test
+    @DisplayName("writes a valid content value without clearing an explicit-null approval")
+    void writesAValidContentValueWithoutClearingAnExplicitNullApproval() {
         Response existing = storedRowCarryingApproval(true);
         stubTheUpdateOf(existing);
 
         service.updateResponse(RESPONSE_ID,
-                new UpdateResponseRequest(NullNode.getInstance(), null));
+                new UpdateResponseRequest(TextNode.valueOf(REVISED_CONTENT), NullNode.getInstance()));
 
         Response written = theRowSubmittedForUpdate(existing);
-        assertThat(written.getContent()).isNull();
+        assertThat(written.getContent()).isEqualTo(REVISED_CONTENT);
         assertThat(written.getIsApproved()).isTrue();
     }
 
-    // Presence decides, not value — DL-082 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("clears the approval flag when the body carries it as an explicit json null")
-    void clearsTheApprovalFlagWhenTheBodyCarriesItAsAnExplicitJsonNull() {
-        Response existing = storedRowCarryingApproval(true);
-        stubTheUpdateOf(existing);
+    @DisplayName("maps an accepted update through the real response mapper")
+    void mapsAnAcceptedUpdateThroughTheRealResponseMapper() {
+        Response existing = storedRowCarryingApproval(false);
+        when(responseRepository.findByIdForUpdate(RESPONSE_KEY)).thenReturn(Optional.of(existing));
+        when(responseRepository.save(existing)).thenReturn(existing);
+        ResponseService serviceWithRealMapper =
+                new ResponseService(responseRepository, tweetRepository, llmService,
+                        new ResponseMapper(), tweetMapper, directTransactionTemplate());
 
-        service.updateResponse(RESPONSE_ID,
-                new UpdateResponseRequest(null, NullNode.getInstance()));
+        ResponseDto updated = serviceWithRealMapper.updateResponse(RESPONSE_ID,
+                new UpdateResponseRequest(TextNode.valueOf(REVISED_CONTENT), BooleanNode.TRUE));
 
-        Response written = theRowSubmittedForUpdate(existing);
-        assertThat(written.getIsApproved()).isNull();
-        assertThat(written.getContent()).isEqualTo(STORED_CONTENT);
+        assertThat(updated.id()).isEqualTo(RESPONSE_ID);
+        assertThat(updated.content()).isEqualTo(REVISED_CONTENT);
+        assertThat(updated.isApproved()).isTrue();
+        assertThat(updated.tweetId()).isEqualTo(TWEET_ID);
+        verify(responseRepository).save(existing);
     }
 
-    // Presence decides, not value — DL-082 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("clears both columns when the body carries both as explicit json nulls")
-    void clearsBothColumnsWhenTheBodyCarriesBothAsExplicitJsonNulls() {
-        Response existing = storedRowCarryingApproval(true);
-        stubTheUpdateOf(existing);
+    @DisplayName("reports the required tweet_id when a response has no tweet association")
+    void reportsTheRequiredTweetIdWhenAResponseHasNoTweetAssociation() {
+        Response withoutTweet = storedRowCarryingApproval(false);
+        withoutTweet.setTweet(null);
 
-        service.updateResponse(RESPONSE_ID,
-                new UpdateResponseRequest(NullNode.getInstance(), NullNode.getInstance()));
+        Throwable thrown = catchThrowable(() -> new ResponseMapper().toDto(withoutTweet));
 
-        Response written = theRowSubmittedForUpdate(existing);
-        assertThat(written.getContent()).isNull();
-        assertThat(written.getIsApproved()).isNull();
-    }
-
-    // Presence decides, not value — DL-082 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("accepts a body whose only key is an explicit json null rather than rejecting it")
-    void acceptsABodyWhoseOnlyKeyIsAnExplicitJsonNullRatherThanRejectingIt() {
-        Response existing = storedRowCarryingApproval(true);
-        stubTheUpdateOf(existing);
-
-        assertThatCode(() -> service.updateResponse(RESPONSE_ID,
-                new UpdateResponseRequest(NullNode.getInstance(), null)))
-                .doesNotThrowAnyException();
+        assertThat(thrown)
+                .isInstanceOf(IllegalStateException.class)
+                .isNotInstanceOf(NullPointerException.class)
+                .hasMessageContaining("tweet_id");
     }
 
     // backend/app/db/models.py:L26 with backend/app/api/responses.py:L60
@@ -750,7 +847,7 @@ class ResponseServiceTest {
         UpdateResponseRequest withoutApproval = contentOnly();
         stubTheUpdateOf(existing);
 
-        assertThat(withoutApproval.approvalPresent()).isFalse();
+        assertThat(withoutApproval.writesApproval()).isFalse();
         service.updateResponse(RESPONSE_ID, withoutApproval);
 
         assertThat(theRowSubmittedForUpdate(existing).getIsApproved()).isTrue();
@@ -764,7 +861,7 @@ class ResponseServiceTest {
         UpdateResponseRequest revokingApproval = new UpdateResponseRequest(null, BooleanNode.FALSE);
         stubTheUpdateOf(existing);
 
-        assertThat(revokingApproval.approvalPresent()).isTrue();
+        assertThat(revokingApproval.writesApproval()).isTrue();
         assertThat(revokingApproval.approvalValue()).isFalse();
         service.updateResponse(RESPONSE_ID, revokingApproval);
 
@@ -1013,7 +1110,7 @@ class ResponseServiceTest {
                 ResponseMapper.class.getName(),
                 TweetMapper.class.getName(),
                 TransactionTemplate.class.getName(),
-                // The in-process generation claim of DL-196 — a Set of raw identifiers, not a
+                // The in-process generation claim of DL-195 — a Set of integer identifiers, not a
                 // collaborator
                 Set.class.getName());
     }
@@ -1173,18 +1270,6 @@ class ResponseServiceTest {
 
     private static ResponseDto storedDto() {
         return new ResponseDto(RESPONSE_ID, STORED_CONTENT, STORED_AT, false, TWEET_ID);
-    }
-
-    /**
-     * Builds the generation result the language-model adapter returns.
-     *
-     * <p>The identifier is {@code null}: the adapter has not persisted anything, so no key has been
-     * assigned. Approval is {@code false}.
-     *
-     * @return the adapter's result carrying {@link #GENERATED_TEXT}
-     */
-    private static ResponseDto generatedDto() {
-        return new ResponseDto(null, GENERATED_TEXT, STORED_AT, false, TWEET_ID);
     }
 
     /**

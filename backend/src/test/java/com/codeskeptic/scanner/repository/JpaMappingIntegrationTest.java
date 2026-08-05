@@ -1,13 +1,28 @@
 package com.codeskeptic.scanner.repository;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import com.codeskeptic.scanner.dto.ResponseDto;
+import com.codeskeptic.scanner.dto.TweetDto;
+import com.codeskeptic.scanner.dto.UpdateResponseRequest;
 import com.codeskeptic.scanner.entity.AiTool;
 import com.codeskeptic.scanner.entity.Response;
 import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.entity.Tweet;
+import com.codeskeptic.scanner.exception.BadRequestException;
+import com.codeskeptic.scanner.service.LlmService;
+import com.codeskeptic.scanner.service.ResponseService;
+import com.codeskeptic.scanner.service.mapper.ResponseMapper;
+import com.codeskeptic.scanner.service.mapper.TweetMapper;
 import com.codeskeptic.scanner.util.DelimitedStringListConverter;
+import com.fasterxml.jackson.databind.node.BooleanNode;
+import com.fasterxml.jackson.databind.node.NullNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import jakarta.persistence.Column;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
@@ -33,6 +48,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import javax.sql.DataSource;
 import org.hibernate.SessionFactory;
 import org.hibernate.boot.MetadataSources;
@@ -49,6 +69,10 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Integration test over the JPA mappings of {@link Tweet}, {@link Response}, {@link AiTool} and
@@ -336,6 +360,9 @@ class JpaMappingIntegrationTest {
 
     @Autowired
     private DataSource dataSource;
+
+    @Autowired
+    private PlatformTransactionManager transactionManager;
 
     // Ported from backend/app/db/models.py:L8,L21,L33,L40 (faithful port) — see
     // docs/DECISION_LOG.md
@@ -1122,6 +1149,85 @@ class JpaMappingIntegrationTest {
                 .as("the answered row is excluded").doesNotContain(answered.getId());
     }
 
+    // The update write boundary and wire conversion share one real persistence transaction — DL-082.
+    @Test
+    @DisplayName("the response service rejects explicit null and maps a valid update through the real repository")
+    void responseServiceRejectsExplicitNullAndMapsAValidUpdateThroughTheRealRepository() {
+        Tweet tweet = saveTweet(LocalDateTime.of(2026, 1, 4, 9, 0), 6.0, 180);
+        Response response = saveResponse(tweet, "Draft awaiting review", Boolean.FALSE);
+        entityManager.flush();
+        entityManager.clear();
+        ResponseService service = responseService(mock(LlmService.class));
+        String responseId = String.valueOf(response.getId());
+
+        assertThatThrownBy(() -> service.updateResponse(responseId,
+                new UpdateResponseRequest(NullNode.getInstance(), null)))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessage("Update data is required");
+
+        Response unchanged = responseRepository.findById(response.getId()).orElseThrow();
+        assertThat(unchanged.getContent()).isEqualTo("Draft awaiting review");
+        assertThat(unchanged.getIsApproved()).isFalse();
+
+        ResponseDto updated = service.updateResponse(responseId,
+                new UpdateResponseRequest(TextNode.valueOf("Reviewed draft"), BooleanNode.TRUE));
+
+        assertThat(updated.id()).isEqualTo(responseId);
+        assertThat(updated.content()).isEqualTo("Reviewed draft");
+        assertThat(updated.isApproved()).isTrue();
+        assertThat(updated.generatedAt()).isEqualTo(response.getGeneratedAt());
+        assertThat(updated.tweetId()).isEqualTo(String.valueOf(tweet.getId()));
+    }
+
+    // Two service instances have distinct in-process claims; the parent-row lock is the shared guard
+    // that serialises their final existence checks — DL-195.
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    @DisplayName("two response service instances racing on one tweet store exactly one response row")
+    void twoResponseServiceInstancesRacingOnOneTweetStoreExactlyOneResponseRow() throws Exception {
+        responseRepository.deleteAll();
+        tweetRepository.deleteAll();
+        Tweet tweet = saveTweet(LocalDateTime.of(2026, 1, 5, 9, 0), 8.0, 300);
+        String tweetId = String.valueOf(tweet.getId());
+        CyclicBarrier bothModelsAnswered = new CyclicBarrier(2);
+        LlmService firstGenerator = mock(LlmService.class);
+        LlmService secondGenerator = mock(LlmService.class);
+        when(firstGenerator.generateResponse(any(TweetDto.class))).thenAnswer(invocation -> {
+            bothModelsAnswered.await(5, TimeUnit.SECONDS);
+            return "First generated draft";
+        });
+        when(secondGenerator.generateResponse(any(TweetDto.class))).thenAnswer(invocation -> {
+            bothModelsAnswered.await(5, TimeUnit.SECONDS);
+            return "Second generated draft";
+        });
+        ResponseService firstService = responseService(firstGenerator);
+        ResponseService secondService = responseService(secondGenerator);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<Optional<ResponseDto>> first =
+                    executor.submit(() -> firstService.generateResponseIfAbsent(tweetId));
+            Future<Optional<ResponseDto>> second =
+                    executor.submit(() -> secondService.generateResponseIfAbsent(tweetId));
+
+            Optional<ResponseDto> firstResult = first.get(15, TimeUnit.SECONDS);
+            Optional<ResponseDto> secondResult = second.get(15, TimeUnit.SECONDS);
+
+            assertThat(firstResult.isPresent() ^ secondResult.isPresent()).isTrue();
+            assertThat(responseRepository.count()).isEqualTo(1L);
+            Response stored = responseRepository.findAll().getFirst();
+            assertThat(stored.getTweet().getId()).isEqualTo(tweet.getId());
+            assertThat(stored.getContent())
+                    .isIn("First generated draft", "Second generated draft");
+            assertThat(stored.getIsApproved()).isFalse();
+        } finally {
+            executor.shutdownNow();
+            executor.awaitTermination(5, TimeUnit.SECONDS);
+            responseRepository.deleteAll();
+            tweetRepository.deleteAll();
+        }
+    }
+
     // Net-new (no Python counterpart: the AnalyticsService imported at
     // backend/app/api/analytics.py:L3 did not exist; the column is
     // backend/app/db/models.py:L26) — DL-041 — see docs/DECISION_LOG.md
@@ -1253,10 +1359,10 @@ class JpaMappingIntegrationTest {
                 .toList();
 
         assertThat(page.getTotalElements()).as("rows the page reports").isEqualTo(3L);
-        // findAll(PageRequest.of(0, 10)) supplies no Sort, so the provider chooses the row order;
-        // this assertion is about which parent every row resolves to, not about that order.
+        // The explicit id ASC sort above fixes the response order, so the parent ids follow the
+        // insertion order of these three responses.
         assertThat(parentIds).as("parent identifier of every row on the page")
-                .containsExactlyInAnyOrder(first.getId(), second.getId(), third.getId());
+                .containsExactly(first.getId(), second.getId(), third.getId());
         assertThat(statistics.getPrepareStatementCount())
                 .as("statements issued to render one page of responses")
                 .isLessThanOrEqualTo(2L);
@@ -1675,6 +1781,17 @@ class JpaMappingIntegrationTest {
             }
         }
         return fields;
+    }
+
+    /**
+     * Builds a service instance over the real repositories and mappers in this test context.
+     *
+     * @param generator the generated-text adapter for this service instance
+     * @return a service whose storage transactions use the context transaction manager
+     */
+    private ResponseService responseService(LlmService generator) {
+        return new ResponseService(responseRepository, tweetRepository, generator,
+                new ResponseMapper(), new TweetMapper(), new TransactionTemplate(transactionManager));
     }
 
     /**

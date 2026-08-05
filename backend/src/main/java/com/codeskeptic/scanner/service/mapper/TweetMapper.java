@@ -1,6 +1,5 @@
 package com.codeskeptic.scanner.service.mapper;
 
-import java.time.LocalDateTime;
 import java.util.List;
 
 import org.springframework.stereotype.Component;
@@ -9,7 +8,7 @@ import com.codeskeptic.scanner.dto.TweetDto;
 import com.codeskeptic.scanner.entity.Tweet;
 
 // Net-new (no Python counterpart method) — call sites backend/app/api/tweets.py:L19,L30 —
-// DL-023, DL-024, DL-080, DL-204, DL-205 — see docs/DECISION_LOG.md
+// DL-023, DL-024 and DL-080 — see docs/DECISION_LOG.md
 /**
  * Converts {@link Tweet} entities into their {@link TweetDto} wire form.
  *
@@ -33,18 +32,6 @@ import com.codeskeptic.scanner.entity.Tweet;
  */
 @Component
 public final class TweetMapper {
-
-    /** Wire value carried for a {@code null} text column. */
-    private static final String ABSENT_TEXT = "";
-
-    /** Wire value carried for a {@code null} {@code like_count} column. */
-    private static final int ABSENT_LIKE_COUNT = 0;
-
-    /** Wire value carried for a {@code null} {@code doubt_rating} column. */
-    private static final double ABSENT_DOUBT_RATING = 0.0d;
-
-    /** Wire value carried for a {@code null} {@code created_at} column. */
-    private static final LocalDateTime ABSENT_TIMESTAMP = LocalDateTime.of(1970, 1, 1, 0, 0);
 
     /**
      * Converts a single tweet entity into its wire form.

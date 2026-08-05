@@ -899,7 +899,7 @@ class LlmServiceTest {
     void returnsTheTrimmedTextOfTheFirstChoice() {
         stubGeneratedText(PADDED_GENERATED_TEXT);
 
-        String generatedText = service.generateResponse(tweet()).content();
+        String generatedText = service.generateResponse(tweet());
 
         assertThat(generatedText).isEqualTo(TRIMMED_GENERATED_TEXT);
         assertThat(generatedText).isNotEqualTo(PADDED_GENERATED_TEXT);
@@ -914,7 +914,7 @@ class LlmServiceTest {
                 choiceCarrying(Optional.of("first choice text")),
                 choiceCarrying(Optional.of("second choice text"))));
 
-        String generatedText = service.generateResponse(tweet()).content();
+        String generatedText = service.generateResponse(tweet());
 
         assertThat(generatedText).isEqualTo("first choice text");
     }
@@ -980,7 +980,7 @@ class LlmServiceTest {
                 Optional.of(TRIMMED_GENERATED_TEXT), Optional.ofNullable(refusal),
                 ChatCompletion.Choice.FinishReason.STOP)));
 
-        assertThat(service.generateResponse(tweet()).content()).isEqualTo(TRIMMED_GENERATED_TEXT);
+        assertThat(service.generateResponse(tweet())).isEqualTo(TRIMMED_GENERATED_TEXT);
     }
 
     @ParameterizedTest(name = "finish reason {0} is reported as INCOMPLETE")
@@ -1065,7 +1065,7 @@ class LlmServiceTest {
     void neverReturnsBlankGeneratedText() {
         stubGeneratedText(PADDED_GENERATED_TEXT);
 
-        String generatedText = service.generateResponse(tweet()).content();
+        String generatedText = service.generateResponse(tweet());
 
         assertThat(generatedText).isNotBlank();
     }
@@ -1211,28 +1211,24 @@ class LlmServiceTest {
     }
 
     @Test
-    @DisplayName("accepts a wire record for an unstored reply that carries no identifier")
-    void acceptsAWireRecordForAnUnstoredReplyThatCarriesNoIdentifier() {
-        ResponseDto unstored = new ResponseDto(null, TRIMMED_GENERATED_TEXT,
-                LocalDateTime.of(2026, 1, 31, 9, 15), false, TWEET_ID);
-
-        assertThat(unstored.id()).isNull();
-        assertThat(unstored.content()).isEqualTo(TRIMMED_GENERATED_TEXT);
-        assertThat(unstored.tweetId()).isEqualTo(TWEET_ID);
+    @DisplayName("rejects a wire record for an unstored reply that carries no identifier")
+    void rejectsAWireRecordForAnUnstoredReplyThatCarriesNoIdentifier() {
+        assertThatNullPointerException()
+                .isThrownBy(() -> new ResponseDto(null, TRIMMED_GENERATED_TEXT,
+                        LocalDateTime.of(2026, 1, 31, 9, 15), false, TWEET_ID))
+                .withMessage("id must not be null.");
     }
 
     @Test
-    @DisplayName("returns no wire record and reaches no dto type from its declared surface")
-    void returnsAPopulatedWireRecordFromItsDeclaredSurface() {
+    @DisplayName("returns generated text and no wire record from its declared surface")
+    void returnsGeneratedTextAndNoWireRecordFromItsDeclaredSurface() throws NoSuchMethodException {
         stubGeneratedText(PADDED_GENERATED_TEXT);
 
-        ResponseDto generated = service.generateResponse(tweet());
+        String generated = service.generateResponse(tweet());
 
-        assertThat(generated.id()).isNull();
-        assertThat(generated.content()).isEqualTo(TRIMMED_GENERATED_TEXT);
-        assertThat(generated.tweetId()).isEqualTo(TWEET_ID);
-        assertThat(generated.isApproved()).isFalse();
-        assertThat(generated.generatedAt()).isNotNull();
+        assertThat(generated).isEqualTo(TRIMMED_GENERATED_TEXT);
+        assertThat(LlmService.class.getMethod("generateResponse", TweetDto.class).getReturnType())
+                .isEqualTo(String.class);
     }
 
     @Test

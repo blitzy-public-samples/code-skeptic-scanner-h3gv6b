@@ -45,7 +45,7 @@ import org.springframework.stereotype.Component;
  * <p>This pass does not own ingestion's replies. It reaches
  * {@link ResponseService#generateResponseIfAbsent(String)}, the one operation both background paths
  * call, so a candidate that {@code task.TweetStreamListener} is answering — or has answered since the
- * candidate query ran — stores nothing and is counted as skipped — see docs/DECISION_LOG.md DL-196.
+ * candidate query ran — stores nothing and is counted as skipped — see docs/DECISION_LOG.md DL-195.
  *
  * <p>The relational database is the system of record and Notion is a secondary mirror. A failed
  * mirror leaves the already stored reply in place; no compensation or re-generation is performed.
@@ -212,7 +212,7 @@ public class ResponseGenerationScheduler {
      *
      * <p>Nothing is stored and nothing is mirrored when
      * {@link ResponseService#generateResponseIfAbsent(String)} reports an empty result, which means the
-     * row was answered elsewhere — see docs/DECISION_LOG.md DL-196. The mirror step alone is skipped,
+     * row was answered elsewhere — see docs/DECISION_LOG.md DL-195. The mirror step alone is skipped,
      * with a warning, when a stored reply carries no content, and a mirror rejection is recorded
      * without failing the candidate; the stored reply is left in place in every case and the mirror is
      * not re-attempted — see docs/DECISION_LOG.md DL-194.
@@ -228,10 +228,10 @@ public class ResponseGenerationScheduler {
     private boolean generateAndMirror(String tweetId) {
         // Direct in-process call replacing `generate_response.delay(tweet.id)` at
         // backend/app/tasks/response_generation.py:L47 — see docs/DECISION_LOG.md DL-047.
-        // The guarded path task.TweetStreamListener also calls — DL-190 — see docs/DECISION_LOG.md.
+        // The guarded path task.TweetStreamListener also calls — DL-195 — see docs/DECISION_LOG.md.
         // ResponseService owns the LLM call, the stored row and the only
         // ResponseGenerationException — see docs/DECISION_LOG.md
-        // The single background generation entry point — DL-196 — see docs/DECISION_LOG.md
+        // The single background generation entry point — DL-195 — see docs/DECISION_LOG.md
         Optional<ResponseDto> result = responseService.generateResponseIfAbsent(tweetId);
 
         if (result.isEmpty()) {

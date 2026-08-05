@@ -21,7 +21,7 @@ import org.springframework.data.repository.query.Param;
  * interface already parsed; it is carried as a {@link String} only at the wire boundary — see
  * docs/DECISION_LOG.md DL-023 and DL-048.
  *
- * <p>Three members are declared below. Every other operation the consumers perform is inherited from
+ * <p>Four members are declared below. Every other operation the consumers perform is inherited from
  * {@link JpaRepository}:
  *
  * <ul>
@@ -59,15 +59,15 @@ import org.springframework.data.repository.query.Param;
  *
  * <pre>{@code
  * Page<Response> page = responseRepository.findAll(PageRequest.of(wirePage - 1, perPage));
- * Optional<Response> found = responseRepository.findById(responseId);
- * Response saved = responseRepository.save(response);
- * ResponseRepository.ResponseCounts counts = responseRepository.findResponseCounts();
+ * long approved = responseRepository.countByIsApprovedTrue();
+ * boolean answered = responseRepository.existsByTweetId(tweetId);
+ * Optional<Response> locked = responseRepository.findByIdForUpdate(responseId);
  * }</pre>
  *
  * @see Response
  */
 // Ported from backend/app/db/database.py:L10-13 (faithful port) — see docs/DECISION_LOG.md
-// The declared member has no source counterpart: backend/app/api/analytics.py:L3 imported an
+// The analytics aggregate has no source counterpart: backend/app/api/analytics.py:L3 imported an
 // AnalyticsService that no module defined; the summary metric set is net-new — DL-041 — see
 // docs/DECISION_LOG.md
 // The identifier type parameter is Integer, matching responses.id — DL-070, DL-138 — see
@@ -96,30 +96,19 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
     @EntityGraph(attributePaths = "tweet")
     Page<Response> findAll(Pageable pageable);
 
-    // The total_responses and approved_responses metrics of dto/SummaryDto, over the is_approved
-    // column at backend/app/db/models.py:L26 — DL-041 — see docs/DECISION_LOG.md
+    // The approved_responses metric of dto/SummaryDto, over the is_approved column at
+    // backend/app/db/models.py:L26 — DL-041 — see docs/DECISION_LOG.md
     /**
-     * Returns the total {@code responses} row count and the approved row count together, read by one
-     * statement.
+     * Returns the number of {@code responses} rows whose {@code is_approved} column is {@code true}.
      *
-     * <p>Both counts come from a single aggregate over the {@code responses} table, so the approved
-     * count can never exceed the total count and the {@code pending_responses} metric
-     * {@code AnalyticsService} derives from them can never be negative, whatever concurrent writes
-     * commit while the query runs. Reading the two counts as separate statements does not offer that
-     * guarantee under a read-committed isolation level.
+     * <p>Spring Data derives the count query from the method name. Rows carrying {@code false} or
+     * {@code null} are excluded — see docs/DECISION_LOG.md DL-041.
      *
-     * <p>{@code approved} counts only a row whose {@code is_approved} holds {@code true}: the
-     * {@code case} expression yields {@code null} for {@code false} and for {@code null}, and
-     * {@code count} ignores {@code null}. The expression uses standard JPQL only, so it renders on
-     * every supported vendor.
-     *
-     * <p>The query reads the {@code responses} table alone.
-     *
-     * @return the two counts, never {@code null}; both are {@code 0} for an empty table
+     * @return the approved row count, never negative; {@code 0} when no row is approved
      */
     long countByIsApprovedTrue();
 
-    // The existence guard of the single generation owner — DL-196 — see docs/DECISION_LOG.md
+    // The existence guard of the single generation owner — DL-195 — see docs/DECISION_LOG.md
     /**
      * Reports whether the {@code responses} table already holds a row whose {@code tweet_id} column
      * names the supplied {@code tweets} row.
@@ -128,9 +117,9 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
      * existence check, and {@code Tweet} binds to the {@code tweet} association of {@link Response},
      * whose owning column is {@code tweet_id}. The check loads no row and traverses no association.
      *
-     * <p>{@code ResponseService} reads it inside the same transaction that inserts a generated row, so
-     * a background pass cannot add a second reply to a row that acquired one while a language model
-     * was answering — see docs/DECISION_LOG.md DL-196.
+     * <p>{@code ResponseService} reads it while holding the parent {@code tweets} row lock, inside the
+     * same transaction that may insert a generated row. A second storage transaction for that parent
+     * checks only after the first commits — see docs/DECISION_LOG.md DL-195.
      *
      * @param tweetId the primary key of the {@code tweets} row to test; a {@code null} value reports
      *                {@code false}

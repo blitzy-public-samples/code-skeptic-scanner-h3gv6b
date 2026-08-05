@@ -30,7 +30,6 @@ import com.codeskeptic.scanner.service.ResponseService;
 import com.codeskeptic.scanner.service.SentimentAnalysisService;
 import com.codeskeptic.scanner.service.TwitterService;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
-import java.time.ZoneOffset;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,9 +40,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 /**
  * Exercises {@link TweetStreamListener} over synthesized filtered-stream records.
  *
- * <p>Assertions cover the four documented steps, the shapes a delivered member must carry before it
- * reaches a stored column, the nullable creation time, and the two secondary Notion mirror writes —
- * the tweet before the trigger and the generated reply after it.
+ * <p>Assertions cover the four documented steps, the shapes every wire-required member must carry
+ * before a row is stored, and the two secondary Notion mirror writes — the tweet before the trigger
+ * and the generated reply after it.
  */
 @DisplayName("TweetStreamListener")
 class TweetStreamListenerTest {
@@ -56,6 +55,16 @@ class TweetStreamListenerTest {
 
     /** Doubt rating the stubbed analysis service derives. */
     private static final double DOUBT_RATING = 7.0D;
+
+    /** Valid stream creation time used by records not testing that member. */
+    private static final String CREATED_AT = "2026-08-03T15:11:52.000Z";
+
+    /** Stored UTC-local form of {@link #CREATED_AT}. */
+    private static final LocalDateTime STORED_CREATED_AT =
+            LocalDateTime.of(2026, 8, 3, 15, 11, 52);
+
+    /** Valid author identifier used by records not testing that member. */
+    private static final String AUTHOR_ID = "4242";
 
     /** Reads a synthesized record into a tree. */
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -116,29 +125,44 @@ class TweetStreamListenerTest {
         }
 
         @Test
-        @DisplayName("reads a fractional like count as absent instead of truncating it")
+        @DisplayName("skips a fractional required like count instead of truncating it")
         void rejectsAFractionalLikeCount() {
-            when(twitterService.meetsPopularityThreshold(null)).thenReturn(false);
             JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
+                    + "\"created_at\":\"" + CREATED_AT + "\","
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
                     + "\"public_metrics\":{\"like_count\":100.9}}}");
 
             assertThat(listener.onStatus(record)).isTrue();
 
-            verify(twitterService).meetsPopularityThreshold(null);
             verify(tweetRepository, never()).save(any());
+            verifyNoInteractions(twitterService, sentimentAnalysisService);
         }
 
         @Test
-        @DisplayName("reads a like count carried as a string as absent")
-        void rejectsAStringLikeCount() {
-            when(twitterService.meetsPopularityThreshold(null)).thenReturn(false);
+        @DisplayName("skips a record whose required like count is absent")
+        void rejectsAnAbsentLikeCount() {
             JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
+                    + "\"created_at\":\"" + CREATED_AT + "\","
+                    + "\"author_id\":\"" + AUTHOR_ID + "\"}}");
+
+            assertThat(listener.onStatus(record)).isTrue();
+
+            verify(tweetRepository, never()).save(any());
+            verifyNoInteractions(twitterService, sentimentAnalysisService);
+        }
+
+        @Test
+        @DisplayName("skips a required like count carried as a string")
+        void rejectsAStringLikeCount() {
+            JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
+                    + "\"created_at\":\"" + CREATED_AT + "\","
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
                     + "\"public_metrics\":{\"like_count\":\"500\"}}}");
 
             assertThat(listener.onStatus(record)).isTrue();
 
-            verify(twitterService).meetsPopularityThreshold(null);
             verify(tweetRepository, never()).save(any());
+            verifyNoInteractions(twitterService, sentimentAnalysisService);
         }
 
         @Test
@@ -146,6 +170,8 @@ class TweetStreamListenerTest {
         void acceptsAnIntegralLikeCount() {
             acceptEverything();
             JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
+                    + "\"created_at\":\"" + CREATED_AT + "\","
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
                     + "\"public_metrics\":{\"like_count\":100}}}");
 
             assertThat(listener.onStatus(record)).isTrue();
@@ -159,10 +185,13 @@ class TweetStreamListenerTest {
         void honoursThePopularityGate() {
             when(twitterService.meetsPopularityThreshold(any())).thenReturn(false);
             JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
+                    + "\"created_at\":\"" + CREATED_AT + "\","
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
                     + "\"public_metrics\":{\"like_count\":1}}}");
 
             assertThat(listener.onStatus(record)).isTrue();
 
+            verify(twitterService).meetsPopularityThreshold(1);
             verify(tweetRepository, never()).save(any());
             verifyNoInteractions(sentimentAnalysisService, notionService, responseService);
         }
@@ -178,6 +207,7 @@ class TweetStreamListenerTest {
             acceptEverything();
             JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
                     + "\"created_at\":\"2026-08-03T17:11:52.000+02:00\","
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
                     + "\"public_metrics\":{\"like_count\":500}}}");
 
             listener.onStatus(record);
@@ -187,42 +217,45 @@ class TweetStreamListenerTest {
         }
 
         @Test
-        @DisplayName("stores no creation time when the member is absent")
-        void storesNoTimeWhenAbsent() {
+        @DisplayName("skips the record when the required creation time is absent")
+        void skipsTheRecordWhenCreationTimeIsAbsent() {
             acceptEverything();
             JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
                     + "\"public_metrics\":{\"like_count\":500}}}");
 
-            listener.onStatus(record);
+            assertThat(listener.onStatus(record)).isTrue();
 
-            assertThat(storedTweet().getCreatedAt()).isNull();
+            verify(tweetRepository, never()).save(any());
+            verifyNoInteractions(sentimentAnalysisService, notionService, responseService);
         }
 
         @Test
-        @DisplayName("stores the current UTC time when the member is not ISO-8601")
-        void storesNoTimeWhenUnparseable() {
+        @DisplayName("skips the record when the required creation time is not ISO-8601")
+        void skipsTheRecordWhenCreationTimeIsUnparseable() {
             acceptEverything();
-            LocalDateTime beforeTheCall = LocalDateTime.now(ZoneOffset.UTC);
             JsonNode record = read("{\"data\":{\"text\":\"doubtful\",\"created_at\":\"garbage\","
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
                     + "\"public_metrics\":{\"like_count\":500}}}");
 
-            listener.onStatus(record);
+            assertThat(listener.onStatus(record)).isTrue();
 
-            assertThat(storedTweet().getCreatedAt())
-                    .isNotNull()
-                    .isBetween(beforeTheCall, LocalDateTime.now(ZoneOffset.UTC));
+            verify(tweetRepository, never()).save(any());
+            verifyNoInteractions(sentimentAnalysisService, notionService, responseService);
         }
 
         @Test
-        @DisplayName("stores no creation time when the member is a number")
-        void storesNoTimeWhenNumeric() {
+        @DisplayName("skips the record when the required creation time is numeric")
+        void skipsTheRecordWhenCreationTimeIsNumeric() {
             acceptEverything();
             JsonNode record = read("{\"data\":{\"text\":\"doubtful\",\"created_at\":1756900000,"
+                    + "\"author_id\":\"" + AUTHOR_ID + "\","
                     + "\"public_metrics\":{\"like_count\":500}}}");
 
-            listener.onStatus(record);
+            assertThat(listener.onStatus(record)).isTrue();
 
-            assertThat(storedTweet().getCreatedAt()).isNull();
+            verify(tweetRepository, never()).save(any());
+            verifyNoInteractions(sentimentAnalysisService, notionService, responseService);
         }
     }
 
@@ -235,6 +268,7 @@ class TweetStreamListenerTest {
         void mapsEveryMember() {
             acceptEverything();
             JsonNode record = read("{\"data\":{\"text\":\"GPT-4 doubts\",\"author_id\":\"4242\","
+                    + "\"created_at\":\"" + CREATED_AT + "\","
                     + "\"public_metrics\":{\"like_count\":500},"
                     + "\"attachments\":{\"media_keys\":[\"m1\",\"m2\"]},"
                     + "\"referenced_tweets\":[{\"type\":\"replied_to\",\"id\":\"1\"},"
@@ -247,6 +281,7 @@ class TweetStreamListenerTest {
             Tweet stored = storedTweet();
             assertThat(stored.getContent()).isEqualTo("GPT-4 doubts");
             assertThat(stored.getUserId()).isEqualTo("4242");
+            assertThat(stored.getCreatedAt()).isEqualTo(STORED_CREATED_AT);
             assertThat(stored.getDoubtRating()).isEqualTo(DOUBT_RATING);
             assertThat(stored.getMedia()).containsExactly("m1", "m2");
             assertThat(stored.getQuotedTweetId()).isEqualTo("99");
@@ -254,15 +289,51 @@ class TweetStreamListenerTest {
         }
 
         @Test
-        @DisplayName("reads a numeric author_id as absent")
+        @DisplayName("skips the record when the required author_id is numeric")
         void rejectsANumericAuthorId() {
             acceptEverything();
             JsonNode record = read("{\"data\":{\"text\":\"doubtful\",\"author_id\":4242,"
+                    + "\"created_at\":\"" + CREATED_AT + "\","
                     + "\"public_metrics\":{\"like_count\":500}}}");
 
-            listener.onStatus(record);
+            assertThat(listener.onStatus(record)).isTrue();
 
-            assertThat(storedTweet().getUserId()).isNull();
+            verify(tweetRepository, never()).save(any());
+            verifyNoInteractions(sentimentAnalysisService, notionService, responseService);
+        }
+
+        @Test
+        @DisplayName("skips the record when the required author_id is absent")
+        void rejectsAnAbsentAuthorId() {
+            acceptEverything();
+            JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
+                    + "\"created_at\":\"" + CREATED_AT + "\","
+                    + "\"public_metrics\":{\"like_count\":500}}}");
+
+            assertThat(listener.onStatus(record)).isTrue();
+
+            verify(tweetRepository, never()).save(any());
+            verifyNoInteractions(sentimentAnalysisService, notionService, responseService);
+        }
+
+        @Test
+        @DisplayName("maps every stored ingested row through the real tweet mapper")
+        void mapsEveryStoredIngestedRowThroughTheRealTweetMapper() {
+            acceptEverything();
+            TweetStreamListener listenerWithRealMapper =
+                    new TweetStreamListener(twitterService, sentimentAnalysisService, tweetRepository,
+                            responseService, notionService, new TweetMapper());
+
+            assertThat(listenerWithRealMapper.onStatus(popularRecord())).isTrue();
+
+            ArgumentCaptor<TweetDto> mirrored = ArgumentCaptor.forClass(TweetDto.class);
+            verify(notionService).storeTweet(mirrored.capture());
+            assertThat(mirrored.getValue().id()).isEqualTo(String.valueOf(STORED_ID));
+            assertThat(mirrored.getValue().content()).isEqualTo("doubtful");
+            assertThat(mirrored.getValue().likeCount()).isEqualTo(500);
+            assertThat(mirrored.getValue().createdAt()).isEqualTo(STORED_CREATED_AT);
+            assertThat(mirrored.getValue().doubtRating()).isEqualTo(DOUBT_RATING);
+            assertThat(mirrored.getValue().userId()).isEqualTo(AUTHOR_ID);
         }
     }
 
@@ -346,7 +417,10 @@ class TweetStreamListenerTest {
     }
 
     private JsonNode popularRecord() {
-        return read("{\"data\":{\"text\":\"doubtful\",\"public_metrics\":{\"like_count\":500}}}");
+        return read("{\"data\":{\"text\":\"doubtful\","
+                + "\"created_at\":\"" + CREATED_AT + "\","
+                + "\"author_id\":\"" + AUTHOR_ID + "\","
+                + "\"public_metrics\":{\"like_count\":500}}}");
     }
 
     private void acceptEverything() {
@@ -359,8 +433,8 @@ class TweetStreamListenerTest {
             return candidate;
         });
         when(tweetMapper.toDto(any(Tweet.class))).thenReturn(new TweetDto(
-                String.valueOf(STORED_ID), "doubtful", 500, null, DOUBT_RATING, List.of(), null,
-                null, List.of()));
+                String.valueOf(STORED_ID), "doubtful", 500, STORED_CREATED_AT, DOUBT_RATING,
+                List.of(), null, AUTHOR_ID, List.of()));
         when(notionService.storeTweet(any(TweetDto.class))).thenReturn("notion-page-id");
         when(responseService.generateResponseIfAbsent(eq(String.valueOf(STORED_ID))))
                 .thenReturn(Optional.of(new ResponseDto("11", "a draft reply", LocalDateTime.now(),

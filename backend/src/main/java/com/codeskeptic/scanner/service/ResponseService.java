@@ -47,7 +47,7 @@ import com.codeskeptic.scanner.util.LogSafe;
  *
  * <p>The source constructed the service once per request, at
  * {@code backend/app/api/responses.py:L14}, {@code :L25}, {@code :L43} and {@code :L59}. This is one
- * singleton bean holding its five collaborators in final fields — DL-211.
+ * singleton bean holding its six collaborators in final fields — DL-211.
  *
  * <p>The set of client-visible messages this class can produce is closed at five, each a wire literal
  * of the source:
@@ -96,9 +96,10 @@ import com.codeskeptic.scanner.util.LogSafe;
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md}; construct-level
  * provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  *
- * <p>This is a singleton bean and its five collaborators are themselves singletons. It holds no other
- * state, and every member declared here is safe for concurrent use. Two callers updating the same row
- * concurrently both write, and the later write stands.
+ * <p>This is a singleton bean and its six collaborators are themselves singletons. Its only mutable
+ * state is a concurrent set of integer tweet identifiers claimed by background generation in this
+ * application instance. Database row locks coordinate the storage step across instances. Every member
+ * declared here is safe for concurrent use — DL-195.
  */
 @Service
 public class ResponseService {
@@ -121,12 +122,6 @@ public class ResponseService {
 
     private static final int WIRE_PAGE_OFFSET = 1;
 
-    /**
-     * Number of monitors {@link #generateResponseIfAbsent(String)} spreads {@code tweets} identifiers
-     * over — DL-190.
-     */
-    private static final int GENERATION_LOCK_STRIPES = 64;
-
     /** Data access for the {@code responses} table. */
     private final ResponseRepository responseRepository;
 
@@ -145,19 +140,10 @@ public class ResponseService {
     /** Demarcates the short transactional unit that stores a generated row — DL-086. */
     private final TransactionTemplate transactionTemplate;
 
-    // In-process claim held for the duration of one background generation — DL-196 — see
-    // docs/DECISION_LOG.md
     /**
-     * Raw {@code tweets} identifiers a background generation currently holds. An identifier is added
-     * by {@link #generateResponseIfAbsent(String)} before it reads the subject row and removed when
-     * that call returns or raises.
-     */
-    private final Set<String> generationClaims = ConcurrentHashMap.newKeySet();
-
-    /**
-     * Identifiers of the {@code tweets} rows an automatic generation pass is currently answering —
-     * DL-191. An identifier is present only while
-     * {@link #generateResponseIfAbsent(String)} runs for it.
+     * Integer identifiers of the {@code tweets} rows this instance is currently generating for. Raw
+     * aliases such as {@code 7} and {@code 007} resolve to the same claim. An identifier is present
+     * only while {@link #generateResponseIfAbsent(String)} runs for it — DL-195.
      */
     private final Set<Integer> claimed = ConcurrentHashMap.newKeySet();
 
@@ -326,8 +312,8 @@ public class ResponseService {
         Integer identifier = parseIdentifier(tweetId);
         try {
             TweetDto subject = readSubject(identifier);
-            ResponseDto generated = llmService.generateResponse(subject);
-            ResponseDto stored = store(identifier, generated.content(), false);
+            String generatedText = llmService.generateResponse(subject);
+            ResponseDto stored = store(identifier, generatedText, false);
 
             log.info("Stored response {} for tweet '{}' awaiting review.",
                     stored.id(), LogSafe.logSafe(tweetId));
@@ -346,22 +332,23 @@ public class ResponseService {
         }
     }
 
-    // The single entry point of both background generation paths — DL-196 — see
+    // The single entry point of both background generation paths — DL-195 — see
     // docs/DECISION_LOG.md
     /**
-     * Generates and stores a reply for the {@code tweets} row identified by {@code tweetId} unless that
-     * row already carries one, and reports what was stored.
+     * Generates a reply for the {@code tweets} row identified by {@code tweetId}, stores it only when
+     * that row still carries none, and reports what was stored.
      *
      * <p>This is the one operation {@code task.TweetStreamListener} and
-     * {@code task.ResponseGenerationScheduler} call, so exactly one reply per {@code tweets} row is
-     * generated no matter which of them reaches the row first. Two protections combine:
+     * {@code task.ResponseGenerationScheduler} call, so at most one automatic {@code responses} row
+     * is stored per {@code tweets} row. Two protections combine:
      *
      * <ul>
-     *   <li>an in-process claim on {@code tweetId}, held for the whole generation, which a second
-     *       concurrent caller in this instance cannot take; and</li>
-     *   <li>{@link ResponseRepository#existsByTweetId(Integer)}, tested inside the same transaction
-     *       that would insert the row, which covers the interval during which a language model is
-     *       answering.</li>
+     *   <li>an in-process claim on the parsed integer identifier, held for the whole generation,
+     *       which a second concurrent caller in this instance cannot take even when the raw strings
+     *       differ; and</li>
+     *   <li>a pessimistic lock on the parent {@code tweets} row, acquired inside the short storage
+     *       transaction before {@link ResponseRepository#existsByTweetId(Integer)} and the insert,
+     *       which serialises the final check across application instances.</li>
      * </ul>
      *
      * <p>An empty result means nothing was stored: the row already carried a reply, or another caller
@@ -369,7 +356,7 @@ public class ResponseService {
      *
      * <p>{@code POST /responses} does not come through here: it calls
      * {@link #generateResponse(String)} directly, so its documented outcomes are unchanged — see
-     * docs/DECISION_LOG.md DL-196.
+     * docs/DECISION_LOG.md DL-195.
      *
      * @param tweetId the raw identifier of the {@code tweets} row to reply to; must be neither
      *                {@code null} nor empty
@@ -383,17 +370,23 @@ public class ResponseService {
             throw BadRequestException.tweetIdRequired();
         }
 
-        if (!generationClaims.add(tweetId)) {
+        Integer identifier = parseIdentifier(tweetId);
+        if (identifier == null) {
+            log.error("Response generation failed: the background request identifier carries no "
+                    + "integer.");
+            throw new ResponseGenerationException();
+        }
+
+        if (!claimed.add(identifier)) {
             log.debug("Tweet '{}' is already being generated for; this pass stores nothing.",
-                    tweetId);
+                    LogSafe.logSafe(tweetId));
             return Optional.empty();
         }
 
         try {
-            Integer identifier = parseIdentifier(tweetId);
             TweetDto subject = readSubject(identifier);
-            ResponseDto generated = llmService.generateResponse(subject);
-            ResponseDto stored = store(identifier, generated.content(), true);
+            String generatedText = llmService.generateResponse(subject);
+            ResponseDto stored = store(identifier, generatedText, true);
 
             if (stored == null) {
                 log.debug("Tweet '{}' acquired a response while one was being generated; nothing was "
@@ -411,7 +404,7 @@ public class ResponseService {
                     LogSafe.logSafe(tweetId), LogSafe.type(e));
             throw new ResponseGenerationException(e);
         } finally {
-            generationClaims.remove(tweetId);
+            claimed.remove(identifier);
         }
     }
 
@@ -450,10 +443,11 @@ public class ResponseService {
      * stored row, replacing the {@code response.save()} call at
      * {@code backend/app/tasks/response_generation.py:L25-26}.
      *
-     * <p>When {@code onlyWhenAbsent} is set, the transaction first tests
-     * {@link ResponseRepository#existsByTweetId(Integer)} and stores nothing, returning {@code null},
-     * for a row that already carries a reply. The test and the insert share one transaction — see
-     * docs/DECISION_LOG.md DL-196.
+     * <p>The transaction first re-reads the parent through
+     * {@link TweetRepository#findByIdForUpdate(Integer)}. The parent-row lock is held through the
+     * existence check and insert. When {@code onlyWhenAbsent} is set, a row that already carries a
+     * reply stores nothing and returns {@code null}. The lock, check and optional insert share one
+     * transaction — see docs/DECISION_LOG.md DL-195.
      *
      * @param identifier the parsed identifier of the parent row
      * @param generatedText the text to store; neither {@code null} nor blank
@@ -466,13 +460,13 @@ public class ResponseService {
      */
     // Replaces response.save() at backend/app/tasks/response_generation.py:L25-26 — DL-086 — see
     // docs/DECISION_LOG.md
-    // The onlyWhenAbsent branch is the transaction-scoped existence guard — DL-196 — see
+    // The parent lock and onlyWhenAbsent check form the transaction-scoped guard — DL-195 — see
     // docs/DECISION_LOG.md
     private ResponseDto store(Integer identifier, String generatedText, boolean onlyWhenAbsent) {
         return transactionTemplate.execute(status -> {
             Optional<Tweet> found = (identifier == null)
                     ? Optional.empty()
-                    : tweetRepository.findById(identifier);
+                    : tweetRepository.findByIdForUpdate(identifier);
             if (found.isEmpty()) {
                 log.error("Response generation failed: identifier {} names no tweets row.",
                         identifier);
@@ -504,21 +498,20 @@ public class ResponseService {
      * Applies a partial update to the {@code responses} row identified by {@code responseId} and
      * returns the stored row.
      *
-     * <p>The request is rejected when it is {@code null} and when it carries neither the
-     * {@code content} key nor the {@code is_approved} key, matching the {@code if not update_data}
-     * guard at {@code backend/app/api/responses.py:L56}. A key the body carries as JSON {@code null}
-     * counts as carried, so a body such as {@code {"is_approved":null}} passes the guard — DL-082. The
-     * request is tested before the row is read, in the order of {@code :L56-60}.
+     * <p>The request is rejected when it is {@code null} or carries no value a writable column can
+     * hold. A JSON string can write {@code content}; a JSON boolean can write
+     * {@code is_approved}. An omitted key, explicit JSON {@code null}, or wrong-typed value is not
+     * writable. The request is tested before the row is read, using the existing
+     * {@code Update data is required} failure — DL-082.
      *
      * <p>{@code responseId} arrives as the raw path segment. An identifier carrying no number, a
      * {@code null} identifier and an identifier naming no row are all reported with the literal of
      * {@code :L65}, which is a different string from the one {@link #getResponseById(String)} reports.
      *
-     * <p>Two columns are writable here, and each is written exactly when the request body carried its
-     * key: presence, not value, decides. A key carried as JSON {@code null} clears the column, which
-     * both columns accept, and a key the body omits leaves its column untouched — see
-     * docs/DECISION_LOG.md DL-082. {@code id}, {@code generated_at} and {@code tweet_id} are not
-     * written by this method, and no value is trimmed or normalised on the way in.
+     * <p>Two columns are writable here, and each is written exactly when the request carries a value
+     * of the column's JSON type. This method never writes {@code null}; an unwritable component leaves
+     * its column untouched. {@code id}, {@code generated_at} and {@code tweet_id} are not written, and
+     * no accepted value is trimmed or normalised on the way in — DL-082.
      *
      * <p>{@code is_approved} is the flag a human reviewer reads.
      *
@@ -529,10 +522,10 @@ public class ResponseService {
      *
      * @param responseId the raw path segment identifying the row; an unparseable and a {@code null}
      *                   value are both reported as absent
-     * @param request    the columns to write; {@code null}, and a request carrying neither key, are
-     *                   both rejected
+     * @param request    the columns to write; {@code null}, and a request carrying no writable value,
+     *                   are both rejected
      * @return the stored row in its wire form, never {@code null}
-     * @throws BadRequestException when {@code request} is {@code null} or carries neither key,
+     * @throws BadRequestException when {@code request} is {@code null} or carries no writable value,
      *                             carrying the wire literal of
      *                             {@code backend/app/api/responses.py:L57}
      * @throws NotFoundException   when {@code responseId} names no row, carrying the wire literal of
@@ -540,9 +533,9 @@ public class ResponseService {
      */
     @Transactional
     public ResponseDto updateResponse(String responseId, UpdateResponseRequest request) {
-        // backend/app/api/responses.py:L56-57 — the guard tests null and a body carrying no key
-        if (request == null || request.carriesNoUpdatableField()) {
-            log.warn("Rejected the update of response '{}': the request carried no updatable field.",
+        // A request carrying no column-compatible value reaches the existing :L57 failure — DL-082.
+        if (request == null || request.carriesNoWritableValue()) {
+            log.warn("Rejected the update of response '{}': the request carried no writable value.",
                     LogSafe.logSafe(responseId));
             throw BadRequestException.updateDataRequired();
         }
@@ -558,11 +551,11 @@ public class ResponseService {
         }
 
         Response response = existing.get();
-        // Presence decides, not value — DL-082 — see docs/DECISION_LOG.md
-        if (request.contentPresent()) {
+        // Only values the target columns can hold are written — DL-082 — see docs/DECISION_LOG.md
+        if (request.writesContent()) {
             response.setContent(request.contentValue());
         }
-        if (request.approvalPresent()) {
+        if (request.writesApproval()) {
             response.setIsApproved(request.approvalValue());
         }
 
@@ -570,13 +563,11 @@ public class ResponseService {
 
         log.info("Updated response '{}': content {}, approval {}.",
                 LogSafe.logSafe(responseId),
-                request.contentPresent() ? "written" : "unchanged",
-                request.approvalPresent() ? "written" : "unchanged");
+                request.writesContent() ? "written" : "unchanged",
+                request.writesApproval() ? "written" : "unchanged");
 
         return stored;
     }
-
-    // Net-new guard over the generation result — DL-081 — see docs/DECISION_LOG.md
 
     /**
      * Reads the {@code responses} row named by a raw path segment.

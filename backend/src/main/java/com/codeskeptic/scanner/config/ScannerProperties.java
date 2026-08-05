@@ -250,16 +250,16 @@ public record ScannerProperties(
      * {@code Completion.create(...)} at {@code backend/app/services/llm_service.py:L22-25}:
      * {@code max_tokens=150}, {@code n=1} and {@code temperature=0.7}. Of those,
      * {@code maxCompletionTokens} and {@code n} carry defaults; {@code temperature} carries none, so
-     * it is {@code null} unless a deployment sets it — DL-145.
+     * it is {@code null} unless a deployment sets it — DL-200.
      *
      * <p>{@code service/LlmService} reads every component of this group.
      * {@code maxCompletionTokens}, {@code n}, {@code temperature}, {@code requestTimeoutSeconds} and
      * {@code maxRetries} are range-checked there, and {@code reasoningEffort} is carried on the
-     * request when it is not blank — DL-145, DL-146.
+     * request when it is not blank — DL-145, DL-146, DL-200, DL-201.
      *
      * <p>{@code service/LlmService} validates {@code reasoningEffort},
      * {@code requestTimeoutSeconds} and {@code maxRetries} on the path that creates the client and
-     * builds the request — DL-088, DL-089.
+     * builds the request — DL-145, DL-146, DL-201.
      *
      * @param apiKey value of {@code scanner.openai.api-key}, redacted by {@link #toString()}
      * @param model value of {@code scanner.openai.model}
@@ -269,13 +269,14 @@ public record ScannerProperties(
      *     is not set
      * @param n value of {@code scanner.openai.n}, default {@code 1}
      * @param reasoningEffort value of {@code scanner.openai.reasoning-effort}, default
-     *     {@code minimal}; sent as the request's reasoning effort, and blank omits the parameter from
+     *     {@code low}; sent as the request's reasoning effort, and blank omits the parameter from
      *     the request
      * @param requestTimeoutSeconds value of {@code scanner.openai.request-timeout-seconds}, default
-     *     {@code 30}; accepted range 1 to 300 seconds inclusive, checked by {@code service/LlmService} on first use
-     *     — see docs/DECISION_LOG.md DL-202
+     *     {@code 30}; accepted range 1 second or greater, checked by
+     *     {@code service/LlmService} on first use — see docs/DECISION_LOG.md DL-146, DL-201
      * @param maxRetries value of {@code scanner.openai.max-retries}, default {@code 2}; accepted range
-     *     0 to 5 inclusive, checked by {@code service/LlmService} on first use — see docs/DECISION_LOG.md DL-202
+     *     0 or greater, checked by {@code service/LlmService} on first use — see
+     *     docs/DECISION_LOG.md DL-146, DL-201
      */
     public record Openai(
 
@@ -292,7 +293,7 @@ public record ScannerProperties(
             @DefaultValue("1000") long maxCompletionTokens,
 
             // scanner.openai.temperature — temperature=0.7 at
-            // backend/app/services/llm_service.py:L25; declared with no default — DL-145
+            // backend/app/services/llm_service.py:L25; declared with no default — DL-200
             Double temperature,
 
             // scanner.openai.n — n=1 at backend/app/services/llm_service.py:L23
@@ -301,16 +302,14 @@ public record ScannerProperties(
             // scanner.openai.reasoning-effort — net-new: the source's completions call at
             // backend/app/services/llm_service.py:L19-26 had no reasoning parameter. Read by
             // service/LlmService.reasoningEffort() — DL-145
-            @DefaultValue("minimal") String reasoningEffort,
+            @DefaultValue("low") String reasoningEffort,
 
             // scanner.openai.request-timeout-seconds — net-new: the source set no timeout.
-            // Accepted range 1..300 seconds; service/LlmService refuses the first request outside
-            // it — DL-146, DL-202
+            // Accepted range: 1 second or greater — DL-146, DL-201
             @DefaultValue("30") long requestTimeoutSeconds,
 
             // scanner.openai.max-retries — net-new: the source set no retry policy.
-            // Accepted range 0..5; service/LlmService refuses the first request outside it —
-            // DL-146, DL-202
+            // Accepted range: 0 or greater; 0 disables retrying — DL-146, DL-201
             @DefaultValue("2") int maxRetries) {
 
         /**

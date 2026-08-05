@@ -25,7 +25,8 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  * <p>Existing lower-case {@code jdbc:} values pass through after credential checks. SQLAlchemy-style
  * PostgreSQL, MySQL, MariaDB and H2 URLs are parsed into vendor JDBC URLs; user-info and recognised
  * credential query properties are returned separately. Unsupported, malformed, unresolved or
- * credential-bearing JDBC values fail with {@link IllegalStateException}.
+ * credential-bearing JDBC values fail with {@link IllegalStateException} — DL-072 — see
+ * docs/DECISION_LOG.md.
  *
  * <p>Every value is consumed exactly as supplied. No value is trimmed, case-folded or otherwise
  * normalised at any point. A value padded with leading or trailing whitespace is not a parseable
@@ -40,7 +41,7 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  *       supplied, character for character, with a {@code null} username and a {@code null}
  *       password. It is not parsed, normalised, trimmed or stripped, and its scheme is matched
  *       case-sensitively. Such a value carrying credential material is rejected; it is never
- *       altered — DL-027 — see docs/DECISION_LOG.md.</li>
+ *       altered — DL-072 — see docs/DECISION_LOG.md.</li>
  *   <li>Any other value is parsed as a {@link URI}. Everything from the first {@code '+'} of the
  *       scheme onward is discarded, the remaining scheme is mapped case-insensitively to a JDBC
  *       vendor, the user-info component is split on its first {@code ':'} into the username and the
@@ -54,7 +55,7 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  * </ol>
  *
  * <p>{@link TranslatedDatabaseUrl#jdbcUrl()} never carries a username or a password, on either
- * path — DL-027 — see docs/DECISION_LOG.md. Credential material is recognised in the user-info
+ * path — DL-072 — see docs/DECISION_LOG.md. Credential material is recognised in the user-info
  * component of an authority and in a {@code ?}, {@code &} or {@code ;} separated property named
  * {@code user}, {@code username}, {@code password}, {@code passwd}, {@code pwd},
  * {@code password1}, {@code password2} or {@code password3}, matched case-insensitively. On the
@@ -62,21 +63,15 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  * unset; every other property is retained verbatim and in order.
  *
  * <p>Supported schemes and the JDBC authority prefix each maps to: {@code postgresql} and
- * {@code postgres} map to {@code jdbc:postgresql://}; {@code mysql} maps to {@code jdbc:mysql://};
- * {@code h2} maps to {@code jdbc:h2:tcp://} — DL-071 — see docs/DECISION_LOG.md. The set matches the
- * runtime-scope JDBC drivers declared in backend/pom.xml: {@code org.postgresql:postgresql},
+ * {@code postgres} map to {@code jdbc:postgresql://}; {@code mysql} and {@code mariadb} map to
+ * {@code jdbc:mysql://} — DL-187 — see docs/DECISION_LOG.md; {@code h2} maps to
+ * {@code jdbc:h2:tcp://} — DL-071 — see docs/DECISION_LOG.md. The set matches the runtime-scope JDBC
+ * drivers declared in backend/pom.xml: {@code org.postgresql:postgresql},
  * {@code com.mysql:mysql-connector-j} and {@code com.h2database:h2}.
  *
- * <p>Server products this service is verified against: PostgreSQL 16, MySQL 8.4 and H2 2.3. The
- * {@code mariadb} scheme is recognised and rejected; the rejection names the supported schemes and
- * the products to point {@code DATABASE_URL} at — DL-187 — see docs/DECISION_LOG.md.
- *
- * <p>Server products this service is verified against: PostgreSQL 16, MySQL 8.4 and H2 2.3. The
- * {@code mariadb} scheme translates and connects, but a MariaDB server is not a supported server
- * product: Connector/J reads server metadata through a MySQL 8.0.11+ catalogue a MariaDB server does
- * not publish, and startup then fails with {@code Unable to determine Dialect without JDBC
- * metadata}. Translation raises a warning naming that limitation whenever the scheme is declared —
- * DL-183 — see docs/DECISION_LOG.md.
+ * <p>Server products this service is verified against: PostgreSQL 16, MySQL 8.4 and H2 2.3. A
+ * {@code mariadb} value translates onto the MySQL vendor and a warning naming that unverified
+ * combination is recorded whenever the scheme is declared — DL-187 — see docs/DECISION_LOG.md.
  *
  * <p>Examples, in which {@code USERNAME} and {@code PASSWORD} stand for the configured credentials:
  * <pre>{@code
@@ -86,8 +81,11 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  * translated.username();  // USERNAME
  * translated.password();  // PASSWORD
  *
+ * DatabaseUrlTranslator.translate("mariadb://db.internal:3306/codeskeptic")
+ *         .jdbcUrl();     // jdbc:mysql://db.internal:3306/codeskeptic
+ *
  * DatabaseUrlTranslator.translate("h2://db.internal:9092/codeskeptic")
- *         .jdbcUrl();     // jdbc:h2://db.internal:9092/codeskeptic
+ *         .jdbcUrl();     // jdbc:h2:tcp://db.internal:9092/codeskeptic
  * }</pre>
  */
 public final class DatabaseUrlTranslator {
@@ -120,11 +118,14 @@ public final class DatabaseUrlTranslator {
      */
     private static final Map<String, Vendor> VENDOR_BY_SCHEME;
 
+    // Scheme-to-vendor map of AAP 0.6.5.1; mariadb resolves onto the MySQL vendor — DL-187 — see
+    // docs/DECISION_LOG.md
     static {
         final Map<String, Vendor> vendors = new LinkedHashMap<>();
         vendors.put("postgresql", Vendor.POSTGRESQL);
         vendors.put("postgres", Vendor.POSTGRESQL);
         vendors.put("mysql", Vendor.MYSQL);
+        vendors.put("mariadb", Vendor.MYSQL);
         vendors.put("h2", Vendor.H2);
         VENDOR_BY_SCHEME = Collections.unmodifiableMap(vendors);
     }
@@ -132,26 +133,15 @@ public final class DatabaseUrlTranslator {
     private static final String SUPPORTED_SCHEMES = String.join(", ", VENDOR_BY_SCHEME.keySet());
 
     /**
-     * Schemes this translator recognises and rejects, mapped to the message the rejection carries.
-     *
-     * <p>Rejection happens during translation, before a connection pool or an application context is
-     * created — DL-187 — see docs/DECISION_LOG.md.
+     * Scheme whose translation is accompanied by a warning: it resolves onto a vendor whose driver
+     * this service ships, against a server product the service is not verified against — DL-187 —
+     * see docs/DECISION_LOG.md.
      */
-    private static final Map<String, String> REJECTED_SCHEMES = Map.of(
-            "mariadb",
-            "DATABASE_URL declares the scheme 'mariadb', which no driver declared by this service "
-                    + "serves: only org.postgresql:postgresql, com.mysql:mysql-connector-j and "
-                    + "com.h2database:h2 are on the classpath, and none is published for a MariaDB "
-                    + "server. Translating the scheme to jdbc:mysql:// lets Connector/J open a "
-                    + "connection but leaves Hibernate unable to resolve a dialect, so startup fails "
-                    + "with 'Unable to determine Dialect without JDBC metadata' after the connection "
-                    + "pool has been created. Point DATABASE_URL at a PostgreSQL server, a MySQL "
-                    + "8.0.11+ server or an H2 server. Supported schemes are "
-                    + SUPPORTED_SCHEMES + ". See backend/docs/DECISION_LOG.md DL-187.");
+    private static final String UNVERIFIED_SERVER_SCHEME = "mariadb";
 
     /**
      * The JDBC property names treated as credential material wherever they appear in a URL. Matched
-     * case-insensitively against the text before a property's {@code '='} — DL-027 — see
+     * case-insensitively against the text before a property's {@code '='} — DL-072 — see
      * docs/DECISION_LOG.md.
      */
     private static final Set<String> CREDENTIAL_PROPERTY_NAMES = Set.of(
@@ -164,24 +154,16 @@ public final class DatabaseUrlTranslator {
     private static final String QUERY_PROPERTY_SEPARATOR = "&";
 
     /**
-     * Shape of a Spring property placeholder that resolved to nothing. Configuration binding leaves
-     * such a placeholder in place as literal text when the environment variable behind it is absent,
-     * so the bound value is neither {@code null} nor blank — DL-182 — see docs/DECISION_LOG.md.
-     */
-    private static final Pattern UNRESOLVED_PLACEHOLDER =
-            Pattern.compile("^\\$\\{.*}$", Pattern.DOTALL);
-
-    /**
      * A supported JDBC vendor and the exact URL prefix its driver requires ahead of the authority.
      *
-     * <p>{@code H2} carries the {@code tcp:} connection mode — DL-027 — see
+     * <p>{@code H2} carries the {@code tcp:} connection mode — DL-071 — see
      * docs/DECISION_LOG.md.
      */
     private enum Vendor {
 
         POSTGRESQL("postgresql", "jdbc:postgresql://"),
         MYSQL("mysql", "jdbc:mysql://"),
-        H2("h2", "jdbc:h2://");
+        H2("h2", "jdbc:h2:tcp://");
 
         private final String token;
         private final String jdbcAuthorityPrefix;
@@ -274,6 +256,10 @@ public final class DatabaseUrlTranslator {
         }
 
         if (databaseUrl.startsWith(JDBC_SCHEME_PREFIX)) {
+            // The invariant holds on this path too: detect, then reject; never alter — DL-072 — see
+            // docs/DECISION_LOG.md
+            rejectCredentialMaterial(databaseUrl, "DATABASE_URL already holds a JDBC URL that "
+                    + "carries credential material");
             LOG.info("DATABASE_URL already holds a JDBC URL; it is used exactly as supplied and no "
                     + "credentials are extracted from it.");
             return new TranslatedDatabaseUrl(databaseUrl, null, null);
@@ -452,7 +438,10 @@ public final class DatabaseUrlTranslator {
     /**
      * Discards any {@code +driver} suffix and matches the remaining scheme case-insensitively.
      *
-     * @throws IllegalStateException if the scheme is absent, recognised but rejected, or unsupported
+     * <p>{@value #UNVERIFIED_SERVER_SCHEME} resolves onto the MySQL vendor and records a warning
+     * naming the unverified server product — DL-187 — see docs/DECISION_LOG.md.
+     *
+     * @throws IllegalStateException if the scheme is absent or unsupported
      */
     private static Vendor resolveVendor(String rawScheme) {
         if (rawScheme == null || rawScheme.isBlank()) {
@@ -465,10 +454,12 @@ public final class DatabaseUrlTranslator {
         final String scheme = (driverSuffix < 0 ? rawScheme : rawScheme.substring(0, driverSuffix))
                 .toLowerCase(Locale.ROOT);
 
-        final String rejection = REJECTED_SCHEMES.get(scheme);
-        if (rejection != null) {
-            LOG.error(rejection);
-            throw new IllegalStateException(rejection);
+        if (UNVERIFIED_SERVER_SCHEME.equals(scheme)) {
+            LOG.warn("DATABASE_URL declares the '{}' scheme, which translates onto the MySQL vendor "
+                    + "served by com.mysql:mysql-connector-j. A MariaDB server is not one of the "
+                    + "server products this service is verified against; dialect resolution can fail "
+                    + "after the connection pool is created. See backend/docs/DECISION_LOG.md DL-187.",
+                    UNVERIFIED_SERVER_SCHEME);
         }
 
         final Vendor vendor = VENDOR_BY_SCHEME.get(scheme);

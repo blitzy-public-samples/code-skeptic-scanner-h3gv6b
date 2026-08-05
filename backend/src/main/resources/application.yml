@@ -39,8 +39,8 @@ spring:
     # spring.jpa.database-platform — not set — DL-027 — see docs/DECISION_LOG.md
     properties:
       hibernate:
-        # Net-new (no Python counterpart). Required because the settings table declares the
-        # reserved-word column names key and value at backend/app/db/models.py:L42-43
+        # Net-new (no Python counterpart); quotes the reserved-word columns key and value at
+        # backend/app/db/models.py:L42-43 — DL-061 — see docs/DECISION_LOG.md
         auto_quote_keyword: true
 
 scanner:
@@ -81,27 +81,21 @@ scanner:
     api-key: ${OPENAI_API_KEY:}
     # Net-new (no Python counterpart) — DL-033 — see docs/DECISION_LOG.md
     model: gpt-5.6-terra
-    # Ported from backend/app/services/llm_service.py:L22 — DL-034, DL-145 — see docs/DECISION_LOG.md
-    # Source value: 150. A reasoning model spends this budget on reasoning as well as on visible
-    # output, so the default is raised above the source literal.
+    # Ported from backend/app/services/llm_service.py:L22; source literal 150, configured default
+    # 1000 — DL-034, DL-202 — see docs/DECISION_LOG.md
     max-completion-tokens: ${OPENAI_MAX_COMPLETION_TOKENS:1000}
-    # Ported from backend/app/services/llm_service.py:L25 — DL-145 — see docs/DECISION_LOG.md
-    # Source value: 0.7. scanner.openai.temperature is deliberately not set here: a reasoning model
-    # accepts only its own default temperature and rejects any explicit value with HTTP 400, so
-    # nothing is sent on the request unless a deployment supplies SCANNER_OPENAI_TEMPERATURE.
-    # Accepted range when supplied: 0 to 2 inclusive; the value is range-checked at the request.
+    # Ported from backend/app/services/llm_service.py:L25; source literal 0.7. The key has no default;
+    # when supplied, its accepted range is 0 to 2 inclusive — DL-200 — see docs/DECISION_LOG.md
     # Ported from backend/app/services/llm_service.py:L23 (faithful port) — see docs/DECISION_LOG.md
     n: ${OPENAI_N:1}
     # Net-new (no Python counterpart) — DL-145 — see docs/DECISION_LOG.md
-    # Accepted by the configured model: none, low, medium, high, xhigh. A blank value omits the
-    # parameter. Measured against gpt-5.6-terra: minimal and max are answered HTTP 400
-    # unsupported_value — see docs/DECISION_LOG.md DL-145.
+    # Accepted by the configured model: none, low, medium, high, xhigh; blank omits the parameter.
     reasoning-effort: ${OPENAI_REASONING_EFFORT:low}
     # Net-new (no Python counterpart) — DL-146 — see docs/DECISION_LOG.md
+    # Accepted range: 1 second or greater.
     request-timeout-seconds: ${OPENAI_REQUEST_TIMEOUT_SECONDS:30}
-    # Net-new (no Python counterpart) — DL-146, DL-202 — see docs/DECISION_LOG.md
-    # Accepted range: 0 to 5 inclusive, where 0 disables retrying. The first request fails
-    # outside it.
+    # Net-new (no Python counterpart) — DL-146, DL-201 — see docs/DECISION_LOG.md
+    # Accepted range: 0 or greater; 0 disables retrying.
     max-retries: ${OPENAI_MAX_RETRIES:2}
 
   jwt:

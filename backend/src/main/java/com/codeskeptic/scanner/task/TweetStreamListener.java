@@ -67,8 +67,9 @@ import com.fasterxml.jackson.databind.JsonNode;
  * {@code backend/app/tasks/tweet_monitoring.py:L40-41}. This class is thread-safe and carries no
  * mutable state.
  *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-049, DL-052 and
- * DL-191; construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-049, DL-052,
+ * DL-080, DL-194, DL-195, DL-197 and DL-199; construct-level provenance is recorded in
+ * {@code docs/TRACEABILITY_MATRIX.md}.
  *
  * @see TwitterService#meetsPopularityThreshold(Integer)
  * @see SentimentAnalysisService#calculateDoubtRating(double)
@@ -100,7 +101,7 @@ public class TweetStreamListener {
     /** Value of {@value #KEY_TYPE} that maps a reference to {@code tweets.quoted_tweet_id}. */
     private static final String QUOTED_REFERENCE_TYPE = "quoted";
 
-    // Payload log redaction — DL-195 — see docs/DECISION_LOG.md
+    // Payload log redaction — DL-197 — see docs/DECISION_LOG.md
     /**
      * Payload members a log record may name. Only the member's name and whether the record carried it
      * are ever written; no member value and no rendered payload is written at any level.
@@ -171,13 +172,18 @@ public class TweetStreamListener {
      * generation trigger. The stored row's {@code id} is assigned by the database on insert and the
      * {@code responses} association is not touched.
      *
+     * <p>{@code text}, {@code like_count}, {@code created_at} and {@code author_id} must carry their
+     * wire types before any row is written. A missing or wrong-typed required member is named at
+     * {@code WARN} and the record is skipped; no neutral value is stored — DL-080.
+     *
      * <p>Four steps run in the order documented at
      * {@code documentation/Code Structure.md:L1407-1411}:
      *
      * <ol>
-     *   <li>The like count of {@code data.public_metrics.like_count} is offered to
-     *       {@link TwitterService#meetsPopularityThreshold(Integer)}. A record the gate rejects is
-     *       recorded at {@code DEBUG} and nothing further happens to it.</li>
+     *   <li>An integral {@code data.public_metrics.like_count} is offered to
+     *       {@link TwitterService#meetsPopularityThreshold(Integer)}. A missing or invalid count is
+     *       skipped at {@code WARN}; a valid count the gate rejects is recorded at {@code DEBUG} and
+     *       nothing further happens to it.</li>
      *   <li>The text of {@code data.text} is offered to
      *       {@link SentimentAnalysisService#analyzeSentiment(String)} and the returned score to
      *       {@link SentimentAnalysisService#calculateDoubtRating(double)}.</li>
@@ -191,7 +197,7 @@ public class TweetStreamListener {
      *   <li>The stored row is mirrored to the Notion database, then
      *       {@link ResponseService#generateResponseIfAbsent(String)} is called with the assigned
      *       identifier. That call is the single background generation entry point and stores nothing
-     *       when the row already carries a reply — see docs/DECISION_LOG.md DL-196. The generated row
+     *       when the row already carries a reply — see docs/DECISION_LOG.md DL-195. The generated row
      *       is stored by that call awaiting review; nothing here reads or writes its approval
      *       flag.</li>
      * </ol>
@@ -221,13 +227,30 @@ public class TweetStreamListener {
 
         String text = readTextValue(data.path(KEY_TEXT));
         if (text == null) {
-            // Member presence only; no payload content — DL-195 — see docs/DECISION_LOG.md
+            // Member presence only; no payload content — DL-197 — see docs/DECISION_LOG.md
             log.warn("Skipping a stream record that carries no post text; members present: {}.",
                     presentMembers(payload));
             return true;
         }
 
         Integer likeCount = readInteger(data.path(KEY_PUBLIC_METRICS).path(KEY_LIKE_COUNT));
+        LocalDateTime createdAt = readCreatedAt(data.path(KEY_CREATED_AT));
+        String authorId = readTextValue(data.path(KEY_AUTHOR_ID));
+        if (likeCount == null || createdAt == null || authorId == null) {
+            List<String> invalidRequiredMembers = new ArrayList<>(3);
+            if (likeCount == null) {
+                invalidRequiredMembers.add(KEY_LIKE_COUNT);
+            }
+            if (createdAt == null) {
+                invalidRequiredMembers.add(KEY_CREATED_AT);
+            }
+            if (authorId == null) {
+                invalidRequiredMembers.add(KEY_AUTHOR_ID);
+            }
+            log.warn("Skipping a stream record whose required members are missing or invalid: {}.",
+                    String.join(", ", invalidRequiredMembers));
+            return true;
+        }
 
         if (!twitterService.meetsPopularityThreshold(likeCount)) {
             log.debug("Skipping a stream record with like count {}: the popularity gate reports "
@@ -252,11 +275,11 @@ public class TweetStreamListener {
         Tweet tweet = new Tweet();
         tweet.setContent(text);
         tweet.setLikeCount(likeCount);
-        tweet.setCreatedAt(readCreatedAt(data.path(KEY_CREATED_AT)));
+        tweet.setCreatedAt(createdAt);
         tweet.setDoubtRating(doubtRating);
         tweet.setMedia(readTextArray(data.path(KEY_ATTACHMENTS).path(KEY_MEDIA_KEYS)));
         tweet.setQuotedTweetId(readQuotedTweetId(data.path(KEY_REFERENCED_TWEETS)));
-        tweet.setUserId(readTextValue(data.path(KEY_AUTHOR_ID)));
+        tweet.setUserId(authorId);
         tweet.setAiToolsMentioned(readRuleTags(payload.path(KEY_MATCHING_RULES)));
 
         // No de-duplication — see docs/DECISION_LOG.md DL-049
@@ -305,7 +328,7 @@ public class TweetStreamListener {
      * identifier the database assigned to the row. That call owns the language-model request, stores
      * the generated {@code responses} row and sets its approval flag; nothing here reads or writes that
      * flag. It is also the guard that keeps this trigger and the scheduled pass from both storing a
-     * reply for one row — see docs/DECISION_LOG.md DL-196.
+     * reply for one row — see docs/DECISION_LOG.md DL-195.
      *
      * <p>An empty result is recorded at {@code DEBUG}. A failure raised by the call is recorded at
      * {@code ERROR} and is not rethrown; the stored row is unaffected.
@@ -318,7 +341,7 @@ public class TweetStreamListener {
         try {
             // Closes the unimplemented trigger at backend/app/tasks/tweet_monitoring.py:L32 — see
             // docs/DECISION_LOG.md
-            // The single background generation entry point — DL-196 — see docs/DECISION_LOG.md
+            // The single background generation entry point — DL-195 — see docs/DECISION_LOG.md
             Optional<ResponseDto> result = responseService.generateResponseIfAbsent(tweetId);
             if (result.isEmpty()) {
                 log.debug("Response generation for tweet row {} stored nothing; the row already "
@@ -378,28 +401,24 @@ public class TweetStreamListener {
      * Reads the creation time of a delivered record.
      *
      * <p>An ISO-8601 value carrying an offset is read and normalised to UTC:
-     * {@code 2026-08-03T15:11:52.000Z} yields {@code 2026-08-03T15:11:52}. An absent, blank or
-     * unparseable value is recorded at {@code WARN} and the current UTC time is returned in its
-     * place. Every stored row carries a creation time.
+     * {@code 2026-08-03T15:11:52.000Z} yields {@code 2026-08-03T15:11:52}. An absent, blank,
+     * wrong-typed or unparseable value yields {@code null}; {@link #onStatus(JsonNode)} then rejects
+     * the record before persistence.
      *
      * @param node the {@code created_at} member, possibly a missing node
-     * @return the creation time to store, or {@code null} when the record supplied none
+     * @return the creation time to store, or {@code null} when the member is missing or invalid
      */
     private static LocalDateTime readCreatedAt(JsonNode node) {
         String raw = readTextValue(node);
         if (raw == null) {
-            log.warn("A stream record carries no textual {} member; storing no creation time.",
-                    KEY_CREATED_AT);
             return null;
         }
         try {
             return OffsetDateTime.parse(raw)
                     .withOffsetSameInstant(ZoneOffset.UTC)
                     .toLocalDateTime();
-        } catch (DateTimeParseException failure) {
-            log.warn("A stream record carries the unusable created_at value '{}'; storing the "
-                    + "current UTC time.", LogSafe.logSafe(raw));
-            return LocalDateTime.now(ZoneOffset.UTC);
+        } catch (DateTimeParseException ignored) {
+            return null;
         }
     }
 
@@ -509,7 +528,7 @@ public class TweetStreamListener {
         return null;
     }
 
-    // Payload log redaction — DL-195 — see docs/DECISION_LOG.md
+    // Payload log redaction — DL-197 — see docs/DECISION_LOG.md
     /**
      * Renders which of the {@link #LOGGABLE_MEMBERS} a payload carries.
      *

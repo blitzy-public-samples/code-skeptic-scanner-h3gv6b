@@ -29,10 +29,12 @@ import org.springframework.web.client.RestClient;
  * {@code backend/app/services/notion_service.py:L24} and
  * {@code backend/app/services/notion_service.py:L35}.
  *
- * <p>The framework defaults carried by the injected builder apply unchanged — DL-013.
+ * <p>The framework defaults carried by the injected builder apply unchanged apart from the request
+ * factory and its two timeout bounds — DL-013, DL-150, DL-221.
  *
  * <p>The published {@link RestClient} is fully configured before it is returned and is never mutated
- * afterwards, so it is safe to share across concurrent requests.
+ * afterwards, so it is safe to share across concurrent requests. Every operation it carries is
+ * synchronous and may be issued from any thread, including a reactive non-blocking thread — DL-221.
  *
  * @see ScannerProperties.Notion
  */
@@ -216,9 +218,9 @@ public class RestClientConfig {
      * Builds the request factory the Notion client uses, with finite connect and read timeouts taken
      * from {@code scanner.notion.connect-timeout-seconds} and {@code scanner.notion.read-timeout-seconds}.
      *
-     * <p>The transport implementation remains the one the framework detects on the classpath; only the
-     * two timeout bounds are supplied by this application - see docs/DECISION_LOG.md DL-150,
-     * DL-128.
+     * <p>The transport is the JDK HTTP client, named rather than detected on the classpath, so a call
+     * issued from any thread behaves the same - see docs/DECISION_LOG.md DL-221. Only the two timeout
+     * bounds are supplied by this application - see docs/DECISION_LOG.md DL-150, DL-128.
      *
      * <p>A {@code null} {@code scanner.notion} group yields {@value #DEFAULT_CONNECT_TIMEOUT_SECONDS}
      * and {@value #DEFAULT_READ_TIMEOUT_SECONDS} seconds, the values the properties declare as their
@@ -238,7 +240,9 @@ public class RestClientConfig {
                         "scanner.notion.connect-timeout-seconds")))
                 .withReadTimeout(Duration.ofSeconds(requireAtLeastOne(readTimeoutSeconds,
                         "scanner.notion.read-timeout-seconds")));
-        return ClientHttpRequestFactoryBuilder.detect().build(bounded);
+        // Named transport, not ClientHttpRequestFactoryBuilder.detect() — see docs/DECISION_LOG.md
+        // DL-221
+        return ClientHttpRequestFactoryBuilder.jdk().build(bounded);
     }
 
     /**

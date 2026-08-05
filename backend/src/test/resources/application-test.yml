@@ -63,6 +63,10 @@ scanner:
     # the X API v2 read path signs nothing with them.
     access-token: test-twitter-access-token
     access-token-secret: test-twitter-access-token-secret
+    # Net-new (no Python counterpart) — DL-230 — see docs/DECISION_LOG.md
+    # Declared explicitly rather than defaulted, as the OpenAI keys are (DL-205). The build reaches
+    # no X host, so the value bounds nothing here; it records the profile's own value.
+    request-timeout-seconds: 10
 
   notion:
     # Ported from backend/app/core/config.py:L7 and backend/app/services/notion_service.py:L8 (faithful port) — see docs/DECISION_LOG.md
@@ -81,14 +85,14 @@ scanner:
     api-key: test-openai-api-key
     # Net-new (no Python counterpart) — DL-033 — see docs/DECISION_LOG.md
     model: gpt-5.6-terra
-    # Ported from backend/app/services/llm_service.py:L22 — DL-034, DL-145 — see docs/DECISION_LOG.md
-    max-completion-tokens: 1000
-    # scanner.openai.temperature is deliberately left unset here, as it is in application.yml — a
-    # reasoning model rejects an explicit temperature — DL-145 — see docs/DECISION_LOG.md
+    # Ported from backend/app/services/llm_service.py:L22 (faithful port) — DL-034, DL-202 — see docs/DECISION_LOG.md
+    max-completion-tokens: 150
+    # Ported from backend/app/services/llm_service.py:L25 (faithful port) — DL-200 — see docs/DECISION_LOG.md
+    temperature: 0.7
     # Ported from backend/app/services/llm_service.py:L23 (faithful port) — see docs/DECISION_LOG.md
     n: 1
     # Net-new (no Python counterpart) — DL-145 — see docs/DECISION_LOG.md
-    reasoning-effort: low
+    reasoning-effort: none
     # Net-new (no Python counterpart) — DL-146 — see docs/DECISION_LOG.md
     request-timeout-seconds: 30
     # Net-new (no Python counterpart) — DL-146 — see docs/DECISION_LOG.md

@@ -29,10 +29,12 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.RequestAttributes;
 import org.springframework.web.context.request.WebRequest;
+import org.springframework.web.multipart.MultipartException;
 import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
+import com.codeskeptic.scanner.config.RequestMediaTypeConfig;
 import com.codeskeptic.scanner.dto.ErrorResponse;
 import com.codeskeptic.scanner.exception.BadRequestException;
 import com.codeskeptic.scanner.exception.NotFoundException;
@@ -40,6 +42,7 @@ import com.codeskeptic.scanner.exception.ResponseGenerationException;
 import com.codeskeptic.scanner.util.LogSafe;
 
 import jakarta.servlet.RequestDispatcher;
+import jakarta.servlet.http.HttpServletRequest;
 
 /**
  * Translates an exception raised while a request is being handled into the HTTP status code and the
@@ -101,9 +104,14 @@ import jakarta.servlet.RequestDispatcher;
  *
  * <p>A client failure Spring MVC raises — a malformed or unbindable body, a missing or unconvertible
  * request value, an unsupported method, an unsupported media type or an unsatisfiable {@code Accept}
- * header — is matched by one of the five framework handlers and keeps the status the framework assigns
+ * header — is matched by one of the framework handlers and keeps the status the framework assigns
  * it; {@link #handleUnexpectedException(Exception)} receives what no earlier handler matches — DL-092,
  * DL-188.
+ *
+ * <p>Two request media-type failures the framework raises outside its own hierarchy are answered 415
+ * here as well: a multipart request, which no route of this service consumes, and a
+ * {@code Content-Type} naming a non-concrete media type such as {@code application/*} — DL-219,
+ * DL-220.
  *
  * <p>{@link HttpMessageNotReadableException}, {@link HttpMessageNotWritableException} and their
  * {@link HttpMessageConversionException} supertype are each declared on a handler of their own: a
@@ -425,8 +433,76 @@ public class GlobalExceptionHandler {
             HttpMediaTypeNotSupportedException ex) {
 
         log.debug("Rejecting an unsupported media type with HTTP 415");
-        return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
-                .body(new ErrorResponse(UNSUPPORTED_MEDIA_TYPE));
+        return unsupportedMediaType();
+    }
+
+    /**
+     * Reports a request the multipart resolver could not parse with HTTP 415 and the message
+     * {@value #UNSUPPORTED_MEDIA_TYPE}.
+     *
+     * <p>No route in this service consumes a multipart body: the tree declares no
+     * {@code @RequestPart} parameter, no {@code MultipartFile} parameter and no {@code multipart}
+     * entry in any {@code consumes} attribute. Every request naming a {@code multipart/*} media type
+     * is therefore a media type this service does not support, and the status is the one
+     * {@link #handleUnsupportedMediaType(HttpMediaTypeNotSupportedException)} serves.
+     *
+     * <p>{@code DispatcherServlet.checkMultipart} resolves a multipart request before handler
+     * mapping, so this failure arrives with no handler method attached; a media type such as
+     * {@code multipart/form-data} carrying no {@code boundary} parameter and
+     * {@code multipart/mixed} both reach this method. A missing multipart part is a different
+     * failure: {@link MissingServletRequestPartException} extends
+     * {@link ServletRequestBindingException} and is answered 400 by
+     * {@link #handleClientRequestFailure(Exception)} — DL-219.
+     *
+     * <p>Only the exception's class name is written to the log, at {@code WARN}. Neither the class
+     * name, the detail message nor any part of the request reaches the response — DL-052.
+     *
+     * @param ex the raised exception, whose class name is recorded in the log
+     * @return HTTP 415 carrying {@code {"error": "Unsupported media type"}}
+     */
+    // Net-new (no Python counterpart) — DL-092, DL-219 — see docs/DECISION_LOG.md
+    @ExceptionHandler(MultipartException.class)
+    public ResponseEntity<ErrorResponse> handleMultipartFailure(MultipartException ex) {
+        log.warn("Rejecting a multipart request this service does not consume with HTTP 415: {}",
+                LogSafe.type(ex));
+        return unsupportedMediaType();
+    }
+
+    /**
+     * Reports a request whose {@code Content-Type} names no concrete media type with HTTP 415 and the
+     * message {@value #UNSUPPORTED_MEDIA_TYPE}, and any other
+     * {@link IllegalArgumentException} exactly as {@link #handleUnexpectedException(Exception)} does.
+     *
+     * <p>{@code HttpHeaders.setContentType} rejects a wildcard type and a wildcard subtype with
+     * {@link IllegalArgumentException}, and {@code ServletServerHttpRequest.getHeaders} calls it while
+     * a message converter reads the request body. A {@code Content-Type} of {@code *&#47;*},
+     * {@code application/*} or {@code text/*} therefore raises that exception during argument
+     * resolution. A {@code Content-Type} the media-type parser rejects outright raises
+     * {@code InvalidMediaTypeException}, which the converter already translates into
+     * {@link HttpMediaTypeNotSupportedException}.
+     *
+     * <p>The status is selected from the request rather than from the exception: 415 when the request
+     * carries a {@code Content-Type} that parses to a non-concrete media type or that cannot be
+     * parsed at all, and otherwise the unchanged 500 of
+     * {@link #handleUnexpectedException(Exception)}, stack trace included — DL-220.
+     *
+     * @param ex the raised exception, recorded in the log
+     * @param request the request being handled, read only for its {@code Content-Type} header
+     * @return HTTP 415 carrying {@code {"error": "Unsupported media type"}} for a non-concrete
+     *     request media type, otherwise HTTP 500 carrying
+     *     {@code {"error": "Internal server error"}}
+     */
+    // Net-new (no Python counterpart) — DL-220 — see docs/DECISION_LOG.md
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ErrorResponse> handleIllegalArgument(IllegalArgumentException ex,
+            HttpServletRequest request) {
+
+        if (namesNoConcreteMediaType(request)) {
+            log.warn("Rejecting a request whose Content-Type names no concrete media type with "
+                    + "HTTP 415: {}", LogSafe.type(ex));
+            return unsupportedMediaType();
+        }
+        return handleUnexpectedException(ex);
     }
 
     /**
@@ -468,6 +544,36 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * Builds the response every 415 branch of this advice serves.
+     *
+     * @return HTTP 415 carrying {@code {"error": "Unsupported media type"}}; never {@code null}
+     */
+    private static ResponseEntity<ErrorResponse> unsupportedMediaType() {
+        return ResponseEntity.status(HttpStatus.UNSUPPORTED_MEDIA_TYPE)
+                .body(new ErrorResponse(UNSUPPORTED_MEDIA_TYPE));
+    }
+
+    /**
+     * Reports whether a request carries a {@code Content-Type} that names no single concrete media
+     * type.
+     *
+     * <p>The question is decided by {@code config.RequestMediaTypeConfig}, the single declaration the
+     * request filter reads as well. A request carrying no {@code Content-Type} at all is not one: an
+     * absent header is answered by
+     * {@link #handleUnsupportedMediaType(HttpMediaTypeNotSupportedException)}, which the framework
+     * raises for it.
+     *
+     * @param request the request being handled, possibly {@code null}
+     * @return {@code true} when the header holds a media type with a wildcard type or subtype, or a
+     *     value the media-type parser rejects; {@code false} when the header is absent, blank, or
+     *     names one concrete media type
+     */
+    private static boolean namesNoConcreteMediaType(HttpServletRequest request) {
+        return request != null
+                && RequestMediaTypeConfig.namesNoConcreteMediaType(request.getContentType());
+    }
+
+    /**
      * Resolves the wire message for a single rejected field.
      *
      * @param fieldError the rejected field reported by Bean Validation
@@ -488,6 +594,37 @@ public class GlobalExceptionHandler {
         return BAD_REQUEST;
     }
 
+    // The one declaration of the container-level error envelope — DL-183, DL-234 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Resolves the status this service reports for a status the container recorded.
+     *
+     * <p>Declared here beside {@link #errorDispatchMessageFor(int)} so the container-level error
+     * surface has a single declaration: the {@link ErrorAttributes} bean below reads both, and so does
+     * the error-report valve {@code config/ContainerErrorResponseConfig} installs for a rejection the
+     * container answers before any filter or servlet runs — DL-234.
+     *
+     * @param status the status the container recorded
+     * @return {@code status} itself when it is a 4xx status, otherwise
+     *         {@link HttpStatus#INTERNAL_SERVER_ERROR}'s value
+     */
+    public static int errorDispatchStatusFor(int status) {
+        return isClientErrorStatus(status) ? status : HttpStatus.INTERNAL_SERVER_ERROR.value();
+    }
+
+    /**
+     * Reports whether a status is a 4xx status.
+     *
+     * @param status the status to classify
+     * @return {@code true} when {@code status} lies in the 4xx range
+     */
+    private static boolean isClientErrorStatus(int status) {
+        return status >= HttpStatus.BAD_REQUEST.value()
+                && status < HttpStatus.INTERNAL_SERVER_ERROR.value();
+    }
+
+    // The one declaration of the container-level error envelope — DL-183, DL-234 — see
+    // docs/DECISION_LOG.md
     /**
      * Resolves the wire message for a status the container recorded on an {@code ERROR} dispatch.
      *
@@ -495,7 +632,7 @@ public class GlobalExceptionHandler {
      * @return the message to carry under {@value #ERROR_KEY}, or {@code null} when the dispatched
      *         status carries no body
      */
-    private static String errorDispatchMessageFor(int status) {
+    public static String errorDispatchMessageFor(int status) {
         if (status == HttpStatus.UNAUTHORIZED.value() || status == HttpStatus.FORBIDDEN.value()) {
             return null;
         }
@@ -503,9 +640,7 @@ public class GlobalExceptionHandler {
         if (mapped != null) {
             return mapped;
         }
-        boolean clientError = status >= HttpStatus.BAD_REQUEST.value()
-                && status < HttpStatus.INTERNAL_SERVER_ERROR.value();
-        return clientError ? BAD_REQUEST : INTERNAL_SERVER_ERROR;
+        return isClientErrorStatus(status) ? BAD_REQUEST : INTERNAL_SERVER_ERROR;
     }
 
     /**

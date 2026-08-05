@@ -6,6 +6,7 @@ import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,6 +21,7 @@ import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
 import com.codeskeptic.scanner.util.LogSafe;
+import com.codeskeptic.scanner.util.QueryParameters;
 
 // Ported from backend/app/services/twitter_service.py:L6-50 (faithful port) — see docs/DECISION_LOG.md
 /**
@@ -153,6 +155,11 @@ public class TwitterService {
      * {@link PaginationDto#totalPages()} continue to describe the whole table. An empty table yields
      * an empty list, a {@code total} of {@code 0} and a {@code totalPages} of {@code 0}.
      *
+     * <p>A {@code page} whose first row lies beyond {@link Integer#MAX_VALUE} rows — that is, one for
+     * which {@code (page - 1) * perPage} exceeds that bound — is answered the same way: the empty list
+     * and the same populated block, with the requested page number and page size restated. No page
+     * size is reduced and no request is rejected — see docs/DECISION_LOG.md DL-225.
+     *
      * <p>The rows are converted inside this method's transaction and the returned lists are
      * unmodifiable.
      *
@@ -177,8 +184,13 @@ public class TwitterService {
         }
 
         // Wire page numbers are 1-based and repository page indexes are 0-based — DL-038
-        Page<Tweet> tweetPage =
-                tweetRepository.findAll(PageRequest.of(effectivePage - 1, effectivePerPage));
+        PageRequest requested = PageRequest.of(effectivePage - 1, effectivePerPage);
+
+        // A page whose first row lies past the offset the query can express is answered without a
+        // query — DL-225 — see docs/DECISION_LOG.md
+        Page<Tweet> tweetPage = QueryParameters.withinQueryableOffset(requested)
+                ? tweetRepository.findAll(requested)
+                : new PageImpl<>(List.of(), requested, tweetRepository.count());
 
         List<TweetDto> tweets = tweetMapper.toDtoList(tweetPage.getContent());
         PaginationDto pagination = new PaginationDto(

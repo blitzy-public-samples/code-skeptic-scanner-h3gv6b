@@ -122,8 +122,11 @@ public record ScannerProperties(
      * that every key the retired tree referenced resolves; the v2 read path signs nothing with them
      * and no production code reads them — DL-031.
      *
-     * <p>Every component of this group is a credential and every one is redacted by
-     * {@link #toString()}.
+     * <p>Seven components of this group are credentials and every one of those is redacted by
+     * {@link #toString()}. The eighth, {@code requestTimeoutSeconds}, is not a credential: it bounds
+     * the two short request/response calls {@code task/TweetStreamClient} makes on the X API — the
+     * app-only token exchange and the stream-rules calls — and leaves the long-lived filtered-stream
+     * subscription unbounded — DL-230.
      *
      * @param apiKey value of {@code scanner.twitter.api-key}
      * @param apiSecret value of {@code scanner.twitter.api-secret}
@@ -132,6 +135,8 @@ public record ScannerProperties(
      * @param consumerSecret value of {@code scanner.twitter.consumer-secret}
      * @param accessToken value of {@code scanner.twitter.access-token}
      * @param accessTokenSecret value of {@code scanner.twitter.access-token-secret}
+     * @param requestTimeoutSeconds value of {@code scanner.twitter.request-timeout-seconds},
+     *     default {@code 10}; bounds the token exchange and the stream-rules calls only
      */
     public record Twitter(
 
@@ -163,12 +168,19 @@ public record ScannerProperties(
             // scanner.twitter.access-token-secret — read at
             // backend/app/services/twitter_service.py:L13 and
             // backend/app/tasks/tweet_monitoring.py:L49, never declared — DL-031
-            String accessTokenSecret) {
+            String accessTokenSecret,
+
+            // scanner.twitter.request-timeout-seconds — net-new: the source set no timeout.
+            // Bounds the app-only token exchange and the stream-rules calls only; the filtered
+            // stream itself is not bounded. A value below one second is read as one second —
+            // DL-230
+            @DefaultValue("10") long requestTimeoutSeconds) {
 
         /**
-         * Renders this group with all seven credentials redacted — DL-052.
+         * Renders this group with all seven credentials redacted and the request timeout in the
+         * clear — DL-052.
          *
-         * @return the group's components, every value redacted
+         * @return the group's components, every credential value redacted
          */
         @Override
         public String toString() {
@@ -179,6 +191,7 @@ public record ScannerProperties(
                     + ", consumerSecret=" + REDACTED
                     + ", accessToken=" + REDACTED
                     + ", accessTokenSecret=" + REDACTED
+                    + ", requestTimeoutSeconds=" + requestTimeoutSeconds
                     + "]";
         }
     }
@@ -246,11 +259,11 @@ public record ScannerProperties(
      * The {@code scanner.openai} group: the OpenAI credential, the four call parameters and the three
      * transport and reasoning settings. Per-component provenance is recorded inline below.
      *
-     * <p>The three numeric call parameters name the literals passed to
-     * {@code Completion.create(...)} at {@code backend/app/services/llm_service.py:L22-25}:
-     * {@code max_tokens=150}, {@code n=1} and {@code temperature=0.7}. Of those,
-     * {@code maxCompletionTokens} and {@code n} carry defaults; {@code temperature} carries none, so
-     * it is {@code null} unless a deployment sets it — DL-200.
+     * <p>The three numeric call parameters carry the literals passed to
+     * {@code Completion.create(...)} at {@code backend/app/services/llm_service.py:L22-25} as their
+     * defaults: {@code max_tokens=150} (DL-034, DL-202), {@code n=1} and {@code temperature=0.7}
+     * (DL-200). {@code temperature} stays nullable, so a deployment that supplies a blank value omits
+     * the parameter from the request.
      *
      * <p>{@code service/LlmService} reads every component of this group.
      * {@code maxCompletionTokens}, {@code n}, {@code temperature}, {@code requestTimeoutSeconds} and
@@ -264,12 +277,12 @@ public record ScannerProperties(
      * @param apiKey value of {@code scanner.openai.api-key}, redacted by {@link #toString()}
      * @param model value of {@code scanner.openai.model}
      * @param maxCompletionTokens value of {@code scanner.openai.max-completion-tokens}, default
-     *     {@code 1000}
-     * @param temperature value of {@code scanner.openai.temperature}, or {@code null} when the key
-     *     is not set
+     *     {@code 150}
+     * @param temperature value of {@code scanner.openai.temperature}, default {@code 0.7}, or
+     *     {@code null} when the key is set to a blank value
      * @param n value of {@code scanner.openai.n}, default {@code 1}
      * @param reasoningEffort value of {@code scanner.openai.reasoning-effort}, default
-     *     {@code low}; sent as the request's reasoning effort, and blank omits the parameter from
+     *     {@code none}; sent as the request's reasoning effort, and blank omits the parameter from
      *     the request
      * @param requestTimeoutSeconds value of {@code scanner.openai.request-timeout-seconds}, default
      *     {@code 30}; accepted range 1 second or greater, checked by
@@ -289,12 +302,13 @@ public record ScannerProperties(
             String model,
 
             // scanner.openai.max-completion-tokens — max_tokens=150 at
-            // backend/app/services/llm_service.py:L22 — DL-034
-            @DefaultValue("1000") long maxCompletionTokens,
+            // backend/app/services/llm_service.py:L22 — DL-034, DL-202
+            @DefaultValue("150") long maxCompletionTokens,
 
             // scanner.openai.temperature — temperature=0.7 at
-            // backend/app/services/llm_service.py:L25; declared with no default — DL-200
-            Double temperature,
+            // backend/app/services/llm_service.py:L25; nullable so a blank value omits the
+            // parameter — DL-200
+            @DefaultValue("0.7") Double temperature,
 
             // scanner.openai.n — n=1 at backend/app/services/llm_service.py:L23
             @DefaultValue("1") long n,
@@ -302,7 +316,7 @@ public record ScannerProperties(
             // scanner.openai.reasoning-effort — net-new: the source's completions call at
             // backend/app/services/llm_service.py:L19-26 had no reasoning parameter. Read by
             // service/LlmService.reasoningEffort() — DL-145
-            @DefaultValue("low") String reasoningEffort,
+            @DefaultValue("none") String reasoningEffort,
 
             // scanner.openai.request-timeout-seconds — net-new: the source set no timeout.
             // Accepted range: 1 second or greater — DL-146, DL-201

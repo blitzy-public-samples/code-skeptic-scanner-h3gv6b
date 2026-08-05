@@ -17,6 +17,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -28,6 +29,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 import jakarta.persistence.LockModeType;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -37,7 +39,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
@@ -69,8 +73,13 @@ import com.codeskeptic.scanner.repository.ResponseRepository;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.mapper.ResponseMapper;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.BooleanNode;
+import com.fasterxml.jackson.databind.node.IntNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.NullNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 
 // Net-new coverage of the four call sites at backend/app/api/responses.py:L15,L26,L44,L60, whose
@@ -460,7 +469,7 @@ class ResponseServiceTest {
     @Test
     @DisplayName("refuses a background generation request carrying no identifier")
     void refusesABackgroundGenerationRequestCarryingNoIdentifier() {
-        assertThatThrownBy(() -> service.generateResponseIfAbsent(null))
+        assertThatThrownBy(() -> service.generateResponseIfAbsent((String) null))
                 .isInstanceOf(BadRequestException.class)
                 .hasMessage(BadRequestException.TWEET_ID_IS_REQUIRED);
         assertThatThrownBy(() -> service.generateResponseIfAbsent(""))
@@ -468,6 +477,62 @@ class ResponseServiceTest {
                 .hasMessage(BadRequestException.TWEET_ID_IS_REQUIRED);
 
         verifyNoInteractions(llmService, responseRepository);
+    }
+
+    // The same operation for a caller that already holds the row — DL-226 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("refuses a background generation request carrying a row that has not been stored")
+    void refusesABackgroundGenerationRequestCarryingAnUnstoredRow() {
+        assertThatThrownBy(() -> service.generateResponseIfAbsent((Tweet) null))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> service.generateResponseIfAbsent(new Tweet()))
+                .isInstanceOf(BadRequestException.class)
+                .hasMessage(BadRequestException.TWEET_ID_IS_REQUIRED);
+
+        verifyNoInteractions(llmService, responseRepository, tweetRepository, tweetMapper);
+    }
+
+    // The same operation for a caller that already holds the row — DL-226 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("generates from a supplied row without reading the tweets table")
+    void generatesFromASuppliedRowWithoutReadingTheTweetsTable() {
+        Tweet subject = tweetCarryingTheKey();
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false);
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(responseRepository.save(any(Response.class))).thenAnswer(returnsTheRowWithAnAssignedId());
+        when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
+
+        Optional<ResponseDto> stored = service.generateResponseIfAbsent(subject);
+
+        assertThat(stored).as("row the background pass stored").isPresent();
+        verify(tweetMapper).toDto(subject);
+        // The subject is the supplied row; the only read of tweets is the locking read the storing
+        // transaction performs — DL-226
+        verify(tweetRepository, never()).findById(TWEET_KEY);
+        verify(tweetRepository, times(1)).findByIdForUpdate(TWEET_KEY);
+        verify(responseRepository).existsByTweetId(TWEET_KEY);
+        verify(responseRepository).save(any(Response.class));
+    }
+
+    // The transaction-scoped existence guard covers the supplied row too — DL-195, DL-226
+    @Test
+    @DisplayName("stores nothing for a supplied row that already carries a reply")
+    void storesNothingForASuppliedRowThatAlreadyCarriesAReply() {
+        Tweet subject = tweetCarryingTheKey();
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(true);
+
+        Optional<ResponseDto> stored = service.generateResponseIfAbsent(subject);
+
+        assertThat(stored).as("row the background pass stored").isEmpty();
+        verify(responseRepository, never()).save(any(Response.class));
+        verifyNoInteractions(responseMapper);
     }
 
     // backend/app/api/responses.py:L44,L46-47
@@ -490,7 +555,8 @@ class ResponseServiceTest {
                     saved.getGeneratedAt(), saved.getIsApproved(), TWEET_ID);
         });
 
-        LocalDateTime beforeTheCall = LocalDateTime.now();
+        // The mint is truncated to microseconds, so the window is too — DL-220
+        LocalDateTime beforeTheCall = LocalDateTime.now().truncatedTo(ChronoUnit.MICROS);
         ResponseDto stored = service.generateResponse(TWEET_ID);
         LocalDateTime afterTheCall = LocalDateTime.now();
 
@@ -658,7 +724,8 @@ class ResponseServiceTest {
         when(responseRepository.save(any(Response.class))).thenAnswer(returnsTheRowWithAnAssignedId());
         when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
 
-        LocalDateTime beforeTheCall = LocalDateTime.now();
+        // The mint is truncated to microseconds, so the window is too — DL-220
+        LocalDateTime beforeTheCall = LocalDateTime.now().truncatedTo(ChronoUnit.MICROS);
         service.generateResponse(TWEET_ID);
         LocalDateTime afterTheCall = LocalDateTime.now();
 
@@ -670,8 +737,34 @@ class ResponseServiceTest {
         assertThat(written.getIsApproved()).isFalse();
         assertThat(written.getGeneratedAt()).isNotNull();
         assertThat(written.getGeneratedAt()).isBetween(beforeTheCall, afterTheCall);
+        assertThat(written.getGeneratedAt().getNano() % 1_000).isZero();
         assertThat(written.getTweet()).isSameAs(subject);
         assertThat(written.getContent()).isEqualTo(GENERATED_TEXT);
+    }
+
+    // The minted timestamp carries the precision the column stores — DL-232 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("mints generated_at truncated to microseconds so a read reports the same value")
+    void mintsGeneratedAtTruncatedToMicrosecondsSoAReadReportsTheSameValue() {
+        Tweet subject = tweetCarryingTheKey();
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
+        when(responseRepository.save(any(Response.class))).thenAnswer(returnsTheRowWithAnAssignedId());
+        when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
+
+        service.generateResponse(TWEET_ID);
+
+        ArgumentCaptor<Response> submitted = ArgumentCaptor.forClass(Response.class);
+        verify(responseRepository).save(submitted.capture());
+        LocalDateTime minted = submitted.getValue().getGeneratedAt();
+
+        assertThat(minted).isNotNull();
+        assertThat(minted.getNano() % 1_000)
+                .as("nanosecond field of a microsecond-truncated timestamp").isZero();
+        assertThat(minted).isEqualTo(minted.truncatedTo(ChronoUnit.MICROS));
     }
 
     // backend/app/tasks/response_generation.py:L25-26,L33
@@ -745,64 +838,85 @@ class ResponseServiceTest {
         assertThat(written.getIsApproved()).isTrue();
     }
 
-    // A JSON null carries no writable content value — DL-082 — see docs/DECISION_LOG.md
+    // A carried key carries a usable value — DL-082 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("rejects an explicit json null as the only content value")
-    void rejectsAnExplicitJsonNullAsTheOnlyContentValue() {
-        UpdateResponseRequest request =
-                new UpdateResponseRequest(NullNode.getInstance(), null);
-
-        assertThat(request.carriesNoWritableValue()).isTrue();
-        assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID, request))
-                .isInstanceOf(BadRequestException.class)
-                .hasMessage("Update data is required");
+    @DisplayName("refuses to build a request whose content is an explicit json null")
+    void refusesToBuildARequestWhoseContentIsAnExplicitJsonNull() {
+        assertThatThrownBy(() -> new UpdateResponseRequest(NullNode.getInstance(), null))
+                .isInstanceOf(IllegalArgumentException.class);
 
         verifyNoInteractions(responseRepository, responseMapper);
     }
 
-    // A JSON null carries no writable approval value — DL-082 — see docs/DECISION_LOG.md
+    // A carried key carries a usable value — DL-082 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("rejects an explicit json null as the only approval value")
-    void rejectsAnExplicitJsonNullAsTheOnlyApprovalValue() {
-        UpdateResponseRequest request =
-                new UpdateResponseRequest(null, NullNode.getInstance());
-
-        assertThat(request.carriesNoWritableValue()).isTrue();
-        assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID, request))
-                .isInstanceOf(BadRequestException.class)
-                .hasMessage("Update data is required");
+    @DisplayName("refuses to build a request whose approval flag is an explicit json null")
+    void refusesToBuildARequestWhoseApprovalFlagIsAnExplicitJsonNull() {
+        assertThatThrownBy(() -> new UpdateResponseRequest(null, NullNode.getInstance()))
+                .isInstanceOf(IllegalArgumentException.class);
 
         verifyNoInteractions(responseRepository, responseMapper);
     }
 
-    // Two JSON nulls still carry no writable value — DL-082 — see docs/DECISION_LOG.md
+    // A carried key carries a usable value — DL-082 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("rejects a body carrying both writable keys as explicit json nulls")
-    void rejectsABodyCarryingBothWritableKeysAsExplicitJsonNulls() {
-        UpdateResponseRequest request =
-                new UpdateResponseRequest(NullNode.getInstance(), NullNode.getInstance());
-
-        assertThat(request.carriesNoWritableValue()).isTrue();
-        assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID, request))
-                .isInstanceOf(BadRequestException.class)
-                .hasMessage("Update data is required");
+    @DisplayName("refuses to build a request that carries both keys as explicit json nulls")
+    void refusesToBuildARequestThatCarriesBothKeysAsExplicitJsonNulls() {
+        assertThatThrownBy(
+                () -> new UpdateResponseRequest(NullNode.getInstance(), NullNode.getInstance()))
+                .isInstanceOf(IllegalArgumentException.class);
 
         verifyNoInteractions(responseRepository, responseMapper);
     }
 
-    // A valid value is written while an explicit null sibling is ignored — DL-082.
+    // A carried key carries a usable value — DL-082 — see docs/DECISION_LOG.md
+    @ParameterizedTest
+    @MethodSource("unusableUpdateBodies")
+    @DisplayName("refuses to build a request carrying a value the addressed column cannot hold")
+    void refusesToBuildARequestCarryingAValueTheAddressedColumnCannotHold(
+            JsonNode content, JsonNode isApproved) {
+
+        assertThatThrownBy(() -> new UpdateResponseRequest(content, isApproved))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        verifyNoInteractions(responseRepository, responseMapper);
+    }
+
+    /**
+     * The ten request bodies the QA reproduction of the wrong-typed update reported, as the component
+     * pair each one binds to.
+     *
+     * @return one argument pair per rejected body
+     */
+    private static Stream<Arguments> unusableUpdateBodies() {
+        ObjectNode object = JsonNodeFactory.instance.objectNode();
+        object.put("x", 1);
+        ArrayNode array = JsonNodeFactory.instance.arrayNode();
+        array.add("a");
+        return Stream.of(
+                Arguments.of(NullNode.getInstance(), null),
+                Arguments.of(IntNode.valueOf(123), null),
+                Arguments.of(BooleanNode.TRUE, null),
+                Arguments.of(array, null),
+                Arguments.of(object, null),
+                Arguments.of(null, NullNode.getInstance()),
+                Arguments.of(null, IntNode.valueOf(1)),
+                Arguments.of(null, TextNode.valueOf("true")),
+                Arguments.of(null, TextNode.valueOf("false")),
+                Arguments.of(TextNode.valueOf(REVISED_CONTENT), TextNode.valueOf("true")));
+    }
+
+    // The two column types of backend/app/db/models.py:L24,L26 — DL-082 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("writes a valid content value without clearing an explicit-null approval")
-    void writesAValidContentValueWithoutClearingAnExplicitNullApproval() {
-        Response existing = storedRowCarryingApproval(true);
-        stubTheUpdateOf(existing);
+    @DisplayName("builds a request from a json string content and a json boolean approval flag")
+    void buildsARequestFromAJsonStringContentAndAJsonBooleanApprovalFlag() {
+        UpdateResponseRequest usable = new UpdateResponseRequest(
+                TextNode.valueOf(REVISED_CONTENT), BooleanNode.FALSE);
 
-        service.updateResponse(RESPONSE_ID,
-                new UpdateResponseRequest(TextNode.valueOf(REVISED_CONTENT), NullNode.getInstance()));
-
-        Response written = theRowSubmittedForUpdate(existing);
-        assertThat(written.getContent()).isEqualTo(REVISED_CONTENT);
-        assertThat(written.getIsApproved()).isTrue();
+        assertThat(usable.writesContent()).isTrue();
+        assertThat(usable.contentValue()).isEqualTo(REVISED_CONTENT);
+        assertThat(usable.writesApproval()).isTrue();
+        assertThat(usable.approvalValue()).isFalse();
     }
 
     @Test
@@ -834,9 +948,8 @@ class ResponseServiceTest {
         Throwable thrown = catchThrowable(() -> new ResponseMapper().toDto(withoutTweet));
 
         assertThat(thrown)
-                .isInstanceOf(IllegalStateException.class)
-                .isNotInstanceOf(NullPointerException.class)
-                .hasMessageContaining("tweet_id");
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("tweet_id must not be null.");
     }
 
     // backend/app/db/models.py:L26 with backend/app/api/responses.py:L60
@@ -953,6 +1066,55 @@ class ResponseServiceTest {
         assertThat(envelope.pagination().perPage()).isEqualTo(500);
     }
 
+    // A page whose first row lies beyond Integer.MAX_VALUE rows holds no row — DL-225 — see
+    // docs/DECISION_LOG.md
+    @ParameterizedTest(name = "page {0} of size {1} renders the empty page")
+    @CsvSource({
+            "214748366,10",
+            "2147483647,10",
+            "2147483647,2147483647",
+            "3,1073741824"
+    })
+    @DisplayName("renders the empty page for a page whose first row lies beyond the largest "
+            + "addressable offset, without asking the repository for it")
+    void rendersTheEmptyPageBeyondTheLargestAddressableOffset(int page, int perPage) {
+        when(responseRepository.count()).thenReturn(21L);
+
+        PaginatedResponsesDto rendered = service.getPaginatedResponses(page, perPage);
+
+        assertThat(rendered.responses()).as("rows of the rendered page").isEmpty();
+        assertThat(rendered.pagination().page()).as("page the envelope restates").isEqualTo(page);
+        assertThat(rendered.pagination().perPage()).as("per_page the envelope restates")
+                .isEqualTo(perPage);
+        assertThat(rendered.pagination().total()).as("total the envelope reports").isEqualTo(21L);
+        assertThat(rendered.pagination().totalPages()).as("total_pages the envelope reports")
+                .isEqualTo((int) Math.ceil(21.0d / perPage));
+        // The row count alone builds the envelope; the paged query is never issued — DL-225
+        verify(responseRepository, never()).findAll(any(Pageable.class));
+        verify(responseRepository).count();
+    }
+
+    // A page whose first row lies at most Integer.MAX_VALUE rows in is read as any other page —
+    // DL-225 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "page {0} of size {1} still reaches the repository")
+    @CsvSource({
+            "214748365,10",
+            "2147483647,1",
+            "1000000,10"
+    })
+    @DisplayName("reads a page whose first row lies within the largest addressable offset")
+    void readsAPageWhoseFirstRowLiesWithinTheLargestAddressableOffset(int page, int perPage) {
+        when(responseRepository.findAll(any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(), PageRequest.of(page - 1, perPage), 21L));
+
+        PaginatedResponsesDto rendered = service.getPaginatedResponses(page, perPage);
+
+        assertThat(theRequestedPage().getOffset())
+                .as("offset of the page request").isLessThanOrEqualTo(Integer.MAX_VALUE);
+        assertThat(rendered.responses()).as("rows of a page beyond the last one").isEmpty();
+        verify(responseRepository, never()).count();
+    }
+
     // backend/app/api/responses.py:L11,L15
     @Test
     @DisplayName("requests the third wire page as index two and reports it as page three")
@@ -1026,6 +1188,60 @@ class ResponseServiceTest {
         assertThat(envelope.pagination().page()).as("page the envelope restates").isEqualTo(1);
         assertThat(envelope.pagination().perPage())
                 .as("per_page the envelope restates").isEqualTo(expectedSize);
+    }
+
+    // The offset ceiling of a paged query — DL-219 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "page {0} of size {1} is queried, its offset being at most 2147483647")
+    @CsvSource({
+            "214748365,10",
+            "214748364,10",
+            "2,2147483647"
+    })
+    @DisplayName("queries a page whose offset the paged query can express")
+    void queriesAPageWhoseOffsetThePagedQueryCanExpress(int page, int perPage) {
+        when(responseRepository.findAll(any(Pageable.class))).thenAnswer(invocation ->
+                new PageImpl<>(List.of(), invocation.<Pageable>getArgument(0), 2L));
+
+        PaginatedResponsesDto envelope = service.getPaginatedResponses(page, perPage);
+
+        assertThat(theRequestedPage().getOffset()).isLessThanOrEqualTo(Integer.MAX_VALUE);
+        assertThat(envelope.pagination().page()).isEqualTo(page);
+        verify(responseRepository, never()).count();
+    }
+
+    // The offset ceiling of a paged query — DL-219 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "page {0} of size {1} is answered empty without a paged query")
+    @CsvSource({
+            "2147483647,10",
+            "2147483646,10",
+            "99999999,99999999",
+            "214748366,10",
+            "3,2147483647"
+    })
+    @DisplayName("answers a page beyond the queryable offset with an empty page and no query")
+    void answersAPageBeyondTheQueryableOffsetWithAnEmptyPageAndNoQuery(int page, int perPage) {
+        when(responseRepository.count()).thenReturn(25L);
+
+        PaginatedResponsesDto envelope = service.getPaginatedResponses(page, perPage);
+
+        assertThat(envelope.responses()).isEmpty();
+        assertThat(envelope.pagination().page()).isEqualTo(page);
+        assertThat(envelope.pagination().perPage()).isEqualTo(perPage);
+        assertThat(envelope.pagination().total()).isEqualTo(25L);
+        verify(responseRepository, never()).findAll(any(Pageable.class));
+    }
+
+    // The offset ceiling of a paged query — DL-219 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("counts the pages a beyond-the-ceiling page reports from the table size")
+    void countsThePagesABeyondTheCeilingPageReportsFromTheTableSize() {
+        when(responseRepository.count()).thenReturn(25L);
+
+        PaginationDto pagination =
+                service.getPaginatedResponses(Integer.MAX_VALUE, 10).pagination();
+
+        assertThat(pagination.totalPages()).isEqualTo(3);
+        assertThat(pagination.total()).isEqualTo(25L);
     }
 
     // backend/app/api/responses.py:L17-20
@@ -1118,7 +1334,8 @@ class ResponseServiceTest {
     // The fifth operation is generateResponseIfAbsent, the claim-aware entry point the two
     // automatic paths share — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("declares exactly five operations and none of them publishes")
+    @DisplayName("declares exactly five operations, one of them overloaded, and none of them "
+            + "publishes")
     void declaresExactlyFiveOperationsAndNoneOfThemPublishes() {
         List<Method> declared = Arrays.stream(ResponseService.class.getDeclaredMethods())
                 .filter(method -> !method.isSynthetic())
@@ -1129,11 +1346,22 @@ class ResponseServiceTest {
         assertThat(namesAPublication("sendTweet")).isTrue();
 
         assertThat(declared).isNotEmpty();
-        assertThat(declared)
-                .filteredOn(method -> Modifier.isPublic(method.getModifiers()))
+        List<Method> publicOperations = declared.stream()
+                .filter(method -> Modifier.isPublic(method.getModifiers()))
+                .toList();
+        assertThat(publicOperations)
                 .extracting(Method::getName)
-                .containsExactlyInAnyOrder("getPaginatedResponses", "getResponseById",
-                        "generateResponse", "generateResponseIfAbsent", "updateResponse");
+                .as("names of the public operations")
+                .containsOnly("getPaginatedResponses", "getResponseById", "generateResponse",
+                        "generateResponseIfAbsent", "updateResponse");
+        // The one operation both background paths call is declared twice: once for a caller that
+        // holds only the identifier and once for a caller that already holds the row — DL-226
+        assertThat(publicOperations)
+                .filteredOn(method -> "generateResponseIfAbsent".equals(method.getName()))
+                .extracting(method -> method.getParameterTypes()[0])
+                .as("parameter types of the overloaded operation")
+                .containsExactlyInAnyOrder(String.class, Tweet.class);
+        assertThat(publicOperations).as("declared public operations").hasSize(6);
         assertThat(declared).allSatisfy(method -> assertThat(namesAPublication(method.getName()))
                 .as("declared method %s", method.getName())
                 .isFalse());

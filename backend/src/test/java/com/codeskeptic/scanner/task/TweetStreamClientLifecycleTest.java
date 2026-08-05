@@ -929,7 +929,7 @@ class TweetStreamClientLifecycleTest {
 
         return new ScannerProperties(null, 100, 60L,
                 new ScannerProperties.Twitter("api-key", "api-secret", "api-secret-key",
-                        consumerKey, consumerSecret, "access-token", "access-token-secret"),
+                        consumerKey, consumerSecret, "access-token", "access-token-secret", 30L),
                 null, null, null, null, null,
                 new ScannerProperties.Ingestion(baseKeywords));
     }

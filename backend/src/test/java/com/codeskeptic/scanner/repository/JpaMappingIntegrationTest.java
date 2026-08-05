@@ -502,6 +502,80 @@ class JpaMappingIntegrationTest {
                 .isEqualTo(NON_PRIMARY_KEY_COLUMN_COUNT);
     }
 
+    // The wire form of a row the schema accepts — DL-080, DL-139 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("a stored responses row carrying a null tweet_id is named by the wire record rather "
+            + "than dereferenced by the mapper, on its own and inside a list")
+    void storedResponseCarryingNoTweetIsNamedByTheWireRecord() {
+        Response orphan = new Response();
+        orphan.setContent("orphan-response");
+        orphan.setGeneratedAt(LocalDateTime.of(2026, 8, 5, 12, 0));
+        orphan.setIsApproved(Boolean.FALSE);
+        Response saved = responseRepository.save(orphan);
+
+        entityManager.flush();
+        entityManager.clear();
+
+        Response reloaded = responseRepository.findById(saved.getId()).orElseThrow();
+        assertThat(reloaded.getTweet()).as("association of the stored row").isNull();
+
+        ResponseMapper mapper = new ResponseMapper();
+        assertThatThrownBy(() -> mapper.toDto(reloaded))
+                .as("conversion of a row that leaves a required column empty")
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("tweet_id must not be null.");
+        assertThatThrownBy(() -> mapper.toDtoList(List.of(reloaded)))
+                .as("list conversion that holds such a row")
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("tweet_id must not be null.");
+    }
+
+    // The wire form of a row the schema accepts — DL-080, DL-139 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("a stored responses row carrying null in every nullable column is named by the wire "
+            + "record and reaches it without an unboxing failure")
+    void storedResponseCarryingOnlyItsKeyIsNamedByTheWireRecord() {
+        Response bare = new Response();
+        Response saved = responseRepository.save(bare);
+
+        entityManager.flush();
+        entityManager.clear();
+
+        Response reloaded = responseRepository.findById(saved.getId()).orElseThrow();
+        assertThat(reloaded.getId()).as("identifier of the stored row").isEqualTo(saved.getId());
+
+        ResponseMapper mapper = new ResponseMapper();
+        assertThatThrownBy(() -> mapper.toDto(reloaded))
+                .as("conversion of a row that leaves every nullable column empty")
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("content must not be null.");
+    }
+
+    // The wire form of a row the schema accepts — DL-080, DL-139 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("a stored tweets row carrying null in every nullable column is named by the wire "
+            + "record and reaches it without an unboxing failure")
+    void storedTweetCarryingOnlyItsKeyIsNamedByTheWireRecord() {
+        Tweet sparse = new Tweet();
+        Tweet saved = tweetRepository.save(sparse);
+
+        entityManager.flush();
+        entityManager.clear();
+
+        Tweet reloaded = tweetRepository.findById(saved.getId()).orElseThrow();
+        assertThat(reloaded.getId()).as("identifier of the stored row").isEqualTo(saved.getId());
+
+        TweetMapper mapper = new TweetMapper();
+        assertThatThrownBy(() -> mapper.toDto(reloaded))
+                .as("conversion of a row that leaves every nullable column empty")
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("content must not be null.");
+        assertThatThrownBy(() -> mapper.toDtoList(List.of(reloaded)))
+                .as("list conversion that holds such a row")
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("content must not be null.");
+    }
+
     // Ported from backend/app/db/models.py:L10-18,L23-27,L35-37,L42-44 (faithful port) — see
     // docs/DECISION_LOG.md
     // backend/app/db/models.py declares each of those columns as a bare Column(<Type>): none
@@ -1149,9 +1223,10 @@ class JpaMappingIntegrationTest {
                 .as("the answered row is excluded").doesNotContain(answered.getId());
     }
 
-    // The update write boundary and wire conversion share one real persistence transaction — DL-082.
+    // The update write boundary and wire conversion share one real persistence transaction — DL-082,
+    // DL-231.
     @Test
-    @DisplayName("the response service rejects explicit null and maps a valid update through the real repository")
+    @DisplayName("the response service rejects an unusable member and maps a valid update through the real repository")
     void responseServiceRejectsExplicitNullAndMapsAValidUpdateThroughTheRealRepository() {
         Tweet tweet = saveTweet(LocalDateTime.of(2026, 1, 4, 9, 0), 6.0, 180);
         Response response = saveResponse(tweet, "Draft awaiting review", Boolean.FALSE);
@@ -1160,8 +1235,15 @@ class JpaMappingIntegrationTest {
         ResponseService service = responseService(mock(LlmService.class));
         String responseId = String.valueOf(response.getId());
 
+        // An explicit JSON null is refused while the body is bound, so the service never sees it —
+        // DL-231
+        assertThatThrownBy(() -> new UpdateResponseRequest(NullNode.getInstance(), null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("The content member of a response update must be a JSON string.");
+
+        // A body carrying no writable key still reaches the transcribed 400 literal — DL-082
         assertThatThrownBy(() -> service.updateResponse(responseId,
-                new UpdateResponseRequest(NullNode.getInstance(), null)))
+                new UpdateResponseRequest(null, null)))
                 .isInstanceOf(BadRequestException.class)
                 .hasMessage("Update data is required");
 

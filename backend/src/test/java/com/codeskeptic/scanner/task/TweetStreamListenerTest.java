@@ -21,6 +21,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
 
 import com.codeskeptic.scanner.dto.ResponseDto;
 import com.codeskeptic.scanner.dto.TweetDto;
@@ -35,6 +36,11 @@ import com.codeskeptic.scanner.service.mapper.TweetMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+
 // Net-new (no source construct that runs): backend/tests/test_tasks.py:L3 imported
 // `from backend.tasks import monitor_tweets, generate_response`, and neither the module nor either
 // symbol existed — see docs/DECISION_LOG.md
@@ -43,7 +49,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  *
  * <p>Assertions cover the four documented steps, the shapes every wire-required member must carry
  * before a row is stored, and the two secondary Notion mirror writes — the tweet before the trigger
- * and the generated reply after it.
+ * and the generated reply after it, each reported at the level DL-224 assigns it.
  */
 @DisplayName("TweetStreamListener")
 class TweetStreamListenerTest {
@@ -217,6 +223,7 @@ class TweetStreamListenerTest {
                     .isEqualTo(LocalDateTime.of(2026, 8, 3, 15, 11, 52));
         }
 
+        // Every stored row carries a creation time — see docs/DECISION_LOG.md DL-223
         @Test
         @DisplayName("skips the record when the required creation time is absent")
         void skipsTheRecordWhenCreationTimeIsAbsent() {
@@ -289,6 +296,7 @@ class TweetStreamListenerTest {
             assertThat(stored.getAiToolsMentioned()).containsExactly("GPT-4", "AI coding tool");
         }
 
+        // A row with no author identifier has no wire form — see docs/DECISION_LOG.md DL-223
         @Test
         @DisplayName("skips the record when the required author_id is numeric")
         void rejectsANumericAuthorId() {
@@ -309,6 +317,21 @@ class TweetStreamListenerTest {
             acceptEverything();
             JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
                     + "\"created_at\":\"" + CREATED_AT + "\","
+                    + "\"public_metrics\":{\"like_count\":500}}}");
+
+            assertThat(listener.onStatus(record)).isTrue();
+
+            verify(tweetRepository, never()).save(any());
+            verifyNoInteractions(sentimentAnalysisService, notionService, responseService);
+        }
+
+        @Test
+        @DisplayName("skips the record when the required author_id is blank")
+        void rejectsABlankAuthorId() {
+            acceptEverything();
+            JsonNode record = read("{\"data\":{\"text\":\"doubtful\","
+                    + "\"created_at\":\"" + CREATED_AT + "\","
+                    + "\"author_id\":\"   \","
                     + "\"public_metrics\":{\"like_count\":500}}}");
 
             assertThat(listener.onStatus(record)).isTrue();
@@ -414,6 +437,80 @@ class TweetStreamListenerTest {
 
             verify(tweetRepository).save(any(Tweet.class));
         }
+
+        // Mirror-preparation failures are reported here — see docs/DECISION_LOG.md DL-224
+        @Test
+        @DisplayName("reports a failed wire-form preparation at WARN and still triggers generation")
+        void reportsAFailedWireFormPreparation() {
+            acceptEverything();
+            when(tweetMapper.toDto(any(Tweet.class)))
+                    .thenThrow(new IllegalStateException("A tweets row carrying no user_id has no "
+                            + "wire form."));
+            ListAppender<ILoggingEvent> recorded = attachListenerAppender();
+            try {
+                assertThat(listener.onStatus(popularRecord())).isTrue();
+
+                List<String> warnings = recorded.list.stream()
+                        .filter(event -> event.getLevel() == Level.WARN)
+                        .map(ILoggingEvent::getFormattedMessage)
+                        .filter(message -> message.startsWith("Preparing the Notion mirror"))
+                        .toList();
+                assertThat(warnings).hasSize(1);
+                assertThat(warnings.get(0))
+                        .contains(String.valueOf(STORED_ID))
+                        .contains("IllegalStateException")
+                        .doesNotContain("user_id");
+            } finally {
+                detachListenerAppender(recorded);
+            }
+            verify(notionService, never()).storeTweet(any(TweetDto.class));
+            verify(responseService).generateResponseIfAbsent(String.valueOf(STORED_ID));
+        }
+
+        @Test
+        @DisplayName("keeps the adapter's own failure at DEBUG")
+        void keepsTheAdapterFailureAtDebug() {
+            acceptEverything();
+            when(notionService.storeTweet(any())).thenThrow(new IllegalStateException("mirror down"));
+            ListAppender<ILoggingEvent> recorded = attachListenerAppender();
+            try {
+                assertThat(listener.onStatus(popularRecord())).isTrue();
+
+                assertThat(recorded.list.stream()
+                        .filter(event -> event.getLevel().isGreaterOrEqual(Level.WARN))
+                        .map(ILoggingEvent::getFormattedMessage)
+                        .filter(message -> message.contains("Notion"))
+                        .toList()).isEmpty();
+            } finally {
+                detachListenerAppender(recorded);
+            }
+        }
+    }
+
+    /**
+     * Attaches a recording appender to the logger of the class under test.
+     *
+     * @return the attached appender
+     */
+    private static ListAppender<ILoggingEvent> attachListenerAppender() {
+        Logger logger = (Logger) LoggerFactory.getLogger(TweetStreamListener.class);
+        logger.setLevel(Level.DEBUG);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        return appender;
+    }
+
+    /**
+     * Detaches a recording appender from the logger of the class under test.
+     *
+     * @param appender the appender to detach
+     */
+    private static void detachListenerAppender(ListAppender<ILoggingEvent> appender) {
+        Logger logger = (Logger) LoggerFactory.getLogger(TweetStreamListener.class);
+        logger.detachAppender(appender);
+        logger.setLevel(null);
+        appender.stop();
     }
 
     private JsonNode popularRecord() {

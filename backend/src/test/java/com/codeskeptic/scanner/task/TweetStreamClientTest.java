@@ -34,6 +34,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.slf4j.LoggerFactory;
 
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
@@ -54,8 +55,14 @@ import com.codeskeptic.scanner.repository.AiToolRepository;
 import com.codeskeptic.scanner.repository.SettingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 /**
  * Verifies {@link TweetStreamClient} against a controlled {@link ExchangeFunction}, so no test reaches
@@ -110,8 +117,17 @@ class TweetStreamClientTest {
     /** Longest a bounded wait allows. */
     private static final Duration WAIT = Duration.ofSeconds(20);
 
+    /** Bytes carried by a record that passes the accumulator bound of {@code MAX_RECORD_BYTES}. */
+    private static final int OVER_THE_RECORD_BOUND = 1_100_000;
+
     /** Shortest reconnection delay the client applies. */
     private static final Duration MINIMUM_BACKOFF = Duration.ofSeconds(5);
+
+    /**
+     * Bound every test but the two of {@code the control-plane bound} gives the token exchange and the
+     * rules calls, long enough not to interfere — DL-230.
+     */
+    private static final long CONTROL_PLANE_TIMEOUT_SECONDS = 30L;
 
     /** Data access for {@code ai_tools}. */
     @Mock
@@ -310,6 +326,76 @@ class TweetStreamClientTest {
             awaitExchange(TOKEN_PATH);
 
             assertThat(exchanges).extracting(RecordedExchange::path).containsOnly(TOKEN_PATH);
+        }
+
+        // The bound of scanner.twitter.request-timeout-seconds — DL-230 — see docs/DECISION_LOG.md
+        @Test
+        @DisplayName("abandons a token exchange that never answers and exchanges again")
+        void abandonsATokenExchangeThatNeverAnswers() {
+            AtomicInteger tokenAttempts = new AtomicInteger();
+            client = clientBoundedAt(1L, request -> {
+                if (request.url().getPath().equals(TOKEN_PATH)) {
+                    tokenAttempts.incrementAndGet();
+                    return Mono.never();
+                }
+                return Mono.error(new AssertionError("Only the token path may be reached."));
+            });
+
+            client.start();
+
+            // A second attempt can only happen if the first was abandoned: with no bound the client
+            // would wait on the first answer for as long as the connection stayed open.
+            awaitCondition(() -> tokenAttempts.get() >= 2);
+            assertThat(exchanges).extracting(RecordedExchange::path).containsOnly(TOKEN_PATH);
+        }
+
+        // The bound of scanner.twitter.request-timeout-seconds — DL-230 — see docs/DECISION_LOG.md
+        @Test
+        @DisplayName("abandons a rules call that never answers and reaches the token path again")
+        void abandonsARulesCallThatNeverAnswers() {
+            AtomicInteger rulesAttempts = new AtomicInteger();
+            client = clientBoundedAt(1L, request -> {
+                String path = request.url().getPath();
+                if (path.equals(TOKEN_PATH)) {
+                    return Mono.just(json("{\"token_type\":\"bearer\",\"access_token\":\""
+                            + TOKEN + "\"}"));
+                }
+                if (path.equals(RULES_PATH)) {
+                    rulesAttempts.incrementAndGet();
+                    return Mono.never();
+                }
+                return Mono.error(new AssertionError("The stream must not be reached."));
+            });
+
+            client.start();
+
+            awaitCondition(() -> rulesAttempts.get() >= 2);
+            assertThat(exchanges).extracting(RecordedExchange::path)
+                    .containsOnly(TOKEN_PATH, RULES_PATH);
+        }
+
+        // The stream body is deliberately unbounded — DL-193, DL-230 — see docs/DECISION_LOG.md
+        @Test
+        @DisplayName("does not bound the filtered stream: a connection quieter than the bound keeps "
+                + "delivering")
+        void doesNotBoundTheFilteredStream() {
+            client = clientBoundedAt(1L, routes(ClientResponse.create(HttpStatus.OK)
+                    .header(HttpHeaders.CONTENT_TYPE, "application/json")
+                    .body(Flux.concat(
+                            Mono.just(DefaultDataBufferFactory.sharedInstance
+                                    .wrap("{\"data\":{\"text\":\"first\"}}\n"
+                                            .getBytes(StandardCharsets.UTF_8))),
+                            Mono.just(DefaultDataBufferFactory.sharedInstance
+                                            .wrap("{\"data\":{\"text\":\"second\"}}\n"
+                                                    .getBytes(StandardCharsets.UTF_8)))
+                                    .delaySubscription(Duration.ofSeconds(3))))
+                    .build()));
+
+            client.start();
+
+            assertThat(awaitDelivery(2))
+                    .extracting(node -> node.path("data").path("text").asText())
+                    .containsExactly("first", "second");
         }
     }
 
@@ -616,6 +702,71 @@ class TweetStreamClientTest {
             client = startedAgainst(streamOf("{}\n"));
 
             assertThat(awaitDelivery(1)).hasSize(1);
+        }
+
+        // Per-record dispatch runs on a blocking-capable scheduler — see docs/DECISION_LOG.md DL-220
+        @Test
+        @DisplayName("hands the record to the listener on a blocking-capable thread, not on the "
+                + "thread the body is emitted on")
+        void handsTheRecordToTheListenerOnABlockingCapableThread() {
+            List<String> emittingThreads = new CopyOnWriteArrayList<>();
+            List<String> listenerThreads = new CopyOnWriteArrayList<>();
+            List<Boolean> listenerOnNonBlockingThread = new CopyOnWriteArrayList<>();
+            when(tweetStreamListener.onStatus(any())).thenAnswer(invocation -> {
+                listenerThreads.add(Thread.currentThread().getName());
+                listenerOnNonBlockingThread.add(Schedulers.isInNonBlockingThread());
+                return true;
+            });
+
+            client = startedAgainst(streamEmittedOnANonBlockingThread(
+                    "{\"data\":{\"text\":\"a post\"}}\n", emittingThreads));
+
+            awaitDelivery(1);
+            awaitCondition(() -> !listenerThreads.isEmpty());
+            assertThat(emittingThreads).isNotEmpty();
+            assertThat(listenerOnNonBlockingThread)
+                    .as("no listener call runs on a non-blocking thread")
+                    .containsOnly(Boolean.FALSE);
+            assertThat(listenerThreads.get(0)).startsWith("boundedElastic-");
+            assertThat(listenerThreads.get(0)).isNotEqualTo(emittingThreads.get(0));
+        }
+
+        // Bounded accumulation — see docs/DECISION_LOG.md DL-222
+        @Test
+        @DisplayName("drops a record that reaches the accumulator bound, reports it once and keeps "
+                + "consuming")
+        void dropsARecordThatReachesTheAccumulatorBound() {
+            ListAppender<ILoggingEvent> recorded = attachClientAppender();
+            try {
+                client = startedAgainst(chunks("y".repeat(OVER_THE_RECORD_BOUND),
+                        "\n{\"data\":{\"text\":\"after the bound\"}}\n"));
+
+                assertThat(awaitDelivery(1))
+                        .extracting(node -> node.path("data").path("text").asText())
+                        .containsExactly("after the bound");
+                assertThat(client.isRunning()).isTrue();
+                List<String> warnings = recorded.list.stream()
+                        .filter(event -> event.getLevel() == Level.WARN)
+                        .map(ILoggingEvent::getFormattedMessage)
+                        .filter(message -> message.contains("with no line feed"))
+                        .toList();
+                assertThat(warnings).hasSize(1);
+                assertThat(warnings.get(0))
+                        .contains("1048576 byte(s)")
+                        .doesNotContain("yyy");
+            } finally {
+                detachClientAppender(recorded);
+            }
+        }
+
+        @Test
+        @DisplayName("keeps delivering a record that stays inside the accumulator bound")
+        void keepsDeliveringARecordInsideTheAccumulatorBound() {
+            String text = "z".repeat(300_000);
+            client = startedAgainst(streamOf("{\"data\":{\"text\":\"" + text + "\"}}\n"));
+
+            assertThat(awaitDelivery(1).get(0).path("data").path("text").asText())
+                    .hasSize(300_000);
         }
     }
 
@@ -987,6 +1138,20 @@ class TweetStreamClientTest {
     }
 
     /**
+     * Builds a client whose control-plane calls carry the supplied bound — DL-230.
+     *
+     * @param timeoutSeconds value of {@code scanner.twitter.request-timeout-seconds}
+     * @param exchange       the controlled exchange function
+     * @return the client under test
+     */
+    private TweetStreamClient clientBoundedAt(long timeoutSeconds, ExchangeFunction exchange) {
+        return new TweetStreamClient(webClient(exchange),
+                properties(twitter(CONSUMER_KEY, CONSUMER_SECRET, timeoutSeconds),
+                        ingestion(BASE_TERMS)),
+                aiToolRepository, settingRepository, tweetStreamListener);
+    }
+
+    /**
      * Wraps an exchange function in a recording {@link WebClient} rooted at {@value #BASE_URL}.
      *
      * @param exchange the controlled exchange function
@@ -1110,6 +1275,48 @@ class TweetStreamClientTest {
     }
 
     /**
+     * Builds a stream response that emits {@code body} on a non-blocking thread, as a connection
+     * thread does.
+     *
+     * @param body            the newline-delimited body
+     * @param emittingThreads collects the name of the thread each chunk is emitted on
+     * @return the canned response
+     */
+    private static ClientResponse streamEmittedOnANonBlockingThread(String body,
+            List<String> emittingThreads) {
+        DataBuffer buffer = DefaultDataBufferFactory.sharedInstance
+                .wrap(body.getBytes(StandardCharsets.UTF_8));
+        return ClientResponse.create(HttpStatus.OK)
+                .header(HttpHeaders.CONTENT_TYPE, "application/json")
+                .body(Flux.just(buffer)
+                        .publishOn(Schedulers.parallel())
+                        .doOnNext(chunk -> emittingThreads.add(Thread.currentThread().getName())))
+                .build();
+    }
+
+    /**
+     * Attaches a recording appender to the logger of the class under test.
+     *
+     * @return the attached appender
+     */
+    private static ListAppender<ILoggingEvent> attachClientAppender() {
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        ((Logger) LoggerFactory.getLogger(TweetStreamClient.class)).addAppender(appender);
+        return appender;
+    }
+
+    /**
+     * Detaches a recording appender from the logger of the class under test.
+     *
+     * @param appender the appender to detach
+     */
+    private static void detachClientAppender(ListAppender<ILoggingEvent> appender) {
+        ((Logger) LoggerFactory.getLogger(TweetStreamClient.class)).detachAppender(appender);
+        appender.stop();
+    }
+
+    /**
      * Builds a stream response delivering each byte array as its own chunk.
      *
      * @param parts the chunks, in order
@@ -1148,8 +1355,22 @@ class TweetStreamClientTest {
      * @return the group
      */
     private static ScannerProperties.Twitter twitter(String consumerKey, String consumerSecret) {
+        return twitter(consumerKey, consumerSecret, CONTROL_PLANE_TIMEOUT_SECONDS);
+    }
+
+    /**
+     * Builds a {@code scanner.twitter} group carrying the supplied consumer credentials and the
+     * supplied control-plane bound.
+     *
+     * @param consumerKey    value of {@code consumer-key}
+     * @param consumerSecret value of {@code consumer-secret}
+     * @param timeoutSeconds value of {@code request-timeout-seconds}
+     * @return the group
+     */
+    private static ScannerProperties.Twitter twitter(String consumerKey, String consumerSecret,
+            long timeoutSeconds) {
         return new ScannerProperties.Twitter("api-key", "api-secret", "api-secret-key",
-                consumerKey, consumerSecret, "access-token", "access-token-secret");
+                consumerKey, consumerSecret, "access-token", "access-token-secret", timeoutSeconds);
     }
 
     /**

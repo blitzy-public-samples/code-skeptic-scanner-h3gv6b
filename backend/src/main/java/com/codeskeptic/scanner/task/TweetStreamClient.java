@@ -75,9 +75,10 @@ import reactor.util.retry.Retry;
  * {@link #isRunning()} reporting {@code false}.
  *
  * <p>{@link #start()} schedules the cycle on {@link Schedulers#boundedElastic()} and returns without
- * blocking, issuing no request on the calling thread and raising nothing. Every failure inside the
- * cycle is recorded and confined to the reactive chain. {@link #stop()} disposes the subscription,
- * which closes the connection.
+ * blocking, issuing no request on the calling thread and raising nothing. Every delivered record is
+ * handed to the listener on {@link Schedulers#boundedElastic()} as well, so no work the listener
+ * performs runs on a connection thread. Every failure inside the cycle is recorded and confined to the
+ * reactive chain. {@link #stop()} disposes the subscription, which closes the connection.
  *
  * <p>{@link #start()} opens no connection at all when {@code scanner.twitter.consumer-key} or
  * {@code scanner.twitter.consumer-secret} is unset or blank; it records the condition at
@@ -221,7 +222,14 @@ public class TweetStreamClient implements SmartLifecycle {
     /** Byte on which the response body is split into records. */
     private static final byte LINE_FEED = (byte) '\n';
 
-
+    // Bound on the bytes held for one record — see docs/DECISION_LOG.md DL-222
+    /**
+     * Most bytes the accumulator holds for a single record. A record that reaches this size without a
+     * terminating {@value #LINE_FEED} is discarded rather than accumulated further; the connection
+     * stays open. One post of the X API v2 filtered stream, with the requested fields and expansions,
+     * is orders of magnitude smaller.
+     */
+    private static final int MAX_RECORD_BYTES = 1_048_576;
 
     /** Shortest delay applied before a reconnection. */
     private static final Duration MIN_RECONNECT_BACKOFF = Duration.ofSeconds(5L);
@@ -234,6 +242,12 @@ public class TweetStreamClient implements SmartLifecycle {
 
     /** Fraction of the computed backoff the applied delay varies by, in either direction. */
     private static final double BACKOFF_JITTER_FACTOR = 0.5D;
+
+    /**
+     * Shortest bound applied to a control-plane call, in seconds. A configured
+     * {@code scanner.twitter.request-timeout-seconds} below this is read as this — DL-230.
+     */
+    private static final long MINIMUM_REQUEST_TIMEOUT_SECONDS = 1L;
 
     /** Transport for the four X paths, published by {@code config/WebClientConfig}. */
     private final WebClient webClient;
@@ -561,6 +575,8 @@ public class TweetStreamClient implements SmartLifecycle {
                 .header(HttpHeaders.AUTHORIZATION, BEARER_SCHEME + token)
                 .retrieve()
                 .bodyToMono(JsonNode.class)
+                // Bounded control-plane call — DL-230 — see docs/DECISION_LOG.md
+                .timeout(controlPlaneTimeout())
                 .map(TweetStreamClient::readRegisteredRules)
                 .defaultIfEmpty(Map.of());
     }
@@ -625,6 +641,8 @@ public class TweetStreamClient implements SmartLifecycle {
                 .bodyValue(body)
                 .retrieve()
                 .bodyToMono(JsonNode.class)
+                // Bounded control-plane call — DL-230 — see docs/DECISION_LOG.md
+                .timeout(controlPlaneTimeout())
                 .then();
     }
 
@@ -655,6 +673,24 @@ public class TweetStreamClient implements SmartLifecycle {
             }
         }
         return registered;
+    }
+
+    // The bound applied to every short request/response call on the X API — DL-230 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Reports the bound applied to a control-plane call.
+     *
+     * <p>The value is {@code scanner.twitter.request-timeout-seconds}, read on every call so that a
+     * configuration change needs no restart, and never shorter than
+     * {@value #MINIMUM_REQUEST_TIMEOUT_SECONDS} second. The filtered-stream subscription is not
+     * bounded by it.
+     *
+     * @return the bound for the app-only token exchange and the stream-rules calls, never
+     *     {@code null} and never shorter than {@value #MINIMUM_REQUEST_TIMEOUT_SECONDS} second
+     */
+    private Duration controlPlaneTimeout() {
+        long configured = properties.twitter().requestTimeoutSeconds();
+        return Duration.ofSeconds(Math.max(configured, MINIMUM_REQUEST_TIMEOUT_SECONDS));
     }
 
     /**
@@ -723,6 +759,8 @@ public class TweetStreamClient implements SmartLifecycle {
                 .body(BodyInserters.fromFormData(GRANT_TYPE_PARAM, CLIENT_CREDENTIALS_GRANT))
                 .retrieve()
                 .bodyToMono(JsonNode.class)
+                // Bounded control-plane call — DL-230 — see docs/DECISION_LOG.md
+                .timeout(controlPlaneTimeout())
                 .flatMap(TweetStreamClient::verifyTokenPayload)
                 .switchIfEmpty(Mono.error(
                         new IllegalStateException("The X token endpoint answered with no body.")))
@@ -764,12 +802,20 @@ public class TweetStreamClient implements SmartLifecycle {
      * Consumes the filtered stream until the listener reports that streaming should stop or the
      * connection ends.
      *
+     * <p>Records are handed to {@link #dispatchRecord(String)} on {@link Schedulers#boundedElastic()},
+     * not on the thread the response body is emitted on, so the listener's persistence and external
+     * calls never run on a connection thread. Delivery stays in arrival order on a single worker, and
+     * the connection thread is free to keep reading while a record is being handled.
+     *
      * @param token the app-only bearer token, must not be {@code null}
      * @return a sequence that completes when the listener reports that streaming should stop and
      *     fails when the connection ends for any other reason
      */
+    // Per-record dispatch runs on a blocking-capable scheduler, not on the connection thread — see
+    // docs/DECISION_LOG.md DL-220
     private Mono<Void> consumeStream(String token) {
         return streamRecords(token)
+                .publishOn(Schedulers.boundedElastic())
                 .map(this::dispatchRecord)
                 .takeWhile(Boolean::booleanValue)
                 .then(Mono.defer(() -> stopRequested
@@ -787,7 +833,15 @@ public class TweetStreamClient implements SmartLifecycle {
      * multi-byte character straddling a chunk boundary stays intact. One accumulator is created per
      * subscription. A reconnection carries no partial record forward.
      *
-     * <p>The request carries no response timeout, no read timeout and no reduced codec buffer limit.
+     * <p>The accumulator holds at most {@value #MAX_RECORD_BYTES} bytes for one record. A record that
+     * grows past that without a terminating line feed is discarded, recorded at {@code WARN} once, and
+     * the bytes up to the next line feed are dropped with it; the connection stays open and the next
+     * record is delivered normally.
+     *
+     * <p>The request carries no response timeout, no read timeout and no reduced codec buffer limit: a
+     * filtered-stream connection is long-lived by design and the bound of
+     * {@code scanner.twitter.request-timeout-seconds} applies only to the token exchange and the
+     * stream-rules calls — DL-230.
      *
      * @param token the app-only bearer token, must not be {@code null}
      * @return the complete records the connection delivers, including the blank keep-alive records X
@@ -796,6 +850,7 @@ public class TweetStreamClient implements SmartLifecycle {
     private Flux<String> streamRecords(String token) {
         return Flux.defer(() -> {
             ByteArrayOutputStream pending = new ByteArrayOutputStream();
+            AtomicBoolean discarding = new AtomicBoolean(false);
             return webClient.get()
                     .uri(uriBuilder -> uriBuilder
                             .path(STREAM_PATH)
@@ -804,7 +859,8 @@ public class TweetStreamClient implements SmartLifecycle {
                             .build())
                     .header(HttpHeaders.AUTHORIZATION, BEARER_SCHEME + token)
                     .exchangeToFlux(TweetStreamClient::openStreamBody)
-                    .concatMap(chunk -> Flux.fromIterable(drainCompleteRecords(chunk, pending)));
+                    .concatMap(chunk ->
+                            Flux.fromIterable(drainCompleteRecords(chunk, pending, discarding)));
         });
     }
 
@@ -831,13 +887,22 @@ public class TweetStreamClient implements SmartLifecycle {
      * cut at every {@value #LINE_FEED} byte. Bytes following the final line feed stay in
      * {@code pending} for the next chunk.
      *
+     * <p>A record whose accumulated bytes reach {@value #MAX_RECORD_BYTES} is discarded: the
+     * accumulator is emptied, the condition is recorded once at {@code WARN}, and {@code discarding} is
+     * raised so that the remaining bytes of that record are dropped up to and including its next line
+     * feed. Accumulation of the following record then resumes normally and the connection is never
+     * ended.
+     *
      * @param chunk one body chunk, released before this method returns; must not be {@code null}
      * @param pending the accumulator holding the bytes of the record in progress, must not be
      *     {@code null}
+     * @param discarding raised while the remainder of an over-long record is being dropped, must not be
+     *     {@code null}
      * @return the records the chunk completed, in arrival order; empty when the chunk completed none
      */
+    // Bounded accumulation: log and skip, never end the connection — see docs/DECISION_LOG.md DL-222
     private static List<String> drainCompleteRecords(DataBuffer chunk,
-            ByteArrayOutputStream pending) {
+            ByteArrayOutputStream pending, AtomicBoolean discarding) {
         byte[] bytes;
         try {
             bytes = new byte[chunk.readableByteCount()];
@@ -848,11 +913,26 @@ public class TweetStreamClient implements SmartLifecycle {
 
         List<String> records = new ArrayList<>();
         for (byte value : bytes) {
+            if (discarding.get()) {
+                if (value == LINE_FEED) {
+                    discarding.set(false);
+                }
+                continue;
+            }
             if (value == LINE_FEED) {
                 records.add(pending.toString(StandardCharsets.UTF_8));
                 pending.reset();
             } else {
                 pending.write(value);
+                if (pending.size() >= MAX_RECORD_BYTES) {
+                    // Neither the accumulated bytes nor any part of them is written: the byte count
+                    // and the bound only — see docs/DECISION_LOG.md DL-222
+                    log.warn("Skipping an X filtered stream record that reached {} byte(s) with no "
+                            + "line feed; the bound is {} byte(s) and the bytes up to the next line "
+                            + "feed are dropped", pending.size(), MAX_RECORD_BYTES);
+                    pending.reset();
+                    discarding.set(true);
+                }
             }
         }
         return records;

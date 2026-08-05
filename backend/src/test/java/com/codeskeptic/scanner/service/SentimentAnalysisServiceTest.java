@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -173,6 +174,47 @@ class SentimentAnalysisServiceTest {
         double score = service.analyzeSentiment("The sky is blue.");
 
         assertThat(score).isCloseTo(0.0d, within(TOLERANCE));
+    }
+
+    // A non-finite provider score has no numeric wire form — DL-233 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "a provider score of {0} is reported as a failure")
+    @ValueSource(floats = {Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY})
+    @DisplayName("reports a document sentiment score that is not a finite number as a failure")
+    void reportsADocumentSentimentScoreThatIsNotAFiniteNumberAsAFailure(float score) {
+        stubDocumentSentimentScore(score);
+
+        assertThatThrownBy(() -> service.analyzeSentiment(TWEET_TEXT))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    // A finite score outside the documented range is still returned unchanged — DL-233
+    @ParameterizedTest(name = "a provider score of {0} is returned unchanged")
+    @ValueSource(floats = {-2.0f, -1.0f, 1.0f, 2.0f, 3.4028235E38f})
+    @DisplayName("returns a finite document sentiment score unchanged, in range or not")
+    void returnsAFiniteDocumentSentimentScoreUnchangedInRangeOrNot(float score) {
+        stubDocumentSentimentScore(score);
+
+        assertThat(service.analyzeSentiment(TWEET_TEXT)).isCloseTo(score, within(TOLERANCE));
+    }
+
+    // A non-finite provider score has no numeric wire form — DL-233 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("remains usable after a non-finite score has been reported as a failure")
+    void remainsUsableAfterANonFiniteScoreHasBeenReportedAsAFailure() {
+        AnalyzeSentimentResponse nonFinite = AnalyzeSentimentResponse.newBuilder()
+                .setDocumentSentiment(Sentiment.newBuilder().setScore(Float.NaN).build())
+                .build();
+        AnalyzeSentimentResponse finite = AnalyzeSentimentResponse.newBuilder()
+                .setDocumentSentiment(Sentiment.newBuilder().setScore(-0.5f).build())
+                .build();
+        when(languageServiceClient.analyzeSentiment(any(Document.class)))
+                .thenReturn(nonFinite)
+                .thenReturn(finite);
+
+        assertThatThrownBy(() -> service.analyzeSentiment(TWEET_TEXT))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(service.analyzeSentiment(TWEET_TEXT)).isCloseTo(-0.5d, within(TOLERANCE));
     }
 
     @Test

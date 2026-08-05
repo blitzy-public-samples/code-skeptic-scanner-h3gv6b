@@ -18,6 +18,7 @@ import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -109,6 +110,31 @@ class TweetControllerTest {
                 .andExpect(status().isOk());
 
         verify(twitterService).getPaginatedTweets(3, 25);
+    }
+
+    // A page beyond the queryable offset is answered, not rejected — DL-217, DL-219 — see
+    // docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] page={0} per_page={1}")
+    @CsvSource({
+            "2147483647,10",
+            "2147483646,10",
+            "99999999,99999999"
+    })
+    @DisplayName("answers 200 and passes an out-of-range page through to the service unchanged")
+    void answers200AndPassesAnOutOfRangePageThroughToTheServiceUnchanged(int page, int perPage)
+            throws Exception {
+
+        when(twitterService.getPaginatedTweets(page, perPage)).thenReturn(emptyPage(page, perPage));
+
+        mockMvc.perform(get("/tweets")
+                        .param("page", String.valueOf(page))
+                        .param("per_page", String.valueOf(perPage))
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tweets").isArray())
+                .andExpect(jsonPath("$.pagination.page").value(page));
+
+        verify(twitterService).getPaginatedTweets(page, perPage);
     }
 
     @ParameterizedTest(name = "[{index}] page={0}")

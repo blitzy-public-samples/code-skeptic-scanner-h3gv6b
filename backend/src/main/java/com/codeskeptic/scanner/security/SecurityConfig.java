@@ -9,6 +9,7 @@ import java.nio.charset.IllegalCharsetNameException;
 import java.nio.charset.StandardCharsets;
 import java.nio.charset.UnsupportedCharsetException;
 import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -37,6 +38,13 @@ import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.web.header.HeaderWriter;
+import org.springframework.security.web.header.writers.CacheControlHeadersWriter;
+import org.springframework.security.web.header.writers.CompositeHeaderWriter;
+import org.springframework.security.web.header.writers.HstsHeaderWriter;
+import org.springframework.security.web.header.writers.XContentTypeOptionsHeaderWriter;
+import org.springframework.security.web.header.writers.XXssProtectionHeaderWriter;
+import org.springframework.security.web.header.writers.frameoptions.XFrameOptionsHeaderWriter;
 import org.springframework.security.web.context.RequestAttributeSecurityContextRepository;
 import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
@@ -336,6 +344,47 @@ public class SecurityConfig {
                 TOKEN_ENDPOINT, HttpStatus.UNAUTHORIZED.value(), BEARER_CHALLENGE);
 
         return http.build();
+    }
+
+    // Net-new (no Python counterpart) — DL-194, DL-237 — see docs/DECISION_LOG.md
+    /**
+     * Publishes the transport-security header policy of this application, as one writer.
+     *
+     * <p>The composed writers are the ones Spring Security's {@code HeadersConfigurer} applies by
+     * default, in its order: {@code X-Content-Type-Options}, {@code X-XSS-Protection},
+     * the cache directives {@code Cache-Control}, {@code Pragma} and {@code Expires},
+     * {@code Strict-Transport-Security} on a secure request only, and {@code X-Frame-Options}. This
+     * class customises none of them, so the chain's {@code HeaderWriterFilter} and this bean apply the
+     * same policy from the same declaration — DL-194.
+     *
+     * <p>Each composed writer either skips a name the response already carries or replaces its value
+     * through {@code setHeader}, so applying this bean to a response the chain has already written
+     * leaves each header with exactly one value.
+     * {@code com.codeskeptic.scanner.config.ContainerErrorResponseConfig} applies it to a rejection the
+     * container answers before any filter runs, which {@code HeaderWriterFilter} never sees — DL-237.
+     *
+     * @return the composed policy; never {@code null}
+     */
+    @Bean
+    public HeaderWriter transportSecurityHeaderWriter() {
+        return defaultTransportSecurityHeaderWriter();
+    }
+
+    /**
+     * Builds the policy {@link #transportSecurityHeaderWriter()} publishes.
+     *
+     * <p>Declared on this class so the policy has one declaration site: the bean above returns it, and
+     * a caller outside the container obtains the same composition — DL-194.
+     *
+     * @return a writer composing Spring Security's default header writers; never {@code null}
+     */
+    public static HeaderWriter defaultTransportSecurityHeaderWriter() {
+        return new CompositeHeaderWriter(List.of(
+                new XContentTypeOptionsHeaderWriter(),
+                new XXssProtectionHeaderWriter(),
+                new CacheControlHeadersWriter(),
+                new HstsHeaderWriter(),
+                new XFrameOptionsHeaderWriter()));
     }
 
     // Net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-112

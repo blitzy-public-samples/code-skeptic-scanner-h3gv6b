@@ -517,6 +517,68 @@ class TwitterServiceTest {
         assertThat(pageRequest.getValue().getPageSize()).isEqualTo(expectedSize);
     }
 
+    // The offset ceiling of a paged query — DL-219 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "page {0} of size {1} is queried, its offset being at most 2147483647")
+    @CsvSource({
+            "214748365,10",
+            "2,2147483647",
+            "1,2147483647",
+            "214748364,10"
+    })
+    @DisplayName("queries a page whose offset the paged query can express")
+    void queriesAPageWhoseOffsetThePagedQueryCanExpress(int page, int perPage) {
+        when(tweetRepository.findAll(any(Pageable.class)))
+                .thenAnswer(invocation -> new PageImpl<>(List.of(), invocation.getArgument(0), 3L));
+        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+
+        PaginatedTweetsDto envelope =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(page, perPage);
+
+        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
+        verify(tweetRepository).findAll(pageRequest.capture());
+        assertThat(pageRequest.getValue().getOffset()).isLessThanOrEqualTo(Integer.MAX_VALUE);
+        assertThat(envelope.pagination().page()).isEqualTo(page);
+        verify(tweetRepository, never()).count();
+    }
+
+    // The offset ceiling of a paged query — DL-219 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "page {0} of size {1} is answered empty without a paged query")
+    @CsvSource({
+            "2147483647,10",
+            "2147483646,10",
+            "99999999,99999999",
+            "214748366,10",
+            "3,2147483647"
+    })
+    @DisplayName("answers a page beyond the queryable offset with an empty page and no query")
+    void answersAPageBeyondTheQueryableOffsetWithAnEmptyPageAndNoQuery(int page, int perPage) {
+        when(tweetRepository.count()).thenReturn(3L);
+
+        PaginatedTweetsDto envelope =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(page, perPage);
+
+        assertThat(envelope.tweets()).isEmpty();
+        assertThat(envelope.pagination().page()).isEqualTo(page);
+        assertThat(envelope.pagination().perPage()).isEqualTo(perPage);
+        assertThat(envelope.pagination().total()).isEqualTo(3L);
+        assertThat(envelope.pagination().totalPages()).isEqualTo(1);
+        verify(tweetRepository, never()).findAll(any(Pageable.class));
+    }
+
+    // The offset ceiling of a paged query — DL-219 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reports an empty table for a page beyond the queryable offset")
+    void reportsAnEmptyTableForAPageBeyondTheQueryableOffset() {
+        when(tweetRepository.count()).thenReturn(0L);
+
+        PaginatedTweetsDto envelope = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD)
+                .getPaginatedTweets(Integer.MAX_VALUE, 10);
+
+        assertThat(envelope.tweets()).isEmpty();
+        assertThat(envelope.pagination().total()).isZero();
+        assertThat(envelope.pagination().totalPages()).isZero();
+    }
+
     @ParameterizedTest(name = "a per_page of {0} reaches the repository unreduced")
     @ValueSource(ints = {100, 101, 500, 10_000, Integer.MAX_VALUE})
     @DisplayName("applies no upper bound to per_page")
@@ -542,6 +604,74 @@ class TwitterServiceTest {
                 serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, 500);
 
         assertThat(envelope.pagination().perPage()).isEqualTo(500);
+    }
+
+    // A page whose first row lies at most Integer.MAX_VALUE rows in is read as any other page —
+    // DL-225 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "page {0} of size {1} still reaches the repository")
+    @CsvSource({
+            "214748365,10",
+            "2147483647,1",
+            "1000000,10"
+    })
+    @DisplayName("reads a page whose first row lies within the largest addressable offset")
+    void readsAPageWhoseFirstRowLiesWithinTheLargestAddressableOffset(int page, int perPage) {
+        when(tweetRepository.findAll(any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(), PageRequest.of(page - 1, perPage), 30L));
+        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+
+        PaginatedTweetsDto rendered =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(page, perPage);
+
+        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
+        verify(tweetRepository).findAll(pageRequest.capture());
+        assertThat(pageRequest.getValue().getOffset())
+                .as("offset of the page request").isLessThanOrEqualTo(Integer.MAX_VALUE);
+        assertThat(rendered.tweets()).as("rows of a page beyond the last one").isEmpty();
+        verify(tweetRepository, never()).count();
+    }
+
+    // A page whose first row lies beyond Integer.MAX_VALUE rows holds no row — DL-225 — see
+    // docs/DECISION_LOG.md
+    @ParameterizedTest(name = "page {0} of size {1} renders the empty page")
+    @CsvSource({
+            "214748366,10",
+            "2147483647,10",
+            "2147483647,2147483647",
+            "3,1073741824"
+    })
+    @DisplayName("renders the empty page for a page whose first row lies beyond the largest "
+            + "addressable offset, without asking the repository for it")
+    void rendersTheEmptyPageBeyondTheLargestAddressableOffset(int page, int perPage) {
+        when(tweetRepository.count()).thenReturn(30L);
+
+        PaginatedTweetsDto rendered =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(page, perPage);
+
+        assertThat(rendered.tweets()).as("rows of the rendered page").isEmpty();
+        assertThat(rendered.pagination().page()).as("page the envelope restates").isEqualTo(page);
+        assertThat(rendered.pagination().perPage()).as("per_page the envelope restates")
+                .isEqualTo(perPage);
+        assertThat(rendered.pagination().total()).as("total the envelope reports").isEqualTo(30L);
+        assertThat(rendered.pagination().totalPages()).as("total_pages the envelope reports")
+                .isEqualTo((int) Math.ceil(30.0d / perPage));
+        verify(tweetRepository, never()).findAll(any(Pageable.class));
+    }
+
+    // The empty table reports the same total_pages a repository page reports — DL-225 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reports a total of zero and no page for an empty table beyond the largest "
+            + "addressable offset")
+    void reportsAnEmptyTableBeyondTheLargestAddressableOffset() {
+        when(tweetRepository.count()).thenReturn(0L);
+
+        PaginatedTweetsDto rendered = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD)
+                .getPaginatedTweets(Integer.MAX_VALUE, 10);
+
+        assertThat(rendered.tweets()).as("rows of the rendered page").isEmpty();
+        assertThat(rendered.pagination().total()).as("total the envelope reports").isZero();
+        assertThat(rendered.pagination().totalPages()).as("total_pages the envelope reports").isZero();
     }
 
     // -----------------------------------------------------------------------

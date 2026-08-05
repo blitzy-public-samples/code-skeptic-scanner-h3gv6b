@@ -6,6 +6,7 @@ import javax.sql.DataSource;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -32,6 +33,11 @@ import com.zaxxer.hikari.HikariDataSource;
  * time from the JDBC URL — DL-027, DL-028. Table creation is {@code spring.jpa.hibernate.ddl-auto} in
  * {@code application.yml} — DL-026.
  *
+ * <p>Pool configuration is Spring Boot's own {@code spring.datasource.hikari.*} surface, bound onto
+ * the published instance — DL-229. {@code spring.datasource.url}, {@code .username},
+ * {@code .password} and {@code .driver-class-name} remain unset and unread: the connection target
+ * comes from {@code scanner.database-url} alone — DL-027.
+ *
  * <p>No JDBC URL, username or password reaches a log record or an exception message raised by this
  * class — DL-052.
  *
@@ -48,6 +54,13 @@ public class DataSourceConfig {
 
     /** Stands in for a credential the configured value carried, in the one log record below. */
     private static final String SUPPLIED = "supplied";
+
+    /**
+     * Configuration prefix bound onto the published pool. It is Spring Boot's own Hikari prefix, so a
+     * deployment configures this pool with the keys it would use for a pool the framework built —
+     * DL-229.
+     */
+    private static final String HIKARI_PROPERTY_PREFIX = "spring.datasource.hikari";
 
     private final ScannerProperties properties;
 
@@ -69,6 +82,12 @@ public class DataSourceConfig {
      * is always applied; the username and the password are applied only when the translation produced
      * them, so a value that already begins with {@code jdbc:} leaves both at the HikariCP default.
      *
+     * <p>Every {@code spring.datasource.hikari.*} property is bound onto the returned instance after
+     * this method has applied the translated values, so pool geometry, timeouts, leak detection,
+     * metric registration and the pool name are configurable exactly as they are for a pool Spring
+     * Boot builds itself — see docs/DECISION_LOG.md DL-229. A deployment that sets no such property
+     * gets the HikariCP defaults.
+     *
      * <p>The instance is returned with its pool not yet started: HikariCP opens the pool on the first
      * {@code getConnection()} call, and the container closes it when the context closes.
      *
@@ -81,8 +100,11 @@ public class DataSourceConfig {
      *     names an unsupported scheme, as raised and reported by
      *     {@link DatabaseUrlTranslator#translate(String)}
      */
+    // The Spring Boot Hikari property surface is bound onto this pool — DL-229 — see
+    // docs/DECISION_LOG.md
     @Bean
-    public DataSource dataSource() {
+    @ConfigurationProperties(prefix = HIKARI_PROPERTY_PREFIX)
+    public HikariDataSource dataSource() {
         DatabaseUrlTranslator.TranslatedDatabaseUrl translated =
                 DatabaseUrlTranslator.translate(this.properties.databaseUrl());
 

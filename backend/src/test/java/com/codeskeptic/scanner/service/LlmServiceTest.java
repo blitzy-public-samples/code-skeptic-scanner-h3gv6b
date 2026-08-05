@@ -102,15 +102,21 @@ class LlmServiceTest {
     private static final long MAX_COMPLETION_TOKENS = 150L;
 
     /**
-     * Value bound to {@code scanner.openai.temperature} by the default fixture: the key is unset, so
-     * no temperature reaches the request.
+     * Value bound to {@code scanner.openai.temperature} by the default fixture. The fixture binds
+     * {@code null} deliberately, which is the state a deployment reaches by setting the key blank, so
+     * the omission path is covered; the shipped default is {@code 0.7} and is pinned by
+     * {@code ScannerApplicationTests}.
      */
     private static final Double TEMPERATURE = null;
 
     /** Value bound to {@code scanner.openai.n}. */
     private static final long N = 1L;
 
-    /** The {@code scanner.openai.reasoning-effort} value the fixtures bind. */
+    /**
+     * The {@code scanner.openai.reasoning-effort} value the fixtures bind. It differs from the shipped
+     * default of {@code none} so that the carried-value path is covered; the shipped default is pinned
+     * by {@code ScannerApplicationTests}.
+     */
     private static final String REASONING_EFFORT = "low";
 
     /** A {@code scanner.openai.reasoning-effort} value the OpenAI client does not recognise. */

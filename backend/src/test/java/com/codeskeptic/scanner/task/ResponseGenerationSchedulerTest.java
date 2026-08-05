@@ -6,12 +6,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
-import java.time.Clock;
-import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -21,12 +21,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.springframework.scheduling.TriggerContext;
+import org.mockito.ArgumentCaptor;
 
-import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.ResponseDto;
 import com.codeskeptic.scanner.entity.Tweet;
-import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.NotionService;
 import com.codeskeptic.scanner.service.ResponseService;
@@ -37,11 +35,12 @@ import com.codeskeptic.scanner.service.ResponseService;
 /**
  * Exercises {@link ResponseGenerationScheduler}.
  *
- * <p>Assertions cover the pacing contract — the interval resolved from the
- * {@code response_generation_delay} setting row in preference to
- * {@code scanner.response-generation-delay-seconds}, measured from the end of the previous pass — and
- * the pass itself, including the claim that keeps a row that already carries a reply from being
- * generated for again.
+ * <p>Assertions cover the pass itself: one reply generated and mirrored per candidate, the claim that
+ * keeps a row another path already answered from being generated for again, the failure of one
+ * candidate leaving the rest of the pass intact, and the candidate row being handed to
+ * {@code ResponseService} as it was selected rather than read a second time — DL-226. The pacing of the
+ * pass belongs to {@code config/AsyncSchedulingConfig} and is asserted by
+ * {@code config/AsyncSchedulingConfigTest} — DL-227.
  */
 @DisplayName("ResponseGenerationScheduler")
 class ResponseGenerationSchedulerTest {
@@ -49,26 +48,17 @@ class ResponseGenerationSchedulerTest {
     /** Row identifier of the single candidate most tests use. */
     private static final int CANDIDATE_ID = 42;
 
-    /** {@code settings} row carrying the interval. */
-    private static final String DELAY_KEY = "response_generation_delay";
-
-    /** Interval {@code scanner.response-generation-delay-seconds} carries in these tests. */
-    private static final long CONFIGURED_DELAY = 60L;
-
     private final TweetRepository tweetRepository = mock(TweetRepository.class);
 
     private final ResponseService responseService = mock(ResponseService.class);
 
     private final NotionService notionService = mock(NotionService.class);
 
-    private final SettingRepository settingRepository = mock(SettingRepository.class);
-
     private ResponseGenerationScheduler scheduler;
 
     @BeforeEach
     void createScheduler() {
-        scheduler = new ResponseGenerationScheduler(tweetRepository, responseService, notionService,
-                settingRepository, properties(CONFIGURED_DELAY));
+        scheduler = new ResponseGenerationScheduler(tweetRepository, responseService, notionService);
     }
 
     @Nested
@@ -79,12 +69,14 @@ class ResponseGenerationSchedulerTest {
         @DisplayName("generates and mirrors one reply per candidate")
         void generatesAndMirrorsEachCandidate() {
             when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(candidate()));
-            when(responseService.generateResponseIfAbsent(String.valueOf(CANDIDATE_ID)))
+            when(responseService.generateResponseIfAbsent(any(Tweet.class)))
                     .thenReturn(Optional.of(reply("a draft reply")));
 
             scheduler.generatePendingResponses();
 
-            verify(responseService).generateResponseIfAbsent(String.valueOf(CANDIDATE_ID));
+            ArgumentCaptor<Tweet> subject = ArgumentCaptor.forClass(Tweet.class);
+            verify(responseService).generateResponseIfAbsent(subject.capture());
+            assertThat(subject.getValue().getId()).isEqualTo(CANDIDATE_ID);
             verify(notionService)
                     .updateTweetResponse(String.valueOf(CANDIDATE_ID), "a draft reply");
         }
@@ -93,7 +85,7 @@ class ResponseGenerationSchedulerTest {
         @DisplayName("mirrors nothing when the candidate already carried a reply")
         void mirrorsNothingWhenTheClaimIsLost() {
             when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(candidate()));
-            when(responseService.generateResponseIfAbsent(anyString()))
+            when(responseService.generateResponseIfAbsent(any(Tweet.class)))
                     .thenReturn(Optional.empty());
 
             scheduler.generatePendingResponses();
@@ -119,9 +111,9 @@ class ResponseGenerationSchedulerTest {
             Tweet second = new Tweet();
             second.setId(43);
             when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(first, second));
-            when(responseService.generateResponseIfAbsent("42"))
+            when(responseService.generateResponseIfAbsent(first))
                     .thenThrow(new IllegalStateException("model down"));
-            when(responseService.generateResponseIfAbsent("43"))
+            when(responseService.generateResponseIfAbsent(second))
                     .thenReturn(Optional.of(reply("second reply")));
 
             scheduler.generatePendingResponses();
@@ -150,12 +142,40 @@ class ResponseGenerationSchedulerTest {
             verifyNoInteractions(responseService, notionService);
         }
 
+        // The candidate query is the pass's only read of the tweets table — DL-226 — see
+        // docs/DECISION_LOG.md
+        @Test
+        @DisplayName("reads the tweets table once for the whole pass, however many candidates it "
+                + "holds")
+        void readsTheTweetsTableOnceForTheWholePass() {
+            Tweet first = candidate();
+            Tweet second = new Tweet();
+            second.setId(43);
+            Tweet third = new Tweet();
+            third.setId(44);
+            when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(first, second, third));
+            when(responseService.generateResponseIfAbsent(any(Tweet.class)))
+                    .thenReturn(Optional.of(reply("a draft reply")));
+
+            scheduler.generatePendingResponses();
+
+            verify(tweetRepository).findByResponsesIsEmpty();
+            verify(tweetRepository, never()).findById(any());
+            verifyNoMoreInteractions(tweetRepository);
+
+            ArgumentCaptor<Tweet> subjects = ArgumentCaptor.forClass(Tweet.class);
+            verify(responseService, times(3)).generateResponseIfAbsent(subjects.capture());
+            assertThat(subjects.getAllValues())
+                    .as("rows handed to the generator")
+                    .containsExactly(first, second, third);
+        }
+
         @Test
         @DisplayName("reads only the identifier of a candidate row")
         void readsOnlyTheIdentifier() {
             Tweet candidate = candidate();
             when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(candidate));
-            when(responseService.generateResponseIfAbsent(anyString()))
+            when(responseService.generateResponseIfAbsent(any(Tweet.class)))
                     .thenReturn(Optional.of(reply("a draft reply")));
 
             scheduler.generatePendingResponses();
@@ -174,35 +194,5 @@ class ResponseGenerationSchedulerTest {
     private static ResponseDto reply(String content) {
         return new ResponseDto("11", content, LocalDateTime.now(ZoneOffset.UTC), Boolean.FALSE,
                 String.valueOf(CANDIDATE_ID));
-    }
-
-    private static ScannerProperties properties(long delaySeconds) {
-        return new ScannerProperties("jdbc:h2:mem:unused", 100, delaySeconds, null, null, null, null,
-                null, null, null);
-    }
-
-    private static TriggerContext context(Instant lastCompletion, Instant now) {
-        return new TriggerContext() {
-
-            @Override
-            public Clock getClock() {
-                return Clock.fixed(now, ZoneOffset.UTC);
-            }
-
-            @Override
-            public Instant lastScheduledExecution() {
-                return lastCompletion;
-            }
-
-            @Override
-            public Instant lastActualExecution() {
-                return lastCompletion;
-            }
-
-            @Override
-            public Instant lastCompletion() {
-                return lastCompletion;
-            }
-        };
     }
 }

@@ -58,6 +58,14 @@ import com.fasterxml.jackson.databind.JsonNode;
  * identifier of the delivered record is matched against the table. A record delivered twice stores
  * two rows — DL-049.
  *
+ * <p>Every row this class stores has a wire form: a record whose {@code data.text},
+ * {@code data.public_metrics.like_count}, {@code data.created_at} or {@code data.author_id} is absent
+ * or does not carry its wire type is named at {@code WARN} and skipped rather than stored, and no
+ * neutral value is substituted for it — DL-080, DL-223. No stored row is therefore left unrenderable
+ * by {@link TweetMapper}, unmirrorable or unanswerable. Preparing a stored row's wire form is
+ * nevertheless guarded, and a failure there is reported at {@code WARN} because no adapter is reached
+ * that would otherwise report it — DL-224.
+ *
  * <p>{@code spring.jpa.open-in-view} is {@code false}. The stored entity is converted to its wire
  * form by {@link TweetMapper}, which reads only loaded scalar values and never traverses the lazy
  * {@code responses} association, and no operation here returns an entity.
@@ -301,14 +309,27 @@ public class TweetStreamListener {
      * {@link TweetMapper#toDto(Tweet)}: the row's identifier is rendered as a string and its two
      * delimited columns as arrays.
      *
-     * <p>A failure raised by the mirror write is recorded at {@code ERROR} and is not rethrown; the
-     * stored row is unaffected.
+     * <p>The two steps report at different levels. A failure raised while the wire form is prepared
+     * is recorded here at {@code WARN}, because no adapter is reached and no other record would name
+     * it. A failure raised by the mirror write itself is recorded at {@code DEBUG}, because
+     * {@link NotionService} reports it at {@code ERROR}. Neither is rethrown and the stored row is
+     * unaffected either way.
      *
      * @param saved the stored row, never {@code null}
      */
+    // Mirror-preparation failures are reported here — see docs/DECISION_LOG.md DL-224
     private void mirrorToNotion(Tweet saved) {
+        TweetDto mirrored;
         try {
-            TweetDto mirrored = tweetMapper.toDto(saved);
+            mirrored = tweetMapper.toDto(saved);
+        } catch (RuntimeException failure) {
+            // No adapter is reached, so this record is the only report of the condition — see
+            // docs/DECISION_LOG.md DL-224
+            log.warn("Preparing the Notion mirror of tweet row {} failed with {}; the row is stored "
+                    + "and is not mirrored.", saved.getId(), LogSafe.type(failure));
+            return;
+        }
+        try {
             String pageId = notionService.storeTweet(mirrored);
             // The Notion page identifier reaches the log only as a correlation token — DL-119 —
             // see docs/DECISION_LOG.md
@@ -395,6 +416,7 @@ public class TweetStreamListener {
         }
     }
 
+    // Every stored row carries a creation time — see docs/DECISION_LOG.md DL-223
     /**
      * Reads the creation time of a delivered record.
      *

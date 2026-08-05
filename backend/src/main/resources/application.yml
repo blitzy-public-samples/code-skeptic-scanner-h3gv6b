@@ -8,6 +8,11 @@ server:
   # reports the forwarded scheme, so HttpServletRequest.isSecure() is true behind that terminator and
   # Spring Security's Strict-Transport-Security writer emits its header.
   forward-headers-strategy: ${FORWARD_HEADERS_STRATEGY:framework}
+  # Net-new (no Python counterpart) — DL-223 — see docs/DECISION_LOG.md
+  # The embedded container's own default, declared explicitly: request headers above this size are
+  # rejected by the connector before any filter runs, and the response is written by the error-report
+  # valve config/ContainerErrorResponseConfig installs.
+  max-http-request-header-size: ${MAX_HTTP_REQUEST_HEADER_SIZE:8KB}
 
 # Net-new (the retired tree configured no logging framework) — DL-052 — see docs/DECISION_LOG.md
 # Spring Boot's default root level is INFO. This key names the application logger explicitly so the
@@ -63,6 +68,10 @@ scanner:
     # Ported from backend/app/services/twitter_service.py:L13 and backend/app/tasks/tweet_monitoring.py:L48-49 (faithful port) — DL-046 — see docs/DECISION_LOG.md
     access-token: ${TWITTER_ACCESS_TOKEN:}
     access-token-secret: ${TWITTER_ACCESS_TOKEN_SECRET:}
+    # Net-new (no Python counterpart) — DL-230 — see docs/DECISION_LOG.md
+    # Bounds the app-only token exchange and the stream-rules calls. The filtered-stream
+    # subscription is deliberately unbounded. A value below 1 is read as 1 second.
+    request-timeout-seconds: ${TWITTER_REQUEST_TIMEOUT_SECONDS:10}
 
   notion:
     # Ported from backend/app/core/config.py:L7 and backend/app/services/notion_service.py:L8 (faithful port) — see docs/DECISION_LOG.md
@@ -81,16 +90,22 @@ scanner:
     api-key: ${OPENAI_API_KEY:}
     # Net-new (no Python counterpart) — DL-033 — see docs/DECISION_LOG.md
     model: gpt-5.6-terra
-    # Ported from backend/app/services/llm_service.py:L22; source literal 150, configured default
-    # 1000 — DL-034, DL-202 — see docs/DECISION_LOG.md
-    max-completion-tokens: ${OPENAI_MAX_COMPLETION_TOKENS:1000}
-    # Ported from backend/app/services/llm_service.py:L25; source literal 0.7. The key has no default;
-    # when supplied, its accepted range is 0 to 2 inclusive — DL-200 — see docs/DECISION_LOG.md
+    # Ported from backend/app/services/llm_service.py:L22 (faithful port) — DL-034, DL-202 — see docs/DECISION_LOG.md
+    # Source value: 150, carried unchanged. The whole budget is available to visible output because
+    # scanner.openai.reasoning-effort is none.
+    max-completion-tokens: ${OPENAI_MAX_COMPLETION_TOKENS:150}
+    # Ported from backend/app/services/llm_service.py:L25 (faithful port) — DL-200 — see docs/DECISION_LOG.md
+    # Source value: 0.7, carried unchanged. The configured model accepts an explicit temperature only
+    # while scanner.openai.reasoning-effort is none — DL-145. Accepted range: 0 to 2 inclusive; the
+    # value is range-checked at the request. An empty value omits the parameter altogether.
+    temperature: ${OPENAI_TEMPERATURE:0.7}
     # Ported from backend/app/services/llm_service.py:L23 (faithful port) — see docs/DECISION_LOG.md
     n: ${OPENAI_N:1}
     # Net-new (no Python counterpart) — DL-145 — see docs/DECISION_LOG.md
-    # Accepted by the configured model: none, low, medium, high, xhigh; blank omits the parameter.
-    reasoning-effort: ${OPENAI_REASONING_EFFORT:low}
+    # Accepted by the configured model: none, low, medium, high, xhigh. A blank value omits the
+    # parameter. Measured against gpt-5.6-terra: minimal and max are answered HTTP 400
+    # unsupported_value — see docs/DECISION_LOG.md DL-145.
+    reasoning-effort: ${OPENAI_REASONING_EFFORT:none}
     # Net-new (no Python counterpart) — DL-146 — see docs/DECISION_LOG.md
     # Accepted range: 1 second or greater.
     request-timeout-seconds: ${OPENAI_REQUEST_TIMEOUT_SECONDS:30}

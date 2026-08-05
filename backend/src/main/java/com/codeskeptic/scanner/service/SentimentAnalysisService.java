@@ -89,6 +89,15 @@ public class SentimentAnalysisService {
     private static final String DESTROYED_MESSAGE =
             "SentimentAnalysisService has been destroyed; the Natural Language API client is closed";
 
+    // The score the API documents is a finite float — DL-233 — see docs/DECISION_LOG.md
+    /**
+     * Message of the {@link IllegalStateException} raised for a document sentiment score that is not
+     * a finite number.
+     */
+    private static final String NON_FINITE_SCORE_MESSAGE =
+            "The Natural Language API returned a document sentiment score that is not a finite "
+                    + "number; the analysis has no reportable result";
+
     /**
      * Guards the client against release while it is in use. Callers hold the read lock for the
      * duration of a request; {@link #closeLanguageClient()} holds the write lock.
@@ -125,6 +134,12 @@ public class SentimentAnalysisService {
      * unscaled and unclamped. A failure reported by the API propagates to the
      * caller unchanged; no substitute score is returned.
      *
+     * <p>The returned score is always finite. The API documents a score between
+     * {@code -1.0} and {@code 1.0}; a value that is not a finite number —
+     * {@link Double#NaN} or either infinity — is reported as a failure and is
+     * never returned. No score is clamped, rounded or substituted: a finite score
+     * outside that range is returned unchanged — see docs/DECISION_LOG.md DL-233.
+     *
      * <p>The call is bounded. One RPC attempt may take at most {@link #RPC_TIMEOUT} and
      * the call as a whole at most {@link #TOTAL_TIMEOUT}, retries included; past
      * that the call fails and the calling thread is released. Such a failure is
@@ -134,12 +149,14 @@ public class SentimentAnalysisService {
      * acquisition-and-call sequence. The client is not released mid-call.
      *
      * @param text the tweet text to analyse; must not be {@code null}
-     * @return the document sentiment score, conventionally between {@code -1.0}
-     *         (negative) and {@code 1.0} (positive)
+     * @return the document sentiment score, a finite value conventionally between
+     *         {@code -1.0} (negative) and {@code 1.0} (positive)
      * @throws NullPointerException  if {@code text} is {@code null}
-     * @throws IllegalStateException if the bean has been destroyed, or if the
+     * @throws IllegalStateException if the bean has been destroyed, if the
      *                               Natural Language client cannot be created
-     *                               from Application Default Credentials
+     *                               from Application Default Credentials, or if
+     *                               the API reports a score that is not a finite
+     *                               number
      */
     // Ported from backend/app/services/sentiment_analysis.py:L12-24 (faithful port). The parameter is
     // the tweet text, reconciling backend/app/api/tweets.py:L46 with
@@ -167,6 +184,11 @@ public class SentimentAnalysisService {
             AnalyzeSentimentResponse response = languageClient().analyzeSentiment(document);
             // getScore() is declared float; the widening to double is lossless.
             double score = response.getDocumentSentiment().getScore();
+            // The API documents a finite score; a non-finite one has no wire form — DL-233 — see
+            // docs/DECISION_LOG.md
+            if (!Double.isFinite(score)) {
+                throw new IllegalStateException(NON_FINITE_SCORE_MESSAGE);
+            }
             log.info("Natural Language API returned document sentiment score {}", score);
             return score;
         } catch (RuntimeException e) {

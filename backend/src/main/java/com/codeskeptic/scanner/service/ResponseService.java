@@ -1,6 +1,7 @@
 package com.codeskeptic.scanner.service;
 
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -10,6 +11,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -30,6 +32,7 @@ import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.mapper.ResponseMapper;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
 import com.codeskeptic.scanner.util.LogSafe;
+import com.codeskeptic.scanner.util.QueryParameters;
 
 // Net-new (no Python module existed; signatures dictated by
 // backend/app/api/responses.py:L15,L26,L44,L60) — see docs/DECISION_LOG.md
@@ -190,10 +193,21 @@ public class ResponseService {
      * {@code perPage}. A {@code page} beyond the last one yields an empty {@code responses} list and
      * a populated pagination block.
      *
+     * <p>A {@code page} whose first row lies beyond {@link Integer#MAX_VALUE} rows — that is, one for
+     * which {@code (page - 1) * perPage} exceeds that bound — is answered the same way: the empty list
+     * and the same populated block, with the requested page number and page size restated. No page
+     * size is reduced and no request is rejected — see docs/DECISION_LOG.md DL-225.
+     *
      * <p>The pagination block carries {@code page} as the 1-based number of the page returned,
      * {@code per_page} as its size, {@code total} as the number of rows in the table and
      * {@code total_pages} as the number of pages that size divides the table into — DL-038. The rows
      * are converted inside this method's transaction.
+     *
+     * <p>A {@code page} whose first row lies at an offset beyond {@link Integer#MAX_VALUE}, the
+     * largest offset the paged query can express, is answered from a row count alone: an empty
+     * {@code responses} list with the requested {@code page} and {@code per_page} restated and the
+     * whole-table counters unchanged — see docs/DECISION_LOG.md DL-225. No pagination argument is
+     * answered with an error status.
      *
      * @param page    the 1-based page number to return; a value below {@value #DEFAULT_PAGE} is read
      *                as {@value #DEFAULT_PAGE}
@@ -212,8 +226,14 @@ public class ResponseService {
 
         // The wire page of backend/app/api/responses.py:L11 is 1-based; PageRequest is 0-based —
         // DL-038 — see docs/DECISION_LOG.md
-        Page<Response> found = responseRepository.findAll(
-                PageRequest.of(Math.subtractExact(requestedPage, WIRE_PAGE_OFFSET), requestedPerPage));
+        PageRequest requested = PageRequest.of(
+                Math.subtractExact(requestedPage, WIRE_PAGE_OFFSET), requestedPerPage);
+
+        // A page whose first row lies past the offset the query can express is answered without a
+        // query — DL-225 — see docs/DECISION_LOG.md
+        Page<Response> found = QueryParameters.withinQueryableOffset(requested)
+                ? responseRepository.findAll(requested)
+                : new PageImpl<>(List.of(), requested, responseRepository.count());
 
         List<ResponseDto> responses = responseMapper.toDtoList(found.getContent());
         PaginationDto pagination = new PaginationDto(
@@ -377,31 +397,89 @@ public class ResponseService {
             throw new ResponseGenerationException();
         }
 
+        return generateWhenAbsent(identifier, null);
+    }
+
+    // The same operation for a caller that already holds the row — DL-226 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Generates and stores a reply for a {@code tweets} row the caller already holds, unless that row
+     * already carries one, and reports what was stored.
+     *
+     * <p>Behaves exactly as {@link #generateResponseIfAbsent(String)} in every respect except one: the
+     * subject row is read from the supplied entity rather than from the {@code tweets} table, so a
+     * caller that selected the row is not made to select it a second time. The in-process claim on the
+     * row's identifier, the transaction-scoped
+     * {@link ResponseRepository#existsByTweetId(Integer)} guard, the stored column values and every
+     * client-visible message are the same ones {@link #generateResponseIfAbsent(String)} produces —
+     * see docs/DECISION_LOG.md DL-195, DL-226.
+     *
+     * <p>Only the identifier and the columns {@code dto/TweetDto} carries are read from
+     * {@code subject}; its {@code responses} association is never traversed. The entity may be
+     * detached: no operation here reattaches it, and the row the new reply is attached to is the one
+     * the storing transaction reads.
+     *
+     * @param subject the {@code tweets} row to reply to, carrying its assigned identifier; must not be
+     *                {@code null}
+     * @return the stored row in its wire form, or empty when nothing was stored
+     * @throws NullPointerException        when {@code subject} is {@code null}
+     * @throws BadRequestException         when {@code subject} carries no identifier, which means it
+     *                                     has not been stored
+     * @throws ResponseGenerationException when generating or storing the row fails
+     */
+    public Optional<ResponseDto> generateResponseIfAbsent(Tweet subject) {
+        Objects.requireNonNull(subject, "subject must not be null.");
+
+        Integer identifier = subject.getId();
+        if (identifier == null) {
+            log.warn("Rejected a background generation request: the supplied tweet carries no "
+                    + "identifier.");
+            throw BadRequestException.tweetIdRequired();
+        }
+
+        return generateWhenAbsent(identifier, subject);
+    }
+
+    /**
+     * Generates and stores one reply for the named {@code tweets} row unless it already carries one.
+     *
+     * <p>The claim on {@code identifier} is taken first and released when this method returns or
+     * raises. The subject row is taken from {@code loaded} when the caller supplied it and read from
+     * the {@code tweets} table otherwise.
+     *
+     * @param identifier the parsed identifier of the row to reply to, never {@code null}
+     * @param loaded     the row the caller already holds, or {@code null} to read it here
+     * @return the stored row in its wire form, or empty when nothing was stored
+     * @throws ResponseGenerationException when the identifier names no row, or when generating or
+     *                                     storing the row fails
+     */
+    private Optional<ResponseDto> generateWhenAbsent(Integer identifier, Tweet loaded) {
         if (!claimed.add(identifier)) {
             log.debug("Tweet '{}' is already being generated for; this pass stores nothing.",
-                    LogSafe.logSafe(tweetId));
+                    identifier);
             return Optional.empty();
         }
 
         try {
-            TweetDto subject = readSubject(identifier);
+            // The supplied row is the subject; only a caller that holds none reads one — DL-226 —
+            // see docs/DECISION_LOG.md
+            TweetDto subject = (loaded == null) ? readSubject(identifier) : tweetMapper.toDto(loaded);
             String generatedText = llmService.generateResponse(subject);
             ResponseDto stored = store(identifier, generatedText, true);
 
             if (stored == null) {
                 log.debug("Tweet '{}' acquired a response while one was being generated; nothing was "
-                        + "stored.", tweetId);
+                        + "stored.", identifier);
                 return Optional.empty();
             }
 
-            log.info("Stored response {} for tweet '{}' awaiting review.", stored.id(), tweetId);
+            log.info("Stored response {} for tweet '{}' awaiting review.", stored.id(), identifier);
             return Optional.of(stored);
         } catch (ResponseGenerationException e) {
             throw e;
         } catch (RuntimeException e) {
             // Single sanitized error log for this path — DL-084 — see docs/DECISION_LOG.md
-            log.error("Response generation failed for tweet '{}': {}.",
-                    LogSafe.logSafe(tweetId), LogSafe.type(e));
+            log.error("Response generation failed for tweet '{}': {}.", identifier, LogSafe.type(e));
             throw new ResponseGenerationException(e);
         } finally {
             claimed.remove(identifier);
@@ -438,9 +516,9 @@ public class ResponseService {
      * Stores the generated reply as a new {@code responses} row and returns the stored row.
      *
      * <p>The row carries the generated text as {@code content}, {@code is_approved} {@code false},
-     * {@code generated_at} as the current local time, and the re-read {@link Tweet} as its
-     * association. Its {@code id} is assigned by the database on insert and is read back from the
-     * stored row, replacing the {@code response.save()} call at
+     * {@code generated_at} as the current local time truncated to microseconds, and the re-read
+     * {@link Tweet} as its association. Its {@code id} is assigned by the database on insert and is
+     * read back from the stored row, replacing the {@code response.save()} call at
      * {@code backend/app/tasks/response_generation.py:L25-26}.
      *
      * <p>The transaction first re-reads the parent through
@@ -483,8 +561,9 @@ public class ResponseService {
             response.setContent(generatedText);
             // backend/app/db/models.py:L26 — the flag a human reviewer reads
             response.setIsApproved(false);
-            // Minted where the row is built — DL-201 — see docs/DECISION_LOG.md
-            response.setGeneratedAt(LocalDateTime.now());
+            // Minted where the row is built, at the precision the column stores — DL-232 — see
+            // docs/DECISION_LOG.md
+            response.setGeneratedAt(LocalDateTime.now().truncatedTo(ChronoUnit.MICROS));
             // backend/app/db/models.py:L27-28 — the association owns the tweet_id column
             response.setTweet(found.get());
 
@@ -498,20 +577,26 @@ public class ResponseService {
      * Applies a partial update to the {@code responses} row identified by {@code responseId} and
      * returns the stored row.
      *
-     * <p>The request is rejected when it is {@code null} or carries no value a writable column can
-     * hold. A JSON string can write {@code content}; a JSON boolean can write
-     * {@code is_approved}. An omitted key, explicit JSON {@code null}, or wrong-typed value is not
-     * writable. The request is tested before the row is read, using the existing
-     * {@code Update data is required} failure — DL-082.
+     * <p>The request is rejected when it is {@code null} and when it carries neither the
+     * {@code content} key nor the {@code is_approved} key, matching the {@code if not update_data}
+     * guard at {@code backend/app/api/responses.py:L56}. The request is tested before the row is read,
+     * in the order of {@code :L56-60}.
+     *
+     * <p>A body carrying a key whose value its column cannot hold — {@code {"is_approved":"true"}} or
+     * {@code {"content":null}}, for instance — never reaches this method: {@link UpdateResponseRequest}
+     * rejects it while the body is being bound, and the request is answered 400 with the body
+     * {@code {"error": "Bad request"}} — see docs/DECISION_LOG.md DL-082, DL-092 and DL-231.
      *
      * <p>{@code responseId} arrives as the raw path segment. An identifier carrying no number, a
      * {@code null} identifier and an identifier naming no row are all reported with the literal of
      * {@code :L65}, which is a different string from the one {@link #getResponseById(String)} reports.
      *
-     * <p>Two columns are writable here, and each is written exactly when the request carries a value
-     * of the column's JSON type. This method never writes {@code null}; an unwritable component leaves
-     * its column untouched. {@code id}, {@code generated_at} and {@code tweet_id} are not written, and
-     * no accepted value is trimmed or normalised on the way in — DL-082.
+     * <p>Two columns are writable here, and each is written exactly when the request body carried its
+     * key: presence, not value, decides, because a key the body carries always carries a value its
+     * column can hold. A key the body omits leaves its column untouched, so neither column is ever
+     * written {@code null} by this method — see docs/DECISION_LOG.md DL-082. {@code id},
+     * {@code generated_at} and {@code tweet_id} are not written by this method, and no value is trimmed
+     * or normalised on the way in.
      *
      * <p>{@code is_approved} is the flag a human reviewer reads.
      *
@@ -551,7 +636,8 @@ public class ResponseService {
         }
 
         Response response = existing.get();
-        // Only values the target columns can hold are written — DL-082 — see docs/DECISION_LOG.md
+        // Presence of the key decides; a carried key always carries a usable value — DL-082 — see
+        // docs/DECISION_LOG.md
         if (request.writesContent()) {
             response.setContent(request.contentValue());
         }

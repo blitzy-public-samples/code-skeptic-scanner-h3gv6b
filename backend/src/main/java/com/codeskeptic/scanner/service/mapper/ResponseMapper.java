@@ -9,7 +9,7 @@ import com.codeskeptic.scanner.entity.Response;
 import com.codeskeptic.scanner.entity.Tweet;
 
 // Net-new (no Python counterpart method) — call sites backend/app/api/responses.py:L18,L29,L47,L63 —
-// DL-023, DL-080 and DL-081 — see docs/DECISION_LOG.md
+// DL-023, DL-080, DL-081, DL-139 — see docs/DECISION_LOG.md
 /**
  * Converts {@link Response} entities into their {@link ResponseDto} wire form.
  *
@@ -25,10 +25,16 @@ import com.codeskeptic.scanner.entity.Tweet;
  * <p>The remaining three components are copied verbatim after the source-required wire fields are
  * validated.
  *
- * <p>Null policy — see docs/DECISION_LOG.md DL-080 and DL-081. The entity columns remain nullable,
- * but a row carrying no {@code id}, {@code content}, {@code generated_at}, {@code is_approved} or
- * associated {@code tweet_id} has no {@link ResponseDto} wire form and is rejected here. No neutral
- * value is substituted.
+ * <p>Null policy — see docs/DECISION_LOG.md DL-080 and DL-139. Every one of the five
+ * {@code responses} columns is declared without {@code nullable=false}, so a stored row may carry
+ * {@code null} in any of them, and this class carries a {@code null} column value through as a
+ * {@code null} component. No conversion here unboxes a column value, defaults a component,
+ * substitutes a neutral value or rejects a column value; the requirement is declared in exactly one
+ * place, {@link ResponseDto}, which rejects a {@code null} for each of the five components the wire
+ * contract of {@code backend/app/schema/response.py:L5-9} declares required. Converting a row that
+ * leaves such a column empty therefore fails in the record's constructor rather than here. An absent
+ * {@code tweet} association yields a {@code null} {@code tweet_id} rather than dereferencing the
+ * association.
  *
  * <p>Conversion runs in one direction: this mapper declares no entity-producing operation and
  * performs no persistence access and no outbound call. Instances hold no state and are thread-safe.
@@ -41,27 +47,21 @@ public final class ResponseMapper {
      *
      * @param response the entity to convert, may be {@code null}
      * @return a DTO holding the entity's five column values, with the identifier and the associated
-     *         tweet identifier each rendered as a string; or {@code null} when {@code response} is
-     *         {@code null}
-     * @throws IllegalStateException if the entity carries {@code null} in any column the wire
-     *         contract of {@code backend/app/schema/response.py:L5-9} declares required
+     *         tweet identifier each rendered as a string and every {@code null} column carried as a
+     *         {@code null} component; or {@code null} when {@code response} is {@code null}
      */
     public ResponseDto toDto(Response response) {
         if (response == null) {
             return null;
         }
-        Integer identifier = response.getId();
-        if (identifier == null) {
-            throw new IllegalStateException(
-                    "A response that carries no identifier has not been stored and has no wire form.");
-        }
-        Tweet tweet = required(response.getTweet(), "tweet_id");
+        Tweet tweet = response.getTweet();
+        String tweetId = (tweet == null) ? null : identifierAsString(tweet.getId());
         return new ResponseDto(
-                String.valueOf(identifier),
-                required(response.getContent(), "content"),
-                required(response.getGeneratedAt(), "generated_at"),
-                required(response.getIsApproved(), "is_approved"),
-                identifierAsString(required(tweet.getId(), "tweet_id")));
+                identifierAsString(response.getId()),
+                response.getContent(),
+                response.getGeneratedAt(),
+                response.getIsApproved(),
+                tweetId);
     }
 
     /**
@@ -72,7 +72,6 @@ public final class ResponseMapper {
      * @return an unmodifiable list holding one DTO per input element in the same order, where a
      *         {@code null} element yields a {@code null} element; empty when {@code responses} is
      *         {@code null} or empty. Never {@code null}
-     * @throws IllegalStateException if an element carries no value for a source-required wire field
      */
     public List<ResponseDto> toDtoList(List<Response> responses) {
         if (responses == null || responses.isEmpty()) {
@@ -86,31 +85,12 @@ public final class ResponseMapper {
     /**
      * Renders a persistent identifier as its decimal string form.
      *
-     * @param identifier the identifier to render, never {@code null}
-     * @return the decimal string form of {@code identifier}
+     * @param identifier the identifier to render, may be {@code null}
+     * @return the decimal string form of {@code identifier}, or {@code null} when {@code identifier}
+     *         is {@code null}
      */
     private static String identifierAsString(Integer identifier) {
-        return String.valueOf(identifier);
-    }
-
-    // The required fields of backend/app/schema/response.py:L5-9 — DL-080, DL-081 — see
-    // docs/DECISION_LOG.md
-    /**
-     * Returns a column value the wire contract declares required.
-     *
-     * @param value  the stored column value, or the association carrying it
-     * @param column the wire key of the column, used in the failure message
-     * @param <T>    the column's value type
-     * @return {@code value}
-     * @throws IllegalStateException if {@code value} is {@code null}
-     */
-    private static <T> T required(T value, String column) {
-        if (value == null) {
-            throw new IllegalStateException("A responses row carrying no " + column
-                    + " has no wire form: backend/app/schema/response.py declares the field "
-                    + "required.");
-        }
-        return value;
+        return (identifier == null) ? null : identifier.toString();
     }
 
 }

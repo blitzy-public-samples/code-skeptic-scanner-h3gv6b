@@ -8,7 +8,7 @@ import com.codeskeptic.scanner.dto.TweetDto;
 import com.codeskeptic.scanner.entity.Tweet;
 
 // Net-new (no Python counterpart method) — call sites backend/app/api/tweets.py:L19,L30 —
-// DL-023, DL-024 and DL-080 — see docs/DECISION_LOG.md
+// DL-023, DL-024, DL-080, DL-139 — see docs/DECISION_LOG.md
 /**
  * Converts {@link Tweet} entities into their {@link TweetDto} wire form.
  *
@@ -20,12 +20,16 @@ import com.codeskeptic.scanner.entity.Tweet;
  *
  * <p>Every other column value is copied verbatim.
  *
- * <p>Null policy — see docs/DECISION_LOG.md DL-080. The columns stay nullable, so a stored row can
- * carry {@code null} in a column that {@code backend/app/schema/tweet.py:L6-14} declares required.
- * Such a row has no wire form and is rejected here, naming the column, rather than serialised with a
- * JSON {@code null}. {@code quoted_tweet_id} is the sole column that may be {@code null}.
- * {@link TweetDto} normalises the two list components. The entity's {@code responses} association is
- * not read.
+ * <p>Null policy — see docs/DECISION_LOG.md DL-080 and DL-139. Every one of the nine {@code tweets}
+ * columns is declared without {@code nullable=false}, so a stored row may carry {@code null} in any of
+ * them, and this class carries a {@code null} column value through as a {@code null} component. No
+ * conversion here unboxes a column value, defaults a component, substitutes a neutral value or
+ * rejects a column value; the requirement is declared in exactly one place, {@link TweetDto}, which
+ * rejects a {@code null} for each component the wire contract of
+ * {@code backend/app/schema/tweet.py:L6-14} declares required. Converting a row that leaves such a
+ * column empty therefore fails in the record's constructor rather than here. {@link TweetDto} also
+ * normalises the two list components, so those two are the only components that are never
+ * {@code null}. The entity's {@code responses} association is not read.
  *
  * <p>Conversion runs in one direction: this mapper declares no entity-producing operation and
  * performs no persistence access and no outbound call. Instances hold no state and are thread-safe.
@@ -37,24 +41,23 @@ public final class TweetMapper {
      * Converts a single tweet entity into its wire form.
      *
      * @param tweet the entity to convert, may be {@code null}
-     * @return a DTO holding the entity's nine column values with the identifier rendered as a
-     *         string, or {@code null} when {@code tweet} is {@code null}
-     * @throws IllegalStateException if the row carries {@code null} in a column the wire contract of
-     *         {@code backend/app/schema/tweet.py:L6-14} declares required
+     * @return a DTO holding the entity's nine column values with the identifier rendered as a string
+     *         and every {@code null} scalar column carried as a {@code null} component, or
+     *         {@code null} when {@code tweet} is {@code null}
      */
     public TweetDto toDto(Tweet tweet) {
         if (tweet == null) {
             return null;
         }
         return new TweetDto(
-                String.valueOf(required(tweet.getId(), "id")),
-                required(tweet.getContent(), "content"),
-                required(tweet.getLikeCount(), "like_count"),
-                required(tweet.getCreatedAt(), "created_at"),
-                required(tweet.getDoubtRating(), "doubt_rating"),
+                identifierAsString(tweet.getId()),
+                tweet.getContent(),
+                tweet.getLikeCount(),
+                tweet.getCreatedAt(),
+                tweet.getDoubtRating(),
                 tweet.getMedia(),
                 tweet.getQuotedTweetId(),
-                required(tweet.getUserId(), "user_id"),
+                tweet.getUserId(),
                 tweet.getAiToolsMentioned());
     }
 
@@ -76,21 +79,14 @@ public final class TweetMapper {
                 .toList();
     }
 
-    // The required fields of backend/app/schema/tweet.py:L6-14 — DL-080 — see docs/DECISION_LOG.md
     /**
-     * Returns a column value the wire contract declares required.
+     * Renders a persistent identifier as its decimal string form.
      *
-     * @param value  the stored column value
-     * @param column the wire key of the column, used in the failure message
-     * @param <T>    the column's value type
-     * @return {@code value}
-     * @throws IllegalStateException if {@code value} is {@code null}
+     * @param identifier the identifier to render, may be {@code null}
+     * @return the decimal string form of {@code identifier}, or {@code null} when {@code identifier}
+     *         is {@code null}
      */
-    private static <T> T required(T value, String column) {
-        if (value == null) {
-            throw new IllegalStateException("A tweets row carrying no " + column
-                    + " has no wire form: backend/app/schema/tweet.py declares the field required.");
-        }
-        return value;
+    private static String identifierAsString(Integer identifier) {
+        return (identifier == null) ? null : identifier.toString();
     }
 }

@@ -37,6 +37,7 @@ import org.springframework.core.MethodParameter;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.InvalidMediaTypeException;
 import org.springframework.http.MediaType;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
@@ -61,6 +62,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.ServletWebRequest;
 import org.springframework.web.method.annotation.ExceptionHandlerMethodResolver;
+import org.springframework.web.multipart.MultipartException;
 import org.springframework.web.multipart.support.MissingServletRequestPartException;
 import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
@@ -936,6 +938,164 @@ class GlobalExceptionHandlerTest {
         assertErrorEnvelope(response, UNSUPPORTED_MEDIA_TYPE);
     }
 
+    // Net-new (no Python counterpart) — DL-219 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("returns 415 for a multipart request no route of this service consumes")
+    void returns415ForAMultipartRequestNoRouteConsumes() throws JsonProcessingException {
+        ResponseEntity<ErrorResponse> response = handler.handleMultipartFailure(
+                new MultipartException("Failed to parse multipart servlet request"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(415);
+        assertErrorEnvelope(response, UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    // Net-new (no Python counterpart) — DL-219 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("records only the exception class for a multipart failure, never its message or a "
+            + "stack trace")
+    void recordsOnlyTheExceptionClassForAMultipartFailure() {
+        ListAppender<ILoggingEvent> appender = attachAdviceAppender();
+        try {
+            handler.handleMultipartFailure(new MultipartException(SUBMITTED_CREDENTIAL));
+
+            assertThat(appender.list).hasSize(1);
+            ILoggingEvent record = appender.list.get(0);
+            assertThat(record.getLevel()).isEqualTo(Level.WARN);
+            assertThat(record.getFormattedMessage()).contains("MultipartException");
+            assertThat(record.getFormattedMessage()).doesNotContain(SUBMITTED_CREDENTIAL);
+            assertThat(record.getThrowableProxy()).isNull();
+        } finally {
+            detachAdviceAppender(appender);
+        }
+    }
+
+    // Net-new (no Python counterpart) — DL-219 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("keeps a missing multipart part on the 400 path and a multipart parse failure on "
+            + "the 415 path")
+    void keepsAMissingMultipartPartOnThe400PathAndAParseFailureOnThe415Path() {
+        assertThat(MultipartException.class
+                .isAssignableFrom(MissingServletRequestPartException.class)).isFalse();
+
+        ExceptionHandlerMethodResolver resolver = resolverForTheAdvice();
+
+        assertThat(resolver.resolveMethod(new MissingServletRequestPartException("file")))
+                .isEqualTo(handlerMethodFor(MissingServletRequestPartException.class));
+        assertThat(resolver.resolveMethod(new MultipartException(CAUSE_MESSAGE)))
+                .isEqualTo(handlerMethodFor(MultipartException.class));
+    }
+
+    // Net-new (no Python counterpart) — DL-220 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] Content-Type {0}")
+    @ValueSource(strings = {"*/*", "application/*", "text/*", "multipart/*"})
+    @DisplayName("returns 415 when the request Content-Type names no concrete media type")
+    void returns415WhenTheRequestContentTypeNamesNoConcreteMediaType(String declaredContentType)
+            throws JsonProcessingException {
+
+        ResponseEntity<ErrorResponse> response = handler.handleIllegalArgument(
+                new IllegalArgumentException("Content-Type cannot contain wildcard type '*'"),
+                requestCarryingContentType(declaredContentType));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(415);
+        assertErrorEnvelope(response, UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    // Net-new (no Python counterpart) — DL-220 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("returns 415 when the request Content-Type cannot be parsed as a media type at all")
+    void returns415WhenTheRequestContentTypeCannotBeParsed() throws JsonProcessingException {
+        ResponseEntity<ErrorResponse> response = handler.handleIllegalArgument(
+                new InvalidMediaTypeException("not a media type", "does not contain '/'"),
+                requestCarryingContentType("not a media type"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(415);
+        assertErrorEnvelope(response, UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    // Net-new (no Python counterpart) — DL-220 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] Content-Type {0}")
+    @ValueSource(strings = {"application/json", "text/plain", "application/json;charset=UTF-8"})
+    @DisplayName("returns 500 for an illegal-argument failure on a request naming a concrete media "
+            + "type")
+    void returns500ForAnIllegalArgumentFailureOnAConcreteMediaType(String declaredContentType)
+            throws JsonProcessingException {
+
+        ResponseEntity<ErrorResponse> response = handler.handleIllegalArgument(
+                new IllegalArgumentException(CAUSE_MESSAGE),
+                requestCarryingContentType(declaredContentType));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(500);
+        assertErrorEnvelope(response, INTERNAL_SERVER_ERROR);
+    }
+
+    // Net-new (no Python counterpart) — DL-220 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("returns 500 for an illegal-argument failure on a request carrying no Content-Type")
+    void returns500ForAnIllegalArgumentFailureWithoutAContentType() throws JsonProcessingException {
+        ResponseEntity<ErrorResponse> response = handler.handleIllegalArgument(
+                new IllegalArgumentException(CAUSE_MESSAGE), new MockHttpServletRequest());
+
+        assertThat(response.getStatusCode().value()).isEqualTo(500);
+        assertErrorEnvelope(response, INTERNAL_SERVER_ERROR);
+    }
+
+    // Net-new (no Python counterpart) — DL-220 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("records a non-concrete media type at WARN without a stack trace and keeps the "
+            + "stack trace for a genuine illegal-argument failure")
+    void separatesTheMediaTypeRecordFromTheGenuineFailureRecord() {
+        ListAppender<ILoggingEvent> appender = attachAdviceAppender();
+        try {
+            handler.handleIllegalArgument(
+                    new IllegalArgumentException("Content-Type cannot contain wildcard subtype '*'"),
+                    requestCarryingContentType("application/*"));
+
+            assertThat(appender.list).hasSize(1);
+            ILoggingEvent mediaTypeRecord = appender.list.get(0);
+            assertThat(mediaTypeRecord.getLevel()).isEqualTo(Level.WARN);
+            assertThat(mediaTypeRecord.getFormattedMessage())
+                    .contains("IllegalArgumentException")
+                    .doesNotContain("wildcard subtype");
+            assertThat(mediaTypeRecord.getThrowableProxy()).isNull();
+
+            handler.handleIllegalArgument(new IllegalArgumentException(SUBMITTED_CREDENTIAL),
+                    requestCarryingContentType("application/json"));
+
+            assertThat(appender.list).hasSize(2);
+            ILoggingEvent genuineFailureRecord = appender.list.get(1);
+            assertThat(genuineFailureRecord.getLevel()).isEqualTo(Level.ERROR);
+            assertThat(genuineFailureRecord.getFormattedMessage()).doesNotContain(SUBMITTED_CREDENTIAL);
+            assertThat(genuineFailureRecord.getThrowableProxy()).isNotNull();
+        } finally {
+            detachAdviceAppender(appender);
+        }
+    }
+
+    // Net-new (no Python counterpart) — DL-220 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("resolves an illegal-argument failure to its own handler rather than the catch-all")
+    void resolvesAnIllegalArgumentFailureToItsOwnHandler() {
+        ExceptionHandlerMethodResolver resolver = resolverForTheAdvice();
+
+        assertThat(resolver.resolveMethod(new IllegalArgumentException(CAUSE_MESSAGE)))
+                .isEqualTo(handlerMethodFor(IllegalArgumentException.class))
+                .isNotEqualTo(handlerMethodFor(Exception.class));
+        assertThat(resolver.resolveMethod(new IllegalStateException(CAUSE_MESSAGE)))
+                .isEqualTo(handlerMethodFor(Exception.class));
+    }
+
+    /**
+     * Builds a request declaring one {@code Content-Type} header value.
+     *
+     * @param declaredContentType the raw header value, which need not be a valid media type
+     * @return the request; never {@code null}
+     */
+    private static MockHttpServletRequest requestCarryingContentType(String declaredContentType) {
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setContentType(declaredContentType);
+        return request;
+    }
+
     @Test
     @DisplayName("returns 406 for a request whose accept header cannot be satisfied")
     void returns406ForARequestWhoseAcceptHeaderCannotBeSatisfied() throws JsonProcessingException {
@@ -1082,6 +1242,8 @@ class GlobalExceptionHandlerTest {
                 HttpRequestMethodNotSupportedException.class,
                 HttpMediaTypeNotSupportedException.class,
                 HttpMediaTypeNotAcceptableException.class,
+                MultipartException.class,
+                IllegalArgumentException.class,
                 Exception.class);
     }
 
@@ -1275,6 +1437,11 @@ class GlobalExceptionHandlerTest {
                 new HttpMessageNotWritableException(CAUSE_MESSAGE)));
         invocations.add(handler.handleMethodNotSupported(methodNotSupported()));
         invocations.add(handler.handleUnsupportedMediaType(unsupportedMediaType()));
+        invocations.add(handler.handleMultipartFailure(new MultipartException(CAUSE_MESSAGE)));
+        invocations.add(handler.handleIllegalArgument(new IllegalArgumentException(CAUSE_MESSAGE),
+                requestCarryingContentType("*/*")));
+        invocations.add(handler.handleIllegalArgument(new IllegalArgumentException(CAUSE_MESSAGE),
+                requestCarryingContentType("application/json")));
         invocations.add(handler.handleNotAcceptable(new HttpMediaTypeNotAcceptableException("none")));
         invocations.add(handler.handleUnexpectedException(new RuntimeException(CAUSE_MESSAGE)));
         invocations.add(handler.handleUnexpectedException(new Exception(CAUSE_MESSAGE)));

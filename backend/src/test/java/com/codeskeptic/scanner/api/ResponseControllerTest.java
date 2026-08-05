@@ -36,6 +36,7 @@ import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.PaginatedResponsesDto;
 import com.codeskeptic.scanner.dto.PaginationDto;
 import com.codeskeptic.scanner.dto.ResponseDto;
+import com.codeskeptic.scanner.exception.BadRequestException;
 import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.exception.ResponseGenerationException;
 import com.codeskeptic.scanner.security.JwtService;
@@ -81,6 +82,12 @@ class ResponseControllerTest {
     private static final String GENERATION_FAILED =
             "{\"error\":\"Failed to generate response\"}";
 
+    /** Wire literal of {@code backend/app/api/responses.py:L57}. */
+    private static final String UPDATE_DATA_REQUIRED = "{\"error\":\"Update data is required\"}";
+
+    /** Message the advice serves for a body the converter rejected — DL-092. */
+    private static final String BAD_REQUEST = "{\"error\":\"Bad request\"}";
+
     @Autowired
     private MockMvc mockMvc;
 
@@ -106,6 +113,23 @@ class ResponseControllerTest {
                 .andExpect(jsonPath("$.responses").isArray());
 
         verify(responseService).getPaginatedResponses(1, 10);
+    }
+
+    // A page beyond the queryable offset is answered, not rejected — DL-217, DL-219 — see
+    // docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] page={0}")
+    @ValueSource(ints = {2147483647, 2147483646, 214748366})
+    @DisplayName("answers 200 and passes an out-of-range page through to the service unchanged")
+    void answers200AndPassesAnOutOfRangePageThroughToTheServiceUnchanged(int page) throws Exception {
+        when(responseService.getPaginatedResponses(page, 10)).thenReturn(emptyPage(page, 10));
+
+        mockMvc.perform(get("/responses").param("page", String.valueOf(page))
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.responses").isArray())
+                .andExpect(jsonPath("$.pagination.page").value(page));
+
+        verify(responseService).getPaginatedResponses(page, 10);
     }
 
     @Test
@@ -265,6 +289,62 @@ class ResponseControllerTest {
                         .header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isNotFound())
                 .andExpect(content().json(UPDATE_FAILED, JsonCompareMode.STRICT));
+    }
+
+    @Test
+    @DisplayName("answers 200 when the body carries the approval flag alone")
+    void answers200WhenTheBodyCarriesTheApprovalFlagAlone() throws Exception {
+        when(responseService.updateResponse(eq(RESPONSE_ID), any())).thenReturn(response(false));
+
+        mockMvc.perform(put("/responses/" + RESPONSE_ID).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"is_approved\":false}")
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.is_approved").value(false));
+    }
+
+    // A carried key carries a usable value — DL-082, DL-092 — see docs/DECISION_LOG.md
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"is_approved\":\"true\"}",
+            "{\"is_approved\":\"false\"}",
+            "{\"is_approved\":1}",
+            "{\"is_approved\":null}",
+            "{\"content\":null}",
+            "{\"content\":123}",
+            "{\"content\":true}",
+            "{\"content\":[\"a\"]}",
+            "{\"content\":{\"x\":1}}",
+            "{\"content\":\"valid\",\"is_approved\":\"true\"}"
+    })
+    @DisplayName("answers 400 with the generic envelope when a carried key holds an unusable value")
+    void answers400WithTheGenericEnvelopeWhenACarriedKeyHoldsAnUnusableValue(String body)
+            throws Exception {
+
+        mockMvc.perform(put("/responses/" + RESPONSE_ID).contentType(MediaType.APPLICATION_JSON)
+                        .content(body)
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().json(BAD_REQUEST, JsonCompareMode.STRICT));
+
+        verifyNoInteractions(responseService);
+    }
+
+    // backend/app/api/responses.py:L56-57 — the body-level guard, unchanged by DL-082
+    @ParameterizedTest
+    @ValueSource(strings = { "{}", "{\"isApproved\":true}", "{\"id\":\"9\"}" })
+    @DisplayName("answers 400 with the update-data envelope when the body carries no writable key")
+    void answers400WithTheUpdateDataEnvelopeWhenTheBodyCarriesNoWritableKey(String body)
+            throws Exception {
+
+        when(responseService.updateResponse(eq(RESPONSE_ID), any()))
+                .thenThrow(BadRequestException.updateDataRequired());
+
+        mockMvc.perform(put("/responses/" + RESPONSE_ID).contentType(MediaType.APPLICATION_JSON)
+                        .content(body)
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().json(UPDATE_DATA_REQUIRED, JsonCompareMode.STRICT));
     }
 
     // -------------------------------------------------------------------------

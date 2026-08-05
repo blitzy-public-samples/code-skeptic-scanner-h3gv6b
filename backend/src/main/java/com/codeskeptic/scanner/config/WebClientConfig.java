@@ -15,9 +15,11 @@ import org.springframework.web.reactive.function.client.WebClient;
  * consumer, {@code task.TweetStreamClient}, sets that header per request from the app-only bearer
  * token it holds at runtime — see docs/DECISION_LOG.md DL-191.
  *
- * <p>No response timeout, no read timeout and no codec buffer limit are configured, so the framework
- * defaults apply and the long-lived chunked stream body is neither cut short nor buffered whole — see
- * docs/DECISION_LOG.md DL-193.
+ * <p>No response timeout, no read timeout and no codec buffer limit are configured on the client, so
+ * the framework defaults apply and the long-lived chunked stream body is neither cut short nor
+ * buffered whole — see docs/DECISION_LOG.md DL-193. The two short request/response calls that share
+ * this client — the app-only token exchange and the stream-rules calls — are bounded per request by
+ * {@code task.TweetStreamClient} from {@code scanner.twitter.request-timeout-seconds} — DL-230.
  */
 // Replaces the tweepy.Stream construction at backend/app/tasks/tweet_monitoring.py:L45-51. The
 // transport itself is net-new: the source targeted the retired v1.1 statuses/filter API over the

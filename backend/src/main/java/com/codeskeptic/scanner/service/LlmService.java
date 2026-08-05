@@ -40,14 +40,15 @@ import jakarta.annotation.PreDestroy;
  * <p>The call parameters transcribe the literals passed to {@code Completion.create(...)} at
  * {@code backend/app/services/llm_service.py:L22-25} and reach the request from
  * {@code scanner.openai.max-completion-tokens}, {@code scanner.openai.n} and
- * {@code scanner.openai.temperature}. The first two are always carried. The third is carried only
- * when the key is set, and the key carries no default, so no temperature reaches the request unless
- * a deployment sets one. {@code scanner.openai.reasoning-effort} is carried when it is not blank.
- * The {@code stop=None} argument at {@code :L24} is expressed by setting no stop parameter.
+ * {@code scanner.openai.temperature}, whose defaults are the source's own {@code 150}, {@code 1} and
+ * {@code 0.7}. The first two are always carried; the third is carried whenever the key holds a value,
+ * and a deployment that sets it blank omits the parameter. {@code scanner.openai.reasoning-effort} is
+ * carried when it is not blank. The {@code stop=None} argument at {@code :L24} is expressed by setting
+ * no stop parameter.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-011, DL-032,
- * DL-033, DL-034, DL-035, DL-052, DL-081, DL-083, DL-084, DL-085 and DL-145; construct-level
- * provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * DL-033, DL-034, DL-035, DL-052, DL-081, DL-083, DL-084, DL-085, DL-145, DL-200 and DL-202;
+ * construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  *
  * <p>This is a singleton bean and every member declared here is safe for concurrent use. The client
  * field is written only inside a {@code synchronized (this)} block and read through a
@@ -248,10 +249,10 @@ public class LlmService {
      * <p>{@code scanner.openai.max-completion-tokens} and {@code scanner.openai.n} are always
      * carried and are validated as at least one. {@code scanner.openai.reasoning-effort} is carried
      * when it names one of the values the API accepts, and is omitted when the key is blank.
-     * {@code scanner.openai.temperature} is carried only when the key is set, and is validated to lie
-     * between {@code 0} and {@value #MAXIMUM_TEMPERATURE} inclusive; a reasoning model accepts only
-     * its own default temperature, so leaving the key unset is what keeps the parameter off the
-     * request. No stop parameter is set, expressing the {@code stop=None} argument at
+     * {@code scanner.openai.temperature} is carried whenever the key holds a value, and is validated
+     * to lie between {@code 0} and {@value #MAXIMUM_TEMPERATURE} inclusive; setting the key blank
+     * keeps the parameter off the request, which is what a model that refuses an explicit temperature
+     * requires — DL-200. No stop parameter is set, expressing the {@code stop=None} argument at
      * {@code backend/app/services/llm_service.py:L24}.
      *
      * @param model  the model identifier, never blank

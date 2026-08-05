@@ -242,6 +242,19 @@ class ScannerApplicationTests {
         assertThat(response.getBody()).isNull();
     }
 
+    // The three call literals of backend/app/services/llm_service.py:L22-25 are the shipped
+    // defaults — see docs/DECISION_LOG.md DL-034, DL-145, DL-200, DL-202
+    @Test
+    @DisplayName("binds the source's OpenAI call parameters as the shipped defaults")
+    void bindsTheSourcesOpenaiCallParametersAsTheShippedDefaults() {
+        ScannerProperties.Openai openai = context.getBean(ScannerProperties.class).openai();
+
+        assertThat(openai.maxCompletionTokens()).isEqualTo(150L);
+        assertThat(openai.temperature()).isEqualTo(0.7d);
+        assertThat(openai.n()).isEqualTo(1L);
+        assertThat(openai.reasoningEffort()).isEqualTo("none");
+    }
+
     /**
      * Authenticates the single configured principal and returns the token minted for it.
      *

@@ -3,8 +3,13 @@ package com.codeskeptic.scanner.config;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -17,6 +22,11 @@ import org.springframework.http.MediaType;
 import org.springframework.http.client.ClientHttpResponse;
 import org.springframework.mock.http.client.MockClientHttpResponse;
 import org.springframework.web.client.RestClient;
+
+import com.sun.net.httpserver.HttpServer;
+
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 // Net-new (no Python counterpart; notion_client built its own headers) — DL-151, DL-195 — see
 // docs/DECISION_LOG.md
@@ -32,6 +42,15 @@ class RestClientConfigTest {
     private static final String API_KEY = "secret-notion-key";
 
     private static final String DEFAULT_API_VERSION = "2022-06-28";
+
+    /** Address the in-process server binds to. */
+    private static final String LOOPBACK = "127.0.0.1";
+
+    /** Port number that asks the operating system for a free port. */
+    private static final int EPHEMERAL_PORT = 0;
+
+    /** Longest the in-process exchange is waited for. */
+    private static final Duration REQUEST_LIMIT = Duration.ofSeconds(20);
 
     private final List<HttpHeaders> captured = new ArrayList<>();
 
@@ -133,6 +152,46 @@ class RestClientConfigTest {
         assertThat(headers.getFirst(HttpHeaders.CONTENT_TYPE))
                 .isEqualTo(MediaType.APPLICATION_JSON_VALUE);
         assertThat(headers.getFirst(HttpHeaders.ACCEPT)).isEqualTo(MediaType.APPLICATION_JSON_VALUE);
+    }
+
+    // Named transport, so a call behaves the same on any thread — see docs/DECISION_LOG.md DL-221
+    @Test
+    @DisplayName("carries a request issued from a reactive non-blocking thread")
+    void carriesARequestIssuedFromAReactiveNonBlockingThread() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress(LOOPBACK, EPHEMERAL_PORT), 0);
+        List<String> paths = new CopyOnWriteArrayList<>();
+        server.createContext("/", exchange -> {
+            paths.add(exchange.getRequestURI().getPath());
+            byte[] body = "{\"id\":\"page-1\"}".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE,
+                    MediaType.APPLICATION_JSON_VALUE);
+            exchange.sendResponseHeaders(HttpStatus.OK.value(), body.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(body);
+            }
+        });
+        server.start();
+        try {
+            RestClient client = new RestClientConfig(propertiesCarrying(notion(API_KEY,
+                    DEFAULT_API_VERSION)))
+                    .notionRestClient(RestClient.builder())
+                    .mutate()
+                    .baseUrl("http://" + LOOPBACK + ":" + server.getAddress().getPort())
+                    .build();
+
+            String body = Mono.fromCallable(() -> client.post()
+                            .uri("/v1/pages")
+                            .body("{}")
+                            .retrieve()
+                            .body(String.class))
+                    .subscribeOn(Schedulers.parallel())
+                    .block(REQUEST_LIMIT);
+
+            assertThat(body).isEqualTo("{\"id\":\"page-1\"}");
+            assertThat(paths).containsExactly("/v1/pages");
+        } finally {
+            server.stop(0);
+        }
     }
 
     /**

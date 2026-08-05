@@ -33,6 +33,14 @@ import com.codeskeptic.scanner.task.ResponseGenerationScheduler;
  * table takes precedence, and {@code scanner.response-generation-delay-seconds} applies when that row
  * is absent or does not hold a positive number of seconds — DL-192.
  *
+ * <p>This class is the only reader of that row on the scheduling path, and it reads it exactly
+ * once per pass: the pass itself resolves no interval and defers no work — DL-227.
+ *
+ * <p>The row is read when the next execution instant is computed, which happens at the completion
+ * of a pass. An instant already computed is not recomputed, so an edit made while the scheduler is
+ * waiting does not move the pass that is already scheduled; it paces every pass after it — see
+ * docs/DECISION_LOG.md DL-228.
+ *
  * <p>No pool size, shutdown policy, termination wait or cancellation policy is set on the scheduler:
  * the {@link ThreadPoolTaskScheduler} defaults apply unchanged. {@code @EnableAsync} is not declared.
  * No message broker, queue, distributed scheduler lock, {@code ApplicationRunner} or
@@ -153,6 +161,9 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
 
     /**
      * Computes when the next response-generation pass starts.
+     *
+     * <p>The instant is computed once per pass, from the interval in force at that moment. It is not
+     * revised while the scheduler waits for it — see docs/DECISION_LOG.md DL-228.
      *
      * @param context the completion of the previous pass, or an empty context before the first one
      * @return the interval in force added to the previous pass's completion, or to the current instant

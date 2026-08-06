@@ -101,7 +101,7 @@ public final class LogSafe {
         return logSafe(value, LOG_VALUE_LIMIT);
     }
 
-    // Log-injection guard with a caller-chosen bound — see docs/DECISION_LOG.md DL-149, DL-246
+    // Log-injection guard with a caller-chosen bound — see docs/DECISION_LOG.md DL-149, DL-197
     /**
      * Renders a caller-supplied or externally supplied value for a log record, truncated to a bound
      * the caller chooses.

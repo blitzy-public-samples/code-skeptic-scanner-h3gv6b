@@ -29,18 +29,17 @@ import org.junit.jupiter.api.Test;
  * {@code docs/DECISION_LOG.md}.
  *
  * <p>Rule 1 makes the decision log the single source of truth for rationale and allows a comment to
- * carry a pointer to it. A pointer naming an identifier the log does not define, or naming one whose
- * row was renumbered, breaks that contract with no other signal. This class turns that into a build
- * failure.
+ * carry a pointer to it. This class fails the build on a pointer naming an identifier the log does not
+ * define and on a pointer naming one whose row was renumbered.
  *
  * <p>Three properties are asserted:
  *
  * <ul>
  *   <li>every {@code DL-<n>} cited anywhere in the scanned set resolves to a row in the log;</li>
- *   <li>the log's own identifiers are unique and contiguous from {@code DL-001}, so a pointer can
- *       never resolve to two rows and a renumbering cannot leave a hole;</li>
- *   <li>the scan actually reached the files it claims to, so the check cannot pass by scanning
- *       nothing.</li>
+ *   <li>the log's own identifiers are unique and contiguous from {@code DL-001} — no pointer resolves
+ *       to two rows, and a renumbering leaves no hole;</li>
+ *   <li>the scan actually reached the files it claims to, and the check does not pass on an empty
+ *       set.</li>
  * </ul>
  *
  * <p>The scanned set is the Maven module — {@code src}, {@code pom.xml}, {@code docs} and the two

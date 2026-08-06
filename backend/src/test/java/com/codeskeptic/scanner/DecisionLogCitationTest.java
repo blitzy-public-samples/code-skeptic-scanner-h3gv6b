@@ -32,8 +32,8 @@ import org.junit.jupiter.api.Test;
  * identifier written in a source file, a resource, the POM or {@code docs/TRACEABILITY_MATRIX.md} the
  * only route from that artifact to its reasoning. A citation that resolves to no row, a row that
  * carries an empty column, a gap in the identifier sequence and a stated population that disagrees
- * with the delivered one are each a broken route, and each is decidable by reading the files — which
- * is what this class does.
+ * with the delivered one are each a broken route. This class reads the files and asserts against each
+ * of them.
  *
  * <p>Ten properties are asserted:
  *
@@ -108,8 +108,8 @@ class DecisionLogCitationTest {
     /**
      * Wordings that state the grounds of a choice: the first group of {@link #RATIONALE_POLICY}.
      *
-     * <p>Each one introduces the ground a construct exists on. The log's Rationale column carries that
-     * content.
+     * <p>Each one introduces the ground a construct exists on. That content belongs to the log's
+     * Rationale column.
      */
     private static final List<String> GROUNDS_WORDINGS = List.of(
             "because", "so that", "therefore", "for that reason", "for this reason",
@@ -121,8 +121,8 @@ class DecisionLogCitationTest {
      * Wordings that weigh one option against another: the second group of {@link #RATIONALE_POLICY}.
      *
      * <p>Each one names an option that was available and the standing of the delivered one beside it.
-     * The log's Alternatives column carries that content. A comment states one behaviour and, where a
-     * second behaviour is part of the same contract, states it as its own claim.
+     * That content belongs to the log's Alternatives column. A comment states one behaviour, and states
+     * a second behaviour of the same contract as its own claim.
      */
     private static final List<String> COMPARISON_WORDINGS = List.of(
             "rather than", "instead of", "in preference to", "in favour of", "in favor of",
@@ -134,8 +134,8 @@ class DecisionLogCitationTest {
      * Wordings that describe an outcome the tree does not produce: the third group of
      * {@link #RATIONALE_POLICY}.
      *
-     * <p>Each one places a claim in a state of affairs other than the delivered one. A comment states
-     * the delivered behaviour in the indicative.
+     * <p>Each one places a claim in a state of affairs other than the delivered one. A comment carries the
+     * delivered behaviour in the indicative.
      */
     private static final List<String> COUNTERFACTUAL_WORDINGS = List.of(
             "would", "could have", "might have", "were it", "if it were", "had it been",
@@ -144,9 +144,9 @@ class DecisionLogCitationTest {
     /**
      * Wordings that appraise a construct: the fourth group of {@link #RATIONALE_POLICY}.
      *
-     * <p>Each one rates a cost, a hazard, a gain or a sufficiency. The log's last two content columns
-     * carry that content. The noun naming the last of those columns is absent from this group, and
-     * DL-058 records why.
+     * <p>Each one rates a cost, a hazard, a gain or a sufficiency. That content belongs to the log's last
+     * two content columns. The noun naming the last of those columns is absent from this group —
+     * DL-058.
      */
     private static final List<String> APPRAISAL_WORDINGS = List.of(
             "at the cost of", "trade-off", "tradeoff", "trade off", "downside", "drawback",
@@ -158,8 +158,8 @@ class DecisionLogCitationTest {
     /**
      * Wordings that place an obligation on a reader: the fifth group of {@link #RATIONALE_POLICY}.
      *
-     * <p>Each one addresses the reader. A comment states what the code does and leaves an operator
-     * obligation to the log and to the configuration documentation.
+     * <p>Each one addresses the reader. A comment carries what the code does; an operator obligation
+     * belongs to the log and to the configuration documentation.
      */
     private static final List<String> DIRECTIVE_WORDINGS = List.of(
             "must configure", "beware", "caution", "take care", "remember to", "ought to",
@@ -168,7 +168,7 @@ class DecisionLogCitationTest {
     /**
      * Wordings that assert an author's intent: the sixth group of {@link #RATIONALE_POLICY}.
      *
-     * <p>Each one asserts an author's intent, which is a claim about an author and not about the
+     * <p>Each one asserts an author's intent — a claim about an author, and not a claim about the
      * code.
      */
     private static final List<String> INTENT_WORDINGS = List.of(
@@ -184,10 +184,13 @@ class DecisionLogCitationTest {
      * the identifier of the log entry that governs it — DL-058.
      *
      * <p>The scan decides wordings and not meaning: it is a floor under Rule 1 and not a proof of it.
-     * Each group is matched case-insensitively as a substring of one joined comment run, so a wording
+     * Each group is matched case-insensitively as a substring of one joined comment run, and a wording
      * split over a line break is read as one text.
+     *
+     * <p>{@code DocumentationConsistencyTest} holds {@code docs/TRACEABILITY_MATRIX.md} to the same
+     * policy, which is the reason this field is visible in the package — DL-058.
      */
-    private static final Map<String, List<String>> RATIONALE_POLICY = Map.of(
+    static final Map<String, List<String>> RATIONALE_POLICY = Map.of(
             "grounds of a choice", GROUNDS_WORDINGS,
             "comparison of options", COMPARISON_WORDINGS,
             "counterfactual state", COUNTERFACTUAL_WORDINGS,

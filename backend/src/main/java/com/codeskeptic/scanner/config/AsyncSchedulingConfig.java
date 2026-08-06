@@ -40,17 +40,17 @@ import com.codeskeptic.scanner.util.LogSafe;
  * table takes precedence, and {@code scanner.response-generation-delay-seconds} applies when that row
  * is absent or does not hold a positive number of seconds — DL-227.
  *
- * <p>The scheduler carries a pool of {@value #POOL_SIZE} threads — one for the generation pass
- * and one for the ownership renewal, so a pass that runs long cannot delay a renewal and let the
- * lease lapse (DL-281) — and at shutdown it stops accepting
- * work and awaits a pass that is already running for up to {@value #SHUTDOWN_AWAIT_SECONDS} seconds.
+ * <p>The scheduler carries a pool of {@value #POOL_SIZE} threads: the generation pass runs on one and
+ * the ownership renewal of {@code task/BackgroundOwnership} on the other — DL-281. At shutdown it
+ * stops accepting work and awaits a pass that is already running for up to
+ * {@value #SHUTDOWN_AWAIT_SECONDS} seconds.
  * The cancellation policy is left at the {@link ThreadPoolTaskScheduler} default.
  * {@code @EnableAsync} is not declared. No message broker, queue, distributed scheduler lock,
  * {@code ApplicationRunner} or {@code CommandLineRunner} is declared here — DL-251.
  *
  * <p>The row is read when the next execution instant is computed, which happens at the completion
- * of a pass. An instant already computed is not recomputed, so an edit made while the scheduler is
- * waiting does not move the pass that is already scheduled; it paces every pass after it — see
+ * of a pass. An instant already computed is not recomputed: an edit made while the scheduler is
+ * waiting leaves the pass already scheduled where it is and paces every pass after it — see
  * docs/DECISION_LOG.md DL-228.
  *
  * <p>The pass is registered only in a process that runs it: {@code scanner.background.enabled} and
@@ -60,9 +60,9 @@ import com.codeskeptic.scanner.util.LogSafe;
  * <p>The first pass runs immediately, and not one interval after startup, matching the
  * work-then-sleep order of {@code backend/app/tasks/response_generation.py:L41-50}. A resolved interval
  * is read within {@value #MINIMUM_DELAY_SECONDS} second and {@value #MAXIMUM_DELAY_SECONDS} seconds, a
- * settings read that fails leaves the configured value in force, and no failure of the trigger can
- * leave the task unscheduled. Each of those three conditions is a standing one, so each is recorded at
- * {@code WARN} once per process and not once per pass — see docs/DECISION_LOG.md DL-251.
+ * settings read that fails leaves the configured value in force, and no failure of the trigger leaves
+ * the task unscheduled. Each of those three conditions is a standing one and is recorded at
+ * {@code WARN} once per process, never once per pass — see docs/DECISION_LOG.md DL-251.
  *
  * <p>This is a singleton configuration class holding its two collaborators in {@code final} fields;
  * every member declared here is safe for concurrent use.

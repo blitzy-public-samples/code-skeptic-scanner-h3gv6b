@@ -264,7 +264,7 @@ class GlobalExceptionHandlerTest {
         assertThat(envelopeOf(response).toString()).doesNotContain(CAUSE_MESSAGE);
     }
 
-    // The public outcome is recorded once; the ERROR owner sits upstream — DL-252 — see
+    // The public outcome is recorded once; the ERROR owner sits upstream — DL-084, DL-197 — see
     // docs/DECISION_LOG.md
     @Test
     @DisplayName("records the generation outcome once at WARN, naming the cause class only")
@@ -292,7 +292,7 @@ class GlobalExceptionHandlerTest {
         }
     }
 
-    // The public outcome is recorded once; the ERROR owner sits upstream — DL-252 — see
+    // The public outcome is recorded once; the ERROR owner sits upstream — DL-084, DL-197 — see
     // docs/DECISION_LOG.md
     @Test
     @DisplayName("records no ERROR for a generation failure the failing layer already reported")

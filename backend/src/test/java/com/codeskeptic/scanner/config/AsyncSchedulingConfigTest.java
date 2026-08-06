@@ -210,8 +210,7 @@ class AsyncSchedulingConfigTest {
     @DisplayName("paces the renewal at the configured interval")
     void pacesTheRenewalAtTheConfiguredInterval() {
         AsyncSchedulingConfig worker = configWithBackground(
-                new ScannerProperties.Background(true, true, true, 200L, 40L, 200, 500, 3_600L, 5,
-                        300L));
+                new ScannerProperties.Background(true, true, true, 200L, 40L, 200));
         ScheduledTaskRegistrar registrar = new ScheduledTaskRegistrar();
 
         worker.configureTasks(registrar);

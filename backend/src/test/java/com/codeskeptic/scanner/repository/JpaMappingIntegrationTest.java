@@ -1506,8 +1506,8 @@ class JpaMappingIntegrationTest {
      * <p>Termination is awaited for at most {@value #EXECUTOR_TERMINATION_SECONDS} seconds. A thread
      * still running at that bound fails the test and is not left behind for the rest of the
      * build holding a JDBC connection from the pool. An interrupt while awaiting is
-     * restored on the calling thread and reported, so the interrupt is neither swallowed nor mistaken
-     * for a clean termination.
+     * restored on the calling thread and reported as a failure; it is never reported as a clean
+     * termination.
      *
      * @param executor the executor to release
      */

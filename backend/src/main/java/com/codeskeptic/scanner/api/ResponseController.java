@@ -80,7 +80,7 @@ import com.codeskeptic.scanner.util.QueryParameters;
  *       {@code :L40} read as false — {@code null}, {@code ""}, a zero, {@code false}, an empty array
  *       and an empty object — on {@code POST /responses};
  *       {@code MethodArgumentNotValidException} is raised instead when the body carries no
- *       {@code tweet_id} member, and both are answered with 400 and that literal — DL-240.</li>
+ *       {@code tweet_id} member, and both are answered with 400 and that literal — DL-286.</li>
  *   <li>{@code ResponseGenerationException} carrying {@code Failed to generate response}, the wire
  *       literal of {@code backend/app/api/responses.py:L49}, for every failure past that guard on
  *       {@code POST /responses} — answered with 500.</li>
@@ -243,7 +243,7 @@ public class ResponseController {
         return ResponseEntity.ok(responseService.getResponseById(responseId));
     }
 
-    // Ported from backend/app/api/responses.py:L33-49 (faithful port) — DL-050, DL-076, DL-240 — see
+    // Ported from backend/app/api/responses.py:L33-49 (faithful port) — DL-050, DL-076, DL-286 — see
     // docs/DECISION_LOG.md
     /**
      * Generates a reply to one {@code tweets} row, stores it, and renders the stored row.
@@ -265,7 +265,7 @@ public class ResponseController {
      * applies the {@code if not tweet_id} guard at {@code :L40} to the raw JSON value: {@code null},
      * {@code ""}, {@code 0}, {@code 0.0}, {@code -0.0}, {@code false}, {@code []} and {@code {}} each
      * reach the service as {@code null} and are answered with 400 and that same literal, before any
-     * identifier is parsed and before generation is attempted — DL-240. Every other value reaches
+     * identifier is parsed and before generation is attempted — DL-286. Every other value reaches
      * generation as text.
      *
      * <p>This route declares no 404 branch: every failure past the guard is answered with 500 and the
@@ -277,7 +277,7 @@ public class ResponseController {
     @PostMapping("/responses")
     public ResponseEntity<ResponseDto> generateResponse(
             @Valid @RequestBody(required = false) CreateResponseRequest request) {
-        // backend/app/api/responses.py:L38,L40 — the guard reads the decoded value — DL-240
+        // backend/app/api/responses.py:L38,L40 — the guard reads the decoded value — DL-286
         String tweetId = (request == null) ? null : request.usableTweetId();
 
         ResponseDto generated = responseService.generateResponse(tweetId);

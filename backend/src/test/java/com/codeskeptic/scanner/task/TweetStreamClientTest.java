@@ -72,19 +72,20 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
+// Supersedes backend/tests/test_tasks.py, whose `from backend.tasks import monitor_tweets` at :L3
+// named a module and symbols that never existed — DL-214, DL-216 — see docs/DECISION_LOG.md
 /**
- * Verifies {@link TweetStreamClient} against a controlled {@link ExchangeFunction}, so no test reaches
- * a network.
+ * Verifies {@link TweetStreamClient} against a controlled {@link ExchangeFunction}. No test reaches a
+ * network.
  *
- * <p>Every exchange is recorded, which is what lets the structural claims be asserted: that only the
- * four X paths of {@code AAP §0.6.2.1} are reached, that {@code POST} reaches only the token and rules
- * paths, and that no publish, reply or retweet path exists.
+ * <p>Every exchange is recorded, and the recording carries the structural claims: the only X paths
+ * reached are {@value #TOKEN_PATH}, {@value #RULES_PATH} and {@value #STREAM_PATH}; {@code POST}
+ * reaches the token and rules paths alone; and no publish, reply or retweet path is reached — DL-046,
+ * DL-214.
  *
  * <p>The class under test replaces {@code start_tweet_stream()} at
  * {@code backend/app/tasks/tweet_monitoring.py:L36-55} and the {@code pass} stub
- * {@code stream_tweets} at {@code backend/app/services/twitter_service.py:L16-23}. It supersedes
- * {@code backend/tests/test_tasks.py}, whose {@code from backend.tasks import monitor_tweets} at
- * {@code :L3} named a module and symbols that never existed.
+ * {@code stream_tweets} at {@code backend/app/services/twitter_service.py:L16-23}.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -408,7 +409,7 @@ class TweetStreamClientTest {
                     .containsOnly(TOKEN_PATH, RULES_PATH);
         }
 
-        // The stream body carries no total-response bound — DL-193, DL-230 — see docs/DECISION_LOG.md
+        // The stream body carries no total-response bound — DL-230 — see docs/DECISION_LOG.md
         @Test
         @DisplayName("does not bound the filtered stream: a connection quieter than the bound keeps "
                 + "delivering")

@@ -11,18 +11,18 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * <p>This record is the complete set of pool settings a deployment may supply. It carries pool
  * geometry and pool timing only: no JDBC URL, no username, no password, no driver or data-source
  * class name, no catalog or schema, no connection-initialisation statement and no free-form
- * driver-property map. A setting that is not a component of this record is not configurable, so no
- * deployment value can redirect the pool away from the connection identity
- * {@link DatabaseUrlTranslator} derived from {@code scanner.database-url} — DL-270.
+ * driver-property map. A setting that is not a component of this record is not configurable, and the
+ * connection identity stays the one {@link DatabaseUrlTranslator} derived from
+ * {@code scanner.database-url} — DL-270.
  *
  * <p>Values bind from {@code src/main/resources/application.yml} under the
  * {@code scanner.datasource.pool} prefix. Spring's relaxed binding maps each kebab-case key onto the
  * matching camelCase component and accepts the {@code SCREAMING_SNAKE} environment-variable form of
- * the same key, so every bound is deployment-tunable without a code change — DL-271.
+ * the same key — DL-271.
  *
  * <p>Every component is range-checked by the compact constructor below, which refuses a value
- * outside its accepted range and substitutes none. The accepted ranges are those HikariCP itself
- * enforces, plus one ceiling of {@value #MAXIMUM_SIZE_CEILING} on the pool size — see
+ * outside its accepted range and substitutes none. Each accepted range is the one HikariCP enforces,
+ * with a ceiling of {@value #MAXIMUM_SIZE_CEILING} on the pool size — see
  * docs/DECISION_LOG.md DL-271. A failure message names the key and the offending number; no
  * connection identity appears in it — DL-052.
  *

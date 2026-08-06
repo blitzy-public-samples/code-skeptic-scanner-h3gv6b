@@ -55,11 +55,10 @@ import com.fasterxml.jackson.databind.JsonNode;
  * {@code tweets.doubt_rating} is produced by
  * {@link SentimentAnalysisService#calculateDoubtRating(double)}.
  *
- * <p>Paid provider work is bounded before it starts. A record that passes the popularity gate takes
- * one unit of {@code task/ProviderWorkBudget} ahead of the sentiment call, and a refused unit skips
- * the record entirely: no sentiment score is obtained, no row is stored, nothing is mirrored and no
- * generation is triggered. The unit's outcome is reported from the sentiment call, so a provider that
- * keeps failing opens the circuit and the following records are refused until it closes — DL-283.
+ * <p>A record that passes the popularity gate reaches the sentiment call directly: no allowance,
+ * window, attempt counter or failure circuit stands between the two. A sentiment call that raises is
+ * named at {@code DEBUG} and the record is skipped — no row is stored, nothing is mirrored and no
+ * generation is triggered — and the next delivered record reaches the sentiment call in the same way.
  *
  * <p>Ingestion stores every accepted record: no stored row is read back for comparison and no
  * identifier of the delivered record is matched against the table. A record delivered twice stores
@@ -148,9 +147,6 @@ public class TweetStreamListener {
 
     private final TweetMapper tweetMapper;
 
-    /** Grants or refuses the paid provider work of one record — DL-283. */
-    private final ProviderWorkBudget providerWorkBudget;
-
     /**
      * Creates the component with its six collaborators.
      *
@@ -173,8 +169,7 @@ public class TweetStreamListener {
             TweetRepository tweetRepository,
             ResponseService responseService,
             NotionService notionService,
-            TweetMapper tweetMapper,
-            ProviderWorkBudget providerWorkBudget) {
+            TweetMapper tweetMapper) {
         this.twitterService = Objects.requireNonNull(twitterService,
                 "twitterService must not be null.");
         this.sentimentAnalysisService = Objects.requireNonNull(sentimentAnalysisService,
@@ -186,8 +181,6 @@ public class TweetStreamListener {
         this.notionService = Objects.requireNonNull(notionService,
                 "notionService must not be null.");
         this.tweetMapper = Objects.requireNonNull(tweetMapper, "tweetMapper must not be null.");
-        this.providerWorkBudget = Objects.requireNonNull(providerWorkBudget,
-                "providerWorkBudget must not be null.");
     }
 
     // Ported from on_status at backend/app/tasks/tweet_monitoring.py:L15-34 (faithful port of
@@ -325,22 +318,11 @@ public class TweetStreamListener {
             return true;
         }
 
-        // Provider allowance and circuit, applied before the first charged call of the record —
-        // DL-283 — see docs/DECISION_LOG.md
-        if (!providerWorkBudget.tryAcquire()) {
-            // task/ProviderWorkBudget owns the record of the refusal — DL-197, DL-283 — see
-            // docs/DECISION_LOG.md
-            log.debug("Skipping a stream record: the provider work budget refused its work.");
-            return true;
-        }
-
         double doubtRating;
         try {
             double sentimentScore = sentimentAnalysisService.analyzeSentiment(text);
             doubtRating = sentimentAnalysisService.calculateDoubtRating(sentimentScore);
-            providerWorkBudget.recordSuccess();
         } catch (RuntimeException failure) {
-            providerWorkBudget.recordFailure();
             // service/SentimentAnalysisService owns the failure record — see
             // docs/DECISION_LOG.md DL-197
             log.debug("Skipping a stream record: obtaining its doubt rating failed with {}.",

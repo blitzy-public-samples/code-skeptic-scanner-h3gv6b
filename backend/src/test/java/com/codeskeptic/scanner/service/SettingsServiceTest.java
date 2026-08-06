@@ -1343,8 +1343,8 @@ class SettingsServiceTest {
      *
      * <p>Termination is awaited for at most {@value #CONCURRENCY_TIMEOUT_SECONDS} seconds. A thread
      * still running at that bound fails the test and is not left behind for the rest of the
-     * build. An interrupt while awaiting is restored on the calling thread and reported, so the
-     * interrupt is neither swallowed nor mistaken for a clean termination.
+     * build. An interrupt while awaiting is restored on the calling thread and reported as a
+     * failure; it is never reported as a clean termination.
      *
      * @param executor the executor to release
      */

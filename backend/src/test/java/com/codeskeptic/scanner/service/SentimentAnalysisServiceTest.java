@@ -111,6 +111,8 @@ class SentimentAnalysisServiceTest {
     // Natural Language client acquisition
     // ---------------------------------------------------------------------
 
+    // The client is reached on first use and not at construction — DL-288 — see
+    // docs/DECISION_LOG.md
     @Test
     @DisplayName("constructing the service reaches the language client accessor zero times")
     void constructingTheServiceReachesTheLanguageClientAccessorZeroTimes() {
@@ -549,6 +551,7 @@ class SentimentAnalysisServiceTest {
         }
     }
 
+    // The accessor a subclass supplies the client through — DL-288 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("leaves the client accessor open to a subclass")
     void leavesTheClientAccessorOpenToASubclass() throws NoSuchMethodException {

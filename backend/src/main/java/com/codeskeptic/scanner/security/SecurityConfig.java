@@ -11,7 +11,6 @@ import java.nio.charset.UnsupportedCharsetException;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -36,7 +35,6 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.header.HeaderWriter;
 import org.springframework.security.web.header.writers.CacheControlHeadersWriter;
@@ -117,13 +115,11 @@ import jakarta.servlet.http.HttpServletResponse;
  * envelopes of {@code backend/app/main.py:L31-37} and is reached only by exceptions raised inside the
  * {@code DispatcherServlet}.
  *
- * <p>Two request-body bounds are enforced inside the chain, both before any converter reads a body.
+ * <p>One request-body bound is enforced inside the chain, before any converter reads a body:
  * {@code POST /auth/token} accepts at most 4096 encoded bytes and answers a larger body with the
- * route's own empty 401 — DL-118. Every other request that carries a body accepts at most 65536
- * encoded bytes and answers a larger body with 400 and {@code {"error":"Bad request"}}, the body the
- * {@code ErrorAttributes} bean of {@code com.codeskeptic.scanner.api.GlobalExceptionHandler} renders
- * for a dispatched 400 — DL-183. The second bound runs after authorization: an unauthenticated
- * request is answered with the bare 401 first.
+ * route's own empty 401 — DL-118. The eleven pre-existing routes carry no body-size bound of this
+ * chain's making; a body they accept is bounded only by the container and by the request-header bound
+ * {@code server.max-http-request-header-size} declares.
  *
  * <p>Response headers are the Spring Security defaults, with {@code Strict-Transport-Security}
  * declared explicitly at the values the framework's own writer carries — a one-year lifetime,
@@ -181,25 +177,6 @@ public class SecurityConfig {
 
     /** Maximum encoded size of the JSON body accepted by {@code POST /auth/token} — DL-118. */
     private static final int MAXIMUM_LOGIN_REQUEST_BYTES = 4_096;
-
-    // Applies to every authenticated route the bound DL-118 places on POST /auth/token — see
-    // docs/DECISION_LOG.md DL-118
-    /**
-     * Maximum encoded size of the request body accepted on an authenticated route that carries one:
-     * sixteen times {@value #MAXIMUM_LOGIN_REQUEST_BYTES}, the bound the token route carries.
-     *
-     * <p>The bound is enforced before any converter reads the body: a larger body is neither
-     * deserialized nor allocated in full. The retired schemas and the retired {@code String} columns
-     * declared no length — DL-118.
-     */
-    private static final int MAXIMUM_REQUEST_BODY_BYTES = 65_536;
-
-    /**
-     * Request methods that carry no body, on which {@link RequestBodyLimitFilter} does nothing.
-     */
-    private static final Set<String> BODYLESS_METHODS =
-            Set.of(HttpMethod.GET.name(), HttpMethod.HEAD.name(), HttpMethod.OPTIONS.name(),
-                    HttpMethod.TRACE.name());
 
     // Net-new (no Python counterpart) — see docs/DECISION_LOG.md
     /**
@@ -294,9 +271,8 @@ public class SecurityConfig {
      * off; two authorization rules — {@code POST /auth/token} permitted and every other request
      * authenticated; the bearer-aware {@code 401} entry point;
      * {@link JwtAuthenticationFilter} positioned ahead of
-     * {@link UsernamePasswordAuthenticationFilter}; and the two request-body bounds, the login bound
-     * ahead of {@link UsernamePasswordAuthenticationFilter} and the general bound behind
-     * {@link AuthorizationFilter}.
+     * {@link UsernamePasswordAuthenticationFilter}; and the login body bound, also ahead of
+     * {@link UsernamePasswordAuthenticationFilter}.
      *
      * <p>Disabling logout removes the {@code /logout} route Spring Security otherwise installs and
      * permits for every method — DL-114. With logout off, {@code POST /auth/token} is the only route
@@ -338,8 +314,7 @@ public class SecurityConfig {
                 .addFilterBefore(
                         new JwtAuthenticationFilter(jwtService, securityContextRepository,
                                 userDetailsService()),
-                        UsernamePasswordAuthenticationFilter.class)
-                .addFilterAfter(new RequestBodyLimitFilter(), AuthorizationFilter.class);
+                        UsernamePasswordAuthenticationFilter.class);
 
         log.info("Security filter chain built: POST {} is permitted unauthenticated; logout is "
                 + "disabled; every other request requires an authenticated principal, answered with "
@@ -593,62 +568,6 @@ public class SecurityConfig {
         private static void rejectOversizedLoginRequest(HttpServletResponse response) {
             response.setStatus(HttpStatus.UNAUTHORIZED.value());
             response.setContentLength(0);
-        }
-    }
-
-    // Applies to every authenticated route that carries a body the bound DL-118 places on
-    // POST /auth/token — see docs/DECISION_LOG.md DL-118, DL-183
-    /**
-     * Bounds the encoded request body on an authenticated route before any converter reads it.
-     *
-     * <p>The filter runs after {@link AuthorizationFilter}, so a request that carries no
-     * authenticated principal is answered with the chain's bare 401 and never reaches this bound. It
-     * does nothing on a request whose method carries no body, and nothing on
-     * {@code POST /auth/token}, which {@link LoginRequestBodyLimitFilter} bounds at the smaller
-     * {@value #MAXIMUM_LOGIN_REQUEST_BYTES} bytes.
-     *
-     * <p>A declared {@code Content-Length} above {@value #MAXIMUM_REQUEST_BODY_BYTES} is rejected
-     * without reading the body at all. A body whose length is not declared is read to at most
-     * {@value #MAXIMUM_REQUEST_BODY_BYTES} plus one bytes, and rejected if that many arrive. An
-     * accepted body is replayed to Spring MVC through {@link CachedBodyRequest}.
-     *
-     * <p>Rejection calls {@link HttpServletResponse#sendError(int)} with 400, which the container
-     * re-dispatches to the framework's own error controller; the {@code ErrorAttributes} bean of
-     * {@code api.GlobalExceptionHandler} renders {@code {"error":"Bad request"}} there — the same
-     * status and the same body that advice returns for a request the converters cannot read. No wire
-     * literal is written here — DL-183.
-     */
-    private static final class RequestBodyLimitFilter extends OncePerRequestFilter {
-
-        @Override
-        protected boolean shouldNotFilter(HttpServletRequest request) {
-            return BODYLESS_METHODS.contains(request.getMethod())
-                    || TOKEN_ENDPOINT_MATCHER.matches(request);
-        }
-
-        @Override
-        protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
-                FilterChain filterChain) throws ServletException, IOException {
-            if (request.getContentLengthLong() > MAXIMUM_REQUEST_BODY_BYTES) {
-                rejectOversizedRequest(request, response);
-                return;
-            }
-
-            byte[] body = request.getInputStream().readNBytes(MAXIMUM_REQUEST_BODY_BYTES + 1);
-            if (body.length > MAXIMUM_REQUEST_BODY_BYTES) {
-                rejectOversizedRequest(request, response);
-                return;
-            }
-
-            filterChain.doFilter(new CachedBodyRequest(request, body), response);
-        }
-
-        private static void rejectOversizedRequest(HttpServletRequest request,
-                HttpServletResponse response) throws IOException {
-
-            log.warn("Rejected a {} request whose body exceeded {} bytes",
-                    request.getMethod(), MAXIMUM_REQUEST_BODY_BYTES);
-            response.sendError(HttpStatus.BAD_REQUEST.value());
         }
     }
 

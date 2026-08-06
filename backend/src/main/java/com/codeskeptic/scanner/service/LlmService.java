@@ -124,7 +124,7 @@ public class LlmService {
      * The reasoning-effort values the configured GPT-5.x model accepts. It is narrower than the
      * SDK-global {@link ReasoningEffort.Value} set, which the client carries for every model it can
      * address: {@code minimal} is refused by the configured model with HTTP 400
-     * {@code unsupported_value}, and it is rejected here and never sent — DL-145, DL-245.
+     * {@code unsupported_value}, and it is rejected here and never sent — DL-145, DL-200.
      */
     private static final Set<ReasoningEffort.Value> ACCEPTED_REASONING_EFFORT_VALUES =
             Collections.unmodifiableSet(EnumSet.of(
@@ -319,9 +319,8 @@ public class LlmService {
      * carried and are validated as at least one. {@code scanner.openai.reasoning-effort} is carried
      * when it names one of the values the API accepts, and is omitted when the key is blank.
      * {@code scanner.openai.temperature} is carried whenever the key holds a value, and is validated
-     * to lie between {@code 0} and {@value #MAXIMUM_TEMPERATURE} inclusive; setting the key blank
-     * keeps the parameter off the request, which is what a model that refuses an explicit temperature
-     * requires — DL-200. No stop parameter is set, expressing the {@code stop=None} argument at
+     * to lie between {@code 0} and {@value #MAXIMUM_TEMPERATURE} inclusive; a blank key leaves the
+     * parameter off the request altogether — DL-200. No stop parameter is set, expressing the {@code stop=None} argument at
      * {@code backend/app/services/llm_service.py:L24}.
      *
      * @param model  the model identifier, never blank

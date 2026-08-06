@@ -19,15 +19,17 @@ import org.springframework.test.context.ActiveProfiles;
 
 import com.codeskeptic.scanner.ScannerApplication;
 
-// Net-new (no source construct): the retired suite had no configuration and started no server \u2014
-// see docs/DECISION_LOG.md DL-118, DL-183
+// Net-new (no Python counterpart: the retired suite declared no configuration and started no
+// server) — see docs/DECISION_LOG.md DL-118
 /**
- * Exercises the two request-body bounds the security chain enforces, against a running server.
+ * Exercises the one request-body bound the security chain enforces, against a running server.
  *
- * <p>The bounds are enforced inside the chain, ahead of the {@code DispatcherServlet}, and a breach
- * on an authenticated route is reported by {@link jakarta.servlet.http.HttpServletResponse#sendError(int)}.
- * A rejection is an {@code ERROR} dispatch that only a servlet container performs, and this is the one
- * class in the suite that starts a container — see docs/DECISION_LOG.md DL-274.
+ * <p>The bound applies to {@code POST /auth/token} alone and is enforced inside the chain, ahead of
+ * the {@code DispatcherServlet}. The eleven pre-existing routes carry no body-size bound of the
+ * chain's making, which this class also asserts.
+ *
+ * <p>This class and {@code config/HttpChainIntegrationTest} are the two classes in the suite that
+ * start a container — see docs/DECISION_LOG.md DL-274.
  *
  * <p>The context this class starts is the whole application context, on a random port, under the
  * {@code test} profile: an in-memory database, a JWT secret, the single {@code scanner.auth}
@@ -37,17 +39,14 @@ import com.codeskeptic.scanner.ScannerApplication;
 @SpringBootTest(classes = ScannerApplication.class,
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("test")
-@DisplayName("Request body bounds")
+@DisplayName("Request body bound")
 class RequestBodyLimitIntegrationTest {
 
-    /** Bound the chain places on an authenticated request that carries a body. */
-    private static final int MAXIMUM_REQUEST_BODY_BYTES = 65_536;
-
-    /** Bound the chain places on {@code POST /auth/token}. */
+    /** Bound the chain places on {@code POST /auth/token} — DL-118. */
     private static final int MAXIMUM_LOGIN_REQUEST_BYTES = 4_096;
 
-    /** Body the wire carries for a rejected request that is answered 400. */
-    private static final String BAD_REQUEST_BODY = "{\"error\":\"Bad request\"}";
+    /** Encoded size of the unbounded body the pre-existing routes are asserted to accept. */
+    private static final int UNBOUNDED_BODY_BYTES = 131_072;
 
     /** Plaintext of the {@code scanner.auth.password-hash} declared by the {@code test} profile. */
     private static final String PASSWORD = "test-password";
@@ -55,28 +54,6 @@ class RequestBodyLimitIntegrationTest {
     /** Client bound to the running server. */
     @Autowired
     private TestRestTemplate rest;
-
-    @Test
-    @DisplayName("answers an oversized body on an authenticated write route with 400 and the bad request envelope")
-    void answersAnOversizedBodyOnAnAuthenticatedWriteRouteWith400AndTheBadRequestEnvelope() {
-        ResponseEntity<String> response = exchange(HttpMethod.PUT, "/responses/1",
-                oversizedUpdateBody(), bearer(accessToken()));
-
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(response.getBody()).isEqualTo(BAD_REQUEST_BODY);
-    }
-
-    @Test
-    @DisplayName("answers an oversized body on the response creation route with 400 without reaching the generator")
-    void answersAnOversizedBodyOnTheResponseCreationRouteWith400WithoutReachingTheGenerator() {
-        String body = "{\"tweet_id\":\"" + "1".repeat(MAXIMUM_REQUEST_BODY_BYTES) + "\"}";
-
-        ResponseEntity<String> response =
-                exchange(HttpMethod.POST, "/responses", body, bearer(accessToken()));
-
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(response.getBody()).isEqualTo(BAD_REQUEST_BODY);
-    }
 
     @Test
     @DisplayName("carries an accepted body through to the route it addresses")
@@ -89,13 +66,10 @@ class RequestBodyLimitIntegrationTest {
     }
 
     @Test
-    @DisplayName("carries a body of exactly the maximum size through to the route it addresses")
-    void carriesABodyOfExactlyTheMaximumSizeThroughToTheRouteItAddresses() {
-        String envelope = "{\"content\":\"\"}";
-        String body = "{\"content\":\""
-                + "a".repeat(MAXIMUM_REQUEST_BODY_BYTES - envelope.length())
-                + "\"}";
-        assertThat(body).hasSize(MAXIMUM_REQUEST_BODY_BYTES);
+    @DisplayName("carries a body far larger than the token route's bound through to the route it addresses")
+    void carriesABodyFarLargerThanTheTokenRoutesBoundThroughToTheRouteItAddresses() {
+        String body = largeUpdateBody();
+        assertThat(body).hasSize(UNBOUNDED_BODY_BYTES);
 
         ResponseEntity<String> response =
                 exchange(HttpMethod.PUT, "/responses/1", body, bearer(accessToken()));
@@ -105,10 +79,10 @@ class RequestBodyLimitIntegrationTest {
     }
 
     @Test
-    @DisplayName("answers an oversized body carrying no token with the chain's bare 401")
-    void answersAnOversizedBodyCarryingNoTokenWithTheChainsBare401() {
+    @DisplayName("answers a large body carrying no token with the chain's bare 401")
+    void answersALargeBodyCarryingNoTokenWithTheChainsBare401() {
         ResponseEntity<String> response =
-                exchange(HttpMethod.PUT, "/responses/1", oversizedUpdateBody(), new HttpHeaders());
+                exchange(HttpMethod.PUT, "/responses/1", largeUpdateBody(), new HttpHeaders());
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
         assertThat(response.getBody()).isNull();
@@ -155,14 +129,15 @@ class RequestBodyLimitIntegrationTest {
     }
 
     /**
-     * Builds a JSON body for {@code PUT /responses/{responseId}} one byte past the bound.
+     * Builds a JSON body for {@code PUT /responses/{responseId}} far larger than the token route's
+     * bound.
      *
-     * @return a body whose encoded length is {@link #MAXIMUM_REQUEST_BODY_BYTES} plus one
+     * @return a body whose encoded length is {@link #UNBOUNDED_BODY_BYTES}
      */
-    private static String oversizedUpdateBody() {
+    private static String largeUpdateBody() {
         String envelope = "{\"content\":\"\"}";
         return "{\"content\":\""
-                + "a".repeat(MAXIMUM_REQUEST_BODY_BYTES + 1 - envelope.length())
+                + "a".repeat(UNBOUNDED_BODY_BYTES - envelope.length())
                 + "\"}";
     }
 

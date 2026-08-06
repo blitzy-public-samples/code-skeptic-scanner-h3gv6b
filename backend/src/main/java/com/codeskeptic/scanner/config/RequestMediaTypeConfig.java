@@ -32,19 +32,18 @@ import jakarta.servlet.http.HttpServletResponse;
  * Withholds a request {@code Content-Type} header that names no concrete media type from request
  * processing.
  *
- * <p>A media type carrying a wildcard type or a wildcard subtype, and a value
- * {@link MediaType#parseMediaType(String)} rejects, are the two cases {@code Content-Type} may carry
- * that no component of the request path can hold: {@code HttpHeaders.setContentType} answers each with
- * {@link IllegalArgumentException}, and {@code ServletServerHttpRequest.getHeaders} calls it from the
- * CORS processor inside the security filter chain, from the {@code @RequestBody} argument resolver and
- * from the return-value writer — DL-236.
+ * <p>Two values are withheld: a media type carrying a wildcard type or a wildcard subtype, and a value
+ * {@link MediaType#parseMediaType(String)} rejects. {@code HttpHeaders.setContentType} answers each
+ * with {@link IllegalArgumentException}, and {@code ServletServerHttpRequest.getHeaders} calls it from
+ * the CORS processor inside the security filter chain, from the {@code @RequestBody} argument resolver
+ * and from the return-value writer — DL-236.
  *
  * <p>The filter published here runs ahead of the security chain and presents such a request to every
  * downstream component as a request carrying no {@code Content-Type} at all, which
  * {@code api/GlobalExceptionHandler#handleUnsupportedMediaType} answers
- * {@code 415 {"error": "Unsupported media type"}}. The header is withheld and the request is not
- * rejected here, so authorization still decides a protected route first: a request carrying no
- * accepted token is answered by the chain's entry point with 401 and an empty body — DL-115.
+ * {@code 415 {"error": "Unsupported media type"}}. This filter withholds the header and rejects no
+ * request; authorization decides a protected route first, and a request carrying no accepted token is
+ * answered by the chain's entry point with 401 and an empty body — DL-115.
  *
  * <p>A media type that parses and names one concrete type — {@code application/json},
  * {@code text/plain}, {@code multipart/mixed} — is passed through untouched.

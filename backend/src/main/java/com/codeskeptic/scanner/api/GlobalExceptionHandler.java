@@ -258,7 +258,7 @@ public class GlobalExceptionHandler {
      * <p>The wire outcome is recorded at {@code WARN}, naming the cause's class only. This advice writes
      * no {@code ERROR} record; the layer that raised the failure writes the single one —
      * {@code service.LlmService} for a provider failure, {@code service.ResponseService} for a
-     * repository or transaction failure — DL-252. No stack trace, no cause message and no stored value
+     * repository or transaction failure — DL-084, DL-197. No stack trace, no cause message and no stored value
      * is written.
      *
      * @param ex the raised exception; its {@link Throwable#getMessage()} becomes the response body
@@ -266,7 +266,7 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(ResponseGenerationException.class)
     public ResponseEntity<ErrorResponse> handleResponseGenerationFailure(ResponseGenerationException ex) {
-        // The public outcome is recorded once here; the ERROR owner sits upstream — DL-252 — see
+        // The public outcome is recorded once here; the ERROR owner sits upstream — DL-084, DL-197 — see
         // docs/DECISION_LOG.md
         log.warn("Responding HTTP 500 with the generation literal; cause {}",
                 ex.getCause() == null ? LogSafe.type(ex) : LogSafe.type(ex.getCause()));

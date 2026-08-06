@@ -145,7 +145,7 @@ class LlmServiceTest {
 
     /**
      * The shipped {@code scanner.openai.reasoning-effort} value, and the only one under which the
-     * configured model accepts an explicit temperature — DL-245.
+     * configured model accepts an explicit temperature — DL-145, DL-200.
      */
     private static final String SHIPPED_REASONING_EFFORT = "none";
 
@@ -2052,7 +2052,7 @@ class LlmServiceTest {
      */
     /**
      * Every accepted {@code scanner.openai.reasoning-effort} value under which the configured model
-     * refuses an explicit temperature — DL-245 — see docs/DECISION_LOG.md.
+     * refuses an explicit temperature — DL-145, DL-200 — see docs/DECISION_LOG.md.
      */
     private static java.util.stream.Stream<String> effortsThatExcludeATemperature() {
         return java.util.stream.Stream.of(ReasoningEffort.LOW, ReasoningEffort.MEDIUM,
@@ -2116,7 +2116,7 @@ class LlmServiceTest {
     private static ScannerProperties.Openai openaiGroup(String model, long maxCompletionTokens,
             Double temperature, long n) {
 
-        // A carried temperature is accepted only while the reasoning effort is none — DL-245 — see
+        // A carried temperature is accepted only while the reasoning effort is none — DL-145, DL-200 — see
         // docs/DECISION_LOG.md
         return new ScannerProperties.Openai(API_KEY, model, maxCompletionTokens, temperature, n,
                 temperature == null ? REASONING_EFFORT : SHIPPED_REASONING_EFFORT,

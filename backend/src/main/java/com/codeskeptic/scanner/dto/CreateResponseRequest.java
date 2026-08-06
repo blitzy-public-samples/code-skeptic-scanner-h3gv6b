@@ -13,7 +13,7 @@ import jakarta.validation.constraints.NotNull;
  * <p>One component, bound from the single key the source handler read out of the free-form body,
  * {@code tweet_id} ({@code backend/app/api/responses.py:L38}), carried as the raw JSON node the
  * request supplied, which is the value the guard at {@code backend/app/api/responses.py:L40} is
- * applied to — see docs/DECISION_LOG.md DL-240.
+ * applied to — see docs/DECISION_LOG.md DL-286.
  *
  * <p>{@code @NotNull} on {@link #tweetId()} is the only constraint declared and corresponds to that
  * guard, which answered an absent {@code tweet_id} with HTTP 400 and the body
@@ -24,7 +24,7 @@ import jakarta.validation.constraints.NotNull;
  * <p>{@link #usableTweetId()} reports {@code null} for exactly the values Python read as false —
  * {@code null}, {@code ""}, {@code 0}, {@code 0.0}, {@code -0.0}, {@code false}, {@code []} and
  * {@code {}} — and the identifier text for every other value, which is what the source passed on to
- * generation — DL-240.
+ * generation — DL-286.
  *
  * <p>The value is the stringified {@code tweets.id} primary key — the generated surrogate declared at
  * {@code backend/app/db/models.py:L10} and referenced by {@code responses.tweet_id} at
@@ -36,7 +36,7 @@ import jakarta.validation.constraints.NotNull;
  *                carries is read by {@link #usableTweetId()}
  */
 // Ported from backend/app/api/responses.py:L38,L40-41 (faithful port) — see docs/DECISION_LOG.md
-// DL-050, DL-240
+// DL-050, DL-286
 public record CreateResponseRequest(
 
         @NotNull
@@ -48,7 +48,7 @@ public record CreateResponseRequest(
      *
      * <p>The guard at {@code backend/app/api/responses.py:L40} is {@code if not tweet_id}, so it
      * rejects an absent member, a JSON {@code null}, an empty string, a zero of any numeric form,
-     * {@code false}, an empty array and an empty object, and accepts every other value — DL-240.
+     * {@code false}, an empty array and an empty object, and accepts every other value — DL-286.
      *
      * <p>An accepted value is rendered as text: a JSON string yields its own characters, a number or
      * a boolean yields its JSON spelling, and an array or object yields its compact JSON document, so

@@ -609,19 +609,7 @@ public record ScannerProperties(
             @DefaultValue("30") long leaseRenewSeconds,
 
             // scanner.background.max-candidates-per-pass — no Python counterpart — DL-282
-            @DefaultValue("200") int maxCandidatesPerPass,
-
-            // scanner.background.provider-calls-per-window — no Python counterpart — DL-283
-            @DefaultValue("500") int providerCallsPerWindow,
-
-            // scanner.background.provider-window-seconds — no Python counterpart — DL-283
-            @DefaultValue("3600") long providerWindowSeconds,
-
-            // scanner.background.provider-failure-threshold — no Python counterpart — DL-283
-            @DefaultValue("5") int providerFailureThreshold,
-
-            // scanner.background.provider-circuit-open-seconds — no Python counterpart — DL-283
-            @DefaultValue("300") long providerCircuitOpenSeconds) {
+            @DefaultValue("200") int maxCandidatesPerPass) {
 
         /** Declared default of {@code scanner.background.lease-ttl-seconds} — DL-281. */
         private static final long DEFAULT_LEASE_TTL_SECONDS = 120L;
@@ -631,18 +619,6 @@ public record ScannerProperties(
 
         /** Declared default of {@code scanner.background.max-candidates-per-pass} — DL-282. */
         private static final int DEFAULT_MAX_CANDIDATES_PER_PASS = 200;
-
-        /** Declared default of {@code scanner.background.provider-calls-per-window} — DL-283. */
-        private static final int DEFAULT_PROVIDER_CALLS_PER_WINDOW = 500;
-
-        /** Declared default of {@code scanner.background.provider-window-seconds} — DL-283. */
-        private static final long DEFAULT_PROVIDER_WINDOW_SECONDS = 3_600L;
-
-        /** Declared default of {@code scanner.background.provider-failure-threshold} — DL-283. */
-        private static final int DEFAULT_PROVIDER_FAILURE_THRESHOLD = 5;
-
-        /** Declared default of {@code scanner.background.provider-circuit-open-seconds} — DL-283. */
-        private static final long DEFAULT_PROVIDER_CIRCUIT_OPEN_SECONDS = 300L;
 
         /** Smallest accepted value of {@code scanner.background.lease-ttl-seconds} — DL-281. */
         private static final long MINIMUM_LEASE_TTL_SECONDS = 10L;
@@ -662,34 +638,13 @@ public record ScannerProperties(
         private static final int MINIMUM_MAX_CANDIDATES_PER_PASS = 1;
 
         /**
-         * Smallest accepted value of {@code scanner.background.provider-calls-per-window} — DL-283.
-         */
-        private static final int MINIMUM_PROVIDER_CALLS_PER_WINDOW = 1;
-
-        /** Smallest accepted value of {@code scanner.background.provider-window-seconds} — DL-283. */
-        private static final long MINIMUM_PROVIDER_WINDOW_SECONDS = 1L;
-
-        /**
-         * Smallest accepted value of {@code scanner.background.provider-failure-threshold} — DL-283.
-         */
-        private static final int MINIMUM_PROVIDER_FAILURE_THRESHOLD = 1;
-
-        /**
-         * Smallest accepted value of {@code scanner.background.provider-circuit-open-seconds} —
-         * DL-283.
-         */
-        private static final long MINIMUM_PROVIDER_CIRCUIT_OPEN_SECONDS = 1L;
-
-        /**
-         * Normalises every bound into a usable value — DL-281, DL-282, DL-283.
+         * Normalises both bounds into a usable value — DL-281, DL-282.
          *
          * <p>The lease term is held within {@value #MINIMUM_LEASE_TTL_SECONDS} and
          * {@value #MAXIMUM_LEASE_TTL_SECONDS} seconds. The renewal interval is held at
          * {@value #MINIMUM_LEASE_RENEW_SECONDS} second or more and at no more than the resulting term
-         * divided by {@value #LEASE_RENEW_DIVISOR}, so a renewal always precedes an expiry and a
-         * misconfiguration cannot let the term lapse between renewals. The per-pass candidate
-         * ceiling, the provider call allowance, the window, the consecutive-failure threshold and the
-         * span the circuit stays open each carry their own floor, so no bound can be configured away.
+         * divided by {@value #LEASE_RENEW_DIVISOR}. The per-pass candidate ceiling is held at
+         * {@value #MINIMUM_MAX_CANDIDATES_PER_PASS} or more.
          */
         public Background {
             leaseTtlSeconds = Math.min(MAXIMUM_LEASE_TTL_SECONDS,
@@ -698,14 +653,6 @@ public record ScannerProperties(
                     Math.max(leaseRenewSeconds, MINIMUM_LEASE_RENEW_SECONDS));
             maxCandidatesPerPass =
                     Math.max(maxCandidatesPerPass, MINIMUM_MAX_CANDIDATES_PER_PASS);
-            providerCallsPerWindow =
-                    Math.max(providerCallsPerWindow, MINIMUM_PROVIDER_CALLS_PER_WINDOW);
-            providerWindowSeconds =
-                    Math.max(providerWindowSeconds, MINIMUM_PROVIDER_WINDOW_SECONDS);
-            providerFailureThreshold =
-                    Math.max(providerFailureThreshold, MINIMUM_PROVIDER_FAILURE_THRESHOLD);
-            providerCircuitOpenSeconds =
-                    Math.max(providerCircuitOpenSeconds, MINIMUM_PROVIDER_CIRCUIT_OPEN_SECONDS);
         }
 
         /**
@@ -727,9 +674,7 @@ public record ScannerProperties(
                 boolean responseGenerationEnabled) {
             return new Background(enabled, streamEnabled, responseGenerationEnabled,
                     DEFAULT_LEASE_TTL_SECONDS, DEFAULT_LEASE_RENEW_SECONDS,
-                    DEFAULT_MAX_CANDIDATES_PER_PASS, DEFAULT_PROVIDER_CALLS_PER_WINDOW,
-                    DEFAULT_PROVIDER_WINDOW_SECONDS, DEFAULT_PROVIDER_FAILURE_THRESHOLD,
-                    DEFAULT_PROVIDER_CIRCUIT_OPEN_SECONDS);
+                    DEFAULT_MAX_CANDIDATES_PER_PASS);
         }
 
         /**

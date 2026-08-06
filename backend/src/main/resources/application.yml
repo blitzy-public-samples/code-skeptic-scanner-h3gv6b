@@ -216,11 +216,3 @@ scanner:
     # Net-new (no Python counterpart) — DL-282 — see docs/DECISION_LOG.md
     # Candidates one generation pass attempts, whatever the backlog holds. Accepted: 1 or more.
     max-candidates-per-pass: ${RESPONSE_GENERATION_MAX_CANDIDATES_PER_PASS:200}
-    # Net-new (no Python counterpart) — DL-283 — see docs/DECISION_LOG.md
-    # Paid provider work the background paths may do: at most `provider-calls-per-window` units per
-    # `provider-window-seconds` span, and `provider-failure-threshold` consecutive failures suspend
-    # provider work for `provider-circuit-open-seconds`. Accepted: 1 or more for each.
-    provider-calls-per-window: ${PROVIDER_CALLS_PER_WINDOW:500}
-    provider-window-seconds: ${PROVIDER_WINDOW_SECONDS:3600}
-    provider-failure-threshold: ${PROVIDER_FAILURE_THRESHOLD:5}
-    provider-circuit-open-seconds: ${PROVIDER_CIRCUIT_OPEN_SECONDS:300}

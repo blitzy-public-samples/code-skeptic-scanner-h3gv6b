@@ -169,7 +169,7 @@ public class RestClientConfig {
      * Reads {@code scanner.notion.api-version} and normalises it into a header-safe token.
      *
      * <p>Falls back to {@link #DEFAULT_NOTION_API_VERSION} when the configured value is absent, blank
-     * or header-unsafe, so the header is never sent blank — DL-193; the value and its default are
+     * or header-unsafe, so the header is never sent blank — DL-289; the value and its default are
      * DL-151.
      *
      * @return the version to send on every request; never {@code null} and never blank
@@ -184,7 +184,7 @@ public class RestClientConfig {
         return safe;
     }
 
-    // Net-new (no Python counterpart; notion_client built the headers itself) — DL-193 — see
+    // Net-new (no Python counterpart; notion_client built the headers itself) — DL-289 — see
     // docs/DECISION_LOG.md
     /**
      * Strips a configured value and rejects it when it still carries a character that is not legal in
@@ -193,7 +193,7 @@ public class RestClientConfig {
      * <p>{@link String#strip()} removes a leading or trailing carriage return or line feed but leaves
      * an embedded one in place. Any value containing a character below {@code U+0020}, or
      * {@code U+007F}, is discarded and not sent; the property name is logged at {@code WARN} and no
-     * part of the value is logged, at any level — DL-052, DL-193.
+     * part of the value is logged, at any level — DL-052, DL-289.
      *
      * @param value the configured value, possibly {@code null}
      * @param propertyName the property the value came from, named in the warning
@@ -215,10 +215,6 @@ public class RestClientConfig {
         }
         return stripped;
     }
-
-    // The Notion-Version header value is scanner.notion.api-version — DL-151, DL-193 — see
-    // docs/DECISION_LOG.md
-
 
     /**
      * Reads the {@code scanner.notion} group. Every reader in this class dereferences the group through
@@ -253,8 +249,8 @@ public class RestClientConfig {
         ScannerProperties.Notion notion = notionGroup();
         long readTimeoutSeconds = (notion == null)
                 ? DEFAULT_READ_TIMEOUT_SECONDS : notion.readTimeoutSeconds();
-        // Named transport, not ClientHttpRequestFactoryBuilder.detect() — see docs/DECISION_LOG.md
-        // DL-221. The transport is the retained bean, so it can be shut down — DL-264.
+        // The request factory is built over the named JDK transport — DL-221 — and that transport is
+        // the retained bean this class shuts down — DL-264 — see docs/DECISION_LOG.md
         JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(httpClient);
         factory.setReadTimeout(Duration.ofSeconds(requireAtLeastOne(readTimeoutSeconds,
                 "scanner.notion.read-timeout-seconds")));

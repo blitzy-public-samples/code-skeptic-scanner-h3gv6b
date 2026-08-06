@@ -19,6 +19,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -275,6 +276,160 @@ final class DocumentationConsistencyTest {
                         .formatted(words((int) netNew)))
                 .contains("the %s rows below sum to the %d cases".formatted(words(tests), cases))
                 .contains("%s classes running %d cases".formatted(words(tests), cases));
+    }
+
+    @Test
+    @DisplayName("states every repeated population claim with the same measured value")
+    void statesEveryRepeatedPopulationClaimWithTheSameMeasuredValue() throws Exception {
+        String log = Files.readString(DECISION_LOG);
+        String matrix = Files.readString(TRACEABILITY_MATRIX);
+        int rows = decisionRows().size();
+        int tests = testClassCount();
+        int mains = mainClassCount();
+        int artifacts = mains + tests + resourceAndBuildFileCount();
+        int cases = deliveredCaseCount();
+        Map<String, String> origins = testOrigins(matrix);
+        long netNew = origins.values().stream()
+                .filter(origin -> origin.startsWith("*No source construct"))
+                .count();
+        long carried = tests - netNew;
+        int sourcelessMains = sourcelessMainClassCount(matrix);
+
+        List<PopulationClaim> claims = List.of(
+                new PopulationClaim("from `DL-001` to `DL-(\\d{3})`", "%03d".formatted(rows)),
+                new PopulationClaim("in the log \u2014 `DL-001` \u2026 `DL-(\\d{3})`",
+                        "%03d".formatted(rows)),
+                new PopulationClaim("entries, `DL-001` \u2026 `DL-(\\d{3})`, with no gap",
+                        "%03d".formatted(rows)),
+                new PopulationClaim("`DL-061` \u2026 `DL-(\\d{3})`", "%03d".formatted(rows)),
+                new PopulationClaim("\\((\\d+) rows\\)", String.valueOf(rows)),
+                new PopulationClaim("\\*\\*([a-z- ]+) rows, with no gap and no repeat\\*\\*",
+                        words(rows)),
+                new PopulationClaim("([A-Za-z- ]+) entries, `DL-001`", capitalised(words(rows))),
+                new PopulationClaim("the ([a-z-]+) rows below sum to the (\\d+) cases",
+                        words(tests), String.valueOf(cases)),
+                new PopulationClaim("([a-z-]+) classes running (\\d+) cases",
+                        words(tests), String.valueOf(cases)),
+                new PopulationClaim("is ([a-z-]+) files under `backend/src/test/java`", words(tests)),
+                new PopulationClaim("\\*\\*([a-z-]+)\\*\\* files under `backend/src/main/java`",
+                        words(mains)),
+                new PopulationClaim("\\*\\*([a-z-]+)\\*\\* under `backend/src/test/java`",
+                        words(tests)),
+                new PopulationClaim("([A-Za-z-]+) of the ([a-z-]+) delivered test classes carry a row "
+                        + "naming a source construct", capitalised(words((int) carried)), words(tests)),
+                new PopulationClaim("the remaining ([a-z-]+) have no source construct of any kind",
+                        words((int) netNew)),
+                new PopulationClaim("([A-Za-z-]+) of the ([a-z-]+) have no source construct of any "
+                        + "kind and are net-new", capitalised(words((int) netNew)), words(tests)),
+                new PopulationClaim("for \\*\\*([a-z- ]+)\\*\\* delivered artifacts",
+                        words(artifacts)),
+                new PopulationClaim("each of the ([a-z- ]+) delivered artifacts under `backend/`",
+                        words(artifacts)),
+                new PopulationClaim("Each of those ([a-z- ]+) appears exactly once",
+                        words(artifacts)),
+                new PopulationClaim("([A-Za-z-]+) main classes have no counterpart of any kind",
+                        capitalised(words(sourcelessMains))));
+
+        Map<String, String> contradictions = new LinkedHashMap<>();
+        for (PopulationClaim claim : claims) {
+            int occurrences = 0;
+            for (Map.Entry<String, String> document
+                    : Map.of("docs/DECISION_LOG.md", log,
+                            "docs/TRACEABILITY_MATRIX.md", matrix).entrySet()) {
+                Matcher matcher = Pattern.compile(claim.shape()).matcher(collapse(document.getValue()));
+                while (matcher.find()) {
+                    occurrences++;
+                    List<String> stated = new ArrayList<>();
+                    for (int group = 1; group <= matcher.groupCount(); group++) {
+                        stated.add(matcher.group(group).trim());
+                    }
+                    if (!stated.equals(claim.measured())) {
+                        contradictions.put(document.getKey() + " [" + claim.shape() + "] " + stated,
+                                claim.measured().toString());
+                    }
+                }
+            }
+            assertThat(occurrences)
+                    .as("occurrences of the population claim %s", claim.shape())
+                    .isPositive();
+        }
+
+        assertThat(contradictions)
+                .as("population claims stating a value the tree does not carry")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("keeps the traceability matrix free of the rationale wordings the log owns")
+    void keepsTheTraceabilityMatrixFreeOfTheRationaleWordingsTheLogOwns() throws IOException {
+        List<String> lines = Files.readAllLines(TRACEABILITY_MATRIX);
+        Map<String, String> offending = new LinkedHashMap<>();
+
+        for (int index = 0; index < lines.size(); index++) {
+            String line = lines.get(index);
+            String lowered = line.toLowerCase(Locale.ROOT);
+            int number = index + 1;
+            DecisionLogCitationTest.RATIONALE_POLICY.forEach((group, wordings) -> wordings.stream()
+                    .filter(lowered::contains)
+                    .findFirst()
+                    .ifPresent(wording -> offending.put(
+                            "docs/TRACEABILITY_MATRIX.md:" + number
+                                    + " [" + group + ": " + wording + "]",
+                            line.strip())));
+        }
+
+        assertThat(offending)
+                .as("matrix text carrying a wording docs/DECISION_LOG.md owns (Rule 1, DL-058)")
+                .isEmpty();
+    }
+
+    /**
+     * One population claim: the shape it is written in, and the group values the tree measures.
+     *
+     * @param shape    the regular expression matching every occurrence of the claim
+     * @param measured the capture-group values the delivered tree carries, in group order
+     */
+    private record PopulationClaim(String shape, List<String> measured) {
+
+        PopulationClaim(String shape, String... measured) {
+            this(shape, List.of(measured));
+        }
+    }
+
+    /**
+     * Counts the main classes the target inventory marks as having no source construct.
+     *
+     * @param matrix the matrix text
+     * @return the number of delivered main classes carrying a net-new marker
+     * @throws IOException if the main tree cannot be walked
+     */
+    private static int sourcelessMainClassCount(String matrix) throws IOException {
+        Set<String> mains = javaSources(BACKEND_ROOT.resolve("src/main/java/com/codeskeptic/scanner"));
+        Matcher matcher = Pattern.compile("^\\| `([^`]+\\.java)` \\| (\\*No source construct[^|]*)\\|",
+                Pattern.MULTILINE).matcher(matrix);
+        int counted = 0;
+        while (matcher.find()) {
+            if (mains.contains(matcher.group(1))) {
+                counted++;
+            }
+        }
+        return counted;
+    }
+
+    /**
+     * Counts the cases the delivered test classes run.
+     *
+     * @return the executable case total
+     * @throws Exception if a delivered test class cannot be loaded or counted
+     */
+    private static int deliveredCaseCount() throws Exception {
+        int cases = 0;
+        for (String path
+                : javaSources(BACKEND_ROOT.resolve("src/test/java/com/codeskeptic/scanner"))) {
+            cases += countTestCases(Class.forName("com.codeskeptic.scanner."
+                    + path.substring(0, path.length() - ".java".length()).replace('/', '.')));
+        }
+        return cases;
     }
 
     /**

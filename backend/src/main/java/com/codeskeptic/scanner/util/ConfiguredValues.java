@@ -2,13 +2,13 @@ package com.codeskeptic.scanner.util;
 
 import java.util.regex.Pattern;
 
-// Net-new shared configuration-value utility — DL-245 — see docs/DECISION_LOG.md
+// Net-new shared configuration-value utility — DL-287 — see docs/DECISION_LOG.md
 /**
  * Inspects values produced by configuration binding.
  *
  * <p>Holds the single definition of the unresolved-placeholder shape previously repeated in
  * {@code security/SecurityConfig}, {@code security/JwtService} and {@code config/DatabaseUrlTranslator}
- * — DL-245. The two call-site behaviours it consolidates are DL-186 for
+ * — DL-287. The two call-site behaviours it consolidates are DL-186 for
  * {@code security/JwtService} and DL-189 for {@code security/SecurityConfig}.
  */
 public final class ConfiguredValues {

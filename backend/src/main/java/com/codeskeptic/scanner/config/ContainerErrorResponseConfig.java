@@ -44,12 +44,12 @@ import jakarta.servlet.http.HttpServletResponse;
  * holds an encoded character the connector refuses, or whose framing the protocol layer rejects never
  * reaches the filter chain: the connector records a status and the container's error-report valve
  * writes the body. The valve declared here replaces the {@code ErrorReportValve} Spring Boot installs,
- * which writes an HTML document and none of this service's headers — DL-237.
+ * and writes the single-key JSON envelope carrying this service's own headers — DL-237.
  *
- * <p>The status and the literal are the ones {@code api/GlobalExceptionHandler} declares, so the three
- * error surfaces — that advice for a {@code REQUEST} dispatch, its nested error-path controller for an
- * {@code ERROR} dispatch, and this valve for a container-level rejection — put the same literals on
- * the wire. The header policy is the {@code HeaderWriter} bean {@code security/SecurityConfig}
+ * <p>The status and the literal are the ones {@code api/GlobalExceptionHandler} declares. Three error
+ * surfaces put the same literals on the wire: that advice for a {@code REQUEST} dispatch, its
+ * {@code ErrorAttributes} bean for an {@code ERROR} dispatch (DL-183), and this valve for a
+ * container-level rejection. The header policy is the {@code HeaderWriter} bean {@code security/SecurityConfig}
  * publishes, the same policy {@code HeaderWriterFilter} applies inside the chain — DL-277. The CORS
  * headers mirror the permissive policy {@code config/CorsConfig} declares, read from that same bean —
  * DL-051.

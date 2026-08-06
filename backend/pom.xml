@@ -172,10 +172,10 @@
             <scope>runtime</scope>
         </dependency>
 
-        <!-- Test-time database only: test scope keeps it out of the executable
-             jar, and config/DatabaseUrlTranslator resolves no h2 scheme, so no
-             main code path reaches it. The BOM resolves the version - see
-             docs/DECISION_LOG.md DL-009, DL-242, DL-071. -->
+        <!-- Test-time database only. Test scope keeps it out of the executable
+             jar, and config/DatabaseUrlTranslator resolves no h2 scheme. The BOM
+             resolves the version - see docs/DECISION_LOG.md DL-009, DL-242,
+             DL-071. -->
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>

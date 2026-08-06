@@ -406,7 +406,7 @@ class RequestMediaTypeConfigTest {
          * Builds the {@code Authorization} header value of an authenticated request.
          *
          * <p>The token is minted by the same {@code security/JwtService} the imported
-         * {@code security/SecurityConfig} chain verifies — DL-021, DL-115, DL-242.
+         * {@code security/SecurityConfig} chain verifies — DL-021, DL-115.
          *
          * @return the {@code Bearer} credential of the principal {@value #PRINCIPAL}
          */

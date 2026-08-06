@@ -49,6 +49,9 @@ class OperationsContractTest {
     private static final Set<String> DOCKER_INSTRUCTIONS = Set.of(
             "FROM", "ARG", "COPY", "RUN", "WORKDIR", "USER", "EXPOSE", "HEALTHCHECK", "CMD");
 
+    /** The `node-version` input the retired workflow declared — DL-074. */
+    private static final String PRESERVED_NODE_VERSION = "14";
+
     @Test
     @DisplayName("locates the repository root from the Maven or repository working directory")
     void locatesTheRepositoryRootFromTheMavenOrRepositoryWorkingDirectory() {
@@ -166,27 +169,24 @@ class OperationsContractTest {
                 .contains("- name: Deploy to staging");
     }
 
-    // Net-new: the mandatory Node.js floor and the pinned toolchain action — DL-103, DL-285 — see
-    // docs/DECISION_LOG.md
+    // The frontend toolchain input of the retired workflow, carried forward unchanged — DL-074,
+    // DL-285 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("provisions a Node.js version at or above the mandatory floor")
-    void provisionsANodeVersionAtOrAboveTheMandatoryFloor() throws IOException {
+    @DisplayName("carries the Node.js input of the retired workflow unchanged, declared exactly once")
+    void carriesTheNodeVersionOfTheRetiredWorkflowUnchanged() throws IOException {
         String workflow = read(CI_WORKFLOW);
 
-        Matcher declared = Pattern.compile("node-version: '(\\d+)\\.(\\d+)\\.(\\d+)'")
-                .matcher(workflow);
+        Matcher declared = Pattern.compile("node-version: '([^']+)'").matcher(workflow);
 
         assertThat(declared.find()).isTrue();
-        int major = Integer.parseInt(declared.group(1));
-        int minor = Integer.parseInt(declared.group(2));
-
-        assertThat(major).isGreaterThanOrEqualTo(20);
-        if (major == 20) {
-            assertThat(minor).isGreaterThanOrEqualTo(20);
-        } else if (major == 22) {
-            assertThat(minor).isGreaterThanOrEqualTo(12);
-        }
+        assertThat(declared.group(1)).isEqualTo(PRESERVED_NODE_VERSION);
         assertThat(declared.find()).isFalse();
+
+        String nodeStep = section(workflow, "- name: Set up Node.js",
+                "- name: Install frontend dependencies");
+        assertThat(nodeStep)
+                .contains("uses: actions/setup-node@v2")
+                .doesNotContain("DL-");
     }
 
     @Test

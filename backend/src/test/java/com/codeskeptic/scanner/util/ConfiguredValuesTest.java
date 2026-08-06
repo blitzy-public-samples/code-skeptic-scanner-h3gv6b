@@ -35,7 +35,7 @@ class ConfiguredValuesTest {
         assertThat(ConfiguredValues.isUnset(value)).isTrue();
     }
 
-    // The trim keeps all three call sites symmetric — DL-186
+    // The trim keeps all three call sites symmetric — DL-287
     @ParameterizedTest(name = "[{index}] \"{0}\"")
     @ValueSource(strings = {
         " ${SECRET_KEY}",

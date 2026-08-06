@@ -70,7 +70,6 @@ import com.codeskeptic.scanner.service.SettingsService;
 import com.codeskeptic.scanner.service.TwitterService;
 import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.task.BackgroundOwnership;
-import com.codeskeptic.scanner.task.ProviderWorkBudget;
 import com.codeskeptic.scanner.task.ResponseGenerationScheduler;
 import com.codeskeptic.scanner.task.TweetStreamClient;
 import com.codeskeptic.scanner.task.TweetStreamListener;
@@ -179,8 +178,7 @@ class ScannerApplicationTests {
                 Arguments.of("TweetStreamClient", TweetStreamClient.class),
                 Arguments.of("TweetStreamListener", TweetStreamListener.class),
                 Arguments.of("ResponseGenerationScheduler", ResponseGenerationScheduler.class),
-                Arguments.of("BackgroundOwnership", BackgroundOwnership.class),
-                Arguments.of("ProviderWorkBudget", ProviderWorkBudget.class));
+                Arguments.of("BackgroundOwnership", BackgroundOwnership.class));
     }
 
     @ParameterizedTest(name = "[{index}] {0} {1}")
@@ -291,9 +289,8 @@ class ScannerApplicationTests {
                 .orElseThrow();
 
         // The first pass runs at startup, which is the work-then-sleep order of
-        // backend/app/tasks/response_generation.py:L41-50 — DL-245, DL-251 — so what the test profile
-        // guarantees is that no second pass falls inside the suite window: the interval in force is a
-        // day.
+        // backend/app/tasks/response_generation.py:L41-50 — DL-251. The interval in force under the
+        // test profile is a day, and no second pass falls inside the suite window.
         assertThat(context.getBean(ScannerProperties.class).responseGenerationDelaySeconds())
                 .isEqualTo(86_400L);
 

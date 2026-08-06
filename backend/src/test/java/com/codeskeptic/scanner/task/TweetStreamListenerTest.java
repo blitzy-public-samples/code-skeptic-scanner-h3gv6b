@@ -14,7 +14,6 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
-import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -35,7 +34,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.slf4j.LoggerFactory;
 
-import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.ResponseDto;
 import com.codeskeptic.scanner.dto.TweetDto;
 import com.codeskeptic.scanner.entity.Tweet;
@@ -142,38 +140,12 @@ class TweetStreamListenerTest {
     private TweetStreamListener listener;
 
     /**
-     * Assembles the listener over its six doubles and a real work budget.
-     *
-     * <p>The budget is the delivered component, not a double. It is configured with an allowance and a
-     * failure threshold no case of this class reaches, and every case observes the granting behaviour.
-     * The cases that assert a refusal configure their own — DL-283.
+     * Assembles the listener over its six doubles.
      */
     @BeforeEach
     void assembleListener() {
         listener = new TweetStreamListener(twitterService, sentimentAnalysisService, tweetRepository,
-                responseService, notionService, tweetMapper, grantingBudget());
-    }
-
-    /**
-     * Builds a work budget whose allowance and failure threshold no case of this class reaches.
-     *
-     * @return the budget every listener of this class is assembled with — DL-283
-     */
-    private static ProviderWorkBudget grantingBudget() {
-        return new ProviderWorkBudget(boundWith(1_000_000, 1_000), Clock.systemUTC());
-    }
-
-    /**
-     * Builds a bound configuration carrying the supplied provider bounds.
-     *
-     * @param allowance value of {@code scanner.background.provider-calls-per-window}
-     * @param failureThreshold value of {@code scanner.background.provider-failure-threshold}
-     * @return the bound configuration
-     */
-    private static ScannerProperties boundWith(int allowance, int failureThreshold) {
-        return new ScannerProperties(null, 100, 60L, null, null, null, null, null, null, null,
-                new ScannerProperties.Background(true, true, true, 120L, 30L, 200, allowance,
-                        3_600L, failureThreshold, 300L));
+                responseService, notionService, tweetMapper);
     }
 
     @Nested
@@ -585,7 +557,7 @@ class TweetStreamListenerTest {
             stubSave();
             TweetStreamListener listenerWithRealMapper = new TweetStreamListener(twitterService,
                     sentimentAnalysisService, tweetRepository, responseService, notionService,
-                    new TweetMapper(), grantingBudget());
+                    new TweetMapper());
 
             assertThat(listenerWithRealMapper.onStatus(popularRecord())).isTrue();
 

@@ -25,7 +25,7 @@ import org.springframework.core.env.PropertySourcesPropertyResolver;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.util.unit.DataSize;
 
-// Net-new (no Python counterpart) — DL-026, DL-027, DL-029, DL-030, DL-031, DL-246 — see
+// Net-new (no Python counterpart) — DL-026, DL-027, DL-029, DL-030, DL-031 — see
 // docs/DECISION_LOG.md
 /**
  * Verifies the production {@code application.yml} contract through Spring's YAML loader,

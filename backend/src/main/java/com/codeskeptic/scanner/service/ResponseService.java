@@ -370,7 +370,7 @@ public class ResponseService {
      * whitespace-only value passes. {@code api/ResponseController} reads the request body through
      * {@code dto/CreateResponseRequest.usableTweetId()}, which reports {@code null} for every value the
      * {@code if not tweet_id} guard at {@code backend/app/api/responses.py:L40} read as false, so this
-     * method answers that whole set with the literal of {@code :L41} — DL-240.
+     * method answers that whole set with the literal of {@code :L41} — DL-286.
      *
      * <p>Past the guard this method reports the two outcomes of {@code :L46-49}: the stored row, or the
      * single literal of {@code :L49}, which covers a {@code tweetId} carrying no number, a
@@ -557,9 +557,8 @@ public class ResponseService {
         }
 
         try {
-            // The one pre-call reply check, taken before the subject is read so a row another process
-            // already answered costs neither a read nor a generation. The definitive check is the one
-            // the storing transaction takes under the parent lock — DL-195, DL-252 — see
+            // The one pre-call reply check, taken ahead of the subject read. The definitive check is
+            // the one the storing transaction takes under the parent lock — DL-195, DL-252 — see
             // docs/DECISION_LOG.md
             if (responseRepository.existsByTweetId(identifier)) {
                 log.debug("Tweet '{}' already carries a response; no generation was requested.",
@@ -567,13 +566,13 @@ public class ResponseService {
                 return Optional.empty();
             }
 
-            // The supplied row is the subject; only a caller that holds none reads one — DL-226 —
+            // The supplied row is the subject; a caller that holds none reads one here — DL-226 —
             // see docs/DECISION_LOG.md
             TweetDto subject = (loaded == null) ? readSubject(identifier) : tweetMapper.toDto(loaded);
 
-            // Presence is tested immediately ahead of the paid provider call, so a row deleted since
-            // it was selected costs no generation. Each read is its own short transaction, so no
-            // connection is held across the provider call — DL-252 — see docs/DECISION_LOG.md
+            // Presence is tested immediately ahead of the paid provider call. Each read is its own
+            // short transaction, and no connection is held across that call — DL-252 — see
+            // docs/DECISION_LOG.md
             if (!tweetRepository.existsById(identifier)) {
                 log.debug("Tweet '{}' is gone at the moment of generation; no provider call is made "
                         + "and nothing is stored.", identifier);

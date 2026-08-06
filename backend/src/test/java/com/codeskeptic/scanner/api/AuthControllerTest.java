@@ -137,7 +137,7 @@ class AuthControllerTest {
     /** The 500 envelope the advice serves — see docs/DECISION_LOG.md DL-210. */
     private static final String INTERNAL_ERROR_BODY = "{\"error\":\"Internal server error\"}";
 
-    /** The 404 envelope the advice serves — see docs/DECISION_LOG.md DL-210, DL-247. */
+    /** The 404 envelope the advice serves — see docs/DECISION_LOG.md DL-210. */
     private static final String NOT_FOUND_BODY = "{\"error\":\"Not found\"}";
 
     /** The token route spelled with a percent-encoded letter; it decodes to {@value #TOKEN_ENDPOINT}. */

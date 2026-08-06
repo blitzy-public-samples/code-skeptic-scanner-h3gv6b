@@ -35,7 +35,7 @@ import jakarta.annotation.PreDestroy;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
-// Net-new (no Python counterpart; notion_client built its own headers) — DL-151, DL-195 — see
+// Net-new (no Python counterpart; notion_client built its own headers) — DL-151, DL-289 — see
 // docs/DECISION_LOG.md
 /**
  * Verifies the bean-level defaults {@link RestClientConfig} applies to the Notion transport.
@@ -120,7 +120,7 @@ class RestClientConfigTest {
         assertThat(headers.getFirst(HttpHeaders.AUTHORIZATION)).isEqualTo("Bearer " + API_KEY);
     }
 
-    // CWE-113: strip() removes a leading or trailing CR or LF but leaves an embedded one — DL-195
+    // CWE-113: strip() removes a leading or trailing CR or LF but leaves an embedded one — DL-289
     @ParameterizedTest(name = "[{index}] {0}")
     @ValueSource(strings = {
         "key\r\nX-Injected: 1",

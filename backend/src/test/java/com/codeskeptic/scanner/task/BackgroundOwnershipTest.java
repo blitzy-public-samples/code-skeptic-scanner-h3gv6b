@@ -57,10 +57,10 @@ import ch.qos.logback.core.read.ListAppender;
  * Unit tests for {@link BackgroundOwnership}, the time-limited lease that admits one process at a time
  * to the two background paths — DL-281.
  *
- * <p>Every collaborator is a double and the clock is driven by hand, so the claim, the renewal, the
- * takeover of a lapsed lease and the release are all exercised without waiting and without a database.
- * The transaction template is the real component over a mocked manager, so the callback runs exactly
- * as it does in production.
+ * <p>Every collaborator is a double and the clock is driven by hand. The claim, the renewal, the
+ * takeover of a lapsed lease and the release are each exercised without waiting and without a
+ * database. The transaction template is the real component over a mocked manager, and the callback
+ * it runs is the production one.
  */
 // Net-new (no Python counterpart) — DL-281 — see docs/DECISION_LOG.md
 @ExtendWith(MockitoExtension.class)

@@ -25,7 +25,7 @@ import jakarta.annotation.PreDestroy;
 // The two public operations are ported from backend/app/services/sentiment_analysis.py:L12-24 and
 // :L26-35 (faithful port) — see docs/DECISION_LOG.md DL-036, DL-037. The client lifecycle below is
 // net-new: the source constructed the client eagerly at :L8 and closed it nowhere — see
-// docs/DECISION_LOG.md DL-245.
+// docs/DECISION_LOG.md DL-288.
 /**
  * Adapter for the Google Cloud Natural Language API and the single home of the
  * doubt-rating calculation.
@@ -40,7 +40,7 @@ import jakarta.annotation.PreDestroy;
  * {@code AnalyzeSentiment} call the client issues carries a bounded deadline.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md}
- * DL-010, DL-036, DL-037, DL-052 and DL-245; construct-level provenance is recorded in
+ * DL-010, DL-036, DL-037, DL-052 and DL-288; construct-level provenance is recorded in
  * {@code docs/TRACEABILITY_MATRIX.md}.
  *
  * <p>This class is thread-safe. It is a singleton bean, and client acquisition,
@@ -252,10 +252,6 @@ public class SentimentAnalysisService {
         return Math.max(0.0d, Math.min(10.0d, doubtRating));    // backend/app/services/sentiment_analysis.py:L32
     }
 
-    // Net-new (no Python counterpart): the inverse of calculateDoubtRating, whose forward
-    // expression is at backend/app/services/sentiment_analysis.py:L26-35 — see
-    // docs/DECISION_LOG.md DL-037
-
     /**
      * Returns the Natural Language client, creating it from Application Default
      * Credentials on first use and reusing it thereafter.
@@ -275,7 +271,7 @@ public class SentimentAnalysisService {
      */
     // Replaces the eager `self.client = LanguageServiceClient()` at
     // backend/app/services/sentiment_analysis.py:L8 (net-new lifecycle) — see docs/DECISION_LOG.md
-    // DL-245
+    // DL-288
     protected LanguageServiceClient languageClient() {
         LanguageServiceClient local = this.client;
         if (local == null) {
@@ -318,7 +314,7 @@ public class SentimentAnalysisService {
      * @throws IOException if the settings cannot be built
      */
     // Net-new (no Python counterpart: backend/app/services/sentiment_analysis.py:L8 created the
-    // client with no call settings) — see docs/DECISION_LOG.md DL-245
+    // client with no call settings) — see docs/DECISION_LOG.md DL-288
     private LanguageServiceSettings languageServiceSettings() throws IOException {
         LanguageServiceSettings.Builder builder = LanguageServiceSettings.newBuilder();
         UnaryCallSettings.Builder<AnalyzeSentimentRequest, AnalyzeSentimentResponse> callSettings =
@@ -355,7 +351,7 @@ public class SentimentAnalysisService {
      * <p>A failure to close is logged at {@code WARN} and not propagated. Calling this method more
      * than once has no further effect.
      */
-    // Net-new (the source closed the client nowhere) — see docs/DECISION_LOG.md DL-207 and DL-268;
+    // Net-new (the source closed the client nowhere) — see docs/DECISION_LOG.md DL-288 and DL-268;
     // the log-and-suppress close policy is the logging baseline — see docs/DECISION_LOG.md DL-052
     @PreDestroy
     void closeLanguageClient() {

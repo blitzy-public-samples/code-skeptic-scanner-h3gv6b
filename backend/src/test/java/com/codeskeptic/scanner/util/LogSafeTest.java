@@ -17,7 +17,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 // — see docs/DECISION_LOG.md
 /**
  * Behaviour of {@link LogSafe}, the renderer every log statement passes an externally supplied value
- * through so no request body, stream payload or credential material reaches a log record.
+ * through. No request body, stream payload or credential material reaches a log record.
  */
 @DisplayName("LogSafe")
 class LogSafeTest {
@@ -90,7 +90,7 @@ class LogSafeTest {
             assertThat(LogSafe.correlation("")).isEqualTo(EMPTY);
         }
 
-        // The token is keyed with a per-process secret, so it is not the plain digest — DL-119 —
+        // The token is keyed with a per-process secret. It is not the unkeyed digest — DL-119 —
         // see docs/DECISION_LOG.md
         @ParameterizedTest(name = "the token for \"{0}\" is not its unkeyed digest")
         @ValueSource(strings = {"1", "42", "4711", "admin", "true", "tweet_popularity_threshold"})

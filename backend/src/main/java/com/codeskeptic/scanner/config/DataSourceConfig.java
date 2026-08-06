@@ -41,13 +41,12 @@ import com.zaxxer.hikari.HikariDataSource;
  * {@code application.yml} — DL-026.
  *
  * <p>The pool surface is {@link DataSourcePoolProperties}, bound from
- * {@code scanner.datasource.pool.*}. It is an allowlist: it carries pool geometry and pool timing
- * only, so no deployment value can supply a JDBC URL, a credential, a driver or data-source class
- * name, a catalog or schema, a connection-initialisation statement or a free-form driver-property
- * map — DL-270. The whole {@code spring.datasource.*} surface is unread: a key from
+ * {@code scanner.datasource.pool.*}. That surface is an allowlist carrying pool geometry and pool
+ * timing only: it expresses no JDBC URL, no credential, no driver or data-source class name, no
+ * catalog or schema, no connection-initialisation statement and no free-form driver-property map —
+ * DL-270. The whole {@code spring.datasource.*} surface is unread: a key from
  * {@link #FORBIDDEN_IDENTITY_KEYS} refuses to start, and any other {@code spring.datasource.*} key
- * is reported at {@code WARN} and ignored, so nothing a deployment sets there takes silent effect —
- * DL-270.
+ * is reported at {@code WARN} and ignored — DL-270.
  *
  * <p>No JDBC URL, username or password reaches a log record or an exception message raised by this
  * class — DL-052.

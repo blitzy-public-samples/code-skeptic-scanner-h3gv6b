@@ -93,7 +93,7 @@ import jakarta.validation.Constraint;
  *
  * <p>Decisions covered by the assertions here are recorded in {@code docs/DECISION_LOG.md} DL-021,
  * DL-022, DL-023, DL-038, DL-048, DL-050, DL-059, DL-076, DL-082, DL-092, DL-123, DL-217,
- * DL-225, DL-231 and DL-240; construct-level provenance is recorded in
+ * DL-225, DL-231 and DL-286; construct-level provenance is recorded in
  * {@code docs/TRACEABILITY_MATRIX.md}.
  */
 @WebMvcTest(ResponseController.class)
@@ -510,7 +510,7 @@ class ResponseControllerTest {
     }
 
     // backend/app/api/responses.py:L40-41 — every value the guard `if not tweet_id` read as false —
-    // DL-240 — see docs/DECISION_LOG.md
+    // DL-286 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] body={0}")
     @ValueSource(strings = {
         "{}",
@@ -531,7 +531,7 @@ class ResponseControllerTest {
             throws Exception {
 
         // The service reports the same literal for the normalised absent identifier as the constraint
-        // reports for the omitted member — backend/app/api/responses.py:L40-41 — DL-240
+        // reports for the omitted member — backend/app/api/responses.py:L40-41 — DL-286
         when(responseService.generateResponse(null)).thenThrow(BadRequestException.tweetIdRequired());
 
         mockMvc.perform(post("/responses").contentType(MediaType.APPLICATION_JSON).content(body)
@@ -556,7 +556,7 @@ class ResponseControllerTest {
     }
 
     // backend/app/api/responses.py:L40 — a value the guard read as false never reaches the identifier
-    // parser or the generator — DL-240 — see docs/DECISION_LOG.md
+    // parser or the generator — DL-286 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] body={0}")
     @ValueSource(strings = {
         "{\"tweet_id\":\"\"}",
@@ -585,7 +585,7 @@ class ResponseControllerTest {
     }
 
     // backend/app/api/responses.py:L40,L49 — a value the guard read as true reaches generation, so one
-    // that names no row answers the 500 literal and never the guard's 400 — DL-240 — see
+    // that names no row answers the 500 literal and never the guard's 400 — DL-286 — see
     // docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] body={0} -> {1}")
     @CsvSource(delimiter = '|', value = {

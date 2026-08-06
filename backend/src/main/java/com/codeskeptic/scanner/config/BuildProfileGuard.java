@@ -19,21 +19,16 @@ import org.springframework.util.ClassUtils;
  * <p>{@code src/test/resources/application-test.yml} is build-scoped: it pins an in-memory H2
  * database with {@code create-drop}, supplies empty X credentials that reach no provider, and carries
  * a signing key and a bcrypt hash that are held in version control — see docs/DECISION_LOG.md
- * DL-205. A deployed revision started with {@code SPRING_PROFILES_ACTIVE=test} mints tokens under a
- * published key and serves against a throwaway schema that is dropped at shutdown; this guard refuses
- * to start such a revision — DL-279.
+ * DL-279. This guard refuses to start a revision on which that profile is active outside the build
+ * — DL-279.
  *
  * <p>The signal this guard reads is the presence of {@value #TEST_FRAMEWORK_CLASS} on the bean class
- * loader. A Spring Boot executable jar carries no test-scoped dependency, and that class is absent
- * from a packaged artifact and present in every Surefire-launched context; {@code mvn clean verify}
- * runs unaffected — see docs/DECISION_LOG.md DL-279.
+ * loader. That class is present in every Surefire-launched context and absent from a Spring Boot
+ * executable jar. {@code mvn clean verify} runs unaffected — see docs/DECISION_LOG.md DL-279.
  *
  * <p>The check is a {@link BeanFactoryPostProcessor} and runs before the container instantiates any
- * singleton, so a deployment that activates the profile fails on the profile itself and not on
- * whichever bean is built first. A bean factory post-processor is instantiated before constructor
- * autowiring is available, and the two values this class reads arrive through
- * {@link EnvironmentAware} and {@link BeanClassLoaderAware}, and not through a constructor —
- * DL-279.
+ * singleton. The two values this class reads arrive through {@link EnvironmentAware} and
+ * {@link BeanClassLoaderAware} — DL-279.
  *
  * <p>Every other profile, and the default profile, are left untouched: this class matches the profile
  * name exactly, reads and alters no bean definition, and publishes no bean.
@@ -45,7 +40,7 @@ public class BuildProfileGuard
     // Logging baseline — DL-052 — see docs/DECISION_LOG.md
     private static final Logger log = LoggerFactory.getLogger(BuildProfileGuard.class);
 
-    /** Profile {@code src/test/resources/application-test.yml} binds to — DL-205. */
+    /** Profile {@code src/test/resources/application-test.yml} binds to — DL-279. */
     private static final String BUILD_PROFILE = "test";
 
     /** Property that activates a profile, named by the failure this guard raises. */
@@ -53,14 +48,14 @@ public class BuildProfileGuard
 
     /**
      * Test-framework class present in a Surefire-launched context and absent from a packaged
-     * artifact, which carries no test-scoped dependency — DL-279.
+     * artifact — DL-279.
      */
     private static final String TEST_FRAMEWORK_CLASS = "org.junit.jupiter.api.Test";
 
     /**
      * Supplies the active profiles. The container sets it before
      * {@link #postProcessBeanFactory(ConfigurableListableBeanFactory)} runs; while it is
-     * {@code null} the guard has nothing to inspect and passes.
+     * {@code null} this guard passes.
      */
     private Environment environment;
 

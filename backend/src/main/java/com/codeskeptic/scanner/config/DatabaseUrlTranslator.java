@@ -19,6 +19,9 @@ import org.slf4j.LoggerFactory;
 
 import com.codeskeptic.scanner.util.ConfiguredValues;
 
+// Net-new class derived from backend/app/core/config.py:L9 — the opaque DATABASE_URL the retired
+// tree read at backend/app/db/database.py:L5 and never interpreted — DL-027, DL-071, DL-072 — see
+// docs/DECISION_LOG.md
 /**
  * Translates the opaque {@code DATABASE_URL} value, bound to {@code scanner.database-url}, into a
  * JDBC URL together with the username and the password as separate values.
@@ -645,7 +648,7 @@ public final class DatabaseUrlTranslator {
     /**
      * Splits a raw user-info component on its first literal {@code ':'} and percent-decodes each half
      * separately; either part may be absent. An encoded {@code ':'} inside a username or password is
-     * not a separator — see docs/DECISION_LOG.md DL-071.
+     * not a separator — see docs/DECISION_LOG.md DL-072.
      */
     private static UserInfo splitUserInfo(String rawUserInfo) {
         if (rawUserInfo == null || rawUserInfo.isEmpty()) {

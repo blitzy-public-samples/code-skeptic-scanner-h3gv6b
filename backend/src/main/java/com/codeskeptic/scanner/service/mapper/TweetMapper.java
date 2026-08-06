@@ -27,7 +27,7 @@ import com.codeskeptic.scanner.entity.Tweet;
  * rejects a column value; the requirement is declared in exactly one place, {@link TweetDto}, which
  * rejects a {@code null} for each component the wire contract of
  * {@code backend/app/schema/tweet.py:L6-14} declares required. Converting a row that leaves such a
- * column empty therefore fails in the record's constructor rather than here. {@link TweetDto} also
+ * column empty fails in the record's constructor, not here. {@link TweetDto} also
  * normalises the two list components, so those two are the only components that are never
  * {@code null}. The entity's {@code responses} association is not read.
  *

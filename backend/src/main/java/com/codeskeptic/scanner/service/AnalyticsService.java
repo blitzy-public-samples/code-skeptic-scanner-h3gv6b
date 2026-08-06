@@ -205,7 +205,7 @@ public class AnalyticsService {
      * is the {@code scanner.analytics.trend-window-days} property, default 30, read through
      * {@link ScannerProperties} — DL-042. The cutoff is the start of the UTC day that is
      * {@code windowDays - 1} days before the current UTC day, so a window of {@code n} days observes
-     * the current UTC date and the {@code n - 1} UTC dates before it and the series therefore holds
+     * the current UTC date and the {@code n - 1} UTC dates before it, and the series holds
      * <em>at most</em> {@code n} elements, never {@code n + 1} — DL-278. The current UTC day is read
      * from the injected {@link Clock}, which is {@code Clock.systemUTC()}, so the cutoff does not move
      * with the JVM's default time zone.

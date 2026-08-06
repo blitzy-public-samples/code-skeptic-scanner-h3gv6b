@@ -195,8 +195,7 @@ public class SecurityConfig {
     private static final int MAXIMUM_REQUEST_BODY_BYTES = 65_536;
 
     /**
-     * Request methods that carry no body, and on which {@link RequestBodyLimitFilter} therefore does
-     * nothing.
+     * Request methods that carry no body, on which {@link RequestBodyLimitFilter} does nothing.
      */
     private static final Set<String> BODYLESS_METHODS =
             Set.of(HttpMethod.GET.name(), HttpMethod.HEAD.name(), HttpMethod.OPTIONS.name(),
@@ -558,8 +557,8 @@ public class SecurityConfig {
      * Bounds the encoded login body before Jackson allocates or deserializes it — DL-118.
      *
      * <p>The filter applies to exactly the requests {@link #TOKEN_ENDPOINT_MATCHER} matches, which is
-     * the same instance the chain's {@code permitAll} rule consults. Matching therefore runs against
-     * the parsed request path — percent-decoded and normalized — so an encoded spelling such as
+     * the same instance the chain's {@code permitAll} rule consults. Matching runs against the parsed
+     * request path — percent-decoded and normalized — so an encoded spelling such as
      * {@code POST /auth/%74oken} is bounded here exactly as {@code POST /auth/token} is.
      *
      * <p>It reads at most {@value #MAXIMUM_LOGIN_REQUEST_BYTES} plus one bytes, rejects a larger body

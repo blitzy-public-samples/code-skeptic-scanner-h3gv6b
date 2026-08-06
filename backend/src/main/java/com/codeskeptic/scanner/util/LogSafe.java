@@ -50,8 +50,8 @@ public final class LogSafe {
      *
      * <p>Every character outside printable ASCII — which includes the carriage return and line feed a
      * decoded {@code %0D%0A} carries — becomes {@value #REPLACEMENT}, and the value is truncated to
-     * {@value #LOG_VALUE_LIMIT} characters. A caller can therefore neither forge a record boundary nor
-     * flood a record with an unbounded value.
+     * {@value #LOG_VALUE_LIMIT} characters. A caller forges no record boundary and floods no record
+     * with an unbounded value.
      *
      * @param value the caller-supplied value, possibly {@code null}
      * @return {@code absent}, {@code empty}, or the guarded rendering; never {@code null}

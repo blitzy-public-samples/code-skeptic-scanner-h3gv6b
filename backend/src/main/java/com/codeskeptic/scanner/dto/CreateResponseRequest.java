@@ -12,8 +12,8 @@ import jakarta.validation.constraints.NotNull;
  *
  * <p>One component, bound from the single key the source handler read out of the free-form body,
  * {@code tweet_id} ({@code backend/app/api/responses.py:L38}), carried as the raw JSON node the
- * request supplied so that the guard at {@code backend/app/api/responses.py:L40} can be applied to
- * the value the source would have seen — see docs/DECISION_LOG.md DL-240.
+ * request supplied, which is the value the guard at {@code backend/app/api/responses.py:L40} is
+ * applied to — see docs/DECISION_LOG.md DL-240.
  *
  * <p>{@code @NotNull} on {@link #tweetId()} is the only constraint declared and corresponds to that
  * guard, which answered an absent {@code tweet_id} with HTTP 400 and the body

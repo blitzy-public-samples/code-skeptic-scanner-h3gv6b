@@ -72,7 +72,7 @@ public class RequestMediaTypeConfig {
      * <p>The order is {@link Ordered#HIGHEST_PRECEDENCE}, ahead of
      * {@code springSecurityFilterChain}, which Spring Boot registers at
      * {@code SecurityProperties.DEFAULT_FILTER_ORDER} — {@code Ordered.HIGHEST_PRECEDENCE} plus 100 —
-     * and therefore ahead of the {@code CorsFilter} inside that chain — DL-236.
+     * and ahead of the {@code CorsFilter} inside that chain — DL-236.
      *
      * <p>The registration names {@link DispatcherType#REQUEST} alone, the dispatch on which a client
      * supplies the header.

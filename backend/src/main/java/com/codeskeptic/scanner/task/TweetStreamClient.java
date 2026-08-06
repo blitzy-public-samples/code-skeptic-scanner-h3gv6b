@@ -1046,10 +1046,10 @@ public class TweetStreamClient implements SmartLifecycle {
     /**
      * Reports the bound applied to a control-plane call.
      *
-     * <p>The value is {@code scanner.twitter.request-timeout-seconds}, read on every call so that a
-     * configuration change needs no restart, and never shorter than
-     * {@value #MINIMUM_REQUEST_TIMEOUT_SECONDS} second. The filtered-stream subscription is not
-     * bounded by it.
+     * <p>The value is {@code scanner.twitter.request-timeout-seconds}, read on every call and never
+     * shorter than {@value #MINIMUM_REQUEST_TIMEOUT_SECONDS} second, so a configuration change takes
+     * effect on the next call with no restart. The filtered-stream subscription is not bounded by
+     * it.
      *
      * @return the bound for the app-only token exchange and the stream-rules calls, never
      *     {@code null} and never shorter than {@value #MINIMUM_REQUEST_TIMEOUT_SECONDS} second
@@ -1263,9 +1263,9 @@ public class TweetStreamClient implements SmartLifecycle {
      *
      * <p>A record whose accumulated bytes reach {@value #MAX_RECORD_BYTES} is discarded: the
      * accumulator is emptied, the condition is counted and reported at most once per
-     * {@value #DROPPED_RECORD_REPORT_INTERVAL} — DL-260 — and {@code discarding} is raised so that the
-     * remaining bytes of that record are dropped up to and including its next line feed. Accumulation of
-     * the following record then resumes normally and the connection is never ended.
+     * {@value #DROPPED_RECORD_REPORT_INTERVAL} — DL-260 — and {@code discarding} is raised, under which
+     * the remaining bytes of that record are dropped up to and including its next line feed.
+     * Accumulation of the following record then resumes normally and the connection is never ended.
      *
      * @param chunk one body chunk, released before this method returns; must not be {@code null}
      * @param pending the accumulator holding the bytes of the record in progress, must not be
@@ -1585,8 +1585,8 @@ public class TweetStreamClient implements SmartLifecycle {
      * <p>The runtime type comes from {@link LogSafe#type(Throwable)} and is carried literally. A
      * message is carried only through {@link LogSafe#logSafe(String)}, so every character outside
      * printable ASCII — the carriage return and the line feed included — becomes {@code ?} and the
-     * rendering is bounded. A message a remote peer, a proxy, a TLS stack or a URL contributed can
-     * therefore neither forge a record boundary nor flood a record — DL-197.
+     * rendering is bounded. A message a remote peer, a proxy, a TLS stack or a URL contributed
+     * forges no record boundary and floods no record — DL-197.
      *
      * @param failure the failure to render, may be {@code null}
      * @return the simple type name of {@code failure} followed by its guarded message when it carries

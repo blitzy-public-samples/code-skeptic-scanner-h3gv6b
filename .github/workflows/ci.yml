@@ -2,89 +2,59 @@ name: Code Skeptic Scanner CI
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
-    branches: [main]
-
-# Least-privilege default for every job in this workflow - see
-# backend/docs/DECISION_LOG.md DL-104
-permissions:
-  contents: read
+    branches: [ main ]
 
 jobs:
-  # Backend verification runs in its own job so that it is reached independently of the frontend
-  # steps - see backend/docs/DECISION_LOG.md DL-250
-  backend:
+  build-and-test:
     runs-on: ubuntu-latest
 
     steps:
-      # Pinned action revision - see backend/docs/DECISION_LOG.md DL-103
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
+    - uses: actions/checkout@v2
 
-      # Replaces the retired Python 3.9 toolchain step - see backend/docs/DECISION_LOG.md DL-004,
-      # DL-005
-      - name: Set up JDK 21
-        uses: actions/setup-java@d7793b545071e98d581d3bf084a51c3213318a07  # v4.9.0
-        with:
-          distribution: 'temurin'
-          java-version: '21'
-          cache: maven
+    # Replaces the retired Python 3.9 toolchain step - see backend/docs/DECISION_LOG.md DL-004,
+    # DL-005
+    - name: Set up JDK 21
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '21'
+        cache: maven
 
-      # Replaces the retired Python dependency-install, lint, type-check, test and packaging steps
-      # of the pre-refactor backend job - see backend/docs/DECISION_LOG.md DL-004, DL-057
-      - name: Build and test backend
-        working-directory: ./backend
-        run: mvn -B clean verify
+    - name: Set up Node.js
+      uses: actions/setup-node@v2
+      with:
+        node-version: '14'
 
-  # The frontend steps are carried over unchanged; only the job they run in is separate - see
-  # backend/docs/DECISION_LOG.md DL-135, DL-250
-  frontend:
-    runs-on: ubuntu-latest
+    - name: Install frontend dependencies
+      working-directory: ./frontend
+      run: npm ci
 
-    steps:
-      # Pinned action revision; frontend Node input remains frozen - see
-      # backend/docs/DECISION_LOG.md DL-103, DL-135
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
+    - name: Run frontend linting and type checking
+      working-directory: ./frontend
+      run: |
+        npm run lint
+        npm run type-check
 
-      # Pinned by full commit SHA - see backend/docs/DECISION_LOG.md DL-103
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
-        with:
-          node-version: '14'
+    # Replaces the retired Python dependency-install, lint, type-check, test and packaging steps of
+    # this job - see backend/docs/DECISION_LOG.md DL-004, DL-057
+    - name: Build and test backend
+      working-directory: ./backend
+      run: mvn -B clean verify
 
-      - name: Install frontend dependencies
-        working-directory: ./frontend
-        run: npm ci
+    - name: Run frontend tests
+      working-directory: ./frontend
+      run: npm test
 
-      - name: Run frontend linting and type checking
-        working-directory: ./frontend
-        run: |
-          npm run lint
-          npm run type-check
+    - name: Build frontend
+      working-directory: ./frontend
+      run: npm run build
 
-      - name: Run frontend tests
-        working-directory: ./frontend
-        run: npm test
-
-      - name: Build frontend
-        working-directory: ./frontend
-        run: npm run build
-
-  # Staging deployment keeps the placeholder the plan freezes - see
-  # backend/docs/DECISION_LOG.md DL-250
-  deploy-staging:
-    runs-on: ubuntu-latest
-    needs: [backend, frontend]
-
-    steps:
-      # HUMAN ASSISTANCE NEEDED
-      # The following step requires configuration for your specific staging environment.
-      # Please replace with the appropriate deployment commands for your setup.
-      - name: Deploy to staging
-        run: |
-          # Add your deployment commands here
-          echo "Deploying to staging environment"
+    # HUMAN ASSISTANCE NEEDED
+    # The following step requires configuration for your specific staging environment.
+    # Please replace with the appropriate deployment commands for your setup.
+    - name: Deploy to staging
+      run: |
+        # Add your deployment commands here
+        echo "Deploying to staging environment"

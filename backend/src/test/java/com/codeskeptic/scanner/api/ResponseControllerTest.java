@@ -744,11 +744,12 @@ class ResponseControllerTest {
         assertThat(written.writesContent()).isFalse();
     }
 
-    // No carried member is rejected at binding time — DL-244 — see docs/DECISION_LOG.md
+    // A carried member the addressed column can hold, an explicit JSON null included, is forwarded as
+    // the value it carries — DL-082, DL-244 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] body={0}")
-    @MethodSource("freeFormUpdateBodies")
-    @DisplayName("forwards every carried member without answering 400")
-    void forwardsEveryCarriedMemberWithoutAnswering400(String body,
+    @MethodSource("usableUpdateBodies")
+    @DisplayName("forwards every usable carried member without answering 400")
+    void forwardsEveryUsableCarriedMemberWithoutAnswering400(String body,
             boolean writesContent, String contentValue,
             boolean writesApproval, Boolean approvalValue) throws Exception {
 
@@ -769,24 +770,65 @@ class ResponseControllerTest {
     }
 
     /**
-     * The request bodies an earlier revision answered 400, with the values each one now forwards.
+     * The request bodies whose carried members the two addressed columns can hold.
      *
      * @return one argument set per body: the body, whether {@code content} is written and the value
      *     it writes, then whether {@code is_approved} is written and the value it writes
      */
-    private static Stream<Arguments> freeFormUpdateBodies() {
+    private static Stream<Arguments> usableUpdateBodies() {
         return Stream.of(
-                Arguments.of("{\"is_approved\":\"true\"}", false, null, true, Boolean.TRUE),
-                Arguments.of("{\"is_approved\":\"false\"}", false, null, true, Boolean.FALSE),
-                Arguments.of("{\"is_approved\":1}", false, null, true, Boolean.TRUE),
+                Arguments.of("{\"is_approved\":true}", false, null, true, Boolean.TRUE),
+                Arguments.of("{\"is_approved\":false}", false, null, true, Boolean.FALSE),
                 Arguments.of("{\"is_approved\":null}", false, null, true, null),
                 Arguments.of("{\"content\":null}", true, null, false, null),
-                Arguments.of("{\"content\":123}", true, "123", false, null),
-                Arguments.of("{\"content\":true}", true, "true", false, null),
-                Arguments.of("{\"content\":[\"a\"]}", true, "[\"a\"]", false, null),
-                Arguments.of("{\"content\":{\"x\":1}}", true, "{\"x\":1}", false, null),
-                Arguments.of("{\"content\":\"valid\",\"is_approved\":\"true\"}", true,
-                        "valid", true, Boolean.TRUE));
+                Arguments.of("{\"content\":\"\"}", true, "", false, null),
+                Arguments.of("{\"content\":\"valid\",\"is_approved\":false}", true,
+                        "valid", true, Boolean.FALSE),
+                Arguments.of("{\"content\":null,\"is_approved\":null}", true, null, true, null));
+    }
+
+    // A carried member the addressed column cannot hold is refused while the body is bound — DL-231 —
+    // see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] body={0}")
+    @ValueSource(strings = {
+        "{\"is_approved\":\"true\"}",
+        "{\"is_approved\":\"false\"}",
+        "{\"is_approved\":1}",
+        "{\"is_approved\":0}",
+        "{\"is_approved\":[true]}",
+        "{\"is_approved\":{\"value\":true}}",
+        "{\"content\":123}",
+        "{\"content\":true}",
+        "{\"content\":[\"a\"]}",
+        "{\"content\":{\"x\":1}}",
+        "{\"content\":\"valid\",\"is_approved\":\"true\"}",
+        "{\"content\":123,\"is_approved\":true}"
+    })
+    @DisplayName("answers 400 with the Bad request envelope when a carried member is unusable")
+    void answers400WithTheBadRequestEnvelopeWhenACarriedMemberIsUnusable(String body)
+            throws Exception {
+
+        mockMvc.perform(put("/responses/" + RESPONSE_ID).contentType(MediaType.APPLICATION_JSON)
+                        .content(body)
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().json(BAD_REQUEST, JsonCompareMode.STRICT))
+                .andExpect(jsonPath("$.*", hasSize(1)))
+                .andExpect(jsonPath("$.error").value("Bad request"));
+
+        verifyNoInteractions(responseService);
+    }
+
+    // The refusal names no member on the wire — DL-231 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("names no offending member in the body it answers for an unusable carried value")
+    void namesNoOffendingMemberInTheBodyItAnswersForAnUnusableCarriedValue() throws Exception {
+        mockMvc.perform(put("/responses/" + RESPONSE_ID).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"content\":123}")
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isBadRequest())
+                .andExpect(bodyDoesNotContain("content", "is_approved", "JSON string",
+                        "IllegalArgumentException"));
     }
 
     // backend/app/api/responses.py:L56-57 — the body-level guard
@@ -1091,7 +1133,7 @@ class ResponseControllerTest {
      * @param text the text the body must not carry
      * @return the matcher
      */
-    private static ResultMatcher bodyDoesNotContain(String text) {
+    private static ResultMatcher bodyDoesNotContain(String... text) {
         return result -> assertThat(result.getResponse().getContentAsString())
                 .doesNotContain(text);
     }

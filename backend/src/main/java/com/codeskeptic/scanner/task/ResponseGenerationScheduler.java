@@ -26,7 +26,7 @@ import org.springframework.stereotype.Component;
  *
  * <p>The sweep reads its candidates in consecutive batches of at most {@value #CANDIDATE_BATCH_ROWS}
  * rows, each batch taken from the rows whose identifier exceeds the last one the pass handled, and it
- * continues until a batch comes back short. One pass therefore still considers the whole backlog, and
+ * continues until a batch comes back short. One pass still considers the whole backlog, and
  * the rows one statement returns and the rows the pass holds at any moment are both bounded — see
  * docs/DECISION_LOG.md DL-248. The pass declares no transaction, so each batch is read in
  * the repository's own transaction and its rows are detached when that call returns.

@@ -34,7 +34,7 @@ import com.codeskeptic.scanner.repository.ResponseRepository.ResponseRow;
  * substitutes a neutral value or rejects a column value; the requirement is declared in exactly one
  * place, {@link ResponseDto}, which rejects a {@code null} for each of the five components the wire
  * contract of {@code backend/app/schema/response.py:L5-9} declares required. Converting a row that
- * leaves such a column empty therefore fails in the record's constructor rather than here. An absent
+ * leaves such a column empty fails in the record's constructor, not here. An absent
  * {@code tweet} association yields a {@code null} {@code tweet_id} rather than dereferencing the
  * association.
  *

@@ -120,9 +120,9 @@ public record ScannerProperties(
      * components, declared with empty defaults in {@code application.yml} — DL-046.
      *
      * <p>{@code task/TweetStreamClient} reads {@code consumerKey} and {@code consumerSecret} for the
-     * app-only client-credentials exchange — DL-046. The remaining five components are declared so
-     * that every key the retired tree referenced resolves; the v2 read path signs nothing with them
-     * and no production code reads them — DL-031.
+     * app-only client-credentials exchange — DL-046. The remaining five components are declared, and
+     * every key the retired tree referenced resolves; the v2 read path signs nothing with them and no
+     * production code reads them — DL-031.
      *
      * <p>Seven components of this group are credentials and every one of those is redacted by
      * {@link #toString()}. The eighth is not: {@code requestTimeoutSeconds} bounds the two short

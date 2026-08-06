@@ -13,8 +13,8 @@ import java.util.List;
  * {@value #ADDITIONAL_TERM_CHARACTERS}, and the first and last characters are a letter or a digit.
  * Every character the rule syntax gives a meaning to — the double quote, the backslash, the
  * parentheses, the colon, the leading negation, the hashtag, the mention sign and every control
- * character — is therefore refused, and no term can close a quoted expression, introduce an operator
- * or forge a log line.
+ * character — is refused, and no term can close a quoted expression, introduce an operator or forge a
+ * log line.
  *
  * <p>Both callers hold to this one rule, so a term reported usable in one place is never refused in
  * the other: {@code task/TweetStreamClient} drops an unusable term before it mutates the registered
@@ -31,8 +31,8 @@ public final class StreamRuleTerms {
 
     /**
      * Most characters an accepted term holds. A longer term is refused, and the rendered expression is
-     * therefore bounded at {@value #MAX_TERM_CHARS} plus the two quotes a phrase carries — well inside
-     * the length the X standard filtered-stream rule grammar accepts.
+     * bounded at {@value #MAX_TERM_CHARS} plus the two quotes a phrase carries — well inside the
+     * length the X standard filtered-stream rule grammar accepts.
      */
     public static final int MAX_TERM_CHARS = 128;
 

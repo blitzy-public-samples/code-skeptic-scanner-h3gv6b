@@ -88,19 +88,9 @@ import com.codeskeptic.scanner.util.LogSafe;
  * any level — DL-052. The resolved principal of a successful issuance reaches the log as the
  * correlation token {@code util/LogSafe} derives from it, never as its own text — DL-197.
  *
- * <h2>Deployment obligation: ingress quotas for this route</h2>
- *
- * <p>This application performs no rate limiting. A deployment that exposes this route MUST configure
- * three ingress controls, and each submitted credential of accepted length costs one bcrypt
- * verification — DL-272:
- *
- * <ul>
- *   <li>a per-client request quota on {@code POST /auth/token};</li>
- *   <li>a concurrency limit on the same route — on Cloud Run the service's maximum
- *       concurrent-request setting, multiplied across instances by the Terraform module's
- *       {@code scaling_parameters};</li>
- *   <li>a total request-rate ceiling for the service.</li>
- * </ul>
+ * <p>This class declares no request quota, no concurrency limit and no request-rate ceiling on
+ * {@code POST /auth/token}, and every submitted credential of accepted length reaches one bcrypt
+ * verification — DL-272.
  *
  * <p>What this class bounds is its own log volume: a rejection is reported at {@code WARN} at most
  * once per {@value #REJECTION_REPORT_INTERVAL_SECONDS} seconds per reason, carrying the number

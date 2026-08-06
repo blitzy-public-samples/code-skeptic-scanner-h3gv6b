@@ -1111,11 +1111,12 @@ class ResponseServiceTest {
         verifyNoInteractions(responseMapper);
     }
 
-    // No carried value is rejected — DL-050, DL-244 — see docs/DECISION_LOG.md
+    // A usable carried value, an explicit JSON null included, is a write — DL-050, DL-082, DL-244 —
+    // see docs/DECISION_LOG.md
     @ParameterizedTest
-    @MethodSource("freeFormUpdateBodies")
-    @DisplayName("builds a request from any carried value and reports it as a write")
-    void buildsARequestFromAnyCarriedValueAndReportsItAsAWrite(
+    @MethodSource("usableUpdateBodies")
+    @DisplayName("builds a request from any usable carried value and reports it as a write")
+    void buildsARequestFromAnyUsableCarriedValueAndReportsItAsAWrite(
             JsonNode content, JsonNode isApproved) {
 
         UpdateResponseRequest request = new UpdateResponseRequest(content, isApproved);
@@ -1128,26 +1129,54 @@ class ResponseServiceTest {
     }
 
     /**
-     * The request bodies an earlier revision rejected at binding time, as the component pair each one
-     * binds to. Every one of them is now carried through — DL-244.
+     * The component pairs whose carried values the two addressed columns can hold.
      *
      * @return one argument pair per carried body
      */
-    private static Stream<Arguments> freeFormUpdateBodies() {
+    private static Stream<Arguments> usableUpdateBodies() {
+        return Stream.of(
+                Arguments.of(NullNode.getInstance(), null),
+                Arguments.of(TextNode.valueOf(REVISED_CONTENT), null),
+                Arguments.of(TextNode.valueOf(""), null),
+                Arguments.of(null, NullNode.getInstance()),
+                Arguments.of(null, BooleanNode.TRUE),
+                Arguments.of(null, BooleanNode.FALSE),
+                Arguments.of(NullNode.getInstance(), NullNode.getInstance()));
+    }
+
+    // A carried value the addressed column cannot hold is refused by the record — DL-231 — see
+    // docs/DECISION_LOG.md
+    @ParameterizedTest
+    @MethodSource("unusableUpdateBodies")
+    @DisplayName("refuses a carried value the addressed column cannot hold")
+    void refusesACarriedValueTheAddressedColumnCannotHold(JsonNode content, JsonNode isApproved) {
+        assertThatThrownBy(() -> new UpdateResponseRequest(content, isApproved))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        verifyNoInteractions(responseRepository, responseMapper);
+    }
+
+    /**
+     * The component pairs carrying a value the addressed column cannot hold.
+     *
+     * @return one argument pair per refused body
+     */
+    private static Stream<Arguments> unusableUpdateBodies() {
         ObjectNode object = JsonNodeFactory.instance.objectNode();
         object.put("x", 1);
         ArrayNode array = JsonNodeFactory.instance.arrayNode();
         array.add("a");
         return Stream.of(
-                Arguments.of(NullNode.getInstance(), null),
                 Arguments.of(IntNode.valueOf(123), null),
                 Arguments.of(BooleanNode.TRUE, null),
                 Arguments.of(array, null),
                 Arguments.of(object, null),
-                Arguments.of(null, NullNode.getInstance()),
                 Arguments.of(null, IntNode.valueOf(1)),
                 Arguments.of(null, TextNode.valueOf("true")),
-                Arguments.of(NullNode.getInstance(), NullNode.getInstance()));
+                Arguments.of(null, array),
+                Arguments.of(null, object),
+                Arguments.of(TextNode.valueOf(REVISED_CONTENT), TextNode.valueOf("true")),
+                Arguments.of(IntNode.valueOf(7), BooleanNode.TRUE));
     }
 
     // Presence decides whether a column is written and the carried value decides what is stored, each
@@ -1155,7 +1184,7 @@ class ResponseServiceTest {
     @ParameterizedTest
     @MethodSource("mixedUpdateBodies")
     @DisplayName("writes each carried member of a mixed body and leaves an omitted member untouched")
-    void appliesTheUsableMemberOfAMixedBody(JsonNode content, JsonNode isApproved,
+    void writesEachCarriedMemberOfAMixedBody(JsonNode content, JsonNode isApproved,
             String expectedContent, Boolean expectedApproval) {
 
         Response existing = storedRowCarryingApproval(false);
@@ -1170,37 +1199,33 @@ class ResponseServiceTest {
     }
 
     /**
-     * Bodies carrying one usable member beside one unusable member, with the column values the update
-     * must leave behind.
+     * Bodies carrying one member, or both, with the column values the update must leave behind.
      *
      * @return one argument row per mixed body
      */
     private static Stream<Arguments> mixedUpdateBodies() {
         return Stream.of(
-                Arguments.of(TextNode.valueOf(REVISED_CONTENT), TextNode.valueOf("true"),
-                        REVISED_CONTENT, Boolean.TRUE),
                 Arguments.of(TextNode.valueOf(REVISED_CONTENT), BooleanNode.TRUE,
                         REVISED_CONTENT, Boolean.TRUE),
+                Arguments.of(TextNode.valueOf(REVISED_CONTENT), null,
+                        REVISED_CONTENT, Boolean.FALSE),
                 Arguments.of(null, BooleanNode.TRUE,
                         STORED_CONTENT, Boolean.TRUE),
-                Arguments.of(IntNode.valueOf(7), BooleanNode.TRUE,
-                        "7", Boolean.TRUE));
+                Arguments.of(TextNode.valueOf(""), BooleanNode.FALSE,
+                        "", Boolean.FALSE));
     }
 
-    // A carried scalar is read the way Jackson reads it — DL-244 — see docs/DECISION_LOG.md
+    // A carried value is read without coercion — DL-231, DL-244 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("reads a carried scalar the way its target column holds it")
-    void readsACarriedScalarTheWayItsTargetColumnHoldsIt() {
-        assertThat(new UpdateResponseRequest(IntNode.valueOf(123), null).contentValue())
-                .isEqualTo("123");
-        assertThat(new UpdateResponseRequest(BooleanNode.TRUE, null).contentValue())
-                .isEqualTo("true");
-        assertThat(new UpdateResponseRequest(null, TextNode.valueOf("true")).approvalValue())
-                .isTrue();
-        assertThat(new UpdateResponseRequest(null, TextNode.valueOf("false")).approvalValue())
-                .isFalse();
-        assertThat(new UpdateResponseRequest(null, IntNode.valueOf(1)).approvalValue()).isTrue();
-        assertThat(new UpdateResponseRequest(null, IntNode.valueOf(0)).approvalValue()).isFalse();
+    @DisplayName("reads a carried value as the type its target column holds")
+    void readsACarriedValueAsTheTypeItsTargetColumnHolds() {
+        assertThat(new UpdateResponseRequest(TextNode.valueOf(REVISED_CONTENT), null).contentValue())
+                .isEqualTo(REVISED_CONTENT);
+        assertThat(new UpdateResponseRequest(TextNode.valueOf(""), null).contentValue()).isEmpty();
+        assertThat(new UpdateResponseRequest(NullNode.getInstance(), null).contentValue()).isNull();
+        assertThat(new UpdateResponseRequest(null, BooleanNode.TRUE).approvalValue()).isTrue();
+        assertThat(new UpdateResponseRequest(null, BooleanNode.FALSE).approvalValue()).isFalse();
+        assertThat(new UpdateResponseRequest(null, NullNode.getInstance()).approvalValue()).isNull();
     }
 
     // The two column types of backend/app/db/models.py:L24,L26 — DL-082 — see docs/DECISION_LOG.md

@@ -274,14 +274,12 @@ class ScannerApplicationTests {
 
     // The error-dispatch strategy of DL-183 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("serves the error path with this application's own controller and attribute source")
-    void servesTheErrorPathWithThisApplicationsOwnControllerAndAttributeSource() {
+    @DisplayName("serves the error path with the framework controller over this application's "
+            + "attribute source")
+    void servesTheErrorPathWithTheFrameworkControllerOverThisApplicationsAttributeSource() {
         assertThat(context.getBeansOfType(ErrorController.class).values())
                 .singleElement()
-                .isNotInstanceOf(BasicErrorController.class)
-                .satisfies(controller -> assertThat(controller.getClass().getEnclosingClass())
-                        .isEqualTo(GlobalExceptionHandler.class));
-        assertThat(context.getBeansOfType(BasicErrorController.class)).isEmpty();
+                .isInstanceOf(BasicErrorController.class);
         assertThat(context.getBeansOfType(ErrorAttributes.class)).hasSize(1);
         assertThat(context.getBean(ErrorAttributes.class).getClass().getEnclosingClass())
                 .isEqualTo(GlobalExceptionHandler.class);
@@ -289,16 +287,16 @@ class ScannerApplicationTests {
 
     // The api package of AAP 0.3.1 — DL-183 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("declares no request-mapped class in the api package beyond the five controllers "
-            + "and the error path")
+    @DisplayName("declares no request-mapped class in the api package beyond the five controllers")
     void declaresNoRequestMappedClassInTheApiPackageBeyondTheFiveControllers() {
         assertThat(context.getBeanNamesForAnnotation(RestController.class))
                 .containsExactlyInAnyOrder("tweetController", "responseController",
                         "settingController", "analyticsController", "authController");
-        // The one further request-mapped bean is the error-path handler, which carries no stereotype
-        // and is nested in the advice that declares the envelope — DL-183
+        // The error path is mapped by basicErrorController, which the framework declares — DL-183
         assertThat(context.getBeanNamesForAnnotation(RequestMapping.class))
-                .containsExactly("errorEnvelopeController");
+                .containsExactly("basicErrorController");
+        assertThat(context.getBeansOfType(ErrorController.class).keySet())
+                .containsExactly("basicErrorController");
     }
 
     // A direct request to the error path — DL-183 — see docs/DECISION_LOG.md
@@ -314,20 +312,62 @@ class ScannerApplicationTests {
                 .isEqualTo("{\"error\":\"Internal server error\"}");
     }
 
-    // A browser-shaped request must not reach the Whitelabel HTML page — DL-183, DL-236 — see
-    // docs/DECISION_LOG.md
-    @Test
-    @DisplayName("answers the error path with the JSON envelope even when only HTML is acceptable")
-    void answersTheErrorPathWithTheJsonEnvelopeEvenWhenOnlyHtmlIsAcceptable() throws Exception {
+    // The error path answers the JSON envelope for every representation that admits JSON — DL-183 —
+    // see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "Accept: {0}")
+    @ValueSource(strings = {"application/json", "*/*", "application/*+json",
+        "application/json;q=0.9,*/*;q=0.1"})
+    @DisplayName("answers the error path with the JSON envelope for every representation admitting "
+            + "JSON")
+    void answersTheErrorPathWithTheJsonEnvelopeForEveryRepresentationAdmittingJson(String accept)
+            throws Exception {
+
         MockHttpServletResponse response = mockMvc.perform(get("/error")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken())
-                        .accept(MediaType.TEXT_HTML))
+                        .header(HttpHeaders.ACCEPT, accept))
                 .andReturn().getResponse();
 
         assertThat(response.getStatus()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
         assertThat(response.getContentType()).startsWith(MediaType.APPLICATION_JSON_VALUE);
         assertThat(response.getContentAsString())
                 .isEqualTo("{\"error\":\"Internal server error\"}");
+    }
+
+    // An Accept header admitting no JSON representation carries the status alone — DL-183 — see
+    // docs/DECISION_LOG.md
+    @ParameterizedTest(name = "Accept: {0}")
+    @ValueSource(strings = {"text/plain", "application/xml"})
+    @DisplayName("answers the error path with the status alone when the request admits no JSON")
+    void answersTheErrorPathWithTheStatusAloneWhenTheRequestAdmitsNoJson(String accept)
+            throws Exception {
+
+        MockHttpServletResponse response = mockMvc.perform(get("/error")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken())
+                        .header(HttpHeaders.ACCEPT, accept))
+                .andReturn().getResponse();
+
+        assertThat(response.getStatus()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
+        assertThat(response.getContentAsString()).isEmpty();
+    }
+
+    // An HTML-only error dispatch renders the framework view, which carries no attribute value this
+    // application withholds — DL-183 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("renders the error path for an HTML-only request without any framework attribute "
+            + "value")
+    void rendersTheErrorPathForAnHtmlOnlyRequestWithoutAnyFrameworkAttributeValue() throws Exception {
+        MockHttpServletResponse response = mockMvc.perform(get("/error")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken())
+                        .accept(MediaType.TEXT_HTML))
+                .andReturn().getResponse();
+
+        assertThat(response.getStatus()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
+        assertThat(response.getContentType()).startsWith(MediaType.TEXT_HTML_VALUE);
+        assertThat(response.getContentAsString())
+                .contains("<div id='created'>null</div>")
+                .contains("type=Internal server error, status=null")
+                .doesNotContain("java.lang", "Exception", "at com.codeskeptic",
+                        "org.springframework");
     }
 
     @Test

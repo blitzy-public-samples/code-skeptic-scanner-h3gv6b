@@ -281,7 +281,8 @@ public class ResponseController {
     }
 
     // Ported from backend/app/api/responses.py:L51-65 (faithful port); the binding-time rejection of a
-    // wrong-typed member is net-new — DL-048, DL-050, DL-231 — see docs/DECISION_LOG.md
+    // wrong-typed member is net-new — DL-048, DL-050, DL-082, DL-231, DL-244 — see
+    // docs/DECISION_LOG.md
     /**
      * Applies a partial update to one {@code responses} row and renders the stored row.
      *
@@ -294,22 +295,26 @@ public class ResponseController {
      * {@link UpdateResponseRequest}. No other property is bound or forwarded: {@code id},
      * {@code generated_at} and {@code tweet_id} are not writable through this route.
      *
-     * <p>Two distinct mechanisms govern the body, and only the first is Bean Validation.
+     * <p>Two distinct mechanisms govern the body, and neither is Bean Validation.
      * {@link UpdateResponseRequest} declares no Bean Validation constraint and this parameter declares
      * no {@code @Valid} annotation, matching the free-form {@code request.json} read at {@code :L54} —
-     * see docs/DECISION_LOG.md DL-050. Separately, and net-new, the record's canonical constructor
-     * rejects at binding time a carried key whose value the addressed column cannot hold — a
-     * {@code content} that is not a JSON string, an {@code is_approved} that is not a JSON boolean, and
-     * an explicit JSON {@code null} for either — which the converter reports as 400
-     * {@code {"error": "Bad request"}} — see docs/DECISION_LOG.md DL-231.
+     * see docs/DECISION_LOG.md DL-050. First, and net-new, the record's canonical constructor rejects
+     * at binding time a carried key whose value the addressed column cannot hold — a {@code content}
+     * that is neither a JSON string nor an explicit JSON {@code null}, and an {@code is_approved} that
+     * is neither a JSON boolean nor an explicit JSON {@code null} — which the converter reports as 400
+     * {@code {"error": "Bad request"}} — see docs/DECISION_LOG.md DL-231. Second, the presence of a key
+     * decides which column is written and the carried value decides what is stored, an explicit JSON
+     * {@code null} included — see docs/DECISION_LOG.md DL-082 and DL-244.
      *
      * <p>Neither value the body carries is trimmed, defaulted or coerced. An absent body binds to
      * {@code null}. Reproducing the {@code if not update_data} guard at {@code :L56}, an absent body
      * and a body carrying neither key are both answered with 400 and the literal of {@code :L57}.
      *
-     * <p>A {@code responseId} carrying no number and one naming no row are both answered with 404 and
-     * the literal of {@code :L65}, {@code Response not found or update failed} — a different string
-     * from the {@code Response not found} that {@link #getResponse(String)} reports at {@code :L31}.
+     * <p>A {@code responseId} carrying no number, one naming no row, and a write that would leave
+     * {@code content} or {@code is_approved} empty are all answered with 404 and the literal of
+     * {@code :L65}, {@code Response not found or update failed} — a different string from the
+     * {@code Response not found} that {@link #getResponse(String)} reports at {@code :L31}. The third
+     * case rolls the transaction back — see docs/DECISION_LOG.md DL-244.
      *
      * @param responseId the raw path segment identifying the row
      * @param request    the columns to write; {@code null} when the request carried no body

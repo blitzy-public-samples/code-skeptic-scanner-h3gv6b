@@ -608,7 +608,7 @@ class JwtServiceTest {
 
     /**
      * Tokens {@link JwtService#extractUsername(String)} cannot verify, each reaching the parser and
-     * therefore producing one log record.
+     * producing one log record each.
      *
      * @return one unverifiable compact JWS or JWS-shaped value per invocation
      */

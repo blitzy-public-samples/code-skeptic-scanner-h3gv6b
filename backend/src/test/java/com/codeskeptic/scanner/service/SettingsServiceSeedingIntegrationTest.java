@@ -47,8 +47,8 @@ import com.codeskeptic.scanner.service.mapper.SettingMapper;
  * writes to a real table.
  *
  * <p>A Spring Boot test context is started through {@code SpringApplication}, which publishes
- * {@link ApplicationReadyEvent} once the context is refreshed. The three rows are therefore already
- * present when the first test method runs. No test-managed transaction wraps a test method — the
+ * {@link ApplicationReadyEvent} once the context is refreshed. The three rows are already present
+ * when the first test method runs. No test-managed transaction wraps a test method — the
  * seeding inserts each row in a transaction of its own (DL-159), which cannot observe state another
  * transaction has not committed — so every write a test performs is committed and the table is
  * restored after each test.

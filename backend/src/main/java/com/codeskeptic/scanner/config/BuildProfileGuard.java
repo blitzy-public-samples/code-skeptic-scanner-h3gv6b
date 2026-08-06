@@ -10,30 +10,29 @@ import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 import org.springframework.util.ClassUtils;
 
-// Net-new (no Python counterpart; the retired tree declared no profiles at all) — DL-244 — see
+// Net-new (no Python counterpart; the retired tree declared no profiles at all) — DL-279 — see
 // docs/DECISION_LOG.md
 /**
  * Refuses to start the application when the build-scoped {@code test} profile is active outside the
  * build.
  *
  * <p>{@code src/test/resources/application-test.yml} is build-scoped: it pins an in-memory H2
- * database with {@code create-drop}, supplies empty X credentials so no request reaches the provider,
- * and carries a signing key and a bcrypt hash that are held in version control — see
- * docs/DECISION_LOG.md DL-205. A deployed revision started with {@code SPRING_PROFILES_ACTIVE=test}
- * would therefore mint tokens under a published key and serve against a throwaway schema that is
- * dropped at shutdown.
+ * database with {@code create-drop}, supplies empty X credentials that reach no provider, and carries
+ * a signing key and a bcrypt hash that are held in version control — see docs/DECISION_LOG.md
+ * DL-205. A deployed revision started with {@code SPRING_PROFILES_ACTIVE=test} would mint tokens
+ * under a published key and serve against a throwaway schema that is dropped at shutdown — DL-279.
  *
  * <p>The signal this guard reads is the presence of {@value #TEST_FRAMEWORK_CLASS} on the bean class
- * loader. A Spring Boot executable jar carries no test-scoped dependency, so that class is absent
- * from a packaged artifact and present in every Surefire-launched context; {@code mvn clean verify} is
- * therefore unaffected — see docs/DECISION_LOG.md DL-244.
+ * loader. A Spring Boot executable jar carries no test-scoped dependency, and that class is absent
+ * from a packaged artifact and present in every Surefire-launched context; {@code mvn clean verify}
+ * runs unaffected — see docs/DECISION_LOG.md DL-279.
  *
- * <p>The check is a {@link BeanFactoryPostProcessor}, so it runs before the container instantiates any
- * singleton. A deployment that activates the profile therefore fails on the profile itself rather than
- * on whichever bean happens to be built first, which is what makes the failure message actionable. A
- * bean factory post-processor is instantiated before constructor autowiring is available, so the two
- * values this class reads arrive through {@link EnvironmentAware} and {@link BeanClassLoaderAware}
- * rather than through a constructor — DL-244.
+ * <p>The check is a {@link BeanFactoryPostProcessor} and runs before the container instantiates any
+ * singleton, so a deployment that activates the profile fails on the profile itself and not on
+ * whichever bean is built first. A bean factory post-processor is instantiated before constructor
+ * autowiring is available, and the two values this class reads arrive through
+ * {@link EnvironmentAware} and {@link BeanClassLoaderAware} instead of through a constructor —
+ * DL-279.
  *
  * <p>Every other profile, and the default profile, are left untouched: this class matches the profile
  * name exactly, reads and alters no bean definition, and publishes no bean.
@@ -53,7 +52,7 @@ public class BuildProfileGuard
 
     /**
      * Test-framework class present in a Surefire-launched context and absent from a packaged
-     * artifact, because a Spring Boot executable jar carries no test-scoped dependency — DL-244.
+     * artifact, which carries no test-scoped dependency — DL-279.
      */
     private static final String TEST_FRAMEWORK_CLASS = "org.junit.jupiter.api.Test";
 

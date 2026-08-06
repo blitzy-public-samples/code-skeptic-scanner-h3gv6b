@@ -1,7 +1,7 @@
 # Build the application with Maven on a Java 21 toolchain
-# Pinned by patch tag and SHA-256 digest - see backend/docs/DECISION_LOG.md DL-106, DL-248
+# Pinned by patch tag and SHA-256 digest - see backend/docs/DECISION_LOG.md DL-106
 # Digest of the 2026-08-04 rebuild of maven:3.9.16-eclipse-temurin-21, which is also what the
-# floating maven:3.9-eclipse-temurin-21 tag resolves to - see backend/docs/DECISION_LOG.md DL-248
+# floating maven:3.9-eclipse-temurin-21 tag resolves to - see backend/docs/DECISION_LOG.md DL-106
 FROM maven:3.9.16-eclipse-temurin-21@sha256:c07f7ccfb8ca6c9fa29ee523f00afa7d2ca6132c92f8652c4aebb5ee3491f502 AS build
 
 # Set the working directory in the container
@@ -24,11 +24,10 @@ RUN mvn -B clean package -DskipTests
 FROM eclipse-temurin:21.0.11_10-jre@sha256:8cef5fc7bebe421363ab543a2f4db5caf7d119d8db67d56b0f56c485d2de4d55
 
 # Java 21 runtime the container executes: Eclipse Temurin 21.0.12+8, the July 2026 critical patch
-# update. Eclipse Adoptium publishes it as a release archive but has not published a container image
-# for it, so the archive replaces the runtime the base image carries. The download is pinned by
-# release URL and verified against its published SHA-256 before it is unpacked; the base image's own
-# JAVA_HOME path is reused, so JAVA_HOME and PATH need no change and no unpatched runtime survives
-# the layer - see backend/docs/DECISION_LOG.md DL-243
+# update, taken from the Adoptium release archive. The download is pinned by release URL and verified
+# against its published SHA-256 before it is unpacked; it replaces the runtime at the base image's
+# own JAVA_HOME, which leaves JAVA_HOME and PATH unchanged and no earlier runtime in the layer - see
+# backend/docs/DECISION_LOG.md DL-243
 ARG JAVA_RUNTIME_URL=https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jre_x64_linux_hotspot_21.0.12_8.tar.gz
 ARG JAVA_RUNTIME_SHA256=8a379a67c91a3ae61ffb33d46e0a40c7ba35e70713c4db31cfca30492f792eff
 ARG JAVA_RUNTIME_VERSION=21.0.12+8
@@ -64,7 +63,7 @@ WORKDIR /app
 COPY --from=build --chown=0:10001 /app/target/*.jar app.jar
 
 # Mode 0640: the runtime identity reads the jar and cannot rewrite it - see
-# backend/docs/DECISION_LOG.md DL-249
+# backend/docs/DECISION_LOG.md DL-107
 RUN chmod 0640 /app/app.jar
 
 # Drop root before the entrypoint runs - see backend/docs/DECISION_LOG.md DL-107

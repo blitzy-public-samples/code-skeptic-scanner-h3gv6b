@@ -26,7 +26,7 @@ import java.util.stream.Collectors;
  * <p>Elements are trimmed and joined with a comma. No character is given a special meaning
  * inside an element and no character is substituted: a comma, a backslash, a quote and any
  * non-ASCII character are all written literally. A read splits on every comma. An element that
- * itself contains a comma is therefore read back as several elements — DL-164.</p>
+ * itself contains a comma is read back as several elements — DL-164.</p>
  *
  * <h2>Write contract</h2>
  * <p>{@link #convertToDatabaseColumn(List)} and {@link #encode(List)} behave as follows.</p>

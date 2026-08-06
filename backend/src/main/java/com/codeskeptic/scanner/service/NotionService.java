@@ -390,8 +390,8 @@ public class NotionService {
      * transcribing the {@code limit: int = 10} default at
      * {@code backend/app/services/notion_service.py:L32}, and a {@code limit} above
      * {@value #MAXIMUM_PAGE_SIZE} is capped at {@value #MAXIMUM_PAGE_SIZE} and the capping is recorded
-     * at {@code WARN} — DL-154. The {@code page_size} the request carries is therefore always between
-     * 1 and {@value #MAXIMUM_PAGE_SIZE}, which is the range Notion accepts.
+     * at {@code WARN} — DL-154. The {@code page_size} the request carries is always between 1 and
+     * {@value #MAXIMUM_PAGE_SIZE}, which is the range Notion accepts.
      *
      * <p>Each returned page is mapped by {@link #toTweetDto(JsonNode)}, which reads back the six
      * mirrored components — DL-088. A page carrying no {@code Tweet Id} property falls back to the

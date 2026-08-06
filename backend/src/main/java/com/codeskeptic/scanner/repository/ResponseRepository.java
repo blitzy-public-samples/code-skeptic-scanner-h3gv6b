@@ -99,9 +99,9 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
      * <p>The select list is the four {@code responses} columns {@code ResponseDto} carries plus the
      * {@code responses.tweet_id} value, read through the identifier path of the {@code tweet}
      * association, which the persistence provider resolves from the owning foreign-key column without
-     * joining the {@code tweets} table. Rendering a page therefore issues one statement for the rows
-     * and the declared count statement, reads no column of {@code tweets}, and places no entity in
-     * the persistence context — DL-245, DL-249.
+     * joining the {@code tweets} table. Rendering a page issues one statement for the rows and the
+     * declared count statement, reads no column of {@code tweets}, and places no entity in the
+     * persistence context — DL-245, DL-249.
      *
      * <p>Content, order, size and pagination metadata are those of the inherited
      * {@code findAll(Pageable)}: the query states no sort, so the order is the one the database
@@ -159,7 +159,7 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
      * <p>The row count and the approved-row count are selected together, so the summary reads the
      * {@code responses} table exactly once — see docs/DECISION_LOG.md DL-041 and DL-180.
      *
-     * <p>Both values are a {@code count(...)} and are therefore never {@code null}. A row whose
+     * <p>Both values are a {@code count(...)} and neither is ever {@code null}. A row whose
      * {@code is_approved} column holds {@code false} or {@code null} is excluded from the approved
      * count — DL-041.
      *
@@ -203,11 +203,10 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
      *
      * <p>{@link LockModeType#PESSIMISTIC_WRITE} makes the read issue a locking select — {@code for
      * update} on PostgreSQL, MySQL and H2 alike — so a second transaction reading the same row through
-     * this operation waits until the first commits. Every column of the row is therefore read, mutated
-     * and written without another writer observing the intermediate state, which is what keeps the two
-     * independently writable columns {@code content} and {@code is_approved} from overwriting one
-     * another when two {@code PUT /responses/{responseId}} requests are served at the same moment —
-     * DL-122.
+     * this operation waits until the first commits. Every column of the row is read, mutated and
+     * written with no other writer observing the intermediate state, and the two independently
+     * writable columns {@code content} and {@code is_approved} do not overwrite one another when two
+     * {@code PUT /responses/{responseId}} requests are served at the same moment — DL-122.
      *
      * <p>The wait is bounded: {@link #LOCK_WAIT_HINT} caps the statement at
      * {@link #LOCK_WAIT_MILLIS} milliseconds, after which the provider reports the contention rather

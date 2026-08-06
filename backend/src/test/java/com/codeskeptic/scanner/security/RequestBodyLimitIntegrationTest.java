@@ -26,8 +26,8 @@ import com.codeskeptic.scanner.ScannerApplication;
  *
  * <p>The bounds are enforced inside the chain, ahead of the {@code DispatcherServlet}, and a breach
  * on an authenticated route is reported by {@link jakarta.servlet.http.HttpServletResponse#sendError(int)}.
- * A rejection is therefore an {@code ERROR} dispatch that only a servlet container performs, and this
- * is the one class in the suite that starts a container — see docs/DECISION_LOG.md DL-274.
+ * A rejection is an {@code ERROR} dispatch that only a servlet container performs, and this is the one
+ * class in the suite that starts a container — see docs/DECISION_LOG.md DL-274.
  *
  * <p>The context this class starts is the whole application context, on a random port, under the
  * {@code test} profile: an in-memory database, a JWT secret, the single {@code scanner.auth}

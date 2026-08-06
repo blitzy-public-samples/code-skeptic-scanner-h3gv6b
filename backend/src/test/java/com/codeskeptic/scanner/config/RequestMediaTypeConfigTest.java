@@ -262,7 +262,7 @@ class RequestMediaTypeConfigTest {
         }
     }
 
-    // Registered request-path coverage — DL-236, DL-244 — see docs/DECISION_LOG.md
+    // Registered request-path coverage — DL-236 — see docs/DECISION_LOG.md
     /**
      * Drives requests through the filter as the container runs it: ahead of the security chain, the
      * {@code CorsFilter} inside it, the {@code DispatcherServlet} and

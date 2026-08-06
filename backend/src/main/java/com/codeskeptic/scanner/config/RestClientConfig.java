@@ -91,8 +91,8 @@ public class RestClientConfig {
     private final ScannerProperties properties;
 
     /**
-     * The transport published by {@link #notionHttpClient()}, retained so that
-     * {@link #shutdownNotionHttpClient()} can release it. Cleared once released — DL-264.
+     * The transport published by {@link #notionHttpClient()}, retained for
+     * {@link #shutdownNotionHttpClient()} to release. Cleared once released — DL-264.
      */
     private volatile HttpClient httpClient;
 

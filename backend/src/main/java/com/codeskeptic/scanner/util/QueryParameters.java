@@ -78,7 +78,7 @@ public final class QueryParameters {
      *
      * <p>The largest offset a paged query can express is {@link Integer#MAX_VALUE}, which it passes as
      * an {@code int}. The offset compared here is the 0-based page index multiplied by the page size,
-     * computed as a {@code long} and therefore free of overflow. An offset of exactly
+     * computed as a {@code long} and free of overflow. An offset of exactly
      * {@link Integer#MAX_VALUE} is expressible and reads as {@code true} — DL-225.
      *
      * <p>Examples with a page size of {@code 10}: page index {@code 214748364}, whose offset is
@@ -116,14 +116,13 @@ public final class QueryParameters {
     /**
      * Reads the rows of one page as consecutive bounded windows and maps each window as it arrives.
      *
-     * <p>{@code reader} is called with windows of at most {@code chunkRows} rows, positioned so that
-     * together they cover exactly the rows {@code requested} names, and each window is handed to
-     * {@code mapper} before the next one is read. The rows one {@code reader} call returns are
-     * therefore bounded by {@code chunkRows} however large the page is, and only the mapped values are
-     * accumulated.
+     * <p>{@code reader} is called with windows of at most {@code chunkRows} rows, positioned to cover
+     * exactly the rows {@code requested} names between them, and each window is handed to
+     * {@code mapper} before the next one is read. The rows one {@code reader} call returns are bounded
+     * by {@code chunkRows} however large the page is, and only the mapped values are accumulated.
      *
-     * <p>The sort of {@code requested} is carried by every window, which is what makes consecutive
-     * windows disjoint and exhaustive. The reader is expected to apply no predicate and to issue no row
+     * <p>The sort of {@code requested} is carried by every window, and consecutive windows are
+     * disjoint and exhaustive. The reader is expected to apply no predicate and to issue no row
      * count.
      *
      * <p>Reading stops when the page's row bound is met, when a window comes back short of the bound it

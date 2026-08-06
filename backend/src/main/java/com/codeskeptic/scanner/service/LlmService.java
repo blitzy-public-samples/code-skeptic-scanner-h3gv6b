@@ -604,7 +604,7 @@ public class LlmService {
      * list order. Every line break within a name is folded to a space so no name can introduce a line
      * of its own into the prompt structure. The joined value is cut to
      * {@value #PROMPT_CONTEXT_LIMIT} characters and marked with {@value #BODY_TRUNCATION_MARK} when it
-     * is longer; this segment therefore carries at most that many characters whatever the row holds.
+     * is longer; this segment carries at most that many characters whatever the row holds.
      *
      * <p>{@link TweetDto} drops a {@code null} element from its list components, so every name here is
      * present.

@@ -1439,23 +1439,19 @@ class GlobalExceptionHandlerTest {
         assertThat(errorAttributes()).isInstanceOf(DefaultErrorAttributes.class);
     }
 
-    // The error path is served by this advice's own handler, in one representation — DL-183 — see
-    // docs/DECISION_LOG.md
+    // The error path stays mapped to the framework controller; this advice publishes only the status
+    // and literal it renders — DL-183 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("publishes an ErrorController mapped to the configured error path")
-    void publishesAnErrorControllerMappedToTheConfiguredErrorPath() {
-        Object controller = errorController();
-
-        assertThat(controller).isInstanceOf(ErrorController.class);
-        assertThat(controller.getClass().getEnclosingClass()).isEqualTo(GlobalExceptionHandler.class);
-        assertThat(controller.getClass().getAnnotation(RequestMapping.class)).isNotNull();
-        assertThat(controller.getClass().getAnnotation(RequestMapping.class).value())
-                .containsExactly("${server.error.path:${error.path:/error}}");
-        // The stereotype Spring MVC requires to detect a handler, under the one bean name — DL-183
-        assertThat(controller.getClass().getAnnotation(Controller.class)).isNotNull();
-        assertThat(controller.getClass().getAnnotation(Controller.class).value())
-                .isEqualTo("errorEnvelopeController");
-        assertThat(controller.getClass().getAnnotation(RestController.class)).isNull();
+    @DisplayName("declares no request-mapped or ErrorController type of its own")
+    void declaresNoRequestMappedOrErrorControllerTypeOfItsOwn() {
+        assertThat(GlobalExceptionHandler.class.getDeclaredClasses()).allSatisfy(nested -> {
+            assertThat(ErrorController.class.isAssignableFrom(nested)).isFalse();
+            assertThat(nested.getAnnotation(RequestMapping.class)).isNull();
+            assertThat(nested.getAnnotation(Controller.class)).isNull();
+            assertThat(nested.getAnnotation(RestController.class)).isNull();
+        });
+        assertThat(GlobalExceptionHandler.class.getAnnotation(RequestMapping.class)).isNull();
+        assertThat(GlobalExceptionHandler.class.getAnnotation(Controller.class)).isNull();
     }
 
     @ParameterizedTest(name = "a dispatch recording {0} is answered {1} carrying {2}")
@@ -1472,77 +1468,69 @@ class GlobalExceptionHandlerTest {
         "503,500,Internal server error",
         "504,500,Internal server error"
     })
-    @DisplayName("answers a dispatched status with the mapped status and the single-key JSON envelope")
-    void answersADispatchedStatusWithTheMappedStatusAndTheSingleKeyEnvelope(int dispatchedStatus,
+    @DisplayName("publishes the mapped status and the single-key literal for a dispatched status")
+    void publishesTheMappedStatusAndTheSingleKeyLiteralForADispatchedStatus(int dispatchedStatus,
             int expectedStatus, String expectedMessage) {
 
-        ResponseEntity<Map<String, Object>> response = errorResponseFor(dispatchedStatus, null);
-
-        assertThat(response.getStatusCode().value()).isEqualTo(expectedStatus);
-        assertThat(response.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_JSON);
-        assertThat(response.getBody()).containsExactly(entry("error", expectedMessage));
+        assertThat(GlobalExceptionHandler.errorDispatchStatusFor(dispatchedStatus))
+                .isEqualTo(expectedStatus);
+        assertThat(GlobalExceptionHandler.errorDispatchMessageFor(dispatchedStatus))
+                .isEqualTo(expectedMessage);
+        assertThat(errorAttributesFor(dispatchedStatus))
+                .containsExactly(entry("error", expectedMessage));
     }
 
     @ParameterizedTest
     @ValueSource(ints = {UNAUTHORIZED, FORBIDDEN})
-    @DisplayName("answers a dispatched 401 or 403 with that status and no body at all")
-    void answersADispatchedUnauthorizedOrForbiddenWithNoBody(int dispatchedStatus) {
-        ResponseEntity<Map<String, Object>> response = errorResponseFor(dispatchedStatus, null);
-
-        assertThat(response.getStatusCode().value()).isEqualTo(dispatchedStatus);
-        assertThat(response.getBody()).isNull();
-        assertThat(response.getHeaders().getContentType()).isNull();
+    @DisplayName("publishes a dispatched 401 or 403 with that status and no literal at all")
+    void publishesADispatchedUnauthorizedOrForbiddenWithNoLiteral(int dispatchedStatus) {
+        assertThat(GlobalExceptionHandler.errorDispatchStatusFor(dispatchedStatus))
+                .isEqualTo(dispatchedStatus);
+        assertThat(GlobalExceptionHandler.errorDispatchMessageFor(dispatchedStatus)).isNull();
+        assertThat(errorAttributesFor(dispatchedStatus)).isEmpty();
     }
 
     @ParameterizedTest(name = "Accept: {0}")
     @ValueSource(strings = {"text/html", "text/html,application/xhtml+xml,*/*;q=0.8", "text/plain",
         "*/*", "application/xml"})
-    @DisplayName("answers the error path as JSON whatever the Accept header names")
-    void answersTheErrorPathAsJsonWhateverTheAcceptHeaderNames(String accept) {
-        ResponseEntity<Map<String, Object>> response = errorResponseFor(404, accept);
+    @DisplayName("renders the same attribute map whatever the Accept header names")
+    void rendersTheSameAttributeMapWhateverTheAcceptHeaderNames(String accept) {
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setAttribute(RequestDispatcher.ERROR_STATUS_CODE, HttpStatus.NOT_FOUND.value());
+        request.addHeader(HttpHeaders.ACCEPT, accept);
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
-        assertThat(response.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_JSON);
-        assertThat(response.getBody()).containsExactly(entry("error", NOT_FOUND));
+        Map<String, Object> attributes = errorAttributes().getErrorAttributes(
+                new ServletWebRequest(request), ErrorAttributeOptions.defaults());
+
+        assertThat(attributes).containsExactly(entry("error", NOT_FOUND));
     }
 
     @Test
-    @DisplayName("answers a dispatch recording no status with the internal server error envelope")
-    void answersADispatchRecordingNoStatusWithTheInternalServerErrorEnvelope() {
-        ResponseEntity<Map<String, Object>> response =
-                errorController().handleError(new MockHttpServletRequest());
+    @DisplayName("maps a dispatch recording no status to the internal server error status")
+    void mapsADispatchRecordingNoStatusToTheInternalServerErrorStatus() {
+        Map<String, Object> attributes = errorAttributes().getErrorAttributes(
+                new ServletWebRequest(new MockHttpServletRequest()),
+                ErrorAttributeOptions.defaults());
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
-        assertThat(response.getBody()).containsExactly(entry("error", INTERNAL_SERVER_ERROR));
+        assertThat(GlobalExceptionHandler.errorDispatchStatusFor(
+                HttpStatus.INTERNAL_SERVER_ERROR.value()))
+                .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
+        assertThat(attributes).containsExactly(entry("error", INTERNAL_SERVER_ERROR));
     }
 
     @Test
-    @DisplayName("carries every error-path body value from the closed literal set this advice declares")
-    void carriesEveryErrorPathBodyValueFromTheClosedLiteralSet() {
+    @DisplayName("publishes every error-path literal from the closed set this advice declares")
+    void publishesEveryErrorPathLiteralFromTheClosedSet() {
         Set<String> rendered = new LinkedHashSet<>();
         for (int status = 400; status < 600; status++) {
-            Map<String, Object> body = errorResponseFor(status, null).getBody();
-            if (body != null) {
-                assertThat(body).hasSize(1);
-                rendered.add(String.valueOf(body.get("error")));
+            String message = GlobalExceptionHandler.errorDispatchMessageFor(status);
+            if (message != null) {
+                rendered.add(message);
             }
         }
 
         assertThat(rendered).containsExactlyInAnyOrder(NOT_FOUND, INTERNAL_SERVER_ERROR,
                 "Bad request", "Method not allowed", "Not acceptable", "Unsupported media type");
-    }
-
-    private GlobalExceptionHandler.ErrorEnvelopeController errorController() {
-        return new GlobalExceptionHandler.ErrorEnvelopeController(errorAttributes());
-    }
-
-    private ResponseEntity<Map<String, Object>> errorResponseFor(int dispatchedStatus, String accept) {
-        MockHttpServletRequest request = new MockHttpServletRequest();
-        request.setAttribute(RequestDispatcher.ERROR_STATUS_CODE, dispatchedStatus);
-        if (accept != null) {
-            request.addHeader(HttpHeaders.ACCEPT, accept);
-        }
-        return errorController().handleError(request);
     }
 
     private ErrorAttributes errorAttributes() {

@@ -20,10 +20,13 @@ import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.SafeConstructor;
 
-// Net-new (no Python counterpart) — DL-004, DL-005, DL-053, DL-056, DL-103, DL-105, DL-106,
-// DL-107, DL-218, DL-248 — see docs/DECISION_LOG.md
+// Net-new (no Python counterpart) — DL-004, DL-005, DL-053, DL-056, DL-057, DL-106, DL-107,
+// DL-215, DL-218, DL-243 — see docs/DECISION_LOG.md
 /**
  * Verifies the repository's backend build, container, CI, CD and deployment-script contracts.
+ *
+ * <p>Each workflow assertion covers one of the line-level edits this migration is authorised to make
+ * and the pre-refactor content each edit replaced — see docs/DECISION_LOG.md DL-057 and DL-215.
  */
 @DisplayName("Backend operations contracts")
 class OperationsContractTest {
@@ -123,7 +126,7 @@ class OperationsContractTest {
         String workflow = read(CI_WORKFLOW);
 
         assertThat(workflow)
-                .containsPattern("uses: actions/setup-java@[0-9a-f]{40}")
+                .contains("uses: actions/setup-java@v4")
                 .contains("distribution: 'temurin'")
                 .contains("java-version: '21'")
                 .contains("cache: maven");
@@ -137,17 +140,72 @@ class OperationsContractTest {
     }
 
     @Test
-    @DisplayName("builds the backend image from the declared Dockerfile and deploys its digest")
-    void buildsTheBackendImageFromTheDeclaredDockerfileAndDeploysItsDigest() throws IOException {
+    @DisplayName("carries no retired Python backend step and leaves every frontend step standing")
+    void carriesNoRetiredPythonBackendStepAndLeavesEveryFrontendStepStanding() throws IOException {
+        String workflow = read(CI_WORKFLOW);
+
+        assertThat(workflow)
+                .doesNotContain("actions/setup-python")
+                .doesNotContain("pip install -r backend/requirements.txt")
+                .doesNotContain("flake8 backend")
+                .doesNotContain("mypy backend")
+                .doesNotContain("pytest backend/tests")
+                .doesNotContain("python -m build");
+
+        assertThat(workflow)
+                .contains("jobs:\n  build-and-test:")
+                .contains("uses: actions/setup-node@v2")
+                .contains("node-version: '14'")
+                .contains("run: npm ci")
+                .contains("npm run lint")
+                .contains("npm run type-check")
+                .contains("run: npm test")
+                .contains("run: npm run build")
+                .contains("- name: Deploy to staging");
+    }
+
+    @Test
+    @DisplayName("builds the backend image from the declared Dockerfile in the backend context")
+    void buildsTheBackendImageFromTheDeclaredDockerfileInTheBackendContext() throws IOException {
         String workflow = read(CD_WORKFLOW);
 
         assertThat(workflow)
-                .contains("docker build -t \"${BACKEND_IMAGE}:${tag}\" "
+                .contains("docker build -t $BACKEND_IMAGE "
                         + "-f infrastructure/docker/Dockerfile.backend ./backend")
-                .contains("docker push \"${BACKEND_IMAGE}:${tag}\"")
-                .contains("gcloud artifacts docker images describe \"${BACKEND_IMAGE}:${tag}\"")
-                .contains("echo \"digest=${digest}\" >> \"$GITHUB_OUTPUT\"")
-                .contains("--image \"${{ steps.backend_image.outputs.digest }}\"");
+                .contains("docker push $BACKEND_IMAGE");
+    }
+
+    @Test
+    @DisplayName("changes the CD workflow at its backend build line and nowhere else")
+    void changesTheCdWorkflowAtItsBackendBuildLineAndNowhereElse() throws IOException {
+        String workflow = read(CD_WORKFLOW);
+
+        assertThat(workflow)
+                .contains("BACKEND_IMAGE: gcr.io/${{ secrets.GCP_PROJECT_ID }}/code-skeptic-backend")
+                .contains("uses: google-github-actions/setup-gcloud@v0.2.1")
+                .contains("run: gcloud auth configure-docker")
+                .contains("gcloud run deploy code-skeptic-backend")
+                .contains("--image $BACKEND_IMAGE")
+                .contains("gsutil -m rsync -r frontend/build gs://$FRONTEND_BUCKET")
+                .contains("gcloud compute backend-buckets create code-skeptic-frontend")
+                .contains("uses: 8398a7/action-slack@v3");
+
+        assertThat(workflow)
+                .doesNotContain("artifacts repositories")
+                .doesNotContain("gcloud secrets")
+                .doesNotContain("--min-instances")
+                .doesNotContain("--max-instances")
+                .doesNotContain("--no-cpu-throttling")
+                .doesNotContain("--port ");
+    }
+
+    @Test
+    @DisplayName("declares no repository-hygiene file outside the frozen operations inventory")
+    void declaresNoRepositoryHygieneFileOutsideTheFrozenOperationsInventory() {
+        assertThat(REPOSITORY_ROOT.resolve(".github/dependabot.yml")).doesNotExist();
+        assertThat(REPOSITORY_ROOT.resolve(".yamllint.yml")).doesNotExist();
+        assertThat(REPOSITORY_ROOT.resolve(".github/workflows/ci.yml")).isRegularFile();
+        assertThat(REPOSITORY_ROOT.resolve(".github/workflows/cd.yml")).isRegularFile();
     }
 
     @Test

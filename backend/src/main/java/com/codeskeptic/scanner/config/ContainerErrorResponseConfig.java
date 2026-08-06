@@ -118,11 +118,11 @@ public class ContainerErrorResponseConfig {
      * Replaces the container's error-report valve with {@link ErrorEnvelopeReportValve}.
      *
      * <p>Two container behaviours fix the shape of this method. {@code Pipeline.addValve} appends and
-     * an error-report valve reports only after the valves beneath it have run, so the valve added last
-     * is the one that reports and this customizer is ordered after Spring Boot's own, which installs
-     * the HTML valve. {@code StandardHost} installs a further valve of its configured error-report
-     * class at start unless one is already present, so that class name is cleared once the replacement
-     * is in place — DL-237.
+     * an error-report valve reports only after the valves beneath it have run; this customizer is
+     * ordered after Spring Boot's own, which installs the HTML valve, and the valve added last is the
+     * one that reports. {@code StandardHost} installs a further valve of its configured error-report
+     * class at start unless one is already present, and that class name is cleared once the
+     * replacement is in place — DL-237.
      *
      * @return the customizer; never {@code null}
      */
@@ -410,8 +410,7 @@ public class ContainerErrorResponseConfig {
          * Renders the single-key envelope.
          *
          * @param message the literal to carry, which is one of the literals
-         *     {@code api/GlobalExceptionHandler} declares and therefore holds no character JSON
-         *     escapes
+         *     {@code api/GlobalExceptionHandler} declares and holds no character JSON escape
          * @return the JSON document to write
          */
         private static String envelope(String message) {

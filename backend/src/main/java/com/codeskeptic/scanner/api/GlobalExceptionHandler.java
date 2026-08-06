@@ -2,7 +2,6 @@ package com.codeskeptic.scanner.api;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 
 
@@ -12,7 +11,6 @@ import org.springframework.beans.TypeMismatchException;
 import org.springframework.boot.web.error.ErrorAttributeOptions;
 import org.springframework.boot.web.servlet.error.DefaultErrorAttributes;
 import org.springframework.boot.web.servlet.error.ErrorAttributes;
-import org.springframework.boot.web.servlet.error.ErrorController;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
@@ -21,7 +19,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageConversionException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.http.converter.HttpMessageNotWritableException;
-import org.springframework.stereotype.Controller;
 import org.springframework.validation.FieldError;
 import org.springframework.web.HttpMediaTypeNotAcceptableException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
@@ -29,11 +26,8 @@ import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.RequestAttributes;
-import org.springframework.web.context.request.ServletWebRequest;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.multipart.MultipartException;
 import org.springframework.web.multipart.support.MissingServletRequestPartException;
@@ -58,13 +52,12 @@ import jakarta.servlet.http.HttpServletRequest;
  * source route literals and the global {@code Not found} and {@code Internal server error} literals.
  * Framework request failures map to 400, 405, 406 or 415; response-write and unexpected failures map
  * to 500. Authentication failures are handled by the security chain, and servlet error dispatches
- * are served by {@link ErrorEnvelopeController} over the {@link ErrorAttributes} bean
- * {@link #errorEnvelopeAttributes()} declares.
+ * are rendered from the {@link ErrorAttributes} bean {@link #errorEnvelopeAttributes()} declares.
  *
  * <p>A failure answered by {@code HttpServletResponse.sendError(int)} reaches no handler declared
- * here; the container re-dispatches the request to the error page, which
- * {@link ErrorEnvelopeController} serves with the same literals declared below, as JSON, at the status
- * {@link #errorDispatchStatusFor(int)} selects — DL-183.
+ * here; the container re-dispatches the request to the error page, where Spring Boot's own
+ * {@code BasicErrorController} renders the attribute map that bean returns — at most the single key
+ * {@value #ERROR_KEY}, carrying the same literals declared below — DL-183.
  *
  * <p>Every body produced here is an {@link ErrorResponse}: the single-key
  * {@code {"error": <string>}} envelope. The table names every handler this class declares and the
@@ -104,14 +97,16 @@ import jakarta.servlet.http.HttpServletRequest;
  *   <td>{@value #INTERNAL_SERVER_ERROR}</td></tr>
  * </table>
  *
- * <p>This class also owns the servlet {@code ERROR} dispatch. The error path
- * {@code server.error.path} names — {@code /error} by default — is served by
- * {@link ErrorEnvelopeController}, declared below and published in place of the framework-supplied
- * controller, so an error dispatch produces the same single-key envelope as every row above, as JSON
- * whatever the request's {@code Accept} header names — DL-183. A dispatched 401 or 403 yields no
- * attribute and therefore no body; 404, 405, 406 and 415 each yield their literal from the table; any
- * other 4xx yields {@value #BAD_REQUEST} at its own status; every other recorded status yields
- * {@value #INTERNAL_SERVER_ERROR} at 500.
+ * <p>This class also declares the body of the servlet {@code ERROR} dispatch. The error path
+ * {@code server.error.path} names — {@code /error} by default — stays mapped to Spring Boot's own
+ * {@code BasicErrorController}, and {@link #errorEnvelopeAttributes()} replaces the attribute source
+ * it renders, so a JSON error dispatch produces the same single-key envelope as every row above —
+ * DL-183. A dispatched 401 or 403 yields no attribute; 404, 405, 406 and 415 each yield their literal
+ * from the table; any other 4xx yields {@value #BAD_REQUEST}; every other recorded status yields
+ * {@value #INTERNAL_SERVER_ERROR}. {@link #errorDispatchStatusFor(int)} and
+ * {@link #errorDispatchMessageFor(int)} publish the same status and literal selection to
+ * {@code com.codeskeptic.scanner.config.ContainerErrorResponseConfig}, which answers a failure the
+ * container reports before any filter runs — DL-237.
  *
  * <p>The three {@code com.codeskeptic.scanner.exception} types declare no {@code @ResponseStatus};
  * their status is assigned here. Their messages are copied through {@link Throwable#getMessage()}
@@ -189,9 +184,6 @@ public class GlobalExceptionHandler {
     /** JSON key of the single-key envelope declared by {@code dto.ErrorResponse}. */
     private static final String ERROR_KEY = "error";
 
-    /** Bean name of {@link ErrorEnvelopeController}, the handler mapped to the error path — DL-183. */
-    static final String ERROR_CONTROLLER_BEAN_NAME = "errorEnvelopeController";
-
     /**
      * Messages keyed by the status the container recorded, for the four statuses of the
      * {@code ERROR} dispatch that carry a message of their own.
@@ -215,8 +207,9 @@ public class GlobalExceptionHandler {
      * dispatch, so both dispatches put the same single-key envelope on the wire and neither carries a
      * request path, a timestamp or an exception detail.
      *
-     * <p>It is read by {@link ErrorEnvelopeController}, which is the handler mapped to the error path
-     * — DL-183.
+     * <p>{@code DefaultErrorAttributes} is declared only while the context holds no
+     * {@link ErrorAttributes} bean, so this bean replaces it while Spring Boot's own
+     * {@code BasicErrorController} stays the handler mapped to the error path — DL-183.
      *
      * @return the error-attribute source, replacing the framework default
      */
@@ -674,76 +667,6 @@ public class GlobalExceptionHandler {
         return isClientErrorStatus(status) ? BAD_REQUEST : INTERNAL_SERVER_ERROR;
     }
 
-    // Ported from backend/app/main.py:L31-37 (faithful port) — DL-183 — see docs/DECISION_LOG.md
-    /**
-     * Serves the error path with the single-key error envelope, as JSON and nothing else.
-     *
-     * <p>Mapped to the path {@code server.error.path} names, {@code /error} by default, on every
-     * request method, which is the path {@code ErrorMvcAutoConfiguration}'s error-page customiser
-     * registers with the container. It is published once, as the component
-     * {@value GlobalExceptionHandler#ERROR_CONTROLLER_BEAN_NAME}, by the component scan
-     * {@code ScannerApplication} declares; Spring Boot's own {@code BasicErrorController} is declared
-     * only while the context holds no {@link ErrorController} bean, so this one replaces it — DL-183.
-     *
-     * <p>The response it writes is fixed by three rules — DL-183:
-     *
-     * <ul>
-     *   <li>the status is {@link GlobalExceptionHandler#errorDispatchStatusFor(int)} of the status the
-     *       container recorded, so a recorded 4xx is kept and anything else is reported as 500;</li>
-     *   <li>the body is the attribute map {@link ErrorAttributes} returns — at most the single key
-     *       {@value GlobalExceptionHandler#ERROR_KEY} — and an empty map is written as no body at all,
-     *       which is the shape a dispatched 401 or 403 takes;</li>
-     *   <li>the {@code Content-Type} is {@code application/json}, set on the response entity, so the
-     *       request's {@code Accept} header selects neither another representation nor a 406.</li>
-     * </ul>
-     *
-     * <p>This class holds no mutable state and is safe to share across concurrent requests.
-     */
-    @Controller(ERROR_CONTROLLER_BEAN_NAME)
-    @RequestMapping("${server.error.path:${error.path:/error}}")
-    static final class ErrorEnvelopeController implements ErrorController {
-
-        /** Source of the rendered body — {@link GlobalExceptionHandler#errorEnvelopeAttributes()}. */
-        private final ErrorAttributes errorAttributes;
-
-        /**
-         * Creates the handler over the attribute source that supplies its body.
-         *
-         * @param errorAttributes the attribute source
-         *                        {@link GlobalExceptionHandler#errorEnvelopeAttributes()} declares,
-         *                        injected through this single constructor; must not be {@code null}
-         */
-        ErrorEnvelopeController(ErrorAttributes errorAttributes) {
-            this.errorAttributes = Objects.requireNonNull(errorAttributes,
-                    "errorAttributes must not be null.");
-        }
-
-        /**
-         * Answers the dispatched failure with the status and the body this service declares for it.
-         *
-         * @param request the dispatched request, read only for the attributes the container recorded
-         * @return the status {@link GlobalExceptionHandler#errorDispatchStatusFor(int)} selects,
-         *         carrying the single-key JSON envelope, or no body when the recorded status carries
-         *         none; never {@code null}
-         */
-        @RequestMapping
-        @ResponseBody
-        public ResponseEntity<Map<String, Object>> handleError(HttpServletRequest request) {
-            ServletWebRequest webRequest = new ServletWebRequest(request);
-            int recorded = ErrorEnvelopeAttributes.recordedStatus(webRequest);
-            // The status is carried as an int: a container may record a status that names no
-            // HttpStatus constant, and errorDispatchStatusFor keeps every 4xx as it stands
-            int status = errorDispatchStatusFor(recorded);
-
-            Map<String, Object> body = errorAttributes.getErrorAttributes(webRequest,
-                    ErrorAttributeOptions.defaults());
-            if (body.isEmpty()) {
-                return ResponseEntity.status(status).build();
-            }
-            return ResponseEntity.status(status).contentType(MediaType.APPLICATION_JSON).body(body);
-        }
-    }
-
     /**
      * Renders the single-key error envelope for the servlet {@code ERROR} dispatch.
      *
@@ -751,8 +674,8 @@ public class GlobalExceptionHandler {
      * {@code error}, {@code path}, {@code exception}, {@code message}, {@code trace} and
      * {@code errors} — is replaced by the one key {@value GlobalExceptionHandler#ERROR_KEY} carrying
      * one of the six literals this class declares, selected by
-     * {@link GlobalExceptionHandler#errorDispatchMessageFor(int)}. A dispatched 401 or 403 yields no
-     * attribute at all, and {@link ErrorEnvelopeController} writes that as no body.
+     * {@link GlobalExceptionHandler#errorDispatchMessageFor(int)}. A dispatched 401 or 403 yields an
+     * empty map, which carries no literal.
      *
      * <p>The superclass is retained so the framework still records the dispatched exception as a
      * request attribute; only the rendered attribute map is replaced.
@@ -779,9 +702,6 @@ public class GlobalExceptionHandler {
 
         /**
          * Reads the status the container recorded for the failure being dispatched.
-         *
-         * <p>Read by {@link ErrorEnvelopeController#handleError(HttpServletRequest)} as well, so the
-         * status and the body of one dispatch are selected from the same recorded value.
          *
          * @param webRequest the dispatched request
          * @return the recorded status, or {@link HttpStatus#INTERNAL_SERVER_ERROR}'s value when the

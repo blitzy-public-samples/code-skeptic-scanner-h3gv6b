@@ -14,7 +14,7 @@ import org.springframework.beans.factory.support.DefaultListableBeanFactory;
 import org.springframework.context.EnvironmentAware;
 import org.springframework.mock.env.MockEnvironment;
 
-// Net-new (the retired backend/ tree declared no profiles) — DL-244 — see docs/DECISION_LOG.md
+// Net-new (the retired backend/ tree declared no profiles) — DL-279 — see docs/DECISION_LOG.md
 /**
  * Exercises {@link BuildProfileGuard}, the startup check that keeps the build-scoped {@code test}
  * profile out of a deployed revision.
@@ -25,7 +25,7 @@ import org.springframework.mock.env.MockEnvironment;
  * framework class as absent, which is the classpath of a packaged Boot jar; nothing is packaged.
  *
  * <p>The guard is also asserted to read its two values through the container callbacks and to declare
- * a no-argument constructor — DL-244.
+ * a no-argument constructor — DL-279.
  *
  * <p>No Spring context is started, no network call is made and no database is reached.
  */

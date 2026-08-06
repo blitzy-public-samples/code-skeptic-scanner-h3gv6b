@@ -750,8 +750,8 @@ public class ResponseService {
      * guard at {@code backend/app/api/responses.py:L56}. The request is tested before the row is read,
      * in the order of {@code :L56-60}.
      *
-     * <p>{@link UpdateResponseRequest} rejects no body: every carried value reaches this method,
-     * a JSON {@code null} included — see docs/DECISION_LOG.md DL-082 and DL-244.
+     * <p>{@link UpdateResponseRequest} admits an explicit JSON {@code null} on either key, so a
+     * {@code null} reaches this method as a write — see docs/DECISION_LOG.md DL-082 and DL-244.
      *
      * <p>{@code responseId} arrives as the raw path segment. An identifier carrying no number, a
      * {@code null} identifier and an identifier naming no row are all reported with the literal of
@@ -760,7 +760,9 @@ public class ResponseService {
      * <p>Two columns are writable here, and each is written exactly when the request body carried its
      * key: presence decides whether the column is written, and the carried value decides what is
      * stored. A key the body omits leaves its column untouched; a key carrying a JSON {@code null}
-     * writes {@code null} to its nullable column — see docs/DECISION_LOG.md DL-082 and DL-244. Both
+     * writes {@code null} to its nullable column — see docs/DECISION_LOG.md DL-082 and DL-244. A key
+     * carrying a value its column cannot hold never reaches this method: {@code dto.UpdateResponseRequest}
+     * refuses it while the body is being bound — see docs/DECISION_LOG.md DL-231. Both
      * members are declared required by the wire contract of {@code backend/app/schema/response.py:L6,L8}
      * (DL-080), so a write that would leave either of them empty is reported with the literal of
      * {@code :L65} and rolls this transaction back, leaving the row as it was. {@code id},

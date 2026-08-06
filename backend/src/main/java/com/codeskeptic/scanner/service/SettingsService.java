@@ -350,8 +350,8 @@ public class SettingsService {
      * reachable from this method — see docs/DECISION_LOG.md DL-159.
      *
      * <p>The insert runs in a transaction of its own, opened by {@link #insertTransaction} with
-     * {@code PROPAGATION_REQUIRES_NEW}. A rejected insert therefore rolls back that transaction
-     * alone, leaving any transaction the caller holds usable and the remaining keys still writable.
+     * {@code PROPAGATION_REQUIRES_NEW}. A rejected insert rolls back that transaction alone, leaving
+     * any transaction the caller holds usable and the remaining keys still writable.
      *
      * <p>{@code existsById} is consulted first and loads no row; the primary key is what refuses a
      * duplicate — see docs/DECISION_LOG.md DL-159. Two concurrent outcomes are possible for one key

@@ -62,8 +62,8 @@ import com.fasterxml.jackson.databind.JsonNode;
  * <p>Every row this class stores has a wire form: a record whose {@code data.text},
  * {@code data.public_metrics.like_count}, {@code data.created_at} or {@code data.author_id} is absent
  * or does not carry its wire type is named at {@code WARN} and skipped, no row is stored for it, and no
- * neutral value is substituted for it — DL-080, DL-223. No stored row is therefore left unrenderable
- * by {@link TweetMapper}, unmirrorable or unanswerable. Preparing a stored row's wire form is
+ * neutral value is substituted for it — DL-080, DL-223. No stored row is left unrenderable by
+ * {@link TweetMapper}, unmirrorable or unanswerable. Preparing a stored row's wire form is
  * nevertheless guarded, and a failure there is reported at {@code WARN} — see docs/DECISION_LOG.md
  * DL-224.
  *

@@ -2151,7 +2151,7 @@ class LlmServiceTest {
      *
      * <p>The cached field is written directly, which is the only way to place a stubbed client where
      * {@link LlmService#closeOpenAiClient()} reads it: {@link SeamedService} overrides the accessor
-     * and therefore never populates that field.
+     * and leaves that field unpopulated.
      *
      * @param client the client to cache
      * @return the service holding {@code client}

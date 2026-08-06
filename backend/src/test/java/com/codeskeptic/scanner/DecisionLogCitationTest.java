@@ -93,22 +93,35 @@ class DecisionLogCitationTest {
     /** Shape of a citation, wherever it appears. */
     private static final Pattern CITATION = Pattern.compile("DL-\\d{3}");
 
-    /** Roots whose comments must carry no rationale: the delivered sources and the POM. */
-    private static final List<Path> RATIONALE_SCANNED_ROOTS =
-            List.of(Path.of("src"), Path.of("pom.xml"));
+    /**
+     * Roots whose comments must carry no rationale: the delivered sources, the POM and the four
+     * operations files this migration edits.
+     */
+    private static final List<Path> RATIONALE_SCANNED_ROOTS = List.of(
+            Path.of("src"),
+            Path.of("pom.xml"),
+            Path.of("../infrastructure/docker/Dockerfile.backend"),
+            Path.of("../.github/workflows/ci.yml"),
+            Path.of("../.github/workflows/cd.yml"),
+            Path.of("../scripts/deploy.sh"));
 
     /**
      * Wordings that mark a comment as arguing for a choice rather than stating what the code does.
      *
-     * <p>Each names either an author's preference, a rejected option, a cost or a risk — the four
-     * things the log's own columns carry. A comment may name the source construct, the delivered
-     * contract and the decision identifier; it may not carry any of these.
+     * <p>Each names an author's preference, a rejected option, a cost, a risk, a causal justification
+     * or an obligation placed on a reader — the content the log's own columns carry. A comment may
+     * name the source construct, the delivered contract and the decision identifier; it may not carry
+     * any of these.
      */
     private static final List<String> RATIONALE_MARKERS = List.of(
             "by design", "deliberately", "deliberate", "intentionally", "on purpose",
             "trade-off", "tradeoff", "at the cost of", "we chose", "chosen over",
             "in preference to", "for readability", "would have been", "the alternative",
-            "no reason to", "is cheaper", "is safer", "arguably", "preferable");
+            "no reason to", "is cheaper", "is safer", "arguably", "preferable",
+            "because", "so that", "therefore", "for that reason",
+            "which is why", "which is what makes", "in order to", "must configure",
+            "no need to", "we prefer", "is preferred", "at no cost", "is redundant",
+            "would break", "would lose", "would add", "would require", "avoids");
 
     /** Openers of a comment line in the scanned file kinds. */
     private static final List<String> COMMENT_OPENERS =
@@ -404,23 +417,20 @@ class DecisionLogCitationTest {
     }
 
     @Test
-    @DisplayName("carries no decision rationale in any comment of the delivered sources or the POM")
-    void carriesNoDecisionRationaleInAnyCommentOfTheDeliveredSourcesOrThePom() {
+    @DisplayName("carries no decision rationale in any comment of the delivered sources, the POM or "
+            + "the operations files")
+    void carriesNoDecisionRationaleInAnyCommentOfTheDeliveredTree() {
         Map<String, String> offending = new TreeMap<>();
         for (Path file : rationaleScannedFiles()) {
-            List<String> lines = read(file).lines().toList();
-            for (int index = 0; index < lines.size(); index++) {
-                String line = lines.get(index).strip();
-                if (!isComment(line)) {
-                    continue;
-                }
-                String lowered = line.toLowerCase(Locale.ROOT);
+            for (CommentBlock block : commentBlocks(read(file))) {
+                String lowered = block.text().toLowerCase(Locale.ROOT);
                 String marker = RATIONALE_MARKERS.stream()
                         .filter(lowered::contains)
                         .findFirst()
                         .orElse(null);
                 if (marker != null) {
-                    offending.put(file + ":" + (index + 1) + " [" + marker + "]", line);
+                    offending.put(file + ":" + block.firstLine() + " [" + marker + "]",
+                            block.text());
                 }
             }
         }
@@ -428,6 +438,67 @@ class DecisionLogCitationTest {
         assertThat(offending)
                 .as("comments carrying rationale, which docs/DECISION_LOG.md owns (Rule 1, DL-058)")
                 .isEmpty();
+    }
+
+    /**
+     * One run of consecutive comment lines, joined into a single text.
+     *
+     * @param firstLine one-based line number the run opens on
+     * @param text      the run's comment text, joined with single spaces
+     */
+    private record CommentBlock(int firstLine, String text) {
+    }
+
+    /**
+     * Splits a file into the runs of consecutive comment lines it carries.
+     *
+     * <p>A wording that spans a line break is one text here, so the marker scan reads a comment the
+     * way a reader does instead of one line at a time.
+     *
+     * @param content the file text
+     * @return the comment runs, in file order
+     */
+    private static List<CommentBlock> commentBlocks(String content) {
+        List<CommentBlock> blocks = new ArrayList<>();
+        List<String> lines = content.lines().toList();
+        int openedAt = -1;
+        StringBuilder joined = new StringBuilder();
+        for (int index = 0; index < lines.size(); index++) {
+            String line = lines.get(index).strip();
+            if (isComment(line)) {
+                if (openedAt < 0) {
+                    openedAt = index + 1;
+                } else {
+                    joined.append(' ');
+                }
+                joined.append(stripOpener(line));
+                continue;
+            }
+            if (openedAt >= 0) {
+                blocks.add(new CommentBlock(openedAt, joined.toString().strip()));
+                openedAt = -1;
+                joined.setLength(0);
+            }
+        }
+        if (openedAt >= 0) {
+            blocks.add(new CommentBlock(openedAt, joined.toString().strip()));
+        }
+        return blocks;
+    }
+
+    /**
+     * Removes the comment opener from a stripped comment line.
+     *
+     * @param strippedLine the line with leading and trailing whitespace removed
+     * @return the line's own text
+     */
+    private static String stripOpener(String strippedLine) {
+        for (String opener : COMMENT_OPENERS) {
+            if (strippedLine.startsWith(opener)) {
+                return strippedLine.substring(opener.length()).strip();
+            }
+        }
+        return strippedLine;
     }
 
     /**

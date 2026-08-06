@@ -461,9 +461,9 @@ public final class DatabaseUrlTranslator {
     /**
      * Splits a raw query component into its properties, keeping the separator that preceded each one.
      *
-     * <p>The first property carries the empty separator, because {@code '?'} precedes it rather than a
-     * property separator. Every later property carries the {@code '&'} or {@code ';'} that separated it
-     * from the property before it in the supplied value — DL-072 — see docs/DECISION_LOG.md.
+     * <p>The first property carries the empty separator: {@code '?'} precedes it, not a property
+     * separator. Every later property carries the {@code '&'} or {@code ';'} that separated it from
+     * the property before it in the supplied value — DL-072 — see docs/DECISION_LOG.md.
      *
      * @param rawQuery the raw query component, never {@code null} and never empty
      * @return the properties in their original order, never {@code null}

@@ -37,7 +37,6 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
-import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.json.JsonCompareMode;
@@ -131,6 +130,9 @@ class SettingControllerTest {
 
     /** Message served with 400 for a body the converter cannot bind — DL-092, DL-188. */
     private static final String BAD_REQUEST = "Bad request";
+
+    /** The sanctioned envelope of an unmatched path — backend/app/main.py:L31-33, DL-243. */
+    private static final String NOT_FOUND_BODY = "{\"error\":\"Not found\"}";
 
     /** Members {@code ProblemDetail} would carry; none of them reaches the wire. */
     private static final List<String> PROBLEM_DETAIL_MEMBERS =
@@ -297,7 +299,9 @@ class SettingControllerTest {
     @DisplayName("serves nothing at the collection path spelled with a trailing slash")
     void servesNothingAtTheCollectionPathSpelledWithATrailingSlash() throws Exception {
         mockMvc.perform(get("/settings/").header(HttpHeaders.AUTHORIZATION, bearer()))
-                .andExpect(statusIsNot(HttpStatus.OK.value()));
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(content().string(NOT_FOUND_BODY));
 
         verifyNoInteractions(settingsService);
     }
@@ -308,8 +312,9 @@ class SettingControllerTest {
     @DisplayName("serves the collection at no prefixed or differently-cased path")
     void servesTheCollectionAtNoPrefixedPath(String path) throws Exception {
         mockMvc.perform(get(path).header(HttpHeaders.AUTHORIZATION, bearer()))
-                .andExpect(statusIsNot(HttpStatus.OK.value()))
-                .andExpect(status().isNotFound());
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(content().string(NOT_FOUND_BODY));
 
         verifyNoInteractions(settingsService);
     }
@@ -347,13 +352,12 @@ class SettingControllerTest {
     }
 
     @Test
-    @WithMockUser(username = PRINCIPAL)
     @DisplayName("serves the read to an authenticated principal")
     void servesTheReadToAnAuthenticatedPrincipal() throws Exception {
         when(settingsService.getAllSettings())
                 .thenReturn(List.of(new SettingDto(KEY, "100", DESCRIPTION)));
 
-        mockMvc.perform(get("/settings"))
+        mockMvc.perform(get("/settings").header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$").isArray())
                 .andExpect(jsonPath("$", hasSize(1)))
@@ -698,19 +702,21 @@ class SettingControllerTest {
                         .header(HttpHeaders.AUTHORIZATION, bearer())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"value\":\"250\"}"))
-                .andExpect(statusIsNot(HttpStatus.OK.value()));
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(content().string(NOT_FOUND_BODY));
 
         verifyNoInteractions(settingsService);
     }
 
     @Test
-    @WithMockUser(username = PRINCIPAL)
     @DisplayName("serves the update to an authenticated principal")
     void servesTheUpdateToAnAuthenticatedPrincipal() throws Exception {
         when(settingsService.updateSetting(KEY, "250"))
                 .thenReturn(new SettingDto(KEY, "250", DESCRIPTION));
 
         mockMvc.perform(put("/settings/{key}", KEY)
+                        .header(HttpHeaders.AUTHORIZATION, bearer())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"value\":\"250\"}"))
                 .andExpect(status().isOk())
@@ -891,6 +897,10 @@ class SettingControllerTest {
 
     /**
      * Builds the {@code Authorization} header value of an authenticated request.
+     *
+     * <p>The token is minted by the same {@code security/JwtService} the imported
+     * {@code security/SecurityConfig} chain verifies, so every request carrying it crosses
+     * {@code security/JwtAuthenticationFilter} — DL-021, DL-115, DL-242.
      *
      * @return the {@code Bearer} credential of the principal {@value #PRINCIPAL}
      */

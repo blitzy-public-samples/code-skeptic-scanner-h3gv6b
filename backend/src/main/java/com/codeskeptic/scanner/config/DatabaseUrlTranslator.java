@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
@@ -28,9 +29,13 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  * credential-bearing JDBC values fail with {@link IllegalStateException} — DL-072 — see
  * docs/DECISION_LOG.md.
  *
- * <p>Every value is consumed exactly as supplied. No value is trimmed, case-folded or otherwise
- * normalised at any point. A value padded with leading or trailing whitespace is not a parseable
- * URL and raises {@link IllegalStateException}.
+ * <p>The value is consumed exactly as supplied: no character of it is trimmed, case-folded or
+ * otherwise normalised on the way into a returned URL. A value padded with leading or trailing
+ * whitespace is not a parseable URL and raises {@link IllegalStateException}. Classification is the
+ * one place trimmed text is used: {@link ConfiguredValues#isUnset(String)} trims before testing for
+ * blankness and for the unresolved-placeholder shape, so a padded {@code ${DATABASE_URL}} is
+ * recognised as unset — DL-186. That trimmed copy is used for the test alone and never reaches the
+ * returned URL.
  *
  * <p>Behaviour contract, applied in this order:
  * <ol>
@@ -39,13 +44,14 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  *       environment variable is absent — DL-186 — see docs/DECISION_LOG.md.</li>
  *   <li>A value beginning with the literal lower-case {@code jdbc:} is returned exactly as
  *       supplied, character for character, with a {@code null} username and a {@code null}
- *       password. It is not parsed, normalised, trimmed or stripped, and its scheme is matched
+ *       password. It is not parsed, rewritten, trimmed or stripped, and its scheme is matched
  *       case-sensitively. Such a value carrying credential material is rejected; it is never
  *       altered — DL-072 — see docs/DECISION_LOG.md.</li>
  *   <li>Any other value is parsed as a {@link URI}. Everything from the first {@code '+'} of the
  *       scheme onward is discarded, the remaining scheme is mapped case-insensitively to a JDBC
  *       vendor, the user-info component is split on its first {@code ':'} into the username and the
- *       password, any recognised credential property is taken out of the query, and the URL is
+ *       password, any recognised credential property is taken out of the query under either property
+ *       separator, and the URL is
  *       reassembled as {@code <jdbc-authority-prefix><host>[:<port>]<path>[?<query>]}. The
  *       {@code :<port>} segment is present only when the value declares a port, the
  *       {@code ?<query>} segment only when at least one property is retained, and neither the
@@ -58,9 +64,22 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  * path — DL-072 — see docs/DECISION_LOG.md. Credential material is recognised in the user-info
  * component of an authority and in a {@code ?}, {@code &} or {@code ;} separated property named
  * {@code user}, {@code username}, {@code password}, {@code passwd}, {@code pwd},
- * {@code password1}, {@code password2} or {@code password3}, matched case-insensitively. On the
- * parse path such a property is removed and fills whichever credential the user-info component left
- * unset; every other property is retained verbatim and in order.
+ * {@code password1}, {@code password2} or {@code password3}, matched case-insensitively.
+ *
+ * <p>Extraction and detection read one grammar — DL-072:
+ * <ul>
+ *   <li><b>Extraction</b>, on the parse path, splits the query component on {@code '&'} and
+ *       {@code ';'} alike. A credential property is removed under either separator and fills whichever
+ *       credential the user-info component left unset. Every other property is retained verbatim, in
+ *       its original order, and with the separator that preceded it in the supplied value; a retained
+ *       property that becomes the first one carries no separator. A query whose every property is a
+ *       credential leaves no {@code ?} segment at all.</li>
+ *   <li><b>Detection</b> splits on {@code '?'}, {@code '&'} and {@code ';'} alike and runs over the
+ *       reassembled URL, so it is a check on the outcome rather than a second grammar. On the parse
+ *       path extraction has already removed every credential property, so detection finds none. On
+ *       the {@code jdbc:} pass-through path nothing is extracted, so a value carrying a credential
+ *       property under any of the three separators is <em>rejected</em> and never altered.</li>
+ * </ul>
  *
  * <p>Supported schemes and the JDBC authority prefix each maps to: {@code postgresql} and
  * {@code postgres} map to {@code jdbc:postgresql://}; {@code mysql} and {@code mariadb} map to
@@ -150,8 +169,12 @@ public final class DatabaseUrlTranslator {
     /** Separates properties inside the query or property section of a URL. */
     private static final Pattern PROPERTY_SEPARATOR = Pattern.compile("[?&;]");
 
-    /** Separates properties inside the query component of a parsed, non-JDBC URL. */
-    private static final String QUERY_PROPERTY_SEPARATOR = "&";
+    /**
+     * Separates properties inside the query component of a parsed, non-JDBC URL. It is the same set
+     * {@link #PROPERTY_SEPARATOR} detects with, minus the {@code '?'} that opens the component, so
+     * extraction and detection read one grammar — DL-072 — see docs/DECISION_LOG.md.
+     */
+    private static final Pattern QUERY_PROPERTY_SEPARATOR = Pattern.compile("[&;]");
 
     /**
      * A supported JDBC vendor and the exact URL prefix its driver requires ahead of the authority.
@@ -298,7 +321,14 @@ public final class DatabaseUrlTranslator {
         jdbcUrl.append(path);
 
         if (!query.retained().isEmpty()) {
-            jdbcUrl.append(QUERY_MARKER).append(String.join(QUERY_PROPERTY_SEPARATOR, query.retained()));
+            jdbcUrl.append(QUERY_MARKER);
+            for (int index = 0; index < query.retained().size(); index++) {
+                final Property retained = query.retained().get(index);
+                if (index > 0) {
+                    jdbcUrl.append(retained.separator());
+                }
+                jdbcUrl.append(retained.text());
+            }
         }
 
         final String assembled = jdbcUrl.toString();
@@ -379,10 +409,16 @@ public final class DatabaseUrlTranslator {
      * Splits a raw query component into the properties the reassembled URL retains and the
      * credentials taken out of it.
      *
-     * <p>Properties are separated on {@code '&'}. A property whose name is recognised by
-     * {@link #CREDENTIAL_PROPERTY_NAMES} is removed from the query and, when the user-info component
-     * did not already supply that half of the credentials, its percent-decoded value becomes the
-     * username or the password. Every other property is retained verbatim and in its original order.
+     * <p>Properties are separated on {@code '&'} and on {@code ';'} alike, which is the grammar
+     * {@link #rejectCredentialMaterial(String, String)} detects with, so a credential property is
+     * extracted under either separator and neither separator can carry one into the reassembled URL —
+     * DL-072 — see docs/DECISION_LOG.md.
+     *
+     * <p>A property whose name is recognised by {@link #CREDENTIAL_PROPERTY_NAMES} is removed from the
+     * query and, when the user-info component did not already supply that half of the credentials, its
+     * percent-decoded value becomes the username or the password. Every other property is retained
+     * verbatim, in its original order, and with the separator that preceded it in the supplied value;
+     * a retained property that becomes the first one carries no separator.
      *
      * @param rawQuery      the raw query component, or {@code null} when the value declared none
      * @param fromUserInfo  the credentials already taken from the user-info component
@@ -396,15 +432,16 @@ public final class DatabaseUrlTranslator {
             return new Query(List.of(), new UserInfo(username, password));
         }
 
-        final List<String> retained = new ArrayList<>();
-        for (String token : rawQuery.split(QUERY_PROPERTY_SEPARATOR, -1)) {
+        final List<Property> retained = new ArrayList<>();
+        for (Property property : splitProperties(rawQuery)) {
+            final String token = property.text();
             if (token.isEmpty()) {
                 continue;
             }
             final int equals = token.indexOf(EQUALS_SIGN);
             final String name = (equals < 0 ? token : token.substring(0, equals)).strip().toLowerCase(Locale.ROOT);
             if (!CREDENTIAL_PROPERTY_NAMES.contains(name)) {
-                retained.add(token);
+                retained.add(property);
                 continue;
             }
             final String value = equals < 0 ? "" : decodeUriComponent(token.substring(equals + 1));
@@ -417,6 +454,30 @@ public final class DatabaseUrlTranslator {
             }
         }
         return new Query(Collections.unmodifiableList(retained), new UserInfo(username, password));
+    }
+
+    /**
+     * Splits a raw query component into its properties, keeping the separator that preceded each one.
+     *
+     * <p>The first property carries the empty separator, because {@code '?'} precedes it rather than a
+     * property separator. Every later property carries the {@code '&'} or {@code ';'} that separated it
+     * from the property before it in the supplied value — DL-072 — see docs/DECISION_LOG.md.
+     *
+     * @param rawQuery the raw query component, never {@code null} and never empty
+     * @return the properties in their original order, never {@code null}
+     */
+    private static List<Property> splitProperties(String rawQuery) {
+        final List<Property> properties = new ArrayList<>();
+        final Matcher separators = QUERY_PROPERTY_SEPARATOR.matcher(rawQuery);
+        String separator = "";
+        int from = 0;
+        while (separators.find()) {
+            properties.add(new Property(separator, rawQuery.substring(from, separators.start())));
+            separator = separators.group();
+            from = separators.end();
+        }
+        properties.add(new Property(separator, rawQuery.substring(from)));
+        return properties;
     }
 
     /**
@@ -588,7 +649,14 @@ public final class DatabaseUrlTranslator {
      * their original order and raw form, and the credentials resolved from the user-info component
      * and from any recognised credential property.
      */
-    private record Query(List<String> retained, UserInfo credentials) {
+    private record Query(List<Property> retained, UserInfo credentials) {
+    }
+
+    /**
+     * One property of a query component together with the separator that preceded it in the supplied
+     * value. The first property of a component carries the empty separator — DL-072.
+     */
+    private record Property(String separator, String text) {
     }
 
     /** The parts of an authority component; {@code port} is {@value #NO_PORT} when absent. */

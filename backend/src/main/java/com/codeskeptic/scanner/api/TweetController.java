@@ -14,7 +14,6 @@ import org.springframework.web.bind.annotation.RestController;
 import com.codeskeptic.scanner.dto.AnalysisResultDto;
 import com.codeskeptic.scanner.dto.PaginatedTweetsDto;
 import com.codeskeptic.scanner.dto.TweetDto;
-import com.codeskeptic.scanner.service.SentimentAnalysisService;
 import com.codeskeptic.scanner.service.TwitterService;
 import com.codeskeptic.scanner.util.QueryParameters;
 
@@ -24,7 +23,7 @@ import com.codeskeptic.scanner.util.QueryParameters;
  * Serves the three HTTP routes of the {@code tweets} resource.
  *
  * <ul>
- *   <li>{@code GET /tweets} — {@link #getTweets(int, int)}, 200 with the two-key envelope
+ *   <li>{@code GET /tweets} — {@link #getTweets(String, String)}, 200 with the two-key envelope
  *       ({@code backend/app/api/tweets.py:L9-21}).</li>
  *   <li>{@code GET /tweets/{tweetId}} — {@link #getTweet(String)}, 200 with one JSON object
  *       ({@code backend/app/api/tweets.py:L23-32}).</li>
@@ -61,7 +60,7 @@ import com.codeskeptic.scanner.util.QueryParameters;
  * names and defaults of 1 and 10 are those of {@code backend/app/api/tweets.py:L12-13}, and passes
  * both to the service unchanged. The 1-based wire page to 0-based repository index conversion and
  * the {@code pagination} counters belong to {@code service.TwitterService} and
- * {@code dto.PaginationDto} — DL-038, DL-193.
+ * {@code dto.PaginationDto} — DL-038, DL-217.
  *
  * <p>The path variable of the two addressed routes is bound as a {@link String}, the type Flask's
  * default path converter delivered at {@code backend/app/api/tweets.py:L23} and {@code :L36} —
@@ -93,7 +92,7 @@ import com.codeskeptic.scanner.util.QueryParameters;
  * every member declared here is safe for concurrent use.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-021, DL-022,
- * DL-023, DL-036, DL-037, DL-038, DL-048, DL-059 and DL-193; construct-level provenance is recorded
+ * DL-023, DL-036, DL-037, DL-038, DL-048, DL-059 and DL-217; construct-level provenance is recorded
  * in {@code docs/TRACEABILITY_MATRIX.md}.
  */
 @RestController
@@ -107,28 +106,27 @@ public class TweetController {
     /** Page size applied when {@code per_page} carries no number — {@code backend/app/api/tweets.py:L13}. */
     private static final int DEFAULT_PER_PAGE = 10;
 
-    /** Reads the {@code tweets} table and writes the {@code doubt_rating} column. */
+    /**
+     * Reads the {@code tweets} table, orchestrates the analyze route and writes the
+     * {@code doubt_rating} column.
+     */
     private final TwitterService twitterService;
 
-    private final SentimentAnalysisService sentimentAnalysisService;
-
     /**
-     * Creates the controller with its two collaborators.
+     * Creates the controller with its single collaborator.
      *
-     * @param twitterService           the service serving all three routes, must not be {@code null}
-     * @param sentimentAnalysisService the service serving the analyze route, must not be
-     *                                 {@code null}
-     * @throws NullPointerException when either argument is {@code null}
+     * <p>Scoring belongs to {@code service.TwitterService}, which orchestrates the read, the provider
+     * call and the write of the analyze route in one operation — DL-263.
+     *
+     * @param twitterService the service serving all three routes, must not be {@code null}
+     * @throws NullPointerException when the argument is {@code null}
      */
-    public TweetController(TwitterService twitterService,
-            SentimentAnalysisService sentimentAnalysisService) {
+    public TweetController(TwitterService twitterService) {
         this.twitterService = Objects.requireNonNull(twitterService,
                 "twitterService must not be null.");
-        this.sentimentAnalysisService = Objects.requireNonNull(sentimentAnalysisService,
-                "sentimentAnalysisService must not be null.");
     }
 
-    // Ported from backend/app/api/tweets.py:L9-21 (faithful port) — DL-038, DL-077 — see
+    // Ported from backend/app/api/tweets.py:L9-21 (faithful port) — DL-038, DL-217 — see
     // docs/DECISION_LOG.md
     /**
      * Renders one page of the {@code tweets} table together with the block that describes it.
@@ -147,7 +145,7 @@ public class TweetController {
      * holds no whole number — the empty string, a whitespace-only value, {@code abc}, {@code 2.5},
      * a value beyond {@code int} range — takes the same default an absent parameter takes and the
      * request is accepted; no such value is reported as a client error — see docs/DECISION_LOG.md
-     * DL-077. A value that holds a whole number is passed on as received, including {@code 0} and a
+     * DL-217. A value that holds a whole number is passed on as received, including {@code 0} and a
      * negative value: this method applies no minimum, no maximum and no re-basing.
      * {@code service.TwitterService.getPaginatedTweets} reads a 1-based {@code page} and requests the
      * matching 0-based repository index, and the {@code page} value it reports back is 1-based — see
@@ -177,7 +175,7 @@ public class TweetController {
             @RequestParam(name = "per_page", required = false) String rawPerPage) {
 
         // backend/app/api/tweets.py:L12-13 — request.args.get(..., type=int) returns the default when
-        // the conversion raises — DL-193, DL-217 — see docs/DECISION_LOG.md
+        // the conversion raises — DL-217 — see docs/DECISION_LOG.md
         int page = QueryParameters.intOrDefault(rawPage, DEFAULT_PAGE);
         int perPage = QueryParameters.intOrDefault(rawPerPage, DEFAULT_PER_PAGE);
 
@@ -254,11 +252,9 @@ public class TweetController {
      */
     @PostMapping("/tweets/{tweetId}/analyze")
     public ResponseEntity<AnalysisResultDto> analyzeTweet(@PathVariable("tweetId") String tweetId) {
-        TweetDto tweet = twitterService.getTweet(tweetId);
-
-        double analysisResult = sentimentAnalysisService.analyzeSentiment(tweet.content());
-
-        twitterService.updateTweetAnalysis(tweetId, analysisResult);
+        // One orchestration: the row is read once, scored with no transaction open, and written once
+        // — DL-263 — see docs/DECISION_LOG.md
+        double analysisResult = twitterService.analyzeTweet(tweetId);
 
         log.info("Served an analysis of one tweet row with document sentiment score {}.",
                 analysisResult);

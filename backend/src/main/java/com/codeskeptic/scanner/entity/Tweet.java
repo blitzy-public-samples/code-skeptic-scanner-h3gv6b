@@ -32,8 +32,8 @@ import java.util.List;
  * mapped to {@code List<String>} attributes by {@link DelimitedStringListConverter}, which owns
  * their null and empty semantics — see docs/DECISION_LOG.md DL-024.
  *
- * <p>The five character columns declare {@code length = Integer.MAX_VALUE} and are generated as each
- * vendor's unbounded character type. Their source declaration is the bare {@code Column(String)} of
+ * <p>No column declares a not-null marker, a duplicate-value restriction or a width bound. The five
+ * character columns carry a bare {@code @Column}, matching the bare {@code Column(String)} of
  * backend/app/db/models.py:L11,L15-18 — see docs/DECISION_LOG.md DL-068.
  */
 // Ported from backend/app/db/models.py:L7-18 (faithful port) — see docs/DECISION_LOG.md
@@ -41,7 +41,7 @@ import java.util.List;
 // GenerationType.IDENTITY over Column(Integer, primary_key=True) — DL-049; media and
 // ai_tools_mentioned are List<String> attributes over Column(String) — DL-024 — see
 // docs/DECISION_LOG.md
-// equals(Object) and hashCode() are net-new Java persistence mechanics — DL-203 — see
+// equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see
 // docs/DECISION_LOG.md
 @Entity
 @Table(name = "tweets")
@@ -54,9 +54,8 @@ public class Tweet {
     @Column(name = "id")
     private Integer id;
 
-    // backend/app/db/models.py:L11 — unbounded character mapping — DL-068 — see
-    // docs/DECISION_LOG.md
-    @Column(name = "content", length = Integer.MAX_VALUE)
+    // backend/app/db/models.py:L11
+    @Column(name = "content")
     private String content;
 
     // backend/app/db/models.py:L12
@@ -73,28 +72,24 @@ public class Tweet {
 
     // backend/app/db/models.py:L15
     // Single delimited column value carried as a list — DL-024 — see docs/DECISION_LOG.md
-    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
     @Convert(converter = DelimitedStringListConverter.class)
-    @Column(name = "media", length = Integer.MAX_VALUE)
+    @Column(name = "media")
     private List<String> media;
 
     // backend/app/db/models.py:L16
     // Sole Optional[str] field in the source (backend/app/schema/tweet.py:L12); may be null.
-    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
-    @Column(name = "quoted_tweet_id", length = Integer.MAX_VALUE)
+    @Column(name = "quoted_tweet_id")
     private String quotedTweetId;
 
     // backend/app/db/models.py:L17
     // Identifier of the post author, held as a plain column value; there is no user table.
-    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
-    @Column(name = "user_id", length = Integer.MAX_VALUE)
+    @Column(name = "user_id")
     private String userId;
 
     // backend/app/db/models.py:L18
     // Single delimited column value carried as a list — DL-024 — see docs/DECISION_LOG.md
-    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
     @Convert(converter = DelimitedStringListConverter.class)
-    @Column(name = "ai_tools_mentioned", length = Integer.MAX_VALUE)
+    @Column(name = "ai_tools_mentioned")
     private List<String> aiToolsMentioned;
 
     // Ported from backend/app/db/models.py:L30 (faithful port) — see docs/DECISION_LOG.md
@@ -190,7 +185,7 @@ public class Tweet {
         this.responses = responses;
     }
 
-    // Net-new Java persistence mechanics (no Python counterpart) — DL-203 — see
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
     // docs/DECISION_LOG.md
     /**
      * Compares two instances on the persistent identifier.
@@ -216,7 +211,7 @@ public class Tweet {
         return thisId != null && thisId.equals(that.getId());
     }
 
-    // Net-new Java persistence mechanics (no Python counterpart) — DL-203 — see
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
     // docs/DECISION_LOG.md
     /**
      * Returns a hash code derived from the entity type. The value is identical for every instance of

@@ -234,7 +234,7 @@ class JwtAuthenticationFilterTest {
     private static ScannerProperties properties() {
         ScannerProperties.Jwt jwt = new ScannerProperties.Jwt(SECRET, "HS256", 60L);
         return new ScannerProperties("jdbc:h2:mem:unused", 100, 60, null, null, null, jwt, null, null,
-                null);
+                null, null);
     }
 
     @Test

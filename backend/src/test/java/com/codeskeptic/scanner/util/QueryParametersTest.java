@@ -6,6 +6,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -13,10 +15,12 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 
 // Ported from the `type=int` conversion at backend/app/api/tweets.py:L12-13 and
-// backend/app/api/responses.py:L11-12 — DL-193, DL-217 — see docs/DECISION_LOG.md
+// backend/app/api/responses.py:L11-12 — DL-217 — see docs/DECISION_LOG.md
 /**
  * Exercises the query-parameter conversion the two list routes perform.
  *
@@ -116,9 +120,143 @@ class QueryParametersTest {
                 .isInstanceOf(NullPointerException.class);
     }
 
+    // The bounded read of one page — DL-249 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("declares two operations and cannot be instantiated")
-    void declaresTwoOperationsAndCannotBeInstantiated() throws Exception {
+    @DisplayName("reads a page at or below the chunk bound as one window equal to the page")
+    void readsAPageAtOrBelowTheChunkBoundAsOneWindowEqualToThePage() {
+        List<Pageable> windows = new ArrayList<>();
+
+        List<String> mapped = QueryParameters.mapInChunks(PageRequest.of(2, 10), 500,
+                window -> {
+                    windows.add(window);
+                    return rowsNumbered(20, 10);
+                },
+                QueryParametersTest::renderRows);
+
+        assertThat(windows).as("windows the reader was asked for").hasSize(1);
+        assertThat(windows.get(0).getPageSize()).as("rows the window asked for").isEqualTo(10);
+        assertThat(windows.get(0).getOffset()).as("first row of the window").isEqualTo(20L);
+        assertThat(mapped).as("mapped values").hasSize(10).first().isEqualTo("row-20");
+    }
+
+    @Test
+    @DisplayName("reads a page larger than the chunk bound as consecutive bounded windows")
+    void readsAPageLargerThanTheChunkBoundAsConsecutiveBoundedWindows() {
+        List<Pageable> windows = new ArrayList<>();
+
+        List<String> mapped = QueryParameters.mapInChunks(PageRequest.of(0, 1_000), 400,
+                window -> {
+                    windows.add(window);
+                    return rowsNumbered(window.getOffset(), window.getPageSize());
+                },
+                QueryParametersTest::renderRows);
+
+        assertThat(windows).extracting(Pageable::getPageSize)
+                .as("rows each window asked for").containsExactly(400, 400, 400);
+        assertThat(windows).extracting(Pageable::getOffset)
+                .as("first row of each window").containsExactly(0L, 400L, 800L);
+        assertThat(mapped).as("mapped values").hasSize(1_000);
+        assertThat(mapped.get(0)).isEqualTo("row-0");
+        assertThat(mapped.get(999)).isEqualTo("row-999");
+        assertThat(mapped).doesNotHaveDuplicates();
+    }
+
+    @Test
+    @DisplayName("discards the rows a window holds before the page opens")
+    void discardsTheRowsAWindowHoldsBeforeThePageOpens() {
+        List<Pageable> windows = new ArrayList<>();
+
+        // Page index 1 of size 30 opens at row 30, which lies inside the second window of 20.
+        List<String> mapped = QueryParameters.mapInChunks(PageRequest.of(1, 30), 20,
+                window -> {
+                    windows.add(window);
+                    return rowsNumbered(window.getOffset(), window.getPageSize());
+                },
+                QueryParametersTest::renderRows);
+
+        assertThat(windows).extracting(Pageable::getOffset)
+                .as("first row of each window").containsExactly(20L, 40L);
+        assertThat(mapped).as("mapped values").hasSize(30);
+        assertThat(mapped.get(0)).as("first mapped value").isEqualTo("row-30");
+        assertThat(mapped.get(29)).as("last mapped value").isEqualTo("row-59");
+    }
+
+    @Test
+    @DisplayName("stops at the window that comes back short of the bound it asked for")
+    void stopsAtTheWindowThatComesBackShort() {
+        List<Pageable> windows = new ArrayList<>();
+
+        List<String> mapped = QueryParameters.mapInChunks(PageRequest.of(0, Integer.MAX_VALUE), 500,
+                window -> {
+                    windows.add(window);
+                    return rowsNumbered(window.getOffset(), 3);
+                },
+                QueryParametersTest::renderRows);
+
+        assertThat(windows).as("windows the reader was asked for").hasSize(1);
+        assertThat(mapped).as("mapped values").containsExactly("row-0", "row-1", "row-2");
+    }
+
+    @Test
+    @DisplayName("returns no value when the page opens past the last row")
+    void returnsNoValueWhenThePageOpensPastTheLastRow() {
+        List<String> mapped = QueryParameters.mapInChunks(PageRequest.of(4, 25), 10,
+                window -> List.of(),
+                QueryParametersTest::renderRows);
+
+        assertThat(mapped).as("mapped values").isEmpty();
+    }
+
+    @Test
+    @DisplayName("returns an unmodifiable list and rejects an unusable argument")
+    void returnsAnUnmodifiableListAndRejectsAnUnusableArgument() {
+        List<String> mapped = QueryParameters.mapInChunks(PageRequest.of(0, 5), 5,
+                window -> rowsNumbered(0, 2), QueryParametersTest::renderRows);
+
+        assertThatThrownBy(() -> mapped.add("row-9"))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> QueryParameters.mapInChunks(PageRequest.of(0, 5), 0,
+                window -> List.of(), QueryParametersTest::renderRows))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("chunkRows");
+        assertThatThrownBy(() -> QueryParameters.mapInChunks(null, 5,
+                window -> List.of(), QueryParametersTest::renderRows))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> QueryParameters.mapInChunks(PageRequest.of(0, 5), 5,
+                null, QueryParametersTest::renderRows))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> QueryParameters.mapInChunks(PageRequest.of(0, 5), 5,
+                window -> List.of(), null))
+                .isInstanceOf(NullPointerException.class);
+    }
+
+    // The total_pages member of the pagination envelope — DL-038, DL-249 — see
+    // docs/DECISION_LOG.md
+    @ParameterizedTest(name = "{0} rows at {1} per page span {2} page(s)")
+    @CsvSource({
+            "0,10,0",
+            "1,10,1",
+            "10,10,1",
+            "11,10,2",
+            "42,5,9",
+            "30,2147483647,1",
+            "0,0,1",
+            "7,0,1"
+    })
+    @DisplayName("reports the page count a repository page reports for the same total and size")
+    void reportsThePageCountARepositoryPageReports(long total, int pageSize, int expected) {
+        assertThat(QueryParameters.totalPages(total, pageSize)).isEqualTo(expected);
+        if (pageSize > 0) {
+            assertThat(QueryParameters.totalPages(total, pageSize))
+                    .as("the value PageImpl reports")
+                    .isEqualTo(new PageImpl<>(List.of(), PageRequest.of(0, pageSize), total)
+                            .getTotalPages());
+        }
+    }
+
+    @Test
+    @DisplayName("declares four operations and cannot be instantiated")
+    void declaresFourOperationsAndCannotBeInstantiated() throws Exception {
         Constructor<QueryParameters> constructor = QueryParameters.class.getDeclaredConstructor();
 
         assertThat(Modifier.isPrivate(constructor.getModifiers())).isTrue();
@@ -126,5 +264,30 @@ class QueryParametersTest {
 
         constructor.setAccessible(true);
         assertThatCode(constructor::newInstance).doesNotThrowAnyException();
+    }
+
+    /**
+     * Builds consecutively numbered row values starting at the supplied first row.
+     *
+     * @param firstRow the number the first value carries
+     * @param rows     the number of values to build
+     * @return the values
+     */
+    private static List<Long> rowsNumbered(long firstRow, int rows) {
+        List<Long> built = new ArrayList<>(rows);
+        for (int row = 0; row < rows; row++) {
+            built.add(firstRow + row);
+        }
+        return List.copyOf(built);
+    }
+
+    /**
+     * Renders each row value as the text a mapper would produce.
+     *
+     * @param rows the values to render
+     * @return one rendered value per row
+     */
+    private static List<String> renderRows(List<Long> rows) {
+        return rows.stream().map(row -> "row-" + row).toList();
     }
 }

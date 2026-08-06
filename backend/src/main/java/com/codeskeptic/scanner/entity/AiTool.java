@@ -18,12 +18,12 @@ import jakarta.persistence.Table;
  * {@code Column(Integer, primary_key=True)} of backend/app/db/models.py:L35 — DL-070 — see
  * docs/DECISION_LOG.md.
  *
- * <p>{@code name} and {@code description} declare {@code length = Integer.MAX_VALUE} and are
- * generated as each vendor's unbounded character type. Their source declaration is the bare
+ * <p>No column declares a not-null marker, a duplicate-value restriction or a width bound.
+ * {@code name} and {@code description} carry a bare {@code @Column}, matching the bare
  * {@code Column(String)} at backend/app/db/models.py:L36-37 — DL-068 — see docs/DECISION_LOG.md.
  */
 // Ported from backend/app/db/models.py:L32-37 (faithful port) — see docs/DECISION_LOG.md
-// equals(Object) and hashCode() are net-new Java persistence mechanics — DL-203 — see
+// equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see
 // docs/DECISION_LOG.md
 @Entity
 @Table(name = "ai_tools")
@@ -37,13 +37,11 @@ public class AiTool {
     private Integer id;
 
     // backend/app/db/models.py:L36
-    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
-    @Column(name = "name", length = Integer.MAX_VALUE)
+    @Column(name = "name")
     private String name;
 
     // backend/app/db/models.py:L37
-    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
-    @Column(name = "description", length = Integer.MAX_VALUE)
+    @Column(name = "description")
     private String description;
 
     /**
@@ -89,7 +87,7 @@ public class AiTool {
         this.description = description;
     }
 
-    // Net-new Java persistence mechanics (no Python counterpart) — DL-203 — see
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
     // docs/DECISION_LOG.md
     /**
      * Compares two instances on the persistent identifier.
@@ -115,7 +113,7 @@ public class AiTool {
         return thisId != null && thisId.equals(that.getId());
     }
 
-    // Net-new Java persistence mechanics (no Python counterpart) — DL-203 — see
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
     // docs/DECISION_LOG.md
     /**
      * Returns a hash code derived from the entity type. The value is identical for every instance of

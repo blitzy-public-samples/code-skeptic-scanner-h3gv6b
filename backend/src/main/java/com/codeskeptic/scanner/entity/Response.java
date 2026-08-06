@@ -29,10 +29,9 @@ import java.time.LocalDateTime;
  * ({@code backend/app/db/models.py:L26}).
  *
  * <p>None of the five columns declares a not-null marker, a duplicate-value restriction or a width
- * bound, matching the source declarations. {@code content} declares
- * {@code length = Integer.MAX_VALUE} and is generated as the vendor's unbounded character type; its
- * source declaration is the bare {@code Column(String)} of backend/app/db/models.py:L24 — see
- * docs/DECISION_LOG.md DL-068.
+ * bound, matching the source declarations. {@code content} carries a bare {@code @Column}, matching
+ * the bare {@code Column(String)} of backend/app/db/models.py:L24 — see docs/DECISION_LOG.md
+ * DL-068.
  */
 // Ported from backend/app/db/models.py:L20-28 (faithful port) — see docs/DECISION_LOG.md
 // Departures from the literal source declaration, each recorded in the decision log: the type keeps
@@ -40,7 +39,7 @@ import java.time.LocalDateTime;
 // Column(Integer, primary_key=True) — DL-025 and DL-049; the tweet_id column and the tweet
 // relationship at backend/app/db/models.py:L27-28 are mapped by the single @ManyToOne association
 // that owns the foreign key — DL-025 — see docs/DECISION_LOG.md
-// equals(Object) and hashCode() are net-new Java persistence mechanics — DL-203 — see
+// equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see
 // docs/DECISION_LOG.md
 @Entity
 @Table(name = "responses")
@@ -54,8 +53,7 @@ public class Response {
     private Integer id;
 
     // backend/app/db/models.py:L24
-    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
-    @Column(name = "content", length = Integer.MAX_VALUE)
+    @Column(name = "content")
     private String content;
 
     // backend/app/db/models.py:L25
@@ -69,9 +67,9 @@ public class Response {
 
     // Ported from backend/app/db/models.py:L27-28 (faithful port) — see docs/DECISION_LOG.md
     // This side owns the foreign key declared as ForeignKey('tweets.id').
-    // Fetch type LAZY — DL-162; repository/ResponseRepository reads this column through a projection
-    // on its page read, so no page read traverses this association — DL-197 — see
-    // docs/DECISION_LOG.md
+    // Fetch type LAZY — DL-162. repository/ResponseRepository.findAllRows reads the tweet_id value
+    // through the identifier path of this association, so its page read traverses no column of
+    // tweets — DL-245 — see docs/DECISION_LOG.md
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "tweet_id")
     private Tweet tweet;
@@ -123,7 +121,7 @@ public class Response {
         this.tweet = tweet;
     }
 
-    // Net-new Java persistence mechanics (no Python counterpart) — DL-203 — see
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
     // docs/DECISION_LOG.md
     /**
      * Compares two instances on the persistent identifier.
@@ -149,7 +147,7 @@ public class Response {
         return thisId != null && thisId.equals(that.getId());
     }
 
-    // Net-new Java persistence mechanics (no Python counterpart) — DL-203 — see
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
     // docs/DECISION_LOG.md
     /**
      * Returns a hash code derived from the entity type. The value is identical for every instance of

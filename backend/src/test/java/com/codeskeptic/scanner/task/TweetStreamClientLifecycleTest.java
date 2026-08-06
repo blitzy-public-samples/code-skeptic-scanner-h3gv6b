@@ -3,6 +3,8 @@ package com.codeskeptic.scanner.task;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
@@ -11,6 +13,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
+import java.lang.reflect.RecordComponent;
 import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -30,6 +33,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -37,6 +41,7 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.junit.jupiter.api.extension.ExtendWith;
 
+import org.springframework.data.domain.Pageable;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
@@ -114,6 +119,12 @@ class TweetStreamClientLifecycleTest {
     /** Longest a test waits for the pipeline to reach a state. */
     private static final Duration AWAIT_LIMIT = Duration.ofSeconds(15);
 
+    /** Rule cap {@code application.yml} configures — DL-254. */
+    private static final int MAX_STREAM_RULES = 25;
+
+    /** Signal-idle bound {@code application.yml} configures, in seconds — DL-256. */
+    private static final long STREAM_IDLE_TIMEOUT_SECONDS = 60L;
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final DefaultDataBufferFactory BUFFERS = new DefaultDataBufferFactory();
@@ -141,9 +152,9 @@ class TweetStreamClientLifecycleTest {
         issued.clear();
         exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK).build());
 
-        when(aiToolRepository.findAll()).thenReturn(List.of());
+        when(aiToolRepository.findNames(any(Pageable.class))).thenReturn(List.of());
         when(settingRepository.findById(any(String.class))).thenReturn(Optional.empty());
-        when(tweetStreamListener.onStatus(any(JsonNode.class))).thenReturn(true);
+        when(tweetStreamListener.onStatus(any(JsonNode.class), anyInt())).thenReturn(true);
 
         client = clientWith(CONSUMER_KEY, CONSUMER_SECRET, BASE_KEYWORDS);
     }
@@ -163,22 +174,65 @@ class TweetStreamClientLifecycleTest {
     }
 
     @Test
-    @DisplayName("declares only the three lifecycle operations as public methods")
-    void declaresOnlyTheThreeLifecycleOperationsAsPublicMethods() {
+    @DisplayName("declares only the four lifecycle operations as public methods")
+    void declaresOnlyTheFourLifecycleOperationsAsPublicMethods() {
         List<String> publicMethods = Stream.of(TweetStreamClient.class.getDeclaredMethods())
                 .filter(method -> Modifier.isPublic(method.getModifiers()))
                 .map(Method::getName)
                 .distinct()
                 .toList();
 
-        assertThat(publicMethods).containsExactlyInAnyOrder("start", "stop", "isRunning");
+        assertThat(publicMethods)
+                .containsExactlyInAnyOrder("start", "stop", "isRunning", "isAutoStartup");
     }
 
+    // The ownership switch — DL-250 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "enabled={0}, streamEnabled={1}")
+    @CsvSource({"false,true", "false,false", "true,false"})
+    @DisplayName("reaches X in no way in a process that does not run the stream")
+    void reachesXInNoWayInAProcessThatDoesNotRunTheStream(boolean enabled, boolean streamEnabled) {
+        exchange = request -> tokenResponse(TOKEN);
+        TweetStreamClient owned = clientOwning(enabled, streamEnabled);
+
+        assertThat(owned.isAutoStartup()).isFalse();
+
+        owned.start();
+
+        assertThat(owned.isRunning()).isFalse();
+        assertThat(issued).isEmpty();
+        verifyNoInteractions(aiToolRepository, settingRepository, tweetStreamListener);
+    }
+
+    // The ownership switch — DL-250 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("declares no nested type, so rule composition, token exchange and backoff stay inside "
-            + "the class")
-    void declaresNoNestedType() {
-        assertThat(TweetStreamClient.class.getDeclaredClasses()).isEmpty();
+    @DisplayName("reports auto startup in a process that runs the stream")
+    void reportsAutoStartupInAProcessThatRunsTheStream() {
+        assertThat(clientOwning(true, true).isAutoStartup()).isTrue();
+    }
+
+    // Both members default to true, so an unbound group streams — DL-250
+    @Test
+    @DisplayName("reports auto startup when no background group is bound")
+    void reportsAutoStartupWhenNoBackgroundGroupIsBound() {
+        assertThat(client.isAutoStartup()).isTrue();
+    }
+
+    // The only nested type is the two-component value the rules endpoint reports — DL-261
+    @Test
+    @DisplayName("declares one nested value record only, so rule composition, token exchange and "
+            + "backoff stay inside the class")
+    void declaresOneNestedValueRecordOnly() {
+        Class<?>[] nested = TweetStreamClient.class.getDeclaredClasses();
+
+        assertThat(nested).hasSize(1);
+        assertThat(nested[0].getSimpleName()).isEqualTo("RegisteredRule");
+        assertThat(nested[0].isRecord()).isTrue();
+        assertThat(Stream.of(nested[0].getRecordComponents()).map(RecordComponent::getName))
+                .containsExactly("id", "tag");
+        assertThat(Stream.of(nested[0].getDeclaredMethods())
+                .filter(method -> Modifier.isPublic(method.getModifiers()))
+                .map(Method::getName))
+                .containsExactlyInAnyOrder("id", "tag", "equals", "hashCode", "toString");
     }
 
     @Test
@@ -433,13 +487,14 @@ class TweetStreamClientLifecycleTest {
     @Test
     @DisplayName("widens the rule set with every ai_tools name and drops null, blank and repeated ones")
     void widensTheRuleSetWithEveryAiToolsName() {
-        when(aiToolRepository.findAll()).thenReturn(List.of(
-                new AiTool("Copilot", "Inline completion"),
-                new AiTool("  Cursor  ", "Editor assistant"),
-                new AiTool("copilot", "A repeat differing only in case"),
-                new AiTool(null, "No name"),
-                new AiTool("   ", "A blank name"),
-                new AiTool("GPT-4", "Already a base term")));
+        List<String> selected = new ArrayList<>();
+        selected.add("Copilot");
+        selected.add("  Cursor  ");
+        selected.add("copilot");
+        selected.add(null);
+        selected.add("   ");
+        selected.add("GPT-4");
+        when(aiToolRepository.findNames(any(Pageable.class))).thenReturn(selected);
         exchange = this::answerHappyPath;
 
         client.start();
@@ -453,8 +508,7 @@ class TweetStreamClientLifecycleTest {
     @Test
     @DisplayName("replaces the whole rule set with the stream_keywords row when it carries a value")
     void replacesTheWholeRuleSetWithTheStreamKeywordsRowWhenItCarriesAValue() {
-        when(aiToolRepository.findAll())
-                .thenReturn(List.of(new AiTool("Copilot", "Inline completion")));
+        when(aiToolRepository.findNames(any(Pageable.class))).thenReturn(List.of("Copilot"));
         storedKeywords(" Devin , vibe coding ,, Devin ,  ");
         exchange = this::answerHappyPath;
 
@@ -535,10 +589,13 @@ class TweetStreamClientLifecycleTest {
         exchange = request -> RULES_PATH.equals(request.url().getPath())
                 && HttpMethod.GET.equals(request.method())
                         ? jsonResponse(HttpStatus.OK, "{\"data\":["
-                                + "{\"id\":\"1\",\"value\":\"\\\"AI coding tool\\\"\"},"
-                                + "{\"id\":\"2\",\"value\":\"\\\"AI code assistant\\\"\"},"
-                                + "{\"id\":\"3\",\"value\":\"\\\"AI generated code\\\"\"},"
-                                + "{\"id\":\"4\",\"value\":\"GPT-4\"}]}")
+                                + "{\"id\":\"1\",\"value\":\"\\\"AI coding tool\\\"\","
+                                + "\"tag\":\"AI coding tool\"},"
+                                + "{\"id\":\"2\",\"value\":\"\\\"AI code assistant\\\"\","
+                                + "\"tag\":\"AI code assistant\"},"
+                                + "{\"id\":\"3\",\"value\":\"\\\"AI generated code\\\"\","
+                                + "\"tag\":\"AI generated code\"},"
+                                + "{\"id\":\"4\",\"value\":\"GPT-4\",\"tag\":\"GPT-4\"}]}")
                         : answerHappyPath(request);
 
         client.start();
@@ -585,9 +642,10 @@ class TweetStreamClientLifecycleTest {
     // Step 4 — consuming the stream
     // -------------------------------------------------------------------------
 
+    // Only the fields the listener maps are requested; no expansion is — DL-262
     @Test
-    @DisplayName("requests the fields and expansions the listener reads")
-    void requestsTheFieldsAndExpansionsTheListenerReads() {
+    @DisplayName("requests the fields the listener reads and no expansion it ignores")
+    void requestsTheFieldsTheListenerReadsAndNoExpansion() {
         exchange = this::answerHappyPath;
 
         client.start();
@@ -599,7 +657,7 @@ class TweetStreamClientLifecycleTest {
         assertThat(stream.url().getQuery())
                 .contains("tweet.fields=created_at,public_metrics,referenced_tweets,attachments,"
                         + "author_id")
-                .contains("expansions=author_id,attachments.media_keys");
+                .doesNotContain("expansions");
     }
 
     @Test
@@ -688,7 +746,7 @@ class TweetStreamClientLifecycleTest {
     @Test
     @DisplayName("keeps consuming after the listener fails on one record")
     void keepsConsumingAfterTheListenerFailsOnOneRecord() {
-        when(tweetStreamListener.onStatus(any(JsonNode.class)))
+        when(tweetStreamListener.onStatus(any(JsonNode.class), anyInt()))
                 .thenThrow(new IllegalStateException("the row could not be stored"))
                 .thenReturn(true);
         exchange = request -> STREAM_PATH.equals(request.url().getPath())
@@ -706,7 +764,7 @@ class TweetStreamClientLifecycleTest {
     @Test
     @DisplayName("stops consuming and does not reconnect when the listener reports a stop signal")
     void stopsConsumingAndDoesNotReconnectWhenTheListenerReportsAStopSignal() {
-        when(tweetStreamListener.onStatus(any(JsonNode.class))).thenReturn(false);
+        when(tweetStreamListener.onStatus(any(JsonNode.class), anyInt())).thenReturn(false);
         exchange = request -> STREAM_PATH.equals(request.url().getPath())
                 ? streamOf("{\"data\":{\"id\":\"1\"}}\n{\"data\":{\"id\":\"2\"}}\n")
                 : answerHappyPath(request);
@@ -917,6 +975,33 @@ class TweetStreamClientLifecycleTest {
     }
 
     /**
+     * Builds a client whose bound configuration carries the supplied ownership switch.
+     *
+     * @param enabled       value bound to {@code scanner.background.enabled}
+     * @param streamEnabled value bound to {@code scanner.background.stream-enabled}
+     * @return a client holding credentials, the configured base terms and that switch
+     */
+    private TweetStreamClient clientOwning(boolean enabled, boolean streamEnabled) {
+        WebClient webClient = WebClient.builder()
+                .baseUrl(BASE_URL)
+                .exchangeFunction(request -> {
+                    issued.add(request);
+                    return exchange.exchange(request);
+                })
+                .build();
+
+        ScannerProperties bound = new ScannerProperties(null, 100, 60L,
+                new ScannerProperties.Twitter("api-key", "api-secret", "api-secret-key",
+                        CONSUMER_KEY, CONSUMER_SECRET, "access-token", "access-token-secret", 30L, 30L),
+                null, null, null, null, null,
+                new ScannerProperties.Ingestion(BASE_KEYWORDS, MAX_STREAM_RULES, STREAM_IDLE_TIMEOUT_SECONDS),
+                new ScannerProperties.Background(enabled, streamEnabled, true));
+
+        return new TweetStreamClient(webClient, bound, aiToolRepository, settingRepository,
+                tweetStreamListener);
+    }
+
+    /**
      * Builds the bound configuration the client reads.
      *
      * @param consumerKey    value bound to {@code scanner.twitter.consumer-key}
@@ -929,9 +1014,10 @@ class TweetStreamClientLifecycleTest {
 
         return new ScannerProperties(null, 100, 60L,
                 new ScannerProperties.Twitter("api-key", "api-secret", "api-secret-key",
-                        consumerKey, consumerSecret, "access-token", "access-token-secret", 30L),
+                        consumerKey, consumerSecret, "access-token", "access-token-secret", 30L, 30L),
                 null, null, null, null, null,
-                new ScannerProperties.Ingestion(baseKeywords));
+                new ScannerProperties.Ingestion(baseKeywords, MAX_STREAM_RULES, STREAM_IDLE_TIMEOUT_SECONDS),
+                null);
     }
 
     /** Makes the {@code stream_keywords} row answer with {@code value}. */
@@ -1059,7 +1145,7 @@ class TweetStreamClientLifecycleTest {
     private List<JsonNode> deliveredRecords() {
         org.mockito.ArgumentCaptor<JsonNode> captor =
                 org.mockito.ArgumentCaptor.forClass(JsonNode.class);
-        verify(tweetStreamListener, atLeast(0)).onStatus(captor.capture());
+        verify(tweetStreamListener, atLeast(0)).onStatus(captor.capture(), anyInt());
         return captor.getAllValues();
     }
 
@@ -1091,13 +1177,13 @@ class TweetStreamClientLifecycleTest {
         client.stop();
 
         assertThat(deliveredRecords()).isNotEmpty().doesNotContainNull();
-        verify(tweetStreamListener, never()).onStatus(null);
+        verify(tweetStreamListener, never()).onStatus(isNull(), anyInt());
     }
 
     /** Makes the listener fail on every record it is handed. */
     private void listenerAlwaysFails() {
         doThrow(new IllegalStateException("the listener is unavailable"))
-                .when(tweetStreamListener).onStatus(any(JsonNode.class));
+                .when(tweetStreamListener).onStatus(any(JsonNode.class), anyInt());
     }
 
     @Test

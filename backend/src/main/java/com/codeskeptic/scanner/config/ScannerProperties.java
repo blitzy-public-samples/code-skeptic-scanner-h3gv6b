@@ -77,7 +77,9 @@ public record ScannerProperties(
 
         @DefaultValue Analytics analytics,
 
-        @DefaultValue Ingestion ingestion) {
+        @DefaultValue Ingestion ingestion,
+
+        @DefaultValue Background background) {
 
     // Credential redaction in toString() — DL-052 — see docs/DECISION_LOG.md
     /** Rendered in place of every credential, principal name and resource identifier. */
@@ -123,10 +125,12 @@ public record ScannerProperties(
      * and no production code reads them — DL-031.
      *
      * <p>Seven components of this group are credentials and every one of those is redacted by
-     * {@link #toString()}. The eighth, {@code requestTimeoutSeconds}, is not a credential: it bounds
-     * the two short request/response calls {@code task/TweetStreamClient} makes on the X API — the
-     * app-only token exchange and the stream-rules calls — and leaves the long-lived filtered-stream
-     * subscription unbounded — DL-230.
+     * {@link #toString()}. The remaining two are not credentials.
+     * {@code requestTimeoutSeconds} bounds the two short request/response calls
+     * {@code task/TweetStreamClient} makes on the X API — the app-only token exchange and the
+     * stream-rules calls — DL-230. {@code streamIdleTimeoutSeconds} bounds the wait between two
+     * records the filtered-stream subscription delivers: a connection that delivers nothing within it
+     * fails the subscription, which reaches the reconnection path — DL-243.
      *
      * @param apiKey value of {@code scanner.twitter.api-key}
      * @param apiSecret value of {@code scanner.twitter.api-secret}
@@ -137,6 +141,9 @@ public record ScannerProperties(
      * @param accessTokenSecret value of {@code scanner.twitter.access-token-secret}
      * @param requestTimeoutSeconds value of {@code scanner.twitter.request-timeout-seconds},
      *     default {@code 10}; bounds the token exchange and the stream-rules calls only
+     * @param streamIdleTimeoutSeconds value of
+     *     {@code scanner.twitter.stream-idle-timeout-seconds}, default {@code 30}; bounds the wait
+     *     between two delivered stream records
      */
     public record Twitter(
 
@@ -174,11 +181,18 @@ public record ScannerProperties(
             // Bounds the app-only token exchange and the stream-rules calls only; the filtered
             // stream itself is not bounded. A value below one second is read as one second —
             // DL-230
-            @DefaultValue("10") long requestTimeoutSeconds) {
+            @DefaultValue("10") long requestTimeoutSeconds,
+
+            // scanner.twitter.stream-idle-timeout-seconds — net-new: the source set no timeout and
+            // the filtered-stream subscription carried none, so a silent half-open connection was
+            // never detected. Bounds the wait between two delivered records, including the
+            // keep-alive records X sends periodically. A value below one second is read as one
+            // second — DL-243
+            @DefaultValue("30") long streamIdleTimeoutSeconds) {
 
         /**
-         * Renders this group with all seven credentials redacted and the request timeout in the
-         * clear — DL-052.
+         * Renders this group with all seven credentials redacted and the two bounds in the clear —
+         * DL-052.
          *
          * @return the group's components, every credential value redacted
          */
@@ -192,6 +206,7 @@ public record ScannerProperties(
                     + ", accessToken=" + REDACTED
                     + ", accessTokenSecret=" + REDACTED
                     + ", requestTimeoutSeconds=" + requestTimeoutSeconds
+                    + ", streamIdleTimeoutSeconds=" + streamIdleTimeoutSeconds
                     + "]";
         }
     }
@@ -216,6 +231,11 @@ public record ScannerProperties(
      *     {@code 5}
      * @param readTimeoutSeconds value of {@code scanner.notion.read-timeout-seconds}, default
      *     {@code 10}
+     * @param mirrorMaxRetries value of {@code scanner.notion.mirror-max-retries}, default {@code 2}:
+     *     retries a mirror write makes after its first attempt; a negative value is read as {@code 0}
+     * @param mirrorRetryBackoffMillis value of {@code scanner.notion.mirror-retry-backoff-millis},
+     *     default {@code 500}: the wait before the first retry, doubled before each later one; a value
+     *     below {@code 0} is read as {@code 0}
      */
     public record Notion(
 
@@ -235,7 +255,24 @@ public record ScannerProperties(
             @DefaultValue("5") long connectTimeoutSeconds,
 
             // scanner.notion.read-timeout-seconds — net-new: the source set no timeout — DL-150
-            @DefaultValue("10") long readTimeoutSeconds) {
+            @DefaultValue("10") long readTimeoutSeconds,
+
+            // scanner.notion.mirror-max-retries — net-new: the source retried nothing — DL-253
+            @DefaultValue("2") int mirrorMaxRetries,
+
+            // scanner.notion.mirror-retry-backoff-millis — net-new — DL-253
+            @DefaultValue("500") long mirrorRetryBackoffMillis) {
+
+        /**
+         * Normalises the two retry components into usable values — DL-253.
+         *
+         * <p>A negative retry count is read as {@code 0} and a negative backoff as {@code 0}, so a
+         * misconfiguration disables the retry rather than failing startup.
+         */
+        public Notion {
+            mirrorMaxRetries = Math.max(mirrorMaxRetries, 0);
+            mirrorRetryBackoffMillis = Math.max(mirrorRetryBackoffMillis, 0L);
+        }
 
         /**
          * Renders this group with the credential and the database identifier redacted — DL-052.
@@ -249,6 +286,8 @@ public record ScannerProperties(
                     + ", apiVersion=" + apiVersion
                     + ", connectTimeoutSeconds=" + connectTimeoutSeconds
                     + ", readTimeoutSeconds=" + readTimeoutSeconds
+                    + ", mirrorMaxRetries=" + mirrorMaxRetries
+                    + ", mirrorRetryBackoffMillis=" + mirrorRetryBackoffMillis
                     + "]";
         }
     }
@@ -432,47 +471,166 @@ public record ScannerProperties(
      *
      * <p>This group carries no credential. Its {@code toString()} is the compiler-generated one.
      *
+     * <p>{@code trendWindowDays} is a finite positive number of days: the canonical constructor
+     * refuses a value below {@value #MINIMUM_TREND_WINDOW_DAYS} and a value above
+     * {@value #MAXIMUM_TREND_WINDOW_DAYS}, and startup fails when the configured value is refused —
+     * DL-247 — see docs/DECISION_LOG.md.
+     *
      * @param trendWindowDays value of {@code scanner.analytics.trend-window-days}, default
-     *     {@code 30}
+     *     {@code 30}. It counts UTC calendar dates, not a rolling duration: a value of {@code n}
+     *     observes the current UTC date and the {@code n - 1} UTC dates before it — DL-241
      */
     public record Analytics(
 
             // scanner.analytics.trend-window-days — no Python counterpart; get_trends() is
-            // argument-less at backend/app/api/analytics.py:L14 — DL-042
+            // argument-less at backend/app/api/analytics.py:L14 — DL-042, DL-247
             @DefaultValue("30") int trendWindowDays) {
+
+        /** Smallest accepted {@code scanner.analytics.trend-window-days} — DL-247. */
+        public static final int MINIMUM_TREND_WINDOW_DAYS = 1;
+
+        /**
+         * Largest accepted {@code scanner.analytics.trend-window-days}, one hundred years — DL-247.
+         */
+        public static final int MAXIMUM_TREND_WINDOW_DAYS = 36_500;
+
+        /**
+         * Refuses an observation window that is not a finite positive number of days — DL-247.
+         *
+         * @throws IllegalStateException when {@code trendWindowDays} is below
+         *     {@value #MINIMUM_TREND_WINDOW_DAYS} or above {@value #MAXIMUM_TREND_WINDOW_DAYS}
+         */
+        public Analytics {
+            if (trendWindowDays < MINIMUM_TREND_WINDOW_DAYS
+                    || trendWindowDays > MAXIMUM_TREND_WINDOW_DAYS) {
+                throw new IllegalStateException(
+                        "scanner.analytics.trend-window-days must be between "
+                                + MINIMUM_TREND_WINDOW_DAYS + " and " + MAXIMUM_TREND_WINDOW_DAYS
+                                + " days; it is " + trendWindowDays + ".");
+            }
+        }
     }
 
     // Net-new (no Python counterpart) — DL-044 — see docs/DECISION_LOG.md
     /**
-     * The {@code scanner.ingestion} group: the base terms of the stream rule set. The retired task
-     * passed an empty list to {@code stream.filter(track=keywords)} at
-     * {@code backend/app/tasks/tweet_monitoring.py:L53-55}.
+     * The {@code scanner.ingestion} group: the base terms of the stream rule set and the two bounds
+     * the ingestion cycle applies. The retired task passed an empty list to
+     * {@code stream.filter(track=keywords)} at {@code backend/app/tasks/tweet_monitoring.py:L53-55}.
      *
      * <p>The terms {@code application.yml} configures are the base of the rule set only.
+     *
+     * <p>{@code maxStreamRules} is the number of rules the account tier accepts; the composed term
+     * collection is truncated to it — DL-254. {@code streamIdleTimeoutSeconds} is the span without
+     * any byte from the filtered-stream connection after which the connection is treated as dead —
+     * DL-256.
      *
      * <p>This group carries no credential. Its {@code toString()} is the compiler-generated one.
      *
      * @param streamBaseKeywords value of {@code scanner.ingestion.stream-base-keywords}; an
      *     unmodifiable copy of the configured sequence, empty when the key is absent, never
      *     {@code null}
+     * @param maxStreamRules value of {@code scanner.ingestion.max-stream-rules}, default {@code 25};
+     *     read as {@code 1} when the bound value is below {@code 1}
+     * @param streamIdleTimeoutSeconds value of
+     *     {@code scanner.ingestion.stream-idle-timeout-seconds}, default {@code 60}; read as
+     *     {@code 1} when the bound value is below {@code 1}
      */
     public record Ingestion(
 
             // scanner.ingestion.stream-base-keywords — no Python counterpart; the keyword list was
             // empty at backend/app/tasks/tweet_monitoring.py:L53-55 — DL-044
-            @DefaultValue List<String> streamBaseKeywords) {
+            @DefaultValue List<String> streamBaseKeywords,
+
+            // scanner.ingestion.max-stream-rules — no Python counterpart — DL-254
+            @DefaultValue("25") int maxStreamRules,
+
+            // scanner.ingestion.stream-idle-timeout-seconds — no Python counterpart — DL-256
+            @DefaultValue("60") long streamIdleTimeoutSeconds) {
+
+        /** Smallest accepted value of {@code scanner.ingestion.max-stream-rules} — DL-254. */
+        private static final int MINIMUM_MAX_STREAM_RULES = 1;
 
         /**
-         * Normalises the bound sequence into an unmodifiable copy — DL-044.
+         * Smallest accepted value of {@code scanner.ingestion.stream-idle-timeout-seconds} — DL-256.
+         */
+        private static final long MINIMUM_STREAM_IDLE_TIMEOUT_SECONDS = 1L;
+
+        /**
+         * Normalises the bound sequence into an unmodifiable copy and both bounds into usable values
+         * — DL-044, DL-254, DL-256.
          *
          * <p>A {@code null} sequence becomes an empty list. A bound sequence is copied element by
          * element, the copy tolerates {@code null} elements, and a later change to the source
          * sequence leaves this record unchanged.
+         *
+         * <p>A rule bound below {@value #MINIMUM_MAX_STREAM_RULES} is read as
+         * {@value #MINIMUM_MAX_STREAM_RULES}, and an idle bound below
+         * {@value #MINIMUM_STREAM_IDLE_TIMEOUT_SECONDS} seconds as
+         * {@value #MINIMUM_STREAM_IDLE_TIMEOUT_SECONDS} seconds, so a misconfiguration cannot
+         * suppress the rule set or reconnect the stream continuously.
          */
         public Ingestion {
             streamBaseKeywords = (streamBaseKeywords == null)
                     ? List.of()
                     : Collections.unmodifiableList(new ArrayList<>(streamBaseKeywords));
+            maxStreamRules = Math.max(maxStreamRules, MINIMUM_MAX_STREAM_RULES);
+            streamIdleTimeoutSeconds =
+                    Math.max(streamIdleTimeoutSeconds, MINIMUM_STREAM_IDLE_TIMEOUT_SECONDS);
+        }
+    }
+
+    // Net-new (no Python counterpart: backend/app/main.py:L43-48 started both background paths in
+    // every process) — DL-250 — see docs/DECISION_LOG.md
+    /**
+     * The {@code scanner.background} group: which background paths this process runs.
+     *
+     * <p>{@code enabled} governs both background paths together, and each path also carries its own
+     * switch. A path runs only when {@code enabled} and that path's own switch are both {@code true};
+     * a process for which either is {@code false} starts that path in no way — see
+     * docs/DECISION_LOG.md DL-250.
+     *
+     * <p>All three default to {@code true}, so a single-process deployment runs both paths without
+     * configuring anything. {@code streamEnabled} binds the {@code TWITTER_STREAM_ENABLED} environment
+     * variable.
+     *
+     * <p>This group carries no credential. Its {@code toString()} is the compiler-generated one.
+     *
+     * @param enabled                   value of {@code scanner.background.enabled}, default
+     *     {@code true}: whether this process runs any background path at all
+     * @param streamEnabled             value of {@code scanner.background.stream-enabled}, default
+     *     {@code true}: whether this process runs the X filtered stream
+     * @param responseGenerationEnabled value of
+     *     {@code scanner.background.response-generation-enabled}, default {@code true}: whether this
+     *     process runs the scheduled response-generation pass
+     */
+    public record Background(
+
+            // scanner.background.enabled — no Python counterpart — DL-250
+            @DefaultValue("true") boolean enabled,
+
+            // scanner.background.stream-enabled — binds TWITTER_STREAM_ENABLED — DL-250
+            @DefaultValue("true") boolean streamEnabled,
+
+            // scanner.background.response-generation-enabled — no Python counterpart — DL-250
+            @DefaultValue("true") boolean responseGenerationEnabled) {
+
+        /**
+         * Reports whether this process runs the X filtered stream.
+         *
+         * @return {@code true} when {@link #enabled()} and {@link #streamEnabled()} both hold
+         */
+        public boolean runsStream() {
+            return enabled && streamEnabled;
+        }
+
+        /**
+         * Reports whether this process runs the scheduled response-generation pass.
+         *
+         * @return {@code true} when {@link #enabled()} and {@link #responseGenerationEnabled()} both
+         *         hold
+         */
+        public boolean runsResponseGeneration() {
+            return enabled && responseGenerationEnabled;
         }
     }
 }

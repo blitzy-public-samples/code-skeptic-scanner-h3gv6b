@@ -7,6 +7,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.codeskeptic.scanner.config.ScannerProperties;
+import com.codeskeptic.scanner.dto.PaginatedResponsesDto;
+import com.codeskeptic.scanner.dto.PaginatedTweetsDto;
 import com.codeskeptic.scanner.dto.ResponseDto;
 import com.codeskeptic.scanner.dto.TweetDto;
 import com.codeskeptic.scanner.dto.UpdateResponseRequest;
@@ -15,11 +18,16 @@ import com.codeskeptic.scanner.entity.Response;
 import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.entity.Tweet;
 import com.codeskeptic.scanner.exception.BadRequestException;
+import com.codeskeptic.scanner.exception.NotFoundException;
+import com.codeskeptic.scanner.repository.ResponseRepository.ResponseRow;
 import com.codeskeptic.scanner.service.LlmService;
 import com.codeskeptic.scanner.service.ResponseService;
+import com.codeskeptic.scanner.service.SentimentAnalysisService;
+import com.codeskeptic.scanner.service.TwitterService;
 import com.codeskeptic.scanner.service.mapper.ResponseMapper;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
 import com.codeskeptic.scanner.util.DelimitedStringListConverter;
+import com.codeskeptic.scanner.util.QueryParameters;
 import com.fasterxml.jackson.databind.node.BooleanNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.TextNode;
@@ -31,7 +39,6 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.sql.Clob;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
@@ -67,6 +74,7 @@ import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -91,7 +99,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  *   <li>exactly the twenty declared physical columns across those tables, nine / five / three /
  *       three, each reported in its declared type family;
  *   <li>sixteen non-primary-key columns that accept null values, no unique constraint beyond each
- *       primary key, no narrowed column length on any mapped field, and no table-level unique
+ *       primary key, no declared column length on any mapped field, and no table-level unique
  *       constraint and no index on any entity;
  *   <li>{@code responses.tweet_id} as the schema's only foreign key, and a reloaded {@code tweets}
  *       row exposing its {@code responses} rows in ascending identifier order with the inverse
@@ -156,44 +164,24 @@ class JpaMappingIntegrationTest {
     /** Value {@code jakarta.persistence.Column#length()} carries when it is not declared. */
     private static final int DEFAULT_ANNOTATION_LENGTH = 255;
 
-    /** Value {@code jakarta.persistence.Column#length()} carries for an unbounded column. */
-    private static final int UNBOUNDED_ANNOTATION_LENGTH = Integer.MAX_VALUE;
-
     /**
-     * Capacity the {@code settings} primary key is mapped at, on every supported vendor — DL-069 —
-     * see docs/DECISION_LOG.md.
-     */
-    private static final int PORTABLE_PRIMARY_KEY_LENGTH = 768;
-
-    /**
-     * Every character column the source declares as a bare, unbounded {@code Column(String)} —
+     * Every character column the source declares as a bare {@code Column(String)} —
      * backend/app/db/models.py:L11,L15-18 (tweets), :L24 (responses), :L36-37 (ai_tools) and
-     * :L42-44 (settings). All eleven are asserted to carry a physical capacity past the annotation
-     * default — DL-068, DL-069 — see docs/DECISION_LOG.md.
+     * :L42-44 (settings). All eleven are mapped by a bare {@code @Column} — DL-068 — see
+     * docs/DECISION_LOG.md.
      */
-    private static final Map<String, List<String>> SOURCE_UNBOUNDED_CHARACTER_COLUMNS = Map.of(
+    private static final Map<String, List<String>> SOURCE_CHARACTER_COLUMNS = Map.of(
             TWEETS_TABLE,
             List.of("content", "media", "quoted_tweet_id", "user_id", "ai_tools_mentioned"),
             RESPONSES_TABLE, List.of("content"),
             AI_TOOLS_TABLE, List.of("name", "description"),
             SETTINGS_TABLE, List.of("key", "value", "description"));
 
-    /** Count of the character columns backend/app/db/models.py declares without a bound. */
-    private static final int SOURCE_UNBOUNDED_CHARACTER_COLUMN_COUNT = 11;
+    /** Count of the character columns backend/app/db/models.py declares as {@code Column(String)}. */
+    private static final int SOURCE_CHARACTER_COLUMN_COUNT = 11;
 
-    /**
-     * The {@code settings} primary-key column, mapped at the declared capacity of
-     * {@link #PORTABLE_PRIMARY_KEY_LENGTH} where the other ten carry the unbounded capacity —
-     * DL-069 — see docs/DECISION_LOG.md.
-     */
+    /** The {@code settings} primary-key column — DL-061 — see docs/DECISION_LOG.md. */
     private static final String PRIMARY_KEY_CHARACTER_COLUMN = "key";
-
-    /**
-     * Smallest physical capacity a column mapped unbounded may report: one character past
-     * {@link #DEFAULT_ANNOTATION_LENGTH}, the capacity an undeclared {@code @Column#length()}
-     * renders.
-     */
-    private static final int SMALLEST_UNBOUNDED_COLUMN_SIZE = DEFAULT_ANNOTATION_LENGTH + 1;
 
     private static final List<Class<?>> MAPPED_ENTITIES =
             List.of(Tweet.class, Response.class, AiTool.class, Setting.class);
@@ -285,63 +273,78 @@ class JpaMappingIntegrationTest {
      * backend/app/db/models.py:L10-18, :L23-28, :L35-37 and :L42-44: a 32-bit column for every
      * {@code Column(Integer)} including the {@code responses.tweet_id} foreign key, a zone-free
      * timestamp for every {@code Column(DateTime)}, a 53-bit binary floating-point column for
-     * {@code Column(Float)}, a boolean column for {@code Column(Boolean)}, the vendor's unbounded
-     * character type for every unbounded {@code Column(String)}, and
-     * {@code varchar(}{@link #PORTABLE_PRIMARY_KEY_LENGTH}{@code )} for the {@code settings} primary
-     * key.
+     * {@code Column(Float)}, a boolean column for {@code Column(Boolean)}, and the capacity an
+     * undeclared {@code @Column#length()} renders — {@code varchar(}{@link
+     * #DEFAULT_ANNOTATION_LENGTH}{@code )} — for every {@code Column(String)}, the
+     * {@code settings} primary key included.
      *
-     * <p>DL-166 — see docs/DECISION_LOG.md.
+     * <p>DL-068, DL-166 — see docs/DECISION_LOG.md.
      */
     private static final Map<String, Map<String, List<String>>> EXPECTED_GENERATED_COLUMN_TYPES =
             Map.of(
                     "org.hibernate.dialect.H2Dialect", Map.of(
-                            TWEETS_TABLE, List.of("id integer", "content clob",
+                            TWEETS_TABLE, List.of("id integer", "content varchar(255)",
                                     "like_count integer", "created_at timestamp(6)",
-                                    "doubt_rating float(53)", "media clob",
-                                    "quoted_tweet_id clob", "user_id clob",
-                                    "ai_tools_mentioned clob"),
-                            RESPONSES_TABLE, List.of("id integer", "content clob",
+                                    "doubt_rating float(53)", "media varchar(255)",
+                                    "quoted_tweet_id varchar(255)", "user_id varchar(255)",
+                                    "ai_tools_mentioned varchar(255)"),
+                            RESPONSES_TABLE, List.of("id integer", "content varchar(255)",
                                     "generated_at timestamp(6)", "is_approved boolean",
                                     "tweet_id integer"),
                             AI_TOOLS_TABLE,
-                            List.of("id integer", "name clob", "description clob"),
-                            SETTINGS_TABLE, List.of("\"key\" varchar(768)", "\"value\" clob",
-                                    "description clob")),
+                            List.of("id integer", "name varchar(255)",
+                                    "description varchar(255)"),
+                            SETTINGS_TABLE, List.of("\"key\" varchar(255)",
+                                    "\"value\" varchar(255)", "description varchar(255)")),
                     "org.hibernate.dialect.PostgreSQLDialect", Map.of(
-                            TWEETS_TABLE, List.of("id integer", "content text",
+                            TWEETS_TABLE, List.of("id integer", "content varchar(255)",
                                     "like_count integer", "created_at timestamp(6)",
-                                    "doubt_rating float(53)", "media text",
-                                    "quoted_tweet_id text", "user_id text",
-                                    "ai_tools_mentioned text"),
-                            RESPONSES_TABLE, List.of("id integer", "content text",
+                                    "doubt_rating float(53)", "media varchar(255)",
+                                    "quoted_tweet_id varchar(255)", "user_id varchar(255)",
+                                    "ai_tools_mentioned varchar(255)"),
+                            RESPONSES_TABLE, List.of("id integer", "content varchar(255)",
                                     "generated_at timestamp(6)", "is_approved boolean",
                                     "tweet_id integer"),
                             AI_TOOLS_TABLE,
-                            List.of("id integer", "name text", "description text"),
-                            SETTINGS_TABLE, List.of("\"key\" varchar(768)", "\"value\" text",
-                                    "description text")),
+                            List.of("id integer", "name varchar(255)",
+                                    "description varchar(255)"),
+                            SETTINGS_TABLE, List.of("\"key\" varchar(255)",
+                                    "\"value\" varchar(255)", "description varchar(255)")),
                     "org.hibernate.dialect.MySQLDialect", Map.of(
-                            TWEETS_TABLE, List.of("id integer", "content longtext",
+                            TWEETS_TABLE, List.of("id integer", "content varchar(255)",
                                     "like_count integer", "created_at datetime(6)",
-                                    "doubt_rating float(53)", "media longtext",
-                                    "quoted_tweet_id longtext", "user_id longtext",
-                                    "ai_tools_mentioned longtext"),
-                            RESPONSES_TABLE, List.of("id integer", "content longtext",
+                                    "doubt_rating float(53)", "media varchar(255)",
+                                    "quoted_tweet_id varchar(255)", "user_id varchar(255)",
+                                    "ai_tools_mentioned varchar(255)"),
+                            RESPONSES_TABLE, List.of("id integer", "content varchar(255)",
                                     "generated_at datetime(6)", "is_approved bit",
                                     "tweet_id integer"),
                             AI_TOOLS_TABLE,
-                            List.of("id integer", "name longtext", "description longtext"),
-                            SETTINGS_TABLE, List.of("`key` varchar(768)", "`value` longtext",
-                                    "description longtext")));
+                            List.of("id integer", "name varchar(255)",
+                                    "description varchar(255)"),
+                            SETTINGS_TABLE, List.of("`key` varchar(255)",
+                                    "`value` varchar(255)", "description varchar(255)")));
 
     private static final String DELIMITER = ",";
     private static final double TOLERANCE = 1.0e-9;
 
-    /**
-     * Number of unanswered {@code tweets} rows the backlog query is asserted to return in one call.
-     * It exceeds the largest batch bound any earlier revision of that query carried.
-     */
+    /** Number of unanswered {@code tweets} rows the keyset drain is asserted to cover. */
     private static final int BACKLOG_ROW_COUNT = 55;
+
+    /**
+     * Row bound of one candidate batch in that assertion. It divides {@link #BACKLOG_ROW_COUNT} into
+     * more than one batch, so the drain is asserted across a batch boundary — DL-248.
+     */
+    private static final int BACKLOG_BATCH_ROWS = 20;
+
+    /** Rows stored for the chunked page read, more than one chunk holds — DL-249. */
+    private static final int PAGE_CHUNK_ROW_COUNT = 7;
+
+    /** Row bound of one page chunk in that assertion — DL-249. */
+    private static final int PAGE_CHUNK_BOUND = 3;
+
+    /** Longest {@link #awaitTermination(ExecutorService)} waits for a test pool — DL-273. */
+    private static final long EXECUTOR_TERMINATION_SECONDS = 5L;
 
     @Autowired
     private TestEntityManager entityManager;
@@ -502,7 +505,7 @@ class JpaMappingIntegrationTest {
                 .isEqualTo(NON_PRIMARY_KEY_COLUMN_COUNT);
     }
 
-    // The wire form of a row the schema accepts — DL-080, DL-139 — see docs/DECISION_LOG.md
+    // The wire form of a row the schema accepts — DL-080 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("a stored responses row carrying a null tweet_id is named by the wire record rather "
             + "than dereferenced by the mapper, on its own and inside a list")
@@ -530,7 +533,7 @@ class JpaMappingIntegrationTest {
                 .hasMessage("tweet_id must not be null.");
     }
 
-    // The wire form of a row the schema accepts — DL-080, DL-139 — see docs/DECISION_LOG.md
+    // The wire form of a row the schema accepts — DL-080 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("a stored responses row carrying null in every nullable column is named by the wire "
             + "record and reaches it without an unboxing failure")
@@ -551,7 +554,7 @@ class JpaMappingIntegrationTest {
                 .hasMessage("content must not be null.");
     }
 
-    // The wire form of a row the schema accepts — DL-080, DL-139 — see docs/DECISION_LOG.md
+    // The wire form of a row the schema accepts — DL-080 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("a stored tweets row carrying null in every nullable column is named by the wire "
             + "record and reaches it without an unboxing failure")
@@ -610,12 +613,11 @@ class JpaMappingIntegrationTest {
     // Ported from backend/app/db/models.py:L10-18,L23-28,L35-37,L42-44 (faithful port) — see
     // docs/DECISION_LOG.md
     // backend/app/db/models.py declares each of those columns as a bare Column(<Type>): none
-    // carries nullable=False, unique=True or a length argument. Ten character columns declare
-    // length = Integer.MAX_VALUE — DL-068 — and the settings primary key declares length = 768 —
-    // DL-069 — see docs/DECISION_LOG.md
+    // carries nullable=False, unique=True or a length argument, and neither does any mapped field —
+    // DL-068 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("every mapped entity field leaves the column defaults for nullability and "
-            + "uniqueness in place and no character column carries the annotation default length")
+    @DisplayName("every mapped entity field leaves the column defaults for nullability, uniqueness "
+            + "and length in place")
     void everyMappedEntityFieldLeavesTheColumnDefaultsInPlace() {
         int columnFields = 0;
         int joinColumnFields = 0;
@@ -624,26 +626,13 @@ class JpaMappingIntegrationTest {
             for (Field field : mappedFields(entityType, Column.class)) {
                 Column column = field.getAnnotation(Column.class);
                 String location = entityType.getSimpleName() + "#" + field.getName();
-                boolean characterColumn = field.getType().equals(String.class)
-                        || field.getType().equals(List.class);
-                boolean primaryKeyCharacterColumn =
-                        normalise(PRIMARY_KEY_CHARACTER_COLUMN).equals(unquotedColumnName(column))
-                                && field.isAnnotationPresent(Id.class);
 
                 assertThat(column.nullable()).as("@Column#nullable of %s", location).isTrue();
                 assertThat(column.unique()).as("@Column#unique of %s", location).isFalse();
-                if (primaryKeyCharacterColumn) {
-                    assertThat(column.length()).as("@Column#length of %s", location)
-                            .isNotEqualTo(DEFAULT_ANNOTATION_LENGTH)
-                            .isEqualTo(PORTABLE_PRIMARY_KEY_LENGTH);
-                } else if (characterColumn) {
-                    assertThat(column.length()).as("@Column#length of %s", location)
-                            .isNotEqualTo(DEFAULT_ANNOTATION_LENGTH)
-                            .isEqualTo(UNBOUNDED_ANNOTATION_LENGTH);
-                } else {
-                    assertThat(column.length()).as("@Column#length of %s", location)
-                            .isEqualTo(DEFAULT_ANNOTATION_LENGTH);
-                }
+                assertThat(column.length()).as("@Column#length of %s", location)
+                        .isEqualTo(DEFAULT_ANNOTATION_LENGTH);
+                assertThat(column.columnDefinition()).as("@Column#columnDefinition of %s", location)
+                        .isEmpty();
                 columnFields++;
             }
 
@@ -666,19 +655,18 @@ class JpaMappingIntegrationTest {
                 .isEqualTo(MAPPED_COLUMN_COUNT);
     }
 
-    // Ported from backend/app/db/models.py:L11,L15-18,L24,L36-37,L42-44 (faithful port) — DL-068,
-    // DL-069 — see docs/DECISION_LOG.md
+    // Ported from backend/app/db/models.py:L11,L15-18,L24,L36-37,L42-44 (faithful port) — DL-068 —
+    // see docs/DECISION_LOG.md
     @Test
-    @DisplayName("every character column the source leaves unbounded is generated with a capacity "
-            + "past the annotation default")
-    void everySourceUnboundedCharacterColumnIsGeneratedUnbounded() throws SQLException {
+    @DisplayName("every character column the source declares is generated in the character type "
+            + "family at the capacity an undeclared length renders")
+    void everySourceCharacterColumnIsGeneratedAtTheUndeclaredLengthCapacity() throws SQLException {
         int assertedColumns = 0;
 
         try (Connection connection = dataSource.getConnection()) {
             DatabaseMetaData metaData = connection.getMetaData();
 
-            for (Map.Entry<String, List<String>> table
-                    : SOURCE_UNBOUNDED_CHARACTER_COLUMNS.entrySet()) {
+            for (Map.Entry<String, List<String>> table : SOURCE_CHARACTER_COLUMNS.entrySet()) {
                 for (String columnName : table.getValue()) {
                     Map<String, Object> attributes =
                             readColumn(metaData, table.getKey(), columnName);
@@ -690,54 +678,30 @@ class JpaMappingIntegrationTest {
                     assertThat((int) attributes.get(COLUMN_SIZE))
                             .as("generated capacity of column %s.%s (reported as %s)",
                                     table.getKey(), columnName, attributes.get(TYPE_NAME))
-                            .isNotEqualTo(DEFAULT_ANNOTATION_LENGTH)
-                            .isGreaterThanOrEqualTo(SMALLEST_UNBOUNDED_COLUMN_SIZE);
+                            .isEqualTo(DEFAULT_ANNOTATION_LENGTH);
                     assertedColumns++;
                 }
             }
         }
 
-        assertThat(assertedColumns).as("character columns the source leaves unbounded")
-                .isEqualTo(SOURCE_UNBOUNDED_CHARACTER_COLUMN_COUNT);
+        assertThat(assertedColumns).as("character columns the source declares")
+                .isEqualTo(SOURCE_CHARACTER_COLUMN_COUNT);
     }
 
-    // The declared capacity of the settings primary key — DL-069 — see docs/DECISION_LOG.md
+    // The settings primary key carries no declared length — DL-068 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("the settings primary key is generated at the portable maximum capacity and never "
-            + "at the annotation default")
-    void theSettingsPrimaryKeyIsGeneratedAtThePortableMaximumCapacity() throws SQLException {
-        try (Connection connection = dataSource.getConnection()) {
-            DatabaseMetaData metaData = connection.getMetaData();
-            Map<String, Object> attributes =
-                    readColumn(metaData, SETTINGS_TABLE, PRIMARY_KEY_CHARACTER_COLUMN);
+    @DisplayName("the settings primary key stores and reloads a key at the generated capacity")
+    void theSettingsPrimaryKeyStoresAKeyAtTheGeneratedCapacity() {
+        String widestKey = "k".repeat(DEFAULT_ANNOTATION_LENGTH);
 
-            assertThat(attributes.get(DATA_TYPE))
-                    .as("java.sql.Types code of column %s.%s", SETTINGS_TABLE,
-                            PRIMARY_KEY_CHARACTER_COLUMN)
-                    .isIn(CHARACTER_TYPES);
-            assertThat((int) attributes.get(COLUMN_SIZE))
-                    .as("generated capacity of column %s.%s", SETTINGS_TABLE,
-                            PRIMARY_KEY_CHARACTER_COLUMN)
-                    .isNotEqualTo(DEFAULT_ANNOTATION_LENGTH)
-                    .isEqualTo(PORTABLE_PRIMARY_KEY_LENGTH);
-        }
-    }
-
-    // The settings primary key accepts a value of the full generated capacity — DL-069 — see
-    // docs/DECISION_LOG.md
-    @Test
-    @DisplayName("the settings primary key stores a key of the full generated capacity")
-    void theSettingsPrimaryKeyStoresAKeyOfTheFullGeneratedCapacity() {
-        String widestKey = "k".repeat(PORTABLE_PRIMARY_KEY_LENGTH);
-
-        settingRepository.save(new Setting(widestKey, "stored", "A key of the declared width"));
+        settingRepository.save(new Setting(widestKey, "stored", "A key at the generated capacity"));
         entityManager.flush();
         entityManager.clear();
 
         Optional<Setting> reloaded = settingRepository.findById(widestKey);
-        assertThat(reloaded).as("row stored under a key of the declared width").isPresent();
+        assertThat(reloaded).as("row stored under a key at the generated capacity").isPresent();
         assertThat(reloaded.get().getKey()).as("stored key")
-                .hasSize(PORTABLE_PRIMARY_KEY_LENGTH).isEqualTo(widestKey);
+                .hasSize(DEFAULT_ANNOTATION_LENGTH).isEqualTo(widestKey);
     }
 
     // Ported from backend/app/db/models.py:L7-8,L20-21,L32-33,L39-40 (faithful port) — see
@@ -1198,10 +1162,11 @@ class JpaMappingIntegrationTest {
     }
 
     // Ported from backend/app/tasks/response_generation.py:L43, whose expression ended in `.all()`
-    // (faithful port) — see docs/DECISION_LOG.md DL-182
+    // (faithful port of the predicate) — DL-248 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("the backlog query returns every unanswered tweet in one unbounded call")
-    void theBacklogQueryReturnsEveryUnansweredTweetInOneUnboundedCall() {
+    @DisplayName("consecutive keyset batches cover every unanswered tweet exactly once and bound "
+            + "the rows one statement returns")
+    void consecutiveKeysetBatchesCoverEveryUnansweredTweetExactlyOnce() {
         Tweet answered = saveTweet(LocalDateTime.of(2026, 1, 1, 9, 0), 7.0, 250);
         saveResponse(answered, "Already drafted", Boolean.FALSE);
 
@@ -1214,20 +1179,178 @@ class JpaMappingIntegrationTest {
         entityManager.flush();
         entityManager.clear();
 
-        List<Tweet> backlog = tweetRepository.findByResponsesIsEmpty();
+        Pageable batchRequest =
+                PageRequest.of(0, BACKLOG_BATCH_ROWS, Sort.by(Sort.Direction.ASC, "id"));
+        List<Integer> drained = new ArrayList<>();
+        List<Integer> batchSizes = new ArrayList<>();
+        Integer afterId = null;
+        while (true) {
+            List<Tweet> batch = tweetRepository.findUnansweredBatchAfter(afterId, batchRequest);
+            if (batch.isEmpty()) {
+                break;
+            }
+            batchSizes.add(batch.size());
+            for (Tweet candidate : batch) {
+                drained.add(candidate.getId());
+                afterId = candidate.getId();
+            }
+            if (batch.size() < BACKLOG_BATCH_ROWS) {
+                break;
+            }
+        }
 
-        assertThat(backlog).extracting(Tweet::getId)
-                .as("every tweets row carrying no response")
-                .containsExactlyInAnyOrderElementsOf(unansweredIds);
-        assertThat(backlog).extracting(Tweet::getId)
-                .as("the answered row is excluded").doesNotContain(answered.getId());
+        assertThat(batchSizes).as("rows each batch returned")
+                .isNotEmpty()
+                .allMatch(size -> size <= BACKLOG_BATCH_ROWS)
+                .hasSizeGreaterThan(1);
+        assertThat(drained).as("every tweets row carrying no response, drained in batches")
+                .containsExactlyElementsOf(unansweredIds)
+                .doesNotHaveDuplicates()
+                .doesNotContain(answered.getId());
+        assertThat(drained).as("the drain order").isSorted();
+    }
+
+    // Consecutive page chunks cover a page exactly once — DL-249 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("consecutive bounded chunks of one page cover its rows exactly once for both "
+            + "listings")
+    void consecutiveBoundedChunksOfOnePageCoverItsRowsExactlyOnce() {
+        List<Integer> tweetIds = new ArrayList<>();
+        List<Integer> responseIds = new ArrayList<>();
+        for (int row = 0; row < PAGE_CHUNK_ROW_COUNT; row++) {
+            Tweet stored = saveTweet(LocalDateTime.of(2026, 1, 3, 9, 0).plusMinutes(row),
+                    5.0, 400 + row);
+            tweetIds.add(stored.getId());
+            responseIds.add(saveResponse(stored, "Reply " + row, Boolean.FALSE).getId());
+        }
+
+        entityManager.flush();
+        entityManager.clear();
+
+        Pageable page = PageRequest.of(0, PAGE_CHUNK_ROW_COUNT * 2,
+                Sort.by(Sort.Direction.ASC, "id"));
+
+        List<Integer> readTweetIds = QueryParameters.mapInChunks(page, PAGE_CHUNK_BOUND,
+                tweetRepository::findChunk,
+                rows -> rows.stream().map(Tweet::getId).toList());
+        List<Integer> readResponseIds = QueryParameters.mapInChunks(page, PAGE_CHUNK_BOUND,
+                responseRepository::findRowChunk,
+                rows -> rows.stream().map(ResponseRow::getId).toList());
+
+        assertThat(readTweetIds).as("tweets the chunked page read covered")
+                .containsExactlyElementsOf(tweetIds).doesNotHaveDuplicates();
+        assertThat(readResponseIds).as("responses the chunked page read covered")
+                .containsExactlyElementsOf(responseIds).doesNotHaveDuplicates();
+    }
+
+    // The chunked read and the single-statement read render the same envelope — DL-249 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("both listings render the same envelope whether a page is read in one statement or "
+            + "in chunks")
+    void bothListingsRenderTheSameEnvelopeWhetherReadInOneStatementOrInChunks() {
+        List<Tweet> stored = new ArrayList<>();
+        for (int row = 0; row < PAGE_CHUNK_ROW_COUNT; row++) {
+            Tweet tweet = saveTweet(LocalDateTime.of(2026, 1, 7, 9, 0).plusMinutes(row),
+                    4.0 + row, 500 + row);
+            stored.add(tweet);
+            saveResponse(tweet, "Reply " + row, row % 2 == 0 ? Boolean.TRUE : Boolean.FALSE);
+        }
+        entityManager.flush();
+        entityManager.clear();
+
+        TwitterService tweets = new TwitterService(tweetRepository, settingRepository,
+                propertiesWithoutOverrides(), new TweetMapper(), mock(SentimentAnalysisService.class));
+        ResponseService responses = responseService(mock(LlmService.class));
+
+        PaginatedTweetsDto tweetsInOneStatement = tweets.getPaginatedTweets(1, PAGE_CHUNK_ROW_COUNT);
+        PaginatedTweetsDto tweetsInChunks = tweets.getPaginatedTweets(1, Integer.MAX_VALUE);
+        PaginatedResponsesDto responsesInOneStatement =
+                responses.getPaginatedResponses(1, PAGE_CHUNK_ROW_COUNT);
+        PaginatedResponsesDto responsesInChunks = responses.getPaginatedResponses(1,
+                Integer.MAX_VALUE);
+
+        assertThat(tweetsInChunks.tweets()).as("tweet rows the chunked read rendered")
+                .containsExactlyElementsOf(tweetsInOneStatement.tweets())
+                .hasSize(PAGE_CHUNK_ROW_COUNT);
+        assertThat(tweetsInChunks.pagination().total()).as("tweet total the chunked read reported")
+                .isEqualTo(tweetsInOneStatement.pagination().total())
+                .isEqualTo(PAGE_CHUNK_ROW_COUNT);
+        assertThat(tweetsInChunks.pagination().totalPages())
+                .as("tweet total_pages the chunked read reported").isEqualTo(1);
+        assertThat(tweetsInChunks.pagination().perPage())
+                .as("per_page the chunked read restated").isEqualTo(Integer.MAX_VALUE);
+        assertThat(tweetsInChunks.tweets()).extracting(TweetDto::id)
+                .as("tweet identifiers in ascending order")
+                .containsExactlyElementsOf(stored.stream().map(row -> String.valueOf(row.getId()))
+                        .toList());
+
+        assertThat(responsesInChunks.responses()).as("response rows the chunked read rendered")
+                .containsExactlyElementsOf(responsesInOneStatement.responses())
+                .hasSize(PAGE_CHUNK_ROW_COUNT);
+        assertThat(responsesInChunks.pagination().total())
+                .as("response total the chunked read reported")
+                .isEqualTo(responsesInOneStatement.pagination().total())
+                .isEqualTo(PAGE_CHUNK_ROW_COUNT);
+        assertThat(responsesInChunks.pagination().totalPages())
+                .as("response total_pages the chunked read reported").isEqualTo(1);
+    }
+
+    // A projected chunk reads no tweets row — DL-245, DL-249 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("a projected response chunk carries the parent identifier without loading a tweets "
+            + "row")
+    void aProjectedResponseChunkCarriesTheParentIdentifierWithoutLoadingATweetsRow() {
+        Tweet parent = saveTweet(LocalDateTime.of(2026, 1, 6, 12, 0), 5.5, 150);
+        Response stored = saveResponse(parent, "Chunked reply", Boolean.TRUE);
+        entityManager.flush();
+        entityManager.clear();
+        Statistics statistics = statistics();
+        statistics.clear();
+
+        List<ResponseRow> chunk = responseRepository.findRowChunk(
+                PageRequest.of(0, PAGE_CHUNK_BOUND, Sort.by(Sort.Direction.ASC, "id")));
+
+        assertThat(chunk).as("rows the chunk covered").hasSize(1);
+        assertThat(chunk.get(0).getId()).as("identifier of the projected row")
+                .isEqualTo(stored.getId());
+        assertThat(chunk.get(0).getTweetId()).as("parent identifier of the projected row")
+                .isEqualTo(parent.getId());
+        assertThat(statistics.getPrepareStatementCount())
+                .as("statements the chunk read issued").isEqualTo(1L);
+        assertThat(statistics.getEntityLoadCount())
+                .as("entities the chunk read loaded").isZero();
+    }
+
+    // The opening batch of a sweep takes the first matching rows — DL-248 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("the opening batch of a sweep applies no cursor and a cursor past the last row "
+            + "returns nothing")
+    void theOpeningBatchAppliesNoCursorAndACursorPastTheLastRowReturnsNothing() {
+        Tweet first = saveTweet(LocalDateTime.of(2026, 1, 2, 9, 0), 8.0, 300);
+        Tweet second = saveTweet(LocalDateTime.of(2026, 1, 2, 9, 5), 8.5, 310);
+        entityManager.flush();
+        entityManager.clear();
+
+        Pageable batchRequest =
+                PageRequest.of(0, BACKLOG_BATCH_ROWS, Sort.by(Sort.Direction.ASC, "id"));
+
+        assertThat(tweetRepository.findUnansweredBatchAfter(null, batchRequest))
+                .as("the opening batch").extracting(Tweet::getId)
+                .containsExactly(first.getId(), second.getId());
+        assertThat(tweetRepository.findUnansweredBatchAfter(first.getId(), batchRequest))
+                .as("the batch past the first row").extracting(Tweet::getId)
+                .containsExactly(second.getId());
+        assertThat(tweetRepository.findUnansweredBatchAfter(second.getId(), batchRequest))
+                .as("the batch past the last row").isEmpty();
     }
 
     // The update write boundary and wire conversion share one real persistence transaction — DL-082,
-    // DL-231.
+    // DL-244.
     @Test
-    @DisplayName("the response service rejects an unusable member and maps a valid update through the real repository")
-    void responseServiceRejectsExplicitNullAndMapsAValidUpdateThroughTheRealRepository() {
+    @DisplayName("the response service leaves the row untouched for a rejected update and maps a valid update through the real repository")
+    void responseServiceLeavesTheRowUntouchedForARejectedUpdateAndMapsAValidUpdate() {
         Tweet tweet = saveTweet(LocalDateTime.of(2026, 1, 4, 9, 0), 6.0, 180);
         Response response = saveResponse(tweet, "Draft awaiting review", Boolean.FALSE);
         entityManager.flush();
@@ -1235,18 +1358,27 @@ class JpaMappingIntegrationTest {
         ResponseService service = responseService(mock(LlmService.class));
         String responseId = String.valueOf(response.getId());
 
-        // An explicit JSON null is refused while the body is bound, so the service never sees it —
-        // DL-231
-        assertThatThrownBy(() -> new UpdateResponseRequest(NullNode.getInstance(), null))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessage("The content member of a response update must be a JSON string.");
+        // An explicit JSON null binds without error and reaches the service as a write of null —
+        // DL-244
+        UpdateResponseRequest emptyingContent =
+                new UpdateResponseRequest(NullNode.getInstance(), null);
+        assertThat(emptyingContent.writesContent()).isTrue();
+        assertThat(emptyingContent.contentValue()).isNull();
 
-        // A body carrying no writable key still reaches the transcribed 400 literal — DL-082
+        // The wire contract declares content required, so the write is reported with the :L65
+        // literal and the row is left as it was — DL-080, DL-244
+        assertThatThrownBy(() -> service.updateResponse(responseId, emptyingContent))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessage("Response not found or update failed");
+
+        // A body carrying neither updatable member still reaches the transcribed 400 literal —
+        // DL-082
         assertThatThrownBy(() -> service.updateResponse(responseId,
                 new UpdateResponseRequest(null, null)))
                 .isInstanceOf(BadRequestException.class)
                 .hasMessage("Update data is required");
 
+        entityManager.clear();
         Response unchanged = responseRepository.findById(response.getId()).orElseThrow();
         assertThat(unchanged.getContent()).isEqualTo("Draft awaiting review");
         assertThat(unchanged.getIsApproved()).isFalse();
@@ -1303,10 +1435,36 @@ class JpaMappingIntegrationTest {
                     .isIn("First generated draft", "Second generated draft");
             assertThat(stored.getIsApproved()).isFalse();
         } finally {
-            executor.shutdownNow();
-            executor.awaitTermination(5, TimeUnit.SECONDS);
+            // The pool is awaited and its termination asserted, so neither generator thread outlives
+            // this test — DL-273 — see docs/DECISION_LOG.md
+            awaitTermination(executor);
             responseRepository.deleteAll();
             tweetRepository.deleteAll();
+        }
+    }
+
+    // Net-new: every test executor is awaited and its termination asserted — DL-273 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Shuts the supplied executor down and asserts that it terminates.
+     *
+     * <p>Termination is awaited for at most {@value #EXECUTOR_TERMINATION_SECONDS} seconds. A thread
+     * still running at that bound fails the test rather than being left behind for the rest of the
+     * build, where it would hold a JDBC connection from the pool. An interrupt while awaiting is
+     * restored on the calling thread and reported, so the interrupt is neither swallowed nor mistaken
+     * for a clean termination.
+     *
+     * @param executor the executor to release
+     */
+    private static void awaitTermination(ExecutorService executor) {
+        executor.shutdownNow();
+        try {
+            assertThat(executor.awaitTermination(EXECUTOR_TERMINATION_SECONDS, TimeUnit.SECONDS))
+                    .as("the concurrent-generator pool terminated").isTrue();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("Interrupted while awaiting the concurrent-generator pool.",
+                    interrupted);
         }
     }
 
@@ -1314,8 +1472,9 @@ class JpaMappingIntegrationTest {
     // backend/app/api/analytics.py:L3 did not exist; the column is
     // backend/app/db/models.py:L26) — DL-041 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("countByIsApprovedTrue counts only the responses whose approval flag is true")
-    void countByIsApprovedTrueCountsOnlyTheApprovedResponses() {
+    @DisplayName("the responses aggregate counts every row and only the rows whose approval flag "
+            + "is true")
+    void theApprovalCountsCountsEveryRowAndOnlyTheApprovedRows() {
         Tweet tweet = saveTweet(LocalDateTime.of(2026, 1, 1, 11, 0), 5.0, 140);
         saveResponse(tweet, "Approved reply one", Boolean.TRUE);
         saveResponse(tweet, "Approved reply two", Boolean.TRUE);
@@ -1324,21 +1483,40 @@ class JpaMappingIntegrationTest {
 
         entityManager.flush();
 
-        assertThat(responseRepository.count()).as("stored responses row count").isEqualTo(4L);
-        assertThat(responseRepository.countByIsApprovedTrue()).as("approved responses row count")
+        ResponseRepository.ApprovalCounts aggregate = responseRepository.findApprovalCounts();
+
+        assertThat(aggregate).as("responses aggregate").isNotNull();
+        assertThat(aggregate.getResponseCount()).as("stored responses row count").isEqualTo(4L);
+        assertThat(aggregate.getApprovedResponseCount()).as("approved responses row count")
                 .isEqualTo(2L);
+    }
+
+    // Net-new (no Python counterpart: the AnalyticsService imported at
+    // backend/app/api/analytics.py:L3 did not exist; the column is
+    // backend/app/db/models.py:L26) — DL-041, DL-180 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("the responses aggregate reports zero for both counts over an empty table")
+    void theApprovalCountsReportsZeroForBothCountsOverAnEmptyTable() {
+        ResponseRepository.ApprovalCounts aggregate = responseRepository.findApprovalCounts();
+
+        assertThat(aggregate).as("responses aggregate").isNotNull();
+        assertThat(aggregate.getResponseCount()).as("stored responses row count").isZero();
+        assertThat(aggregate.getApprovedResponseCount()).as("approved responses row count").isZero();
     }
 
     // Net-new (no Python counterpart: the AnalyticsService imported at
     // backend/app/api/analytics.py:L3 did not exist; the columns are
     // backend/app/db/models.py:L12,L14) — DL-041 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("both average queries return null when no tweet is stored")
-    void bothAverageQueriesReturnNullWhenNoTweetIsStored() {
-        assertThat(tweetRepository.count()).as("stored tweets row count").isZero();
-        assertThat(tweetRepository.findAverageDoubtRating())
+    @DisplayName("the tweets aggregate reports zero rows and no mean when no tweet is stored")
+    void theTweetAggregateReportsZeroRowsAndNoMeanWhenNoTweetIsStored() {
+        TweetRepository.TweetAggregate aggregate = tweetRepository.findAggregates();
+
+        assertThat(aggregate).as("tweets aggregate").isNotNull();
+        assertThat(aggregate.getTweetCount()).as("stored tweets row count").isZero();
+        assertThat(aggregate.getAverageDoubtRating())
                 .as("average doubt rating over an empty table").isNull();
-        assertThat(tweetRepository.findAverageLikeCount())
+        assertThat(aggregate.getAverageLikeCount())
                 .as("average like count over an empty table").isNull();
     }
 
@@ -1346,46 +1524,60 @@ class JpaMappingIntegrationTest {
     // backend/app/api/analytics.py:L3 did not exist; the columns are
     // backend/app/db/models.py:L12,L14) — DL-041 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("both average queries compute the mean of the stored doubt ratings and like counts")
-    void bothAverageQueriesComputeTheStoredMeans() {
+    @DisplayName("the tweets aggregate computes the row count and both means in one statement")
+    void theTweetAggregateComputesTheRowCountAndBothMeansInOneStatement() {
         saveTweet(LocalDateTime.of(2026, 1, 1, 9, 0), 2.5, 4);
         saveTweet(LocalDateTime.of(2026, 1, 1, 12, 0), 7.5, 10);
 
         entityManager.flush();
+        entityManager.clear();
+        statistics().clear();
 
-        assertThat(tweetRepository.findAverageDoubtRating()).as("average doubt rating")
+        TweetRepository.TweetAggregate aggregate = tweetRepository.findAggregates();
+
+        assertThat(aggregate).as("tweets aggregate").isNotNull();
+        assertThat(aggregate.getTweetCount()).as("stored tweets row count").isEqualTo(2L);
+        assertThat(aggregate.getAverageDoubtRating()).as("average doubt rating")
                 .isNotNull().isCloseTo(5.0, within(TOLERANCE));
-        assertThat(tweetRepository.findAverageLikeCount()).as("average like count")
+        assertThat(aggregate.getAverageLikeCount()).as("average like count")
                 .isNotNull().isCloseTo(7.0, within(TOLERANCE));
+        assertThat(statistics().getPrepareStatementCount())
+                .as("statements issued for the three tweets metrics").isEqualTo(1L);
     }
 
     // Net-new (no Python counterpart: the AnalyticsService imported at
     // backend/app/api/analytics.py:L3 did not exist and get_trends() at :L13-14 took no argument;
     // the columns are backend/app/db/models.py:L12-14) — DL-042 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("findDailyTrendsSince buckets the tweets at or after the cutoff by calendar day "
-            + "and populates every projection accessor")
-    void findDailyTrendsSinceBucketsTheTweetsByCalendarDay() {
+    @DisplayName("findDailyTrendsBetween buckets only the tweets inside the closed window by "
+            + "calendar day and populates every projection accessor")
+    void findDailyTrendsBetweenBucketsTheTweetsInsideTheClosedWindowByCalendarDay() {
         LocalDate today = LocalDate.now();
         LocalDate yesterday = today.minusDays(1);
         LocalDateTime cutoff = yesterday.atStartOfDay();
+        LocalDateTime until = today.atTime(23, 0);
 
         saveTweet(yesterday.atTime(9, 0), 2.0, 3);
         saveTweet(today.atTime(12, 0), 4.0, 5);
         saveTweet(today.atTime(18, 0), 6.0, 7);
         Tweet beforeCutoff = saveTweet(today.minusDays(4).atTime(12, 0), 9.0, 1000);
+        Tweet afterWindow = saveTweet(today.plusDays(3).atTime(12, 0), 1.0, 2000);
 
         entityManager.flush();
         entityManager.clear();
 
-        List<TweetRepository.DailyTrend> trends = tweetRepository.findDailyTrendsSince(cutoff);
+        List<TweetRepository.DailyTrend> trends =
+                tweetRepository.findDailyTrendsBetween(cutoff, until);
 
-        assertThat(trends).as("day buckets at or after the cutoff").hasSize(2);
+        assertThat(trends).as("day buckets inside the closed window").hasSize(2);
         assertThat(trends).extracting(TweetRepository.DailyTrend::getBucketDate)
                 .as("bucket days in ascending order").containsExactly(yesterday, today);
         assertThat(trends).extracting(TweetRepository.DailyTrend::getBucketDate)
                 .as("day of the tweet stored before the cutoff")
                 .doesNotContain(beforeCutoff.getCreatedAt().toLocalDate());
+        assertThat(trends).extracting(TweetRepository.DailyTrend::getBucketDate)
+                .as("day of the tweet stamped after the closing bound")
+                .doesNotContain(afterWindow.getCreatedAt().toLocalDate());
 
         TweetRepository.DailyTrend yesterdayBucket = trends.get(0);
         assertThat(yesterdayBucket.getTweetCount()).as("row count of the %s bucket", yesterday)
@@ -1413,10 +1605,11 @@ class JpaMappingIntegrationTest {
         }
     }
 
-    // Net-new (no Python counterpart) — DL-087 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-245, DL-249 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("a page of responses reads the tweet association without a per-row statement")
-    void aPageOfResponsesReadsTheTweetAssociationWithoutAPerRowStatement() {
+    @DisplayName("a page of responses carries the parent identifier without loading a tweets row or "
+            + "issuing a per-row statement")
+    void aPageOfResponsesCarriesTheParentIdentifierWithoutLoadingATweetsRow() {
         Tweet first = saveTweet(LocalDateTime.of(2026, 1, 1, 12, 0), 6.5, 120);
         Tweet second = saveTweet(LocalDateTime.of(2026, 1, 2, 12, 0), 7.5, 220);
         Tweet third = saveTweet(LocalDateTime.of(2026, 1, 3, 12, 0), 8.5, 320);
@@ -1434,10 +1627,10 @@ class JpaMappingIntegrationTest {
         statistics.clear();
 
         // The row order is requested explicitly; relational row order is otherwise unspecified.
-        Page<Response> page =
-                responseRepository.findAll(PageRequest.of(0, 10, Sort.by(Sort.Direction.ASC, "id")));
+        Page<ResponseRow> page = responseRepository
+                .findAllRows(PageRequest.of(0, 10, Sort.by(Sort.Direction.ASC, "id")));
         List<Integer> parentIds = page.getContent().stream()
-                .map(response -> response.getTweet().getId())
+                .map(ResponseRow::getTweetId)
                 .toList();
 
         assertThat(page.getTotalElements()).as("rows the page reports").isEqualTo(3L);
@@ -1445,9 +1638,40 @@ class JpaMappingIntegrationTest {
         // insertion order of these three responses.
         assertThat(parentIds).as("parent identifier of every row on the page")
                 .containsExactly(first.getId(), second.getId(), third.getId());
+        assertThat(page.getContent()).extracting(ResponseRow::getContent)
+                .as("content of every row on the page")
+                .containsExactly("First drafted reply", "Second drafted reply",
+                        "Third drafted reply");
+        assertThat(page.getContent()).extracting(ResponseRow::getIsApproved)
+                .as("approval flag of every row on the page")
+                .containsExactly(Boolean.FALSE, Boolean.TRUE, null);
         assertThat(statistics.getPrepareStatementCount())
                 .as("statements issued to render one page of responses")
                 .isLessThanOrEqualTo(2L);
+        assertThat(statistics.getEntityLoadCount())
+                .as("entities the page read loaded")
+                .isZero();
+    }
+
+    // The projection maps onto the five wire members — DL-245 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("the response mapper renders a projected page row as the five wire members")
+    void theResponseMapperRendersAProjectedPageRowAsTheFiveWireMembers() {
+        Tweet tweet = saveTweet(LocalDateTime.of(2026, 1, 5, 12, 0), 4.5, 90);
+        Response stored = saveResponse(tweet, "Projected reply", Boolean.TRUE);
+        entityManager.flush();
+        entityManager.clear();
+
+        Page<ResponseRow> page = responseRepository.findAllRows(PageRequest.of(0, 10));
+        assertThat(page.getContent()).hasSize(1);
+
+        ResponseDto rendered = new ResponseMapper().toDto(page.getContent().getFirst());
+
+        assertThat(rendered.id()).isEqualTo(String.valueOf(stored.getId()));
+        assertThat(rendered.content()).isEqualTo("Projected reply");
+        assertThat(rendered.generatedAt()).isEqualTo(stored.getGeneratedAt());
+        assertThat(rendered.isApproved()).isTrue();
+        assertThat(rendered.tweetId()).isEqualTo(String.valueOf(tweet.getId()));
     }
 
     // Ported from backend/app/db/models.py:L32-37 (faithful port) — see docs/DECISION_LOG.md
@@ -1518,13 +1742,12 @@ class JpaMappingIntegrationTest {
         }
     }
 
-    // The declared capacity of the settings primary key — DL-069, DL-166 — see
-    // docs/DECISION_LOG.md
+    // Every character column carries the capacity an undeclared length renders, and no statement
+    // widens one into a long or large-object type — DL-068, DL-166 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("no generated statement bounds a character column at the annotation default, and "
-            + "the settings primary key alone carries the portable maximum")
-    void noGeneratedStatementBoundsACharacterColumnAtTheAnnotationDefault() {
-        String portableKeyType = "varchar(" + PORTABLE_PRIMARY_KEY_LENGTH + ")";
+    @DisplayName("every generated character column carries the capacity an undeclared length "
+            + "renders and no statement declares a long or large-object character type")
+    void everyGeneratedCharacterColumnCarriesTheUndeclaredLengthCapacity() {
         String defaultBound = "varchar(" + DEFAULT_ANNOTATION_LENGTH + ")";
 
         for (String dialect : EXPECTED_GENERATED_COLUMN_TYPES.keySet()) {
@@ -1533,15 +1756,15 @@ class JpaMappingIntegrationTest {
             for (Map.Entry<String, String> table : statements.entrySet()) {
                 assertThat(table.getValue())
                         .as("create statement of table %s on %s", table.getKey(), dialect)
-                        .doesNotContain(defaultBound);
+                        .doesNotContain("clob")
+                        .doesNotContain("longtext")
+                        .doesNotContain(" text")
+                        .doesNotContain("varchar(max)");
             }
-            assertThat(statements.get(SETTINGS_TABLE))
-                    .as("create statement of table %s on %s", SETTINGS_TABLE, dialect)
-                    .contains(portableKeyType);
-            for (String table : List.of(TWEETS_TABLE, RESPONSES_TABLE, AI_TOOLS_TABLE)) {
+            for (String table : MAPPED_TABLES) {
                 assertThat(statements.get(table))
                         .as("create statement of table %s on %s", table, dialect)
-                        .doesNotContain("varchar(");
+                        .contains(defaultBound);
             }
         }
     }
@@ -1871,9 +2094,32 @@ class JpaMappingIntegrationTest {
      * @param generator the generated-text adapter for this service instance
      * @return a service whose storage transactions use the context transaction manager
      */
+    /**
+     * Builds a configuration record carrying no popularity-threshold override and no credential.
+     *
+     * @return the bound configuration handed to a service under test
+     */
+    private static ScannerProperties propertiesWithoutOverrides() {
+        return new ScannerProperties(null, 100, 0L, null, null, null, null, null, null, null, null);
+    }
+
     private ResponseService responseService(LlmService generator) {
         return new ResponseService(responseRepository, tweetRepository, generator,
                 new ResponseMapper(), new TweetMapper(), new TransactionTemplate(transactionManager));
+    }
+
+    /**
+     * Returns the session factory statistics of this test context, enabled and cleared.
+     *
+     * @return the statistics recorder, counting only the statements issued after this call
+     */
+    private Statistics statistics() {
+        Statistics statistics = entityManager.getEntityManager()
+                .getEntityManagerFactory()
+                .unwrap(SessionFactory.class)
+                .getStatistics();
+        statistics.setStatisticsEnabled(true);
+        return statistics;
     }
 
     /**
@@ -1951,12 +2197,11 @@ class JpaMappingIntegrationTest {
     }
 
     /**
-     * Reads a character column value as text, whatever handle the driver reports it through.
+     * Reads a character column value as text.
      *
-     * <p>The two delimited columns are mapped unbounded — DL-068 — and a vendor may report an
-     * unbounded character column either as a {@link String} or as a {@link Clob} handle. Both are
-     * read here so the surrounding assertions describe the stored text, not the driver's handle
-     * type.
+     * <p>The two delimited columns carry a bare {@code @Column} — DL-068 — and are reported by the
+     * driver as a {@link String}. Any other handle type fails this method, so the surrounding
+     * assertions describe the stored text and never a driver handle.
      *
      * @param columnValue the raw value the driver reported; may be {@code null}
      * @return the stored text, or {@code null} when the column holds SQL null
@@ -1967,13 +2212,6 @@ class JpaMappingIntegrationTest {
         }
         if (columnValue instanceof String text) {
             return text;
-        }
-        if (columnValue instanceof Clob clob) {
-            try {
-                return clob.getSubString(1L, (int) clob.length());
-            } catch (SQLException e) {
-                throw new AssertionError("The character column value could not be read.", e);
-            }
         }
         throw new AssertionError("A character column reported an unexpected handle type: "
                 + columnValue.getClass().getName());

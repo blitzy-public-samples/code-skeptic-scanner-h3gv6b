@@ -2,7 +2,9 @@ package com.codeskeptic.scanner.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatNoException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -15,11 +17,17 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.RecordComponent;
+import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.TimeZone;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -84,6 +92,24 @@ class AnalyticsServiceTest {
     private static final int CONFIGURED_TREND_WINDOW_DAYS = 30;
 
     private static final int SHORTER_TREND_WINDOW_DAYS = 7;
+
+    // -----------------------------------------------------------------------
+    // Fixed clock — the UTC basis the window is measured from (DL-241)
+    // -----------------------------------------------------------------------
+
+    /**
+     * The instant every case measures the window from: 2026-08-06T10:30:00Z. Its UTC date is
+     * 2026-08-06, its date in {@code Pacific/Midway} (UTC-11:00) is 2026-08-05 and its date in
+     * {@code Pacific/Kiritimati} (UTC+14:00) is 2026-08-07, so a cutoff computed on the JVM default
+     * zone rather than on UTC lands a day early in the first zone and a day late in the second.
+     */
+    private static final Instant FIXED_INSTANT = Instant.parse("2026-08-06T10:30:00Z");
+
+    /** UTC date of {@link #FIXED_INSTANT}. */
+    private static final LocalDate FIXED_UTC_DATE = LocalDate.of(2026, 8, 6);
+
+    /** Clock every case injects, fixed at {@link #FIXED_INSTANT} and reading in UTC. */
+    private static final Clock FIXED_UTC_CLOCK = Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC);
 
     // -----------------------------------------------------------------------
     // Day buckets of the trend series
@@ -164,7 +190,18 @@ class AnalyticsServiceTest {
     @BeforeEach
     void setUp() {
         service = new AnalyticsService(tweetRepository, responseRepository, aiToolRepository,
-                properties);
+                properties, FIXED_UTC_CLOCK);
+    }
+
+    /**
+     * Returns the inclusive lower bound a window of {@code windowDays} UTC dates opens at, measured
+     * from {@link #FIXED_INSTANT}.
+     *
+     * @param windowDays the configured window width in UTC calendar dates
+     * @return the expected cutoff
+     */
+    private static LocalDateTime expectedCutoff(int windowDays) {
+        return FIXED_UTC_DATE.minusDays((long) windowDays - 1L).atStartOfDay();
     }
 
     // -----------------------------------------------------------------------
@@ -207,8 +244,10 @@ class AnalyticsServiceTest {
         });
     }
 
+    // The clock is the fifth constructor parameter — DL-241 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("takes its three repositories and its configuration through its only constructor")
+    @DisplayName("takes its three repositories, its configuration and its clock through its only "
+            + "constructor")
     void takesItsThreeRepositoriesAndItsConfigurationThroughItsOnlyConstructor() {
         List<Constructor<?>> constructors = List.of(AnalyticsService.class.getDeclaredConstructors());
 
@@ -216,7 +255,19 @@ class AnalyticsServiceTest {
         assertThat(constructors.get(0).getParameterTypes()).containsExactly(TweetRepository.class,
                 ResponseRepository.class,
                 AiToolRepository.class,
-                ScannerProperties.class);
+                ScannerProperties.class,
+                Clock.class);
+    }
+
+    // No reader of the current instant bypasses the injected clock — DL-241 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("rejects a null clock rather than falling back to the system default zone")
+    void rejectsANullClock() {
+        assertThatThrownBy(() -> new AnalyticsService(tweetRepository, responseRepository,
+                aiToolRepository, properties, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("clock");
     }
 
     @Test
@@ -322,8 +373,8 @@ class AnalyticsServiceTest {
     @DisplayName("reports the tweet total under total_tweets and the response total under "
             + "total_responses")
     void reportsTheTweetTotalUnderTotalTweetsAndTheResponseTotalUnderTotalResponses() {
-        when(tweetRepository.count()).thenReturn(TOTAL_TWEETS);
-        when(responseRepository.count()).thenReturn(TOTAL_RESPONSES);
+        stubTweetTotals(TOTAL_TWEETS, null, null);
+        stubResponseTotals(TOTAL_RESPONSES, 0L);
 
         SummaryDto summary = service.getSummary();
 
@@ -349,8 +400,8 @@ class AnalyticsServiceTest {
     @Test
     @DisplayName("reports the pending count as the total less the approved count")
     void reportsThePendingCountAsTheTotalLessTheApprovedCount() {
-        when(responseRepository.count()).thenReturn(WIDER_TOTAL_RESPONSES);
-        when(responseRepository.countByIsApprovedTrue()).thenReturn(WIDER_APPROVED_RESPONSES);
+        stubTweetTotals(0L, null, null);
+        stubResponseTotals(WIDER_TOTAL_RESPONSES, WIDER_APPROVED_RESPONSES);
 
         SummaryDto summary = service.getSummary();
 
@@ -358,37 +409,34 @@ class AnalyticsServiceTest {
         assertThat(summary.pendingResponses())
                 .isEqualTo(summary.totalResponses() - summary.approvedResponses());
         assertThat(summary.pendingResponses()).isNotNegative();
-        verify(responseRepository).count();
-        verify(responseRepository).countByIsApprovedTrue();
+        verify(responseRepository).findApprovalCounts();
         verifyNoMoreInteractions(responseRepository);
     }
 
     @Test
     @DisplayName("reports the approved count from the approval flag alone")
     void reportsTheApprovedCountFromTheApprovalFlagAlone() {
-        when(responseRepository.countByIsApprovedTrue()).thenReturn(APPROVED_RESPONSES);
+        stubTweetTotals(0L, null, null);
+        stubResponseTotals(TOTAL_RESPONSES, APPROVED_RESPONSES);
 
         SummaryDto summary = service.getSummary();
 
         assertThat(summary.approvedResponses()).isEqualTo(APPROVED_RESPONSES);
-        verify(responseRepository).countByIsApprovedTrue();
+        verify(responseRepository).findApprovalCounts();
         assertThat(booleanFieldNamesOf(Response.class)).containsExactly("isApproved");
         assertThat(recordComponentTypesOf(SummaryDto.class))
                 .noneMatch(type -> type == Boolean.class || type == boolean.class);
     }
 
     @Test
-    @DisplayName("issues one query for each measured metric and no other query")
-    void issuesOneQueryForEachMeasuredMetricAndNoOtherQuery() {
+    @DisplayName("issues one aggregate query per measured table and no other query")
+    void issuesOneAggregateQueryPerMeasuredTableAndNoOtherQuery() {
         stubTheMeasuredDatabase();
 
         service.getSummary();
 
-        verify(tweetRepository).count();
-        verify(tweetRepository).findAverageDoubtRating();
-        verify(tweetRepository).findAverageLikeCount();
-        verify(responseRepository).count();
-        verify(responseRepository).countByIsApprovedTrue();
+        verify(tweetRepository).findAggregates();
+        verify(responseRepository).findApprovalCounts();
         verify(aiToolRepository).count();
         verifyNoMoreInteractions(tweetRepository, responseRepository, aiToolRepository);
         verifyNoInteractions(properties);
@@ -397,10 +445,12 @@ class AnalyticsServiceTest {
     @Test
     @DisplayName("reports the counts each call reads rather than repeating an earlier report")
     void reportsTheCountsEachCallReadsRatherThanRepeatingAnEarlierReport() {
-        when(tweetRepository.count()).thenReturn(TOTAL_TWEETS, WIDER_TOTAL_RESPONSES);
-        when(responseRepository.count()).thenReturn(TOTAL_RESPONSES, WIDER_TOTAL_RESPONSES);
-        when(responseRepository.countByIsApprovedTrue())
-                .thenReturn(APPROVED_RESPONSES, WIDER_APPROVED_RESPONSES);
+        when(tweetRepository.findAggregates()).thenReturn(
+                new TweetTotals(TOTAL_TWEETS, null, null),
+                new TweetTotals(WIDER_TOTAL_RESPONSES, null, null));
+        when(responseRepository.findApprovalCounts()).thenReturn(
+                new ResponseTotals(TOTAL_RESPONSES, APPROVED_RESPONSES),
+                new ResponseTotals(WIDER_TOTAL_RESPONSES, WIDER_APPROVED_RESPONSES));
         when(aiToolRepository.count()).thenReturn(TRACKED_AI_TOOLS, TRACKED_AI_TOOLS + 2L);
 
         SummaryDto first = service.getSummary();
@@ -415,9 +465,8 @@ class AnalyticsServiceTest {
         assertThat(first.trackedAiTools()).isEqualTo(TRACKED_AI_TOOLS);
         assertThat(second.trackedAiTools()).isEqualTo(TRACKED_AI_TOOLS + 2L);
         assertThat(second).isNotEqualTo(first);
-        verify(tweetRepository, times(2)).count();
-        verify(responseRepository, times(2)).count();
-        verify(responseRepository, times(2)).countByIsApprovedTrue();
+        verify(tweetRepository, times(2)).findAggregates();
+        verify(responseRepository, times(2)).findApprovalCounts();
         verify(aiToolRepository, times(2)).count();
     }
 
@@ -461,9 +510,8 @@ class AnalyticsServiceTest {
     @Test
     @DisplayName("reports a measured zero average as zero and an unmeasured average as absent")
     void reportsAMeasuredZeroAverageAsZeroAndAnUnmeasuredAverageAsAbsent() {
-        when(tweetRepository.count()).thenReturn(TOTAL_TWEETS);
-        when(tweetRepository.findAverageDoubtRating()).thenReturn(null);
-        when(tweetRepository.findAverageLikeCount()).thenReturn(0.0d);
+        stubTweetTotals(TOTAL_TWEETS, null, 0.0d);
+        stubResponseTotals(0L, 0L);
 
         SummaryDto summary = service.getSummary();
 
@@ -474,8 +522,8 @@ class AnalyticsServiceTest {
     @Test
     @DisplayName("reports the measured average unchanged")
     void reportsTheMeasuredAverageUnchanged() {
-        when(tweetRepository.findAverageDoubtRating()).thenReturn(AVERAGE_DOUBT_RATING);
-        when(tweetRepository.findAverageLikeCount()).thenReturn(AVERAGE_LIKE_COUNT);
+        stubTweetTotals(TOTAL_TWEETS, AVERAGE_DOUBT_RATING, AVERAGE_LIKE_COUNT);
+        stubResponseTotals(0L, 0L);
 
         SummaryDto summary = service.getSummary();
 
@@ -579,37 +627,144 @@ class AnalyticsServiceTest {
         assertThat(reported.totalLikes()).isNull();
     }
 
+    // The window is a count of UTC calendar dates read from the injected clock — DL-241 — see
+    // docs/DECISION_LOG.md
     @Test
-    @DisplayName("opens the window the configured number of days before the call")
+    @DisplayName("opens the window at the start of the UTC day the configured number of dates back")
     void opensTheWindowTheConfiguredNumberOfDaysBeforeTheCall() {
         stubTheConfiguredWindow(CONFIGURED_TREND_WINDOW_DAYS);
         stubTheReturnedBuckets();
 
-        LocalDateTime beforeTheCall = LocalDateTime.now();
         service.getTrends();
-        LocalDateTime afterTheCall = LocalDateTime.now();
 
-        assertThat(capturedCutoff()).isBetween(
-                beforeTheCall.minusDays(CONFIGURED_TREND_WINDOW_DAYS),
-                afterTheCall.minusDays(CONFIGURED_TREND_WINDOW_DAYS));
+        // 2026-08-06 minus 29 dates, at midnight: the 30th UTC date counting back from the clock.
+        assertThat(capturedCutoff()).isEqualTo(LocalDateTime.of(2026, 7, 8, 0, 0));
+        assertThat(capturedCutoff()).isEqualTo(expectedCutoff(CONFIGURED_TREND_WINDOW_DAYS));
     }
 
+    // DL-241 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("opens the window seven days before the call when seven days are configured")
+    @DisplayName("opens the window seven UTC dates back when seven days are configured")
     void opensTheWindowSevenDaysBeforeTheCallWhenSevenDaysAreConfigured() {
         stubTheConfiguredWindow(SHORTER_TREND_WINDOW_DAYS);
         stubTheReturnedBuckets();
 
-        LocalDateTime beforeTheCall = LocalDateTime.now();
         service.getTrends();
-        LocalDateTime afterTheCall = LocalDateTime.now();
 
         LocalDateTime cutoff = capturedCutoff();
-        assertThat(cutoff).isBetween(beforeTheCall.minusDays(SHORTER_TREND_WINDOW_DAYS),
-                afterTheCall.minusDays(SHORTER_TREND_WINDOW_DAYS));
-        assertThat(cutoff).isAfter(afterTheCall.minusDays(CONFIGURED_TREND_WINDOW_DAYS));
+        assertThat(cutoff).isEqualTo(LocalDateTime.of(2026, 7, 31, 0, 0));
+        assertThat(cutoff).isEqualTo(expectedCutoff(SHORTER_TREND_WINDOW_DAYS));
+        assertThat(cutoff).isAfter(expectedCutoff(CONFIGURED_TREND_WINDOW_DAYS));
         verify(properties).analytics();
         verifyNoMoreInteractions(properties);
+    }
+
+    // The cutoff is read in UTC, never in the JVM's default zone — DL-241 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("opens the window on the UTC date even when the default JVM zone is on another date")
+    void opensTheWindowOnTheUtcDateWhateverTheDefaultJvmZone() {
+        TimeZone originalZone = TimeZone.getDefault();
+        try {
+            // At 2026-08-06T10:30:00Z the local date in Pacific/Midway (UTC-11:00) is 2026-08-05,
+            // one day earlier, so a cutoff read from the default zone would open a day early.
+            TimeZone.setDefault(TimeZone.getTimeZone("Pacific/Midway"));
+            stubTheConfiguredWindow(SHORTER_TREND_WINDOW_DAYS);
+            stubTheReturnedBuckets();
+
+            service.getTrends();
+
+            assertThat(capturedCutoff()).isEqualTo(LocalDateTime.of(2026, 7, 31, 0, 0));
+        } finally {
+            TimeZone.setDefault(originalZone);
+        }
+    }
+
+    // DL-241 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("opens the window on the UTC date even when the default JVM zone is a day ahead")
+    void opensTheWindowOnTheUtcDateWhenTheDefaultJvmZoneIsADayAhead() {
+        TimeZone originalZone = TimeZone.getDefault();
+        try {
+            // At 2026-08-06T10:30:00Z the local date in Pacific/Kiritimati (UTC+14:00) is
+            // 2026-08-07, one day later, so a cutoff read from the default zone would open a day late.
+            TimeZone.setDefault(TimeZone.getTimeZone("Pacific/Kiritimati"));
+            stubTheConfiguredWindow(SHORTER_TREND_WINDOW_DAYS);
+            stubTheReturnedBuckets();
+
+            service.getTrends();
+
+            assertThat(capturedCutoff()).isEqualTo(LocalDateTime.of(2026, 7, 31, 0, 0));
+        } finally {
+            TimeZone.setDefault(originalZone);
+        }
+    }
+
+    // A window of one UTC date opens at the start of the current UTC day — DL-241 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("a one-day window opens at the start of the current UTC day, never mid-day")
+    void aOneDayWindowOpensAtTheStartOfTheCurrentUtcDay() {
+        stubTheConfiguredWindow(1);
+        stubTheReturnedBuckets();
+
+        service.getTrends();
+
+        LocalDateTime cutoff = capturedCutoff();
+        assertThat(cutoff).isEqualTo(FIXED_UTC_DATE.atStartOfDay());
+        assertThat(cutoff.toLocalTime()).isEqualTo(LocalTime.MIDNIGHT);
+    }
+
+    // The cutoff is always midnight, so the series spans whole UTC dates and never a partial day —
+    // DL-241 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("the window spans exactly the configured number of whole UTC dates for every width")
+    void theWindowSpansExactlyTheConfiguredNumberOfWholeUtcDates() {
+        for (int windowDays : new int[] {1, 2, 7, 30, 365}) {
+            reset(tweetRepository, properties);
+            stubTheConfiguredWindow(windowDays);
+            stubTheReturnedBuckets();
+
+            service.getTrends();
+
+            LocalDateTime cutoff = capturedCutoff();
+            assertThat(cutoff.toLocalTime()).as("cutoff time for a %d-date window", windowDays)
+                    .isEqualTo(LocalTime.MIDNIGHT);
+            assertThat(ChronoUnit.DAYS.between(cutoff.toLocalDate(), FIXED_UTC_DATE) + 1L)
+                    .as("UTC dates the %d-date window spans", windowDays)
+                    .isEqualTo(windowDays);
+        }
+    }
+
+    // A non-positive window observes nothing — DL-241 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("refuses a zero or negative observation window when the property binds")
+    void refusesANonPositiveObservationWindowWhenThePropertyBinds() {
+        for (int windowDays : new int[] {0, -1}) {
+            assertThatThrownBy(() -> new ScannerProperties.Analytics(windowDays))
+                    .as("binding a %d-day window", windowDays)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("scanner.analytics.trend-window-days");
+        }
+
+        verifyNoInteractions(tweetRepository, responseRepository, aiToolRepository);
+    }
+
+    @Test
+    @DisplayName("closes the window at the instant of the call and opens it the configured span "
+            + "earlier")
+    void closesTheWindowAtTheInstantOfTheCallAndOpensItTheConfiguredSpanEarlier() {
+        stubTheConfiguredWindow(CONFIGURED_TREND_WINDOW_DAYS);
+        stubTheReturnedBuckets();
+
+        service.getTrends();
+
+        // Both bounds are read from the injected fixed clock, so both are deterministic — DL-241,
+        // DL-247
+        WindowBounds window = capturedWindow();
+        assertThat(window.until())
+                .isEqualTo(LocalDateTime.ofInstant(FIXED_INSTANT, ZoneOffset.UTC));
+        assertThat(window.since()).isEqualTo(expectedCutoff(CONFIGURED_TREND_WINDOW_DAYS));
+        assertThat(window.since()).isBefore(window.until());
     }
 
     @Test
@@ -620,7 +775,8 @@ class AnalyticsServiceTest {
 
         service.getTrends();
 
-        verify(tweetRepository).findDailyTrendsSince(any(LocalDateTime.class));
+        verify(tweetRepository)
+                .findDailyTrendsBetween(any(LocalDateTime.class), any(LocalDateTime.class));
         verifyNoMoreInteractions(tweetRepository);
         verifyNoInteractions(responseRepository, aiToolRepository);
     }
@@ -629,7 +785,8 @@ class AnalyticsServiceTest {
     @DisplayName("reads the window and the series again on each call")
     void readsTheWindowAndTheSeriesAgainOnEachCall() {
         stubTheConfiguredWindow(CONFIGURED_TREND_WINDOW_DAYS);
-        when(tweetRepository.findDailyTrendsSince(any(LocalDateTime.class)))
+        when(tweetRepository.findDailyTrendsBetween(any(LocalDateTime.class),
+                any(LocalDateTime.class)))
                 .thenReturn(List.of(firstBucket()))
                 .thenReturn(List.of());
 
@@ -639,10 +796,48 @@ class AnalyticsServiceTest {
         assertThat(first.trends()).hasSize(1);
         assertThat(second.trends()).isEmpty();
         ArgumentCaptor<LocalDateTime> cutoffs = ArgumentCaptor.forClass(LocalDateTime.class);
-        verify(tweetRepository, times(2)).findDailyTrendsSince(cutoffs.capture());
+        verify(tweetRepository, times(2))
+                .findDailyTrendsBetween(cutoffs.capture(), any(LocalDateTime.class));
         assertThat(cutoffs.getAllValues()).hasSize(2);
         assertThat(cutoffs.getAllValues().get(1)).isAfterOrEqualTo(cutoffs.getAllValues().get(0));
         verify(properties, times(2)).analytics();
+    }
+
+    // -----------------------------------------------------------------------
+    // The configured observation window
+    // -----------------------------------------------------------------------
+
+    // The window property is a finite positive number of days — DL-247 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("accepts a window of one day and a window of one hundred years")
+    void acceptsAWindowOfOneDayAndAWindowOfOneHundredYears() {
+        assertThatNoException().isThrownBy(() -> new ScannerProperties.Analytics(
+                ScannerProperties.Analytics.MINIMUM_TREND_WINDOW_DAYS));
+        assertThatNoException().isThrownBy(() -> new ScannerProperties.Analytics(
+                ScannerProperties.Analytics.MAXIMUM_TREND_WINDOW_DAYS));
+        assertThatNoException()
+                .isThrownBy(() -> new ScannerProperties.Analytics(CONFIGURED_TREND_WINDOW_DAYS));
+    }
+
+    @Test
+    @DisplayName("refuses a window that is not a finite positive number of days")
+    void refusesAWindowThatIsNotAFinitePositiveNumberOfDays() {
+        assertThatThrownBy(() -> new ScannerProperties.Analytics(0))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("scanner.analytics.trend-window-days");
+        assertThatThrownBy(() -> new ScannerProperties.Analytics(-1))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("scanner.analytics.trend-window-days");
+        assertThatThrownBy(() -> new ScannerProperties.Analytics(Integer.MIN_VALUE))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("scanner.analytics.trend-window-days");
+        assertThatThrownBy(() -> new ScannerProperties.Analytics(
+                ScannerProperties.Analytics.MAXIMUM_TREND_WINDOW_DAYS + 1))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("scanner.analytics.trend-window-days");
+        assertThatThrownBy(() -> new ScannerProperties.Analytics(Integer.MAX_VALUE))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("scanner.analytics.trend-window-days");
     }
 
     // -----------------------------------------------------------------------
@@ -650,24 +845,77 @@ class AnalyticsServiceTest {
     // -----------------------------------------------------------------------
 
     /**
-     * Stubs each of the six aggregate queries with the sentinel of the metric it backs.
+     * Stubs the three aggregate statements with the sentinel of every metric they back.
      */
     private void stubTheMeasuredDatabase() {
-        when(tweetRepository.count()).thenReturn(TOTAL_TWEETS);
-        when(responseRepository.count()).thenReturn(TOTAL_RESPONSES);
-        when(responseRepository.countByIsApprovedTrue()).thenReturn(APPROVED_RESPONSES);
-        when(tweetRepository.findAverageDoubtRating()).thenReturn(AVERAGE_DOUBT_RATING);
-        when(tweetRepository.findAverageLikeCount()).thenReturn(AVERAGE_LIKE_COUNT);
+        stubTweetTotals(TOTAL_TWEETS, AVERAGE_DOUBT_RATING, AVERAGE_LIKE_COUNT);
+        stubResponseTotals(TOTAL_RESPONSES, APPROVED_RESPONSES);
         when(aiToolRepository.count()).thenReturn(TRACKED_AI_TOOLS);
     }
 
     private void stubTheEmptyDatabase() {
-        when(tweetRepository.count()).thenReturn(0L);
-        when(responseRepository.count()).thenReturn(0L);
-        when(responseRepository.countByIsApprovedTrue()).thenReturn(0L);
-        when(tweetRepository.findAverageDoubtRating()).thenReturn(null);
-        when(tweetRepository.findAverageLikeCount()).thenReturn(null);
+        stubTweetTotals(0L, null, null);
+        stubResponseTotals(0L, 0L);
         when(aiToolRepository.count()).thenReturn(0L);
+    }
+
+    /**
+     * Stubs the single {@code tweets} aggregate statement.
+     *
+     * @param tweetCount         the row count to report
+     * @param averageDoubtRating the mean doubt rating to report, {@code null} for unmeasured
+     * @param averageLikeCount   the mean like count to report, {@code null} for unmeasured
+     */
+    private void stubTweetTotals(Long tweetCount, Double averageDoubtRating,
+            Double averageLikeCount) {
+        when(tweetRepository.findAggregates())
+                .thenReturn(new TweetTotals(tweetCount, averageDoubtRating, averageLikeCount));
+    }
+
+    /**
+     * Stubs the single {@code responses} aggregate statement.
+     *
+     * @param responseCount         the row count to report
+     * @param approvedResponseCount the approved row count to report
+     */
+    private void stubResponseTotals(Long responseCount, Long approvedResponseCount) {
+        when(responseRepository.findApprovalCounts())
+                .thenReturn(new ResponseTotals(responseCount, approvedResponseCount));
+    }
+
+    /** The {@code tweets} aggregate projection, carrying the three values it reports. */
+    private record TweetTotals(Long tweetCount, Double averageDoubtRating, Double averageLikeCount)
+            implements TweetRepository.TweetAggregate {
+
+        @Override
+        public Long getTweetCount() {
+            return tweetCount;
+        }
+
+        @Override
+        public Double getAverageDoubtRating() {
+            return averageDoubtRating;
+        }
+
+        @Override
+        public Double getAverageLikeCount() {
+            return averageLikeCount;
+        }
+    }
+
+    /** The {@code responses} aggregate projection, carrying the two values it reports. */
+    private record ResponseTotals(Long responseCount, Long approvedResponseCount)
+            implements ResponseRepository.ApprovalCounts {
+
+        @Override
+        public Long getResponseCount() {
+            return responseCount;
+        }
+
+        @Override
+        public Long getApprovedResponseCount() {
+            return approvedResponseCount;
+        }
     }
 
     private void stubTheConfiguredWindow(int days) {
@@ -675,7 +923,8 @@ class AnalyticsServiceTest {
     }
 
     private void stubTheReturnedBuckets(TweetRepository.DailyTrend... buckets) {
-        when(tweetRepository.findDailyTrendsSince(any(LocalDateTime.class)))
+        when(tweetRepository.findDailyTrendsBetween(any(LocalDateTime.class),
+                any(LocalDateTime.class)))
                 .thenReturn(List.of(buckets));
     }
 
@@ -690,14 +939,28 @@ class AnalyticsServiceTest {
     }
 
     /**
-     * Captures the single cutoff the daily trend query was called with.
+     * Captures the opening bound the daily trend query was called with.
      *
      * @return the captured lower bound on {@code tweets.created_at}
      */
     private LocalDateTime capturedCutoff() {
-        ArgumentCaptor<LocalDateTime> cutoff = ArgumentCaptor.forClass(LocalDateTime.class);
-        verify(tweetRepository).findDailyTrendsSince(cutoff.capture());
-        return cutoff.getValue();
+        return capturedWindow().since();
+    }
+
+    /**
+     * Captures both bounds the daily trend query was called with.
+     *
+     * @return the captured closed interval on {@code tweets.created_at}
+     */
+    private WindowBounds capturedWindow() {
+        ArgumentCaptor<LocalDateTime> since = ArgumentCaptor.forClass(LocalDateTime.class);
+        ArgumentCaptor<LocalDateTime> until = ArgumentCaptor.forClass(LocalDateTime.class);
+        verify(tweetRepository).findDailyTrendsBetween(since.capture(), until.capture());
+        return new WindowBounds(since.getValue(), until.getValue());
+    }
+
+    /** The closed interval a trend query was issued over — DL-247. */
+    private record WindowBounds(LocalDateTime since, LocalDateTime until) {
     }
 
     // -----------------------------------------------------------------------

@@ -24,10 +24,6 @@ import com.codeskeptic.scanner.service.AnalyticsService;
  *       ({@code backend/app/api/analytics.py:L17-25}).</li>
  * </ul>
  *
- * <p>Both paths are unprefixed: no {@code /api} segment and no version segment — DL-059. Neither
- * route reads a query parameter, a path variable, a request body or a header, and a query parameter a
- * client appends leaves the body unchanged — DL-042.
- *
  * <p>Both paths are unprefixed: no {@code /api} segment and no version segment.
  * {@code documentation/Technical Specifications.md:L386-387} documents the same two routes carrying
  * an {@code /api} prefix; the routes served here carry none — DL-059.

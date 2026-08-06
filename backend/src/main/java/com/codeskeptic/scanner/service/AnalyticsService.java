@@ -1,6 +1,9 @@
 package com.codeskeptic.scanner.service;
 
+import java.time.Clock;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Objects;
 
@@ -15,7 +18,9 @@ import com.codeskeptic.scanner.dto.SummaryDto;
 import com.codeskeptic.scanner.dto.TrendsDto;
 import com.codeskeptic.scanner.repository.AiToolRepository;
 import com.codeskeptic.scanner.repository.ResponseRepository;
+import com.codeskeptic.scanner.repository.ResponseRepository.ApprovalCounts;
 import com.codeskeptic.scanner.repository.TweetRepository;
+import com.codeskeptic.scanner.repository.TweetRepository.TweetAggregate;
 
 // Net-new (no Python module existed; signatures dictated by backend/app/api/analytics.py:L13-14,L23-24) — see docs/DECISION_LOG.md DL-041, DL-042
 /**
@@ -47,7 +52,7 @@ import com.codeskeptic.scanner.repository.TweetRepository;
  * persistence layer propagates to {@code api.GlobalExceptionHandler}.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-041, DL-042,
- * DL-052, DL-075 and DL-088; this file's target-to-source row in {@code docs/TRACEABILITY_MATRIX.md} reads
+ * DL-052, DL-075 and DL-180; this file's target-to-source row in {@code docs/TRACEABILITY_MATRIX.md} reads
  * "no source construct — net-new".
  *
  * <p>Usage:
@@ -81,6 +86,9 @@ public class AnalyticsService {
     /** Source of the {@code scanner.analytics.trend-window-days} observation window. */
     private final ScannerProperties properties;
 
+    /** UTC time source the trend window is measured from — DL-241. */
+    private final Clock clock;
+
     /**
      * Creates the bean with its collaborators, replacing the per-request {@code AnalyticsService()}
      * instantiation at {@code backend/app/api/analytics.py:L13} and {@code :L23}.
@@ -91,12 +99,15 @@ public class AnalyticsService {
      * @param aiToolRepository   data access for the {@code ai_tools} table, must not be {@code null}
      * @param properties         bound configuration supplying the observation window, must not be
      *                           {@code null}
+     * @param clock              the UTC time source the trend window is measured from, must not be
+     *                           {@code null}
      * @throws NullPointerException when any argument is {@code null}
      */
     public AnalyticsService(TweetRepository tweetRepository,
             ResponseRepository responseRepository,
             AiToolRepository aiToolRepository,
-            ScannerProperties properties) {
+            ScannerProperties properties,
+            Clock clock) {
         this.tweetRepository = Objects.requireNonNull(tweetRepository,
                 "tweetRepository must not be null.");
         this.responseRepository = Objects.requireNonNull(responseRepository,
@@ -104,6 +115,7 @@ public class AnalyticsService {
         this.aiToolRepository = Objects.requireNonNull(aiToolRepository,
                 "aiToolRepository must not be null.");
         this.properties = Objects.requireNonNull(properties, "properties must not be null.");
+        this.clock = Objects.requireNonNull(clock, "clock must not be null.");
     }
 
     // Call site backend/app/api/analytics.py:L23-24 — see docs/DECISION_LOG.md DL-041
@@ -131,22 +143,28 @@ public class AnalyticsService {
      *       ({@code backend/app/db/models.py:L32-37}).
      * </ul>
      *
-     * <p>Six of the seven are issued as separate aggregate queries against the three tables and
-     * {@code pending_responses} is arithmetic over two of them. All six read one repeatable-read
+     * <p>Six of the seven are read by three aggregate statements, one per table, and
+     * {@code pending_responses} is arithmetic over two of them. All three read one repeatable-read
      * snapshot, so {@code approved_responses} never exceeds {@code total_responses} and
-     * {@code pending_responses} is never negative — see docs/DECISION_LOG.md DL-091.
+     * {@code pending_responses} is never negative — see docs/DECISION_LOG.md DL-091 and DL-180.
      *
      * <p>An empty database yields {@code 0} for all five counts and {@code null} for both means.
      *
      * @return the seven metrics, never {@code null}; the two means are {@code null} when no row
      *         carries the averaged column
      */
-    // One repeatable-read snapshot spans the six aggregates — DL-091 — see docs/DECISION_LOG.md
+    // One repeatable-read snapshot spans the three aggregate statements — DL-091, DL-180 — see
+    // docs/DECISION_LOG.md
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public SummaryDto getSummary() {
-        long totalTweets = tweetRepository.count();
-        long totalResponses = responseRepository.count();
-        long approvedResponses = responseRepository.countByIsApprovedTrue();
+        // One statement per table — DL-180 — see docs/DECISION_LOG.md
+        TweetAggregate tweets = tweetRepository.findAggregates();
+        ApprovalCounts responses = responseRepository.findApprovalCounts();
+        long trackedAiTools = aiToolRepository.count();
+
+        long totalTweets = tweets.getTweetCount();
+        long totalResponses = responses.getResponseCount();
+        long approvedResponses = responses.getApprovedResponseCount();
 
         // pending_responses is the complement of the approved count over the is_approved column at
         // backend/app/db/models.py:L26 — DL-041
@@ -154,10 +172,8 @@ public class AnalyticsService {
 
         // Both avg(...) results are null when no row carries the column and are reported as null —
         // DL-075 — see docs/DECISION_LOG.md
-        Double averageDoubtRating = tweetRepository.findAverageDoubtRating();
-        Double averageLikeCount = tweetRepository.findAverageLikeCount();
-
-        long trackedAiTools = aiToolRepository.count();
+        Double averageDoubtRating = tweets.getAverageDoubtRating();
+        Double averageLikeCount = tweets.getAverageLikeCount();
 
         SummaryDto summary = new SummaryDto(totalTweets,
                 totalResponses,
@@ -185,13 +201,27 @@ public class AnalyticsService {
     /**
      * Returns the day-bucketed trend series of {@code GET /analytics/trends}.
      *
-     * <p>The observation window is the {@code scanner.analytics.trend-window-days} property, default
-     * 30, read through {@link ScannerProperties} — DL-042. Its cutoff is that many days before the
-     * current instant and is computed here on each call.
+     * <p><b>The window is a whole number of UTC calendar dates, not a rolling duration.</b> Its width
+     * is the {@code scanner.analytics.trend-window-days} property, default 30, read through
+     * {@link ScannerProperties} — DL-042. The cutoff is the start of the UTC day that is
+     * {@code windowDays - 1} days before the current UTC day, so a window of {@code n} days observes
+     * the current UTC date and the {@code n - 1} UTC dates before it and the series therefore holds
+     * <em>at most</em> {@code n} elements, never {@code n + 1} — DL-241. The current UTC day is read
+     * from the injected {@link Clock}, which is {@code Clock.systemUTC()}, so the cutoff does not move
+     * with the JVM's default time zone.
+     *
+     * <p>That basis matches the stored values: {@code task.TweetStreamListener} and
+     * {@code service.NotionService} both normalise a delivered timestamp to UTC before it reaches
+     * {@code tweets.created_at} — DL-192.
+     *
+     * <p>The window also closes at the instant of the call, taken from the same {@link Clock}: a row
+     * stamped after that instant falls outside it, and the property is a finite positive number of days
+     * that {@link ScannerProperties} enforces at startup — DL-247.
      *
      * <p>One element is produced per calendar day on which at least one {@code tweets} row was created
-     * at or after the cutoff, in ascending day order. A day on which no row was created produces no
-     * element, and a row whose {@code created_at} is {@code null} appears in no bucket.
+     * inside that interval, in ascending day order. A day on which no row was created produces no
+     * element, a row whose {@code created_at} is {@code null} appears in no bucket, and a row stamped
+     * after the closing instant appears in none either — DL-247.
      *
      * <p>Each element carries the bucket day taken from {@code tweets.created_at}
      * ({@code backend/app/db/models.py:L13}), the number of rows created on it, the mean of
@@ -201,28 +231,52 @@ public class AnalyticsService {
      * <p>A window containing no row yields an envelope holding an empty list. An element's day and row
      * count are never {@code null} and its two measures are {@code null} exactly when no row in the
      * bucket carries the aggregated column — see docs/DECISION_LOG.md DL-075. A window configured as
-     * zero or negative places the cutoff at or after the current instant.
+     * zero or negative places the cutoff after the current UTC day, so the series is empty.
      *
      * @return the series in ascending day order, never {@code null}
      */
     @Transactional(readOnly = true)
     public TrendsDto getTrends() {
         int windowDays = properties.analytics().trendWindowDays();
-        LocalDateTime since = LocalDateTime.now().minusDays(windowDays);
+        // The window closes at the instant of the call, read from the same UTC clock as the cutoff; a
+        // row stamped later falls outside it — DL-247, DL-241 — see docs/DECISION_LOG.md
+        LocalDateTime until = LocalDateTime.now(clock);
+        LocalDateTime since = windowCutoff(windowDays);
 
-        List<TrendsDto.TrendPoint> trends = tweetRepository.findDailyTrendsSince(since).stream()
-                // avg(...) and sum(...) are reported as they stand, null included — DL-075
-                .map(bucket -> new TrendsDto.TrendPoint(bucket.getBucketDate(),
-                        bucket.getTweetCount(),
-                        bucket.getAverageDoubtRating(),
-                        bucket.getTotalLikes()))
-                .toList();
+        List<TrendsDto.TrendPoint> trends =
+                tweetRepository.findDailyTrendsBetween(since, until).stream()
+                        // avg(...) and sum(...) are reported as they stand, null included — DL-075
+                        .map(bucket -> new TrendsDto.TrendPoint(bucket.getBucketDate(),
+                                bucket.getTweetCount(),
+                                bucket.getAverageDoubtRating(),
+                                bucket.getTotalLikes()))
+                        .toList();
 
-        log.debug("Analytics trends: {} daily bucket(s) over the {}-day window opening at {}.",
+        log.debug("Analytics trends: {} daily bucket(s) over the {}-UTC-date window from {} to {}.",
                 trends.size(),
                 windowDays,
-                since);
+                since,
+                until);
 
         return new TrendsDto(trends);
+    }
+
+    // The trend window is a count of UTC calendar dates read from the UTC clock — DL-241 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Returns the inclusive lower bound on {@code tweets.created_at} for a window of the given width.
+     *
+     * <p>The current UTC date is taken from the injected {@link Clock}. The bound is the start of the
+     * UTC day {@code windowDays - 1} days earlier, so the window spans exactly {@code windowDays} UTC
+     * dates ending with the current one. A width of {@code 1} yields the start of the current UTC day;
+     * a width of {@code 0} or less yields the start of a day after the current one, which no stored row
+     * can satisfy.
+     *
+     * @param windowDays the configured width in UTC calendar dates
+     * @return the inclusive lower bound, never {@code null}
+     */
+    private LocalDateTime windowCutoff(int windowDays) {
+        LocalDate today = LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC);
+        return today.minusDays((long) windowDays - 1L).atStartOfDay();
     }
 }

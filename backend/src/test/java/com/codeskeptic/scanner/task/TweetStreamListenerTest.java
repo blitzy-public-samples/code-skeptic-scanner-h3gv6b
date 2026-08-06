@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -14,6 +15,9 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Optional;
 
@@ -310,6 +314,32 @@ class TweetStreamListenerTest {
             assertThat(listener.onStatus(record)).isTrue();
 
             verifyNoCollaboratorWasReached();
+        }
+
+        // A timestamp beyond the arrival instant is not stored — DL-247 — see docs/DECISION_LOG.md
+        @Test
+        @DisplayName("stores nothing when the creation time is stamped beyond the accepted "
+                + "tolerance")
+        void storesNothingWhenTheCreationTimeIsStampedBeyondTheAcceptedTolerance() {
+            JsonNode record = recordCreatedAt(OffsetDateTime.now(ZoneOffset.UTC).plusDays(1));
+
+            assertThat(listener.onStatus(record)).isTrue();
+
+            verifyNoCollaboratorWasReached();
+        }
+
+        // A timestamp inside the tolerance is stored — DL-247 — see docs/DECISION_LOG.md
+        @Test
+        @DisplayName("stores a record whose creation time is inside the accepted tolerance")
+        void storesARecordWhoseCreationTimeIsInsideTheAcceptedTolerance() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            OffsetDateTime stamped = OffsetDateTime.now(ZoneOffset.UTC).plusMinutes(1);
+
+            assertThat(listener.onStatus(recordCreatedAt(stamped))).isTrue();
+
+            assertThat(storedRow().getCreatedAt()).isEqualTo(stamped.toLocalDateTime());
         }
     }
 
@@ -662,6 +692,35 @@ class TweetStreamListenerTest {
             verify(notionService, never()).updateTweetResponse(anyString(), anyString());
         }
 
+        // The failing layer owns the ERROR record — DL-252 — see docs/DECISION_LOG.md
+        @Test
+        @DisplayName("records a failed generation trigger at DEBUG and never at ERROR")
+        void recordsAFailedGenerationTriggerAtDebugAndNeverAtError() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            when(responseService.generateResponseIfAbsent(anyString()))
+                    .thenThrow(new IllegalStateException("the model is unavailable"));
+
+            ListAppender<ILoggingEvent> recorded = attachRecordingAppender();
+            try {
+                assertThat(listener.onStatus(popularRecord())).isTrue();
+
+                assertThat(recorded.list).noneMatch(event -> event.getLevel() == Level.ERROR);
+                assertThat(recorded.list)
+                        .filteredOn(event -> event.getLevel() == Level.DEBUG
+                                && event.getFormattedMessage()
+                                        .contains("Triggering response generation for tweet row"))
+                        .hasSize(1)
+                        .allSatisfy(event -> assertThat(event.getFormattedMessage())
+                                .contains("IllegalStateException")
+                                .contains("ingestion continues")
+                                .doesNotContain("the model is unavailable"));
+            } finally {
+                detachRecordingAppender(recorded);
+            }
+        }
+
         @Test
         @DisplayName("mirrors no reply when the stored row already carried one")
         void mirrorsNoReplyWhenTheStoredRowAlreadyCarriedOne() {
@@ -764,6 +823,61 @@ class TweetStreamListenerTest {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // One threshold resolution per ingestion cycle — DL-255
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("evaluates the gate against a supplied threshold and resolves none itself")
+    void evaluatesTheGateAgainstASuppliedThresholdAndResolvesNoneItself() {
+        when(twitterService.meetsPopularityThreshold(any(), anyInt())).thenReturn(true);
+        stubSentiment();
+        stubSave();
+        JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
+                + "\"created_at\":\"" + CREATED_AT + "\","
+                + "\"author_id\":\"" + AUTHOR_ID + "\","
+                + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "}}}");
+
+        assertThat(listener.onStatus(record, 250)).isTrue();
+
+        verify(twitterService).meetsPopularityThreshold(POPULAR_LIKE_COUNT, 250);
+        verify(twitterService, never()).meetsPopularityThreshold(any());
+        verify(twitterService, never()).popularityThresholdInForce();
+    }
+
+    @Test
+    @DisplayName("stores nothing when a supplied threshold rejects the like count")
+    void storesNothingWhenASuppliedThresholdRejectsTheLikeCount() {
+        when(twitterService.meetsPopularityThreshold(any(), anyInt())).thenReturn(false);
+        JsonNode record = read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
+                + "\"created_at\":\"" + CREATED_AT + "\","
+                + "\"author_id\":\"" + AUTHOR_ID + "\","
+                + "\"public_metrics\":{\"like_count\":1}}}");
+
+        assertThat(listener.onStatus(record, 250)).isTrue();
+
+        verify(twitterService).meetsPopularityThreshold(1, 250);
+        verify(tweetRepository, never()).save(any(Tweet.class));
+    }
+
+    @Test
+    @DisplayName("resolves no threshold for a record the payload checks reject")
+    void resolvesNoThresholdForARecordThePayloadChecksReject() {
+        assertThat(listener.onStatus(read("{}"), 250)).isTrue();
+
+        verifyNoInteractions(twitterService);
+    }
+
+    @Test
+    @DisplayName("reports the threshold in force from the twitter service")
+    void reportsTheThresholdInForceFromTheTwitterService() {
+        when(twitterService.popularityThresholdInForce()).thenReturn(321);
+
+        assertThat(listener.popularityThresholdInForce()).isEqualTo(321);
+
+        verify(twitterService).popularityThresholdInForce();
+    }
+
     /**
      * Reports that the popularity gate accepts every like count offered to it.
      */
@@ -837,6 +951,20 @@ class TweetStreamListenerTest {
     private void verifyNoCollaboratorWasReached() {
         verifyNoInteractions(twitterService, sentimentAnalysisService, tweetRepository,
                 responseService, notionService, tweetMapper);
+    }
+
+    /**
+     * Builds an otherwise-accepted record whose {@code created_at} carries the supplied instant.
+     *
+     * @param stamped the instant the record declares as its creation time
+     * @return the record
+     */
+    private static JsonNode recordCreatedAt(OffsetDateTime stamped) {
+        return read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
+                + "\"created_at\":\"" + stamped.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+                + "\","
+                + "\"author_id\":\"" + AUTHOR_ID + "\","
+                + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "}}}");
     }
 
     /**

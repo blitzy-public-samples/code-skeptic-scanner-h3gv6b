@@ -1,10 +1,17 @@
 package com.codeskeptic.scanner.service;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -18,6 +25,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -51,13 +59,23 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.repository.Lock;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.SimpleTransactionStatus;
+import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.slf4j.LoggerFactory;
+
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 
 import com.codeskeptic.scanner.dto.PaginatedResponsesDto;
 import com.codeskeptic.scanner.dto.PaginationDto;
@@ -69,7 +87,9 @@ import com.codeskeptic.scanner.entity.Tweet;
 import com.codeskeptic.scanner.exception.BadRequestException;
 import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.exception.ResponseGenerationException;
+import com.codeskeptic.scanner.util.LogSafe;
 import com.codeskeptic.scanner.repository.ResponseRepository;
+import com.codeskeptic.scanner.repository.ResponseRepository.ResponseRow;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.mapper.ResponseMapper;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
@@ -81,6 +101,10 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
+
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 
 // Net-new coverage of the four call sites at backend/app/api/responses.py:L15,L26,L44,L60, whose
 // service was imported at :L3 and existed nowhere — see docs/DECISION_LOG.md DL-076, DL-084, DL-086,
@@ -151,6 +175,46 @@ class ResponseServiceTest {
                 responseMapper, tweetMapper, directTransactionTemplate());
     }
 
+    // The storage transaction carries the statement bound — DL-246 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("bounds its storage transaction at the statement bound and leaves the injected "
+            + "template unmodified")
+    void boundsItsStorageTransactionAtTheStatementBoundAndLeavesTheInjectedTemplateUnmodified()
+            throws Exception {
+        TransactionTemplate injected = directTransactionTemplate();
+        int injectedTimeoutBefore = injected.getTimeout();
+
+        ResponseService bounded = new ResponseService(responseRepository, tweetRepository, llmService,
+                responseMapper, tweetMapper, injected);
+
+        Field field = ResponseService.class.getDeclaredField("transactionTemplate");
+        field.setAccessible(true);
+        TransactionTemplate held = (TransactionTemplate) field.get(bounded);
+
+        assertThat(held.getTimeout())
+                .as("timeout of the template the service holds, in seconds")
+                .isEqualTo(Integer.parseInt(ResponseRepository.LOCK_WAIT_MILLIS) / 1000);
+        assertThat(held).as("the service holds a copy, not the injected instance")
+                .isNotSameAs(injected);
+        assertThat(injected.getTimeout()).as("timeout of the injected template after construction")
+                .isEqualTo(injectedTimeoutBefore);
+        assertThat(held.getTransactionManager())
+                .as("the copy runs on the injected template's transaction manager")
+                .isSameAs(injected.getTransactionManager());
+    }
+
+    // The storage transaction needs a manager to open — DL-246 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("refuses a transaction template that carries no transaction manager")
+    void refusesATransactionTemplateThatCarriesNoTransactionManager() {
+        TransactionTemplate withoutManager = new TransactionTemplate();
+
+        assertThatThrownBy(() -> new ResponseService(responseRepository, tweetRepository, llmService,
+                responseMapper, tweetMapper, withoutManager))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("transactionTemplate must carry a transaction manager.");
+    }
+
     // backend/app/api/responses.py:L40-41
     @Test
     @DisplayName("rejects a generation request that carries no tweet identifier")
@@ -212,11 +276,11 @@ class ResponseServiceTest {
 
     // backend/app/api/responses.py:L56-57
     @Test
-    @DisplayName("rejects an update whose body carries neither writable key")
-    void rejectsAnUpdateWhoseBodyCarriesNeitherWritableKey() {
+    @DisplayName("rejects an update whose body carries neither updatable member")
+    void rejectsAnUpdateWhoseBodyCarriesNeitherUpdatableMember() {
         UpdateResponseRequest emptyBody = new UpdateResponseRequest(null, null);
 
-        assertThat(emptyBody.carriesNoWritableValue()).isTrue();
+        assertThat(emptyBody.carriesNoUpdatableMember()).isTrue();
         assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID, emptyBody))
                 .isInstanceOf(BadRequestException.class)
                 .hasMessage("Update data is required");
@@ -318,6 +382,68 @@ class ResponseServiceTest {
                 responseMapper);
     }
 
+    // Every log record naming a caller-supplied identifier passes it through util/LogSafe, the
+    // failure-wrapping record included — DL-208 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("bounds a caller-supplied identifier on the failure-wrapping path as well as on the "
+            + "success path")
+    void boundsACallerSuppliedIdentifierOnTheFailureWrappingPath() {
+        // Integer.valueOf accepts leading zeros, so this 404-character caller-supplied value names the
+        // same row as TWEET_ID and still reaches the failure-wrapping record verbatim.
+        String unboundedIdentifier = "0".repeat(400) + TWEET_ID;
+        Tweet subject = tweetCarryingTheKey();
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class)))
+                .thenThrow(new IllegalStateException("The provider answered no usable choice."));
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            Throwable thrown = catchThrowable(() -> service.generateResponse(unboundedIdentifier));
+
+            assertThat(thrown).isInstanceOf(ResponseGenerationException.class)
+                    .hasMessage("Failed to generate response");
+            // The record SEC-010 named is the one written while the failure is wrapped; assert it
+            // was actually written — DL-252.
+            assertThat(recorded.list).extracting(ILoggingEvent::getFormattedMessage)
+                    .as("records written while wrapping the failure")
+                    .anyMatch(message -> message.contains("failed")
+                            && message.contains("responses.py:L49"));
+            for (ILoggingEvent event : recorded.list) {
+                assertThat(event.getFormattedMessage()).as("record written at %s", event.getLevel())
+                        .doesNotContain(unboundedIdentifier)
+                        .hasSizeLessThan(unboundedIdentifier.length());
+            }
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
+    /**
+     * Attaches a recording appender to the {@link ResponseService} logger.
+     *
+     * @return the attached appender, already started
+     */
+    private static ListAppender<ILoggingEvent> attachAppender() {
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        Logger logger = (Logger) LoggerFactory.getLogger(ResponseService.class);
+        logger.setLevel(Level.DEBUG);
+        logger.addAppender(appender);
+        return appender;
+    }
+
+    /**
+     * Detaches a recording appender from the {@link ResponseService} logger.
+     *
+     * @param appender the appender to detach
+     */
+    private static void detachAppender(ListAppender<ILoggingEvent> appender) {
+        Logger logger = (Logger) LoggerFactory.getLogger(ResponseService.class);
+        logger.detachAppender(appender);
+        logger.setLevel(null);
+    }
+
     // backend/app/api/responses.py:L46-49
     @Test
     @DisplayName("reports a generation failure when the text generator fails")
@@ -378,22 +504,20 @@ class ResponseServiceTest {
                 .isNotEqualTo(BadRequestException.TWEET_ID_IS_REQUIRED);
     }
 
-    // The single background generation entry point — DL-195
+    // The single background generation entry point — DL-195, DL-252
     @Test
-    @DisplayName("stores nothing for a background pass when the row already carries a response")
+    @DisplayName("stores nothing and makes no provider call for a background pass when the row "
+            + "already carries a response")
     void storesNothingForABackgroundPassWhenTheRowAlreadyCarriesAResponse() {
-        Tweet subject = tweetCarryingTheKey();
-        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
-        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
-        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
         when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(true);
 
         Optional<ResponseDto> stored = service.generateResponseIfAbsent(TWEET_ID);
 
         assertThat(stored).isEmpty();
+        // The stored state is read once, before any provider call — DL-252
         verify(responseRepository).existsByTweetId(TWEET_KEY);
         verify(responseRepository, never()).save(any(Response.class));
+        verifyNoInteractions(llmService);
     }
 
     // The single background generation entry point — DL-195
@@ -404,6 +528,7 @@ class ResponseServiceTest {
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(tweetRepository.existsById(TWEET_KEY)).thenReturn(true);
         when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
         when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false);
         when(responseRepository.save(any(Response.class))).thenAnswer(invocation -> {
@@ -417,30 +542,54 @@ class ResponseServiceTest {
 
         assertThat(stored).isPresent();
         assertThat(stored.get().id()).isEqualTo(RESPONSE_ID);
-        verify(responseRepository).existsByTweetId(TWEET_KEY);
+        // Once before the subject read, once in the current preflight — DL-247, DL-252 — and once
+        // inside the storing transaction — DL-195
+        verify(responseRepository, times(3)).existsByTweetId(TWEET_KEY);
         verify(responseRepository).save(any(Response.class));
     }
 
-    // The parent lock and existence guard share the transaction that inserts — DL-195
+    // The existence guard is read before the provider call — DL-252 — and again inside the
+    // transaction that takes the parent lock and inserts — DL-195
     @Test
-    @DisplayName("tests existence inside the storing transaction, after the model has answered")
-    void testsExistenceInsideTheStoringTransactionAfterTheModelHasAnswered() {
+    @DisplayName("tests existence before the model call and again inside the storing transaction")
+    void testsExistenceBeforeTheModelCallAndAgainInsideTheStoringTransaction() {
         Tweet subject = tweetCarryingTheKey();
         TweetDto subjectDto = tweetDto();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.existsById(TWEET_KEY)).thenReturn(true);
         when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(subjectDto);
         when(llmService.generateResponse(subjectDto)).thenReturn(GENERATED_TEXT);
-        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(true);
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false, false, true);
 
         service.generateResponseIfAbsent(TWEET_ID);
 
         InOrder ordering = inOrder(tweetRepository, llmService, responseRepository);
+        ordering.verify(responseRepository).existsByTweetId(TWEET_KEY);
         ordering.verify(tweetRepository).findById(TWEET_KEY);
+        ordering.verify(tweetRepository).existsById(TWEET_KEY);
+        ordering.verify(responseRepository).existsByTweetId(TWEET_KEY);
         ordering.verify(llmService).generateResponse(subjectDto);
         ordering.verify(tweetRepository).findByIdForUpdate(TWEET_KEY);
         ordering.verify(responseRepository).existsByTweetId(TWEET_KEY);
         ordering.verifyNoMoreInteractions();
+    }
+
+    // The preflight of DL-247 answers before the paid call for a row that vanished
+    @Test
+    @DisplayName("makes no provider call for a background pass whose tweets row is gone")
+    void makesNoProviderCallForABackgroundPassWhoseTweetsRowIsGone() {
+        Tweet subject = tweetCarryingTheKey();
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.existsById(TWEET_KEY)).thenReturn(false);
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+
+        assertThat(service.generateResponseIfAbsent(TWEET_ID)).isEmpty();
+
+        verifyNoInteractions(llmService, responseMapper);
+        verify(responseRepository, never()).save(any(Response.class));
+        // The guard is read before the subject; the row being gone is what stops the provider call
+        verify(responseRepository).existsByTweetId(TWEET_KEY);
     }
 
     // The route path takes the parent lock but not the existence guard — DL-195
@@ -469,7 +618,7 @@ class ResponseServiceTest {
     @Test
     @DisplayName("refuses a background generation request carrying no identifier")
     void refusesABackgroundGenerationRequestCarryingNoIdentifier() {
-        assertThatThrownBy(() -> service.generateResponseIfAbsent((String) null))
+        assertThatThrownBy(() -> service.generateResponseIfAbsent(null))
                 .isInstanceOf(BadRequestException.class)
                 .hasMessage(BadRequestException.TWEET_ID_IS_REQUIRED);
         assertThatThrownBy(() -> service.generateResponseIfAbsent(""))
@@ -484,9 +633,9 @@ class ResponseServiceTest {
     @Test
     @DisplayName("refuses a background generation request carrying a row that has not been stored")
     void refusesABackgroundGenerationRequestCarryingAnUnstoredRow() {
-        assertThatThrownBy(() -> service.generateResponseIfAbsent((Tweet) null))
+        assertThatThrownBy(() -> service.generateResponseIfAbsentFor(null))
                 .isInstanceOf(NullPointerException.class);
-        assertThatThrownBy(() -> service.generateResponseIfAbsent(new Tweet()))
+        assertThatThrownBy(() -> service.generateResponseIfAbsentFor(new Tweet()))
                 .isInstanceOf(BadRequestException.class)
                 .hasMessage(BadRequestException.TWEET_ID_IS_REQUIRED);
 
@@ -500,39 +649,48 @@ class ResponseServiceTest {
     void generatesFromASuppliedRowWithoutReadingTheTweetsTable() {
         Tweet subject = tweetCarryingTheKey();
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(tweetRepository.existsById(TWEET_KEY)).thenReturn(true);
         when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
         when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false);
         when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(responseRepository.save(any(Response.class))).thenAnswer(returnsTheRowWithAnAssignedId());
         when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
 
-        Optional<ResponseDto> stored = service.generateResponseIfAbsent(subject);
+        Optional<ResponseDto> stored = service.generateResponseIfAbsentFor(subject);
 
         assertThat(stored).as("row the background pass stored").isPresent();
         verify(tweetMapper).toDto(subject);
-        // The subject is the supplied row; the only read of tweets is the locking read the storing
-        // transaction performs — DL-226
+        // The supplied row is never selected again; the preflight of DL-247 tests presence without
+        // loading it and the storing transaction takes the locking read — DL-226
         verify(tweetRepository, never()).findById(TWEET_KEY);
+        verify(tweetRepository, times(1)).existsById(TWEET_KEY);
         verify(tweetRepository, times(1)).findByIdForUpdate(TWEET_KEY);
-        verify(responseRepository).existsByTweetId(TWEET_KEY);
+        // Once before the subject read, once in the current preflight — DL-247, DL-252 — and once
+        // inside the storing transaction — DL-195
+        verify(responseRepository, times(3)).existsByTweetId(TWEET_KEY);
         verify(responseRepository).save(any(Response.class));
     }
 
-    // The transaction-scoped existence guard covers the supplied row too — DL-195, DL-226
+    // The preflight covers the supplied row too, so no paid call is made — DL-195, DL-226, DL-247
     @Test
-    @DisplayName("stores nothing for a supplied row that already carries a reply")
+    @DisplayName("stores nothing and makes no provider call for a supplied row that already carries "
+            + "a reply")
     void storesNothingForASuppliedRowThatAlreadyCarriesAReply() {
         Tweet subject = tweetCarryingTheKey();
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
-        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
-        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(true);
+        lenient().when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
+        lenient().when(tweetRepository.findByIdForUpdate(TWEET_KEY))
+                .thenReturn(Optional.of(subject));
+        // Absent when the pass starts and at the preflight, present by the time the storing
+        // transaction reads it — DL-247, DL-252
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false, false, true);
 
-        Optional<ResponseDto> stored = service.generateResponseIfAbsent(subject);
+        Optional<ResponseDto> stored = service.generateResponseIfAbsentFor(subject);
 
         assertThat(stored).as("row the background pass stored").isEmpty();
         verify(responseRepository, never()).save(any(Response.class));
-        verifyNoInteractions(responseMapper);
+        verifyNoInteractions(responseMapper, llmService);
+        verify(tweetRepository, never()).findByIdForUpdate(any());
     }
 
     // backend/app/api/responses.py:L44,L46-47
@@ -555,7 +713,7 @@ class ResponseServiceTest {
                     saved.getGeneratedAt(), saved.getIsApproved(), TWEET_ID);
         });
 
-        // The mint is truncated to microseconds, so the window is too — DL-220
+        // The mint is truncated to microseconds, so the window is too — DL-232
         LocalDateTime beforeTheCall = LocalDateTime.now().truncatedTo(ChronoUnit.MICROS);
         ResponseDto stored = service.generateResponse(TWEET_ID);
         LocalDateTime afterTheCall = LocalDateTime.now();
@@ -594,22 +752,21 @@ class ResponseServiceTest {
         orchestration.verifyNoMoreInteractions();
     }
 
-    // The claim the two automatic paths share — see docs/DECISION_LOG.md
+    // A row another process already answered costs no provider call — DL-252 — see
+    // docs/DECISION_LOG.md
     @Test
-    @DisplayName("reports nothing and stores nothing for a row that already carries a reply")
+    @DisplayName("makes no provider call for a row that already carries a reply")
     void skipsAnAutomaticGenerationForARowThatAlreadyCarriesAReply() {
-        Tweet subject = tweetCarryingTheKey();
         when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(true);
-        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
-        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
-        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
-        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
 
         assertThat(service.generateResponseIfAbsent(TWEET_ID)).isEmpty();
 
         verify(responseRepository).existsByTweetId(TWEET_KEY);
         verify(responseRepository, never()).save(any(Response.class));
-        verifyNoInteractions(responseMapper);
+        // Neither the subject read, nor the mapping, nor the model, nor the parent lock is reached
+        verify(tweetRepository, never()).findById(TWEET_KEY);
+        verify(tweetRepository, never()).findByIdForUpdate(TWEET_KEY);
+        verifyNoInteractions(tweetMapper, llmService, responseMapper);
     }
 
     // The claim the two automatic paths share — see docs/DECISION_LOG.md
@@ -617,14 +774,18 @@ class ResponseServiceTest {
     @DisplayName("stores nothing when the row is taken between the model request and the insert")
     void storesNothingWhenTheRowIsTakenDuringGeneration() {
         Tweet subject = tweetCarryingTheKey();
-        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(true);
+        // Absent when the pass starts and at the preflight, present by the time the storing
+        // transaction reads it — DL-247, DL-252
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false, false, true);
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.existsById(TWEET_KEY)).thenReturn(true);
         when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
         when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
 
         assertThat(service.generateResponseIfAbsent(TWEET_ID)).isEmpty();
 
+        verify(llmService).generateResponse(any(TweetDto.class));
         verify(responseRepository, never()).save(any(Response.class));
         verifyNoInteractions(responseMapper);
     }
@@ -635,6 +796,7 @@ class ResponseServiceTest {
     void storesTheReplyWhenTheRowCarriesNone() {
         Tweet subject = tweetCarryingTheKey();
         when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false);
+        when(tweetRepository.existsById(TWEET_KEY)).thenReturn(true);
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
@@ -648,7 +810,9 @@ class ResponseServiceTest {
                 .extracting(ResponseDto::id)
                 .isEqualTo(RESPONSE_ID);
 
-        verify(responseRepository).existsByTweetId(TWEET_KEY);
+        // Once before the subject read, once in the current preflight — DL-247, DL-252 — and once
+        // inside the storing transaction — DL-195
+        verify(responseRepository, times(3)).existsByTweetId(TWEET_KEY);
         verify(responseRepository).save(any(Response.class));
     }
 
@@ -660,6 +824,7 @@ class ResponseServiceTest {
         CountDownLatch modelEntered = new CountDownLatch(1);
         CountDownLatch releaseModel = new CountDownLatch(1);
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.existsById(TWEET_KEY)).thenReturn(true);
         when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
         when(llmService.generateResponse(any(TweetDto.class))).thenAnswer(invocation -> {
@@ -724,7 +889,7 @@ class ResponseServiceTest {
         when(responseRepository.save(any(Response.class))).thenAnswer(returnsTheRowWithAnAssignedId());
         when(responseMapper.toDto(any(Response.class))).thenReturn(storedDto());
 
-        // The mint is truncated to microseconds, so the window is too — DL-220
+        // The mint is truncated to microseconds, so the window is too — DL-232
         LocalDateTime beforeTheCall = LocalDateTime.now().truncatedTo(ChronoUnit.MICROS);
         service.generateResponse(TWEET_ID);
         LocalDateTime afterTheCall = LocalDateTime.now();
@@ -838,57 +1003,137 @@ class ResponseServiceTest {
         assertThat(written.getIsApproved()).isTrue();
     }
 
-    // A carried key carries a usable value — DL-082 — see docs/DECISION_LOG.md
+    // An explicit json null writes the nullable column — DL-244 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("refuses to build a request whose content is an explicit json null")
-    void refusesToBuildARequestWhoseContentIsAnExplicitJsonNull() {
-        assertThatThrownBy(() -> new UpdateResponseRequest(NullNode.getInstance(), null))
-                .isInstanceOf(IllegalArgumentException.class);
+    @DisplayName("reports an explicit json null content as a write of null")
+    void reportsAnExplicitJsonNullContentAsAWriteOfNull() {
+        UpdateResponseRequest request =
+                new UpdateResponseRequest(NullNode.getInstance(), BooleanNode.TRUE);
 
-        verifyNoInteractions(responseRepository, responseMapper);
+        assertThat(request.carriesNoUpdatableMember()).isFalse();
+        assertThat(request.writesContent()).isTrue();
+        assertThat(request.contentValue()).isNull();
     }
 
-    // A carried key carries a usable value — DL-082 — see docs/DECISION_LOG.md
+    // An explicit json null writes the nullable column — DL-244 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("refuses to build a request whose approval flag is an explicit json null")
-    void refusesToBuildARequestWhoseApprovalFlagIsAnExplicitJsonNull() {
-        assertThatThrownBy(() -> new UpdateResponseRequest(null, NullNode.getInstance()))
-                .isInstanceOf(IllegalArgumentException.class);
+    @DisplayName("reports an explicit json null approval flag as a write of null")
+    void reportsAnExplicitJsonNullApprovalFlagAsAWriteOfNull() {
+        UpdateResponseRequest request =
+                new UpdateResponseRequest(TextNode.valueOf(REVISED_CONTENT),
+                        NullNode.getInstance());
 
-        verifyNoInteractions(responseRepository, responseMapper);
+        assertThat(request.carriesNoUpdatableMember()).isFalse();
+        assertThat(request.writesApproval()).isTrue();
+        assertThat(request.approvalValue()).isNull();
     }
 
-    // A carried key carries a usable value — DL-082 — see docs/DECISION_LOG.md
+    // Bounded lock wait with an explicit contention outcome — DL-246 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("refuses to build a request that carries both keys as explicit json nulls")
-    void refusesToBuildARequestThatCarriesBothKeysAsExplicitJsonNulls() {
-        assertThatThrownBy(
-                () -> new UpdateResponseRequest(NullNode.getInstance(), NullNode.getInstance()))
-                .isInstanceOf(IllegalArgumentException.class);
+    @DisplayName("reports a contended update row with the update-failed literal")
+    void reportsAContendedUpdateRowWithTheUpdateFailedLiteral() {
+        when(responseRepository.findByIdForUpdate(RESPONSE_KEY))
+                .thenThrow(new PessimisticLockingFailureException("row locked"));
 
-        verifyNoInteractions(responseRepository, responseMapper);
+        assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID, contentOnly()))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessage("Response not found or update failed");
+
+        verify(responseRepository, never()).save(any(Response.class));
+        verifyNoInteractions(responseMapper);
     }
 
-    // A carried key carries a usable value — DL-082 — see docs/DECISION_LOG.md
+    // Bounded lock wait with an explicit contention outcome — DL-246 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reports a contended update row that timed out with the update-failed literal")
+    void reportsAContendedUpdateRowThatTimedOutWithTheUpdateFailedLiteral() {
+        when(responseRepository.findByIdForUpdate(RESPONSE_KEY))
+                .thenThrow(new QueryTimeoutException("statement bound reached"));
+
+        assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID, contentOnly()))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessage("Response not found or update failed");
+
+        verify(responseRepository, never()).save(any(Response.class));
+        verifyNoInteractions(responseMapper);
+    }
+
+    // Bounded lock wait with an explicit contention outcome — DL-246 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("stores nothing when the parent row of a background generation stays contended")
+    void storesNothingWhenTheParentRowOfABackgroundGenerationStaysContended() {
+        Tweet subject = new Tweet();
+        subject.setId(TWEET_KEY);
+        subject.setContent("A doubtful post");
+        lenient().when(llmService.generateResponse(any(TweetDto.class)))
+                .thenReturn("A generated reply");
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        lenient().when(tweetRepository.findByIdForUpdate(TWEET_KEY))
+                .thenThrow(new PessimisticLockingFailureException("parent locked"));
+
+        assertThat(service.generateResponseIfAbsentFor(subject)).isEmpty();
+
+        verify(responseRepository, never()).save(any(Response.class));
+    }
+
+    // dto/ResponseDto declares both members required — DL-080, DL-244 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reports an update that would empty the content with the update-failed literal")
+    void reportsAnUpdateThatWouldEmptyTheContentWithTheUpdateFailedLiteral() {
+        Response existing = storedRowCarryingApproval(false);
+        when(responseRepository.findByIdForUpdate(RESPONSE_KEY))
+                .thenReturn(Optional.of(existing));
+
+        assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID,
+                new UpdateResponseRequest(NullNode.getInstance(), null)))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessage("Response not found or update failed");
+
+        verify(responseRepository, never()).save(any(Response.class));
+        verifyNoInteractions(responseMapper);
+    }
+
+    // dto/ResponseDto declares both members required — DL-080, DL-244 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reports an update that would empty the approval flag with the update-failed "
+            + "literal")
+    void reportsAnUpdateThatWouldEmptyTheApprovalFlagWithTheUpdateFailedLiteral() {
+        Response existing = storedRowCarryingApproval(false);
+        when(responseRepository.findByIdForUpdate(RESPONSE_KEY))
+                .thenReturn(Optional.of(existing));
+
+        assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID,
+                new UpdateResponseRequest(null, NullNode.getInstance())))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessage("Response not found or update failed");
+
+        verify(responseRepository, never()).save(any(Response.class));
+        verifyNoInteractions(responseMapper);
+    }
+
+    // No carried value is rejected — DL-050, DL-244 — see docs/DECISION_LOG.md
     @ParameterizedTest
-    @MethodSource("unusableUpdateBodies")
-    @DisplayName("refuses to build a request carrying a value the addressed column cannot hold")
-    void refusesToBuildARequestCarryingAValueTheAddressedColumnCannotHold(
+    @MethodSource("freeFormUpdateBodies")
+    @DisplayName("builds a request from any carried value and reports it as a write")
+    void buildsARequestFromAnyCarriedValueAndReportsItAsAWrite(
             JsonNode content, JsonNode isApproved) {
 
-        assertThatThrownBy(() -> new UpdateResponseRequest(content, isApproved))
-                .isInstanceOf(IllegalArgumentException.class);
+        UpdateResponseRequest request = new UpdateResponseRequest(content, isApproved);
+
+        assertThat(request.carriesNoUpdatableMember()).isFalse();
+        assertThat(request.writesContent()).isEqualTo(content != null);
+        assertThat(request.writesApproval()).isEqualTo(isApproved != null);
 
         verifyNoInteractions(responseRepository, responseMapper);
     }
 
     /**
-     * The ten request bodies the QA reproduction of the wrong-typed update reported, as the component
-     * pair each one binds to.
+     * The request bodies an earlier revision rejected at binding time, as the component pair each one
+     * binds to. Every one of them is now carried through — DL-244.
      *
-     * @return one argument pair per rejected body
+     * @return one argument pair per carried body
      */
-    private static Stream<Arguments> unusableUpdateBodies() {
+    private static Stream<Arguments> freeFormUpdateBodies() {
         ObjectNode object = JsonNodeFactory.instance.objectNode();
         object.put("x", 1);
         ArrayNode array = JsonNodeFactory.instance.arrayNode();
@@ -902,8 +1147,60 @@ class ResponseServiceTest {
                 Arguments.of(null, NullNode.getInstance()),
                 Arguments.of(null, IntNode.valueOf(1)),
                 Arguments.of(null, TextNode.valueOf("true")),
-                Arguments.of(null, TextNode.valueOf("false")),
-                Arguments.of(TextNode.valueOf(REVISED_CONTENT), TextNode.valueOf("true")));
+                Arguments.of(NullNode.getInstance(), NullNode.getInstance()));
+    }
+
+    // Presence decides whether a column is written and the carried value decides what is stored, each
+    // member independently of the other — DL-082, DL-244 — see docs/DECISION_LOG.md
+    @ParameterizedTest
+    @MethodSource("mixedUpdateBodies")
+    @DisplayName("writes each carried member of a mixed body and leaves an omitted member untouched")
+    void appliesTheUsableMemberOfAMixedBody(JsonNode content, JsonNode isApproved,
+            String expectedContent, Boolean expectedApproval) {
+
+        Response existing = storedRowCarryingApproval(false);
+        existing.setContent(STORED_CONTENT);
+        stubTheUpdateOf(existing);
+
+        service.updateResponse(RESPONSE_ID, new UpdateResponseRequest(content, isApproved));
+
+        Response written = theRowSubmittedForUpdate(existing);
+        assertThat(written.getContent()).isEqualTo(expectedContent);
+        assertThat(written.getIsApproved()).isEqualTo(expectedApproval);
+    }
+
+    /**
+     * Bodies carrying one usable member beside one unusable member, with the column values the update
+     * must leave behind.
+     *
+     * @return one argument row per mixed body
+     */
+    private static Stream<Arguments> mixedUpdateBodies() {
+        return Stream.of(
+                Arguments.of(TextNode.valueOf(REVISED_CONTENT), TextNode.valueOf("true"),
+                        REVISED_CONTENT, Boolean.TRUE),
+                Arguments.of(TextNode.valueOf(REVISED_CONTENT), BooleanNode.TRUE,
+                        REVISED_CONTENT, Boolean.TRUE),
+                Arguments.of(null, BooleanNode.TRUE,
+                        STORED_CONTENT, Boolean.TRUE),
+                Arguments.of(IntNode.valueOf(7), BooleanNode.TRUE,
+                        "7", Boolean.TRUE));
+    }
+
+    // A carried scalar is read the way Jackson reads it — DL-244 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reads a carried scalar the way its target column holds it")
+    void readsACarriedScalarTheWayItsTargetColumnHoldsIt() {
+        assertThat(new UpdateResponseRequest(IntNode.valueOf(123), null).contentValue())
+                .isEqualTo("123");
+        assertThat(new UpdateResponseRequest(BooleanNode.TRUE, null).contentValue())
+                .isEqualTo("true");
+        assertThat(new UpdateResponseRequest(null, TextNode.valueOf("true")).approvalValue())
+                .isTrue();
+        assertThat(new UpdateResponseRequest(null, TextNode.valueOf("false")).approvalValue())
+                .isFalse();
+        assertThat(new UpdateResponseRequest(null, IntNode.valueOf(1)).approvalValue()).isTrue();
+        assertThat(new UpdateResponseRequest(null, IntNode.valueOf(0)).approvalValue()).isFalse();
     }
 
     // The two column types of backend/app/db/models.py:L24,L26 — DL-082 — see docs/DECISION_LOG.md
@@ -1031,7 +1328,7 @@ class ResponseServiceTest {
     @Test
     @DisplayName("requests the first wire page as index zero")
     void requestsTheFirstWirePageAsIndexZero() {
-        when(responseRepository.findAll(any(Pageable.class)))
+        when(responseRepository.findAllRows(any(Pageable.class)))
                 .thenReturn(pageOfStoredRows(0, 10, 25L));
 
         service.getPaginatedResponses(1, 10);
@@ -1042,23 +1339,87 @@ class ResponseServiceTest {
     }
 
     // backend/app/api/responses.py:L11-12 declares defaults and no bound — DL-123
-    @ParameterizedTest(name = "a per_page of {0} reaches the repository unreduced")
+    @ParameterizedTest(name = "a per_page of {0} is restated unreduced and read in bounded windows")
     @ValueSource(ints = {100, 101, 500, 10_000, Integer.MAX_VALUE})
-    @DisplayName("applies no upper bound to per_page")
+    @DisplayName("applies no upper bound to per_page and reads it in bounded windows")
     void appliesNoUpperBoundToPerPage(int perPage) {
-        when(responseRepository.findAll(any(Pageable.class)))
-                .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, perPage), 0L));
+        stubEveryWindowRead(0L);
+
+        PaginatedResponsesDto envelope = service.getPaginatedResponses(1, perPage);
+
+        assertThat(envelope.pagination().perPage())
+                .as("per_page the envelope restates").isEqualTo(perPage);
+        assertThatEveryWindowIsBounded();
+    }
+
+    // One page larger than the chunk bound is read as consecutive bounded chunks — DL-249 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reads a page larger than the chunk bound as consecutive chunks that cover it once")
+    void readsAPageLargerThanTheChunkBoundAsConsecutiveChunks() {
+        int chunkBound = declaredChunkBound();
+        int perPage = chunkBound * 2;
+        List<ResponseRow> firstChunk = projectedRows(chunkBound);
+        List<ResponseRow> secondChunk = projectedRows(3);
+        when(responseRepository.findRowChunk(any(Pageable.class)))
+                .thenReturn(firstChunk)
+                .thenReturn(secondChunk);
+        when(responseRepository.count()).thenReturn((long) chunkBound + secondChunk.size());
+        when(responseMapper.toDtoRowList(anyList()))
+                .thenAnswer(invocation -> dtosFor(invocation.getArgument(0)));
+
+        PaginatedResponsesDto envelope = service.getPaginatedResponses(1, perPage);
+
+        assertThat(envelope.responses()).as("rows the page rendered")
+                .hasSize(chunkBound + secondChunk.size());
+        assertThat(envelope.pagination().perPage())
+                .as("per_page the envelope restates").isEqualTo(perPage);
+        assertThat(envelope.pagination().total()).as("total the envelope reports")
+                .isEqualTo((long) chunkBound + secondChunk.size());
+        assertThat(pageRequestsIssued()).as("windows the page read asked for").hasSize(2);
+        assertThat(pageRequestsIssued()).extracting(Pageable::getOffset)
+                .as("first row of each window").containsExactly(0L, (long) chunkBound);
+        verify(responseMapper, times(2)).toDtoRowList(anyList());
+        verify(responseRepository, never()).findAllRows(any(Pageable.class));
+        assertThatEveryWindowIsBounded();
+    }
+
+    // A page at or below the chunk bound is read by one statement — DL-249 — see
+    // docs/DECISION_LOG.md
+    @ParameterizedTest(name = "a per_page of {0} is read by the single page statement")
+    @ValueSource(ints = {1, 10, 499, 500})
+    @DisplayName("reads a page at or below the chunk bound with one page statement and no row count")
+    void readsAPageAtOrBelowTheChunkBoundWithOnePageStatement(int perPage) {
+        when(responseRepository.findAllRows(any(Pageable.class))).thenAnswer(invocation ->
+                new PageImpl<>(List.of(), invocation.<Pageable>getArgument(0), 0L));
 
         service.getPaginatedResponses(1, perPage);
 
-        assertThat(theRequestedPage().getPageSize()).isEqualTo(perPage);
+        assertThat(theRequestedPage().getPageSize())
+                .as("rows the single statement was asked for").isEqualTo(perPage);
+        verify(responseRepository, never()).findRowChunk(any(Pageable.class));
+        verify(responseRepository, never()).count();
+    }
+
+    // Every page read carries a total order — DL-249 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("orders every page read by identifier ascending")
+    void ordersEveryPageReadByIdentifierAscending() {
+        stubEveryWindowRead(0L);
+
+        service.getPaginatedResponses(2, 10);
+
+        assertThat(pageRequestsIssued()).as("windows the page read asked for")
+                .isNotEmpty()
+                .allSatisfy(window -> assertThat(window.getSort())
+                        .as("sort of one window").isEqualTo(Sort.by(Sort.Direction.ASC, "id")));
     }
 
     // backend/app/api/responses.py:L11-12 declares defaults and no bound — DL-123
     @Test
     @DisplayName("restates the unreduced per_page in the pagination block")
     void restatesTheUnreducedPerPageInThePaginationBlock() {
-        when(responseRepository.findAll(any(Pageable.class)))
+        when(responseRepository.findAllRows(any(Pageable.class)))
                 .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 500), 0L));
 
         PaginatedResponsesDto envelope = service.getPaginatedResponses(1, 500);
@@ -1090,7 +1451,7 @@ class ResponseServiceTest {
         assertThat(rendered.pagination().totalPages()).as("total_pages the envelope reports")
                 .isEqualTo((int) Math.ceil(21.0d / perPage));
         // The row count alone builds the envelope; the paged query is never issued — DL-225
-        verify(responseRepository, never()).findAll(any(Pageable.class));
+        verify(responseRepository, never()).findAllRows(any(Pageable.class));
         verify(responseRepository).count();
     }
 
@@ -1104,7 +1465,7 @@ class ResponseServiceTest {
     })
     @DisplayName("reads a page whose first row lies within the largest addressable offset")
     void readsAPageWhoseFirstRowLiesWithinTheLargestAddressableOffset(int page, int perPage) {
-        when(responseRepository.findAll(any(Pageable.class)))
+        when(responseRepository.findAllRows(any(Pageable.class)))
                 .thenReturn(new PageImpl<>(List.of(), PageRequest.of(page - 1, perPage), 21L));
 
         PaginatedResponsesDto rendered = service.getPaginatedResponses(page, perPage);
@@ -1119,7 +1480,7 @@ class ResponseServiceTest {
     @Test
     @DisplayName("requests the third wire page as index two and reports it as page three")
     void requestsTheThirdWirePageAsIndexTwoAndReportsItAsPageThree() {
-        when(responseRepository.findAll(any(Pageable.class)))
+        when(responseRepository.findAllRows(any(Pageable.class)))
                 .thenReturn(pageOfStoredRows(2, 10, 25L));
 
         PaginatedResponsesDto envelope = service.getPaginatedResponses(3, 10);
@@ -1141,19 +1502,19 @@ class ResponseServiceTest {
     })
     @DisplayName("passes the page size through with no upper bound")
     void passesThePageSizeThroughWithNoUpperBound(int perPage, int expectedSize) {
-        when(responseRepository.findAll(any(Pageable.class)))
-                .thenReturn(pageOfStoredRows(0, expectedSize, 0L));
+        stubEveryWindowRead(0L);
 
-        service.getPaginatedResponses(1, perPage);
+        PaginatedResponsesDto envelope = service.getPaginatedResponses(1, perPage);
 
-        assertThat(theRequestedPage().getPageSize()).isEqualTo(expectedSize);
+        assertThat(envelope.pagination().perPage()).isEqualTo(expectedSize);
+        assertThatEveryWindowIsBounded();
     }
 
     // No upper bound is applied to per_page — IR9 — see docs/DECISION_LOG.md DL-200
     @Test
     @DisplayName("reports the supplied page size in the pagination block it builds")
     void reportsTheSuppliedPageSizeInThePaginationBlockItBuilds() {
-        when(responseRepository.findAll(any(Pageable.class)))
+        when(responseRepository.findAllRows(any(Pageable.class)))
                 .thenReturn(pageOfStoredRows(0, 500, 0L));
 
         PaginationDto pagination = service.getPaginatedResponses(1, 500).pagination();
@@ -1161,7 +1522,7 @@ class ResponseServiceTest {
         assertThat(pagination.perPage()).isEqualTo(500);
     }
 
-    // Lower bounds applied to page and per_page — DL-077 — see docs/DECISION_LOG.md
+    // Lower bounds applied to page and per_page — DL-123 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "page {0} of size {1} reads page index {2} of size {3}")
     @CsvSource({
             "0,10,0,10",
@@ -1175,7 +1536,7 @@ class ResponseServiceTest {
     void readsAPageOrPerPageBelowTheLowerBoundAsItsDefault(int page, int perPage,
             int expectedIndex, int expectedSize) {
 
-        when(responseRepository.findAll(any(Pageable.class))).thenAnswer(invocation ->
+        when(responseRepository.findAllRows(any(Pageable.class))).thenAnswer(invocation ->
                 new PageImpl<>(List.of(), invocation.<Pageable>getArgument(0), 0L));
 
         PaginatedResponsesDto envelope = service.getPaginatedResponses(page, perPage);
@@ -1190,7 +1551,7 @@ class ResponseServiceTest {
                 .as("per_page the envelope restates").isEqualTo(expectedSize);
     }
 
-    // The offset ceiling of a paged query — DL-219 — see docs/DECISION_LOG.md
+    // The offset ceiling of a paged query — DL-225 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "page {0} of size {1} is queried, its offset being at most 2147483647")
     @CsvSource({
             "214748365,10",
@@ -1199,17 +1560,18 @@ class ResponseServiceTest {
     })
     @DisplayName("queries a page whose offset the paged query can express")
     void queriesAPageWhoseOffsetThePagedQueryCanExpress(int page, int perPage) {
-        when(responseRepository.findAll(any(Pageable.class))).thenAnswer(invocation ->
-                new PageImpl<>(List.of(), invocation.<Pageable>getArgument(0), 2L));
+        stubEveryWindowRead(2L);
 
         PaginatedResponsesDto envelope = service.getPaginatedResponses(page, perPage);
 
-        assertThat(theRequestedPage().getOffset()).isLessThanOrEqualTo(Integer.MAX_VALUE);
+        assertThat(pageRequestsIssued()).as("windows the page read asked for")
+                .isNotEmpty()
+                .allMatch(window -> window.getOffset() <= Integer.MAX_VALUE);
         assertThat(envelope.pagination().page()).isEqualTo(page);
-        verify(responseRepository, never()).count();
+        assertThatEveryWindowIsBounded();
     }
 
-    // The offset ceiling of a paged query — DL-219 — see docs/DECISION_LOG.md
+    // The offset ceiling of a paged query — DL-225 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "page {0} of size {1} is answered empty without a paged query")
     @CsvSource({
             "2147483647,10",
@@ -1228,10 +1590,10 @@ class ResponseServiceTest {
         assertThat(envelope.pagination().page()).isEqualTo(page);
         assertThat(envelope.pagination().perPage()).isEqualTo(perPage);
         assertThat(envelope.pagination().total()).isEqualTo(25L);
-        verify(responseRepository, never()).findAll(any(Pageable.class));
+        verify(responseRepository, never()).findAllRows(any(Pageable.class));
     }
 
-    // The offset ceiling of a paged query — DL-219 — see docs/DECISION_LOG.md
+    // The offset ceiling of a paged query — DL-225 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("counts the pages a beyond-the-ceiling page reports from the table size")
     void countsThePagesABeyondTheCeilingPageReportsFromTheTableSize() {
@@ -1248,8 +1610,8 @@ class ResponseServiceTest {
     @Test
     @DisplayName("builds the pagination block from the page it read")
     void buildsThePaginationBlockFromThePageItRead() {
-        Page<Response> read = pageOfStoredRows(0, 10, 25L);
-        when(responseRepository.findAll(any(Pageable.class))).thenReturn(read);
+        Page<ResponseRow> read = pageOfStoredRows(0, 10, 25L);
+        when(responseRepository.findAllRows(any(Pageable.class))).thenReturn(read);
 
         PaginationDto pagination = service.getPaginatedResponses(1, 10).pagination();
 
@@ -1268,15 +1630,15 @@ class ResponseServiceTest {
     @Test
     @DisplayName("takes the response list from the mapper")
     void takesTheResponseListFromTheMapper() {
-        Page<Response> read = pageOfStoredRows(0, 10, 25L);
+        Page<ResponseRow> read = pageOfStoredRows(0, 10, 25L);
         List<ResponseDto> converted = List.of(storedDto());
-        when(responseRepository.findAll(any(Pageable.class))).thenReturn(read);
-        when(responseMapper.toDtoList(read.getContent())).thenReturn(converted);
+        when(responseRepository.findAllRows(any(Pageable.class))).thenReturn(read);
+        when(responseMapper.toDtoRowList(read.getContent())).thenReturn(converted);
 
         PaginatedResponsesDto envelope = service.getPaginatedResponses(1, 10);
 
         assertThat(envelope.responses()).isSameAs(converted);
-        verify(responseMapper).toDtoList(read.getContent());
+        verify(responseMapper).toDtoRowList(read.getContent());
     }
 
     // backend/app/api/responses.py:L26,L28-29
@@ -1331,12 +1693,11 @@ class ResponseServiceTest {
                 Set.class.getName());
     }
 
-    // The fifth operation is generateResponseIfAbsent, the claim-aware entry point the two
-    // automatic paths share — see docs/DECISION_LOG.md
+    // The two claim-aware entry points the automatic paths share carry distinct names — DL-226 — see
+    // docs/DECISION_LOG.md
     @Test
-    @DisplayName("declares exactly five operations, one of them overloaded, and none of them "
-            + "publishes")
-    void declaresExactlyFiveOperationsAndNoneOfThemPublishes() {
+    @DisplayName("declares exactly six distinctly named operations and none of them publishes")
+    void declaresExactlySixOperationsAndNoneOfThemPublishes() {
         List<Method> declared = Arrays.stream(ResponseService.class.getDeclaredMethods())
                 .filter(method -> !method.isSynthetic())
                 .toList();
@@ -1352,15 +1713,25 @@ class ResponseServiceTest {
         assertThat(publicOperations)
                 .extracting(Method::getName)
                 .as("names of the public operations")
-                .containsOnly("getPaginatedResponses", "getResponseById", "generateResponse",
-                        "generateResponseIfAbsent", "updateResponse");
-        // The one operation both background paths call is declared twice: once for a caller that
-        // holds only the identifier and once for a caller that already holds the row — DL-226
+                .containsExactlyInAnyOrder("getPaginatedResponses", "getResponseById",
+                        "generateResponse", "generateResponseIfAbsent", "generateResponseIfAbsentFor",
+                        "updateResponse");
+        // The operation both background paths call is declared once per subject form, under a name of
+        // its own, so no name is overloaded and no call can be ambiguous — DL-226
+        assertThat(publicOperations)
+                .extracting(Method::getName)
+                .as("names of the public operations")
+                .doesNotHaveDuplicates();
         assertThat(publicOperations)
                 .filteredOn(method -> "generateResponseIfAbsent".equals(method.getName()))
+                .singleElement()
                 .extracting(method -> method.getParameterTypes()[0])
-                .as("parameter types of the overloaded operation")
-                .containsExactlyInAnyOrder(String.class, Tweet.class);
+                .isEqualTo(String.class);
+        assertThat(publicOperations)
+                .filteredOn(method -> "generateResponseIfAbsentFor".equals(method.getName()))
+                .singleElement()
+                .extracting(method -> method.getParameterTypes()[0])
+                .isEqualTo(Tweet.class);
         assertThat(publicOperations).as("declared public operations").hasSize(6);
         assertThat(declared).allSatisfy(method -> assertThat(namesAPublication(method.getName()))
                 .as("declared method %s", method.getName())
@@ -1508,9 +1879,66 @@ class ResponseServiceTest {
      * @param total the number of rows the table holds
      * @return a page carrying one stored row
      */
-    private static Page<Response> pageOfStoredRows(int index, int size, long total) {
-        return new PageImpl<>(List.of(storedRowCarryingApproval(false)), PageRequest.of(index, size),
-                total);
+    private static Page<ResponseRow> pageOfStoredRows(int index, int size, long total) {
+        return new PageImpl<>(List.of(projectedRow()), PageRequest.of(index, size), total);
+    }
+
+    /**
+     * Builds the requested number of projected page rows.
+     *
+     * @param rows the number of rows to build
+     * @return the rows
+     */
+    private static List<ResponseRow> projectedRows(int rows) {
+        List<ResponseRow> built = new ArrayList<>(rows);
+        for (int row = 0; row < rows; row++) {
+            built.add(projectedRow());
+        }
+        return List.copyOf(built);
+    }
+
+    /**
+     * Builds one wire form per supplied projected row, as the mapper does.
+     *
+     * @param rows the rows to render
+     * @return one wire form per row
+     */
+    private static List<ResponseDto> dtosFor(List<ResponseRow> rows) {
+        return rows.stream().map(row -> storedDto()).toList();
+    }
+
+    /**
+     * Builds one projected page row carrying the five values the wire contract renders.
+     *
+     * @return the projected row, never {@code null}
+     */
+    private static ResponseRow projectedRow() {
+        return new ResponseRow() {
+            @Override
+            public Integer getId() {
+                return RESPONSE_KEY;
+            }
+
+            @Override
+            public String getContent() {
+                return STORED_CONTENT;
+            }
+
+            @Override
+            public java.time.LocalDateTime getGeneratedAt() {
+                return STORED_AT;
+            }
+
+            @Override
+            public Boolean getIsApproved() {
+                return Boolean.FALSE;
+            }
+
+            @Override
+            public Integer getTweetId() {
+                return TWEET_KEY;
+            }
+        };
     }
 
     private static Answer<Response> returnsTheRowWithAnAssignedId() {
@@ -1547,8 +1975,185 @@ class ResponseServiceTest {
 
     private Pageable theRequestedPage() {
         ArgumentCaptor<Pageable> requested = ArgumentCaptor.forClass(Pageable.class);
-        verify(responseRepository).findAll(requested.capture());
+        verify(responseRepository).findAllRows(requested.capture());
         return requested.getValue();
+    }
+
+    // One diagnostic owner per failing layer — DL-252 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("records a provider failure at DEBUG only, leaving the ERROR record to the adapter")
+    void recordsAProviderFailureAtDebugOnlyLeavingTheErrorRecordToTheAdapter() {
+        Tweet subject = tweetCarryingTheKey();
+        IllegalStateException providerFailure = new IllegalStateException("BLANK_TEXT");
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenThrow(providerFailure);
+
+        List<ILoggingEvent> records =
+                recordsOf(() -> catchThrowable(() -> service.generateResponse(TWEET_ID)));
+
+        assertThat(records).noneMatch(record -> record.getLevel() == Level.ERROR);
+        assertThat(records)
+                .filteredOn(record -> record.getLevel() == Level.DEBUG)
+                .hasSize(1)
+                .allSatisfy(record -> assertThat(record.getFormattedMessage())
+                        .contains("The generation provider failed for tweet")
+                        .contains(IllegalStateException.class.getSimpleName())
+                        .doesNotContain("BLANK_TEXT"));
+    }
+
+    // One diagnostic owner per failing layer — DL-252 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("records a repository failure on the route path once at ERROR, naming no statement")
+    void recordsARepositoryFailureOnTheRoutePathOnceAtErrorNamingNoStatement() {
+        Tweet subject = tweetCarryingTheKey();
+        DataIntegrityViolationException rejectedInsert =
+                new DataIntegrityViolationException("could not execute statement [23502]");
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
+        when(responseRepository.save(any(Response.class))).thenThrow(rejectedInsert);
+
+        List<ILoggingEvent> records =
+                recordsOf(() -> catchThrowable(() -> service.generateResponse(TWEET_ID)));
+
+        assertThat(records)
+                .filteredOn(record -> record.getLevel() == Level.ERROR)
+                .hasSize(1)
+                .allSatisfy(record -> assertThat(record.getFormattedMessage())
+                        .contains("Generating a response for tweet")
+                        .contains(DataIntegrityViolationException.class.getSimpleName())
+                        .doesNotContain("23502")
+                        .doesNotContain("could not execute statement"));
+    }
+
+    // One diagnostic owner per failing layer — DL-252 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("records a provider failure on the background path at DEBUG and never at ERROR")
+    void recordsAProviderFailureOnTheBackgroundPathAtDebugAndNeverAtError() {
+        Tweet subject = tweetCarryingTheKey();
+        IllegalStateException providerFailure = new IllegalStateException("REFUSAL");
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(tweetRepository.existsById(TWEET_KEY)).thenReturn(true);
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false);
+        when(llmService.generateResponse(any(TweetDto.class))).thenThrow(providerFailure);
+
+        List<ILoggingEvent> records = recordsOf(
+                () -> catchThrowable(() -> service.generateResponseIfAbsentFor(subject)));
+
+        assertThat(records).noneMatch(record -> record.getLevel() == Level.ERROR);
+        assertThat(records)
+                .filteredOn(record -> record.getLevel() == Level.DEBUG)
+                .anySatisfy(record -> assertThat(record.getFormattedMessage())
+                        .contains("The generation provider failed for tweet")
+                        .doesNotContain("REFUSAL"));
+    }
+
+    // One diagnostic owner per failing layer — DL-252 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("records a repository failure on the background path once at ERROR")
+    void recordsARepositoryFailureOnTheBackgroundPathOnceAtError() {
+        Tweet subject = tweetCarryingTheKey();
+        DataIntegrityViolationException rejectedInsert =
+                new DataIntegrityViolationException("could not execute statement [23502]");
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(tweetRepository.existsById(TWEET_KEY)).thenReturn(true);
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false);
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
+        when(responseRepository.save(any(Response.class))).thenThrow(rejectedInsert);
+
+        List<ILoggingEvent> records = recordsOf(
+                () -> catchThrowable(() -> service.generateResponseIfAbsentFor(subject)));
+
+        assertThat(records)
+                .filteredOn(record -> record.getLevel() == Level.ERROR)
+                .hasSize(1)
+                .allSatisfy(record -> assertThat(record.getFormattedMessage())
+                        .contains("Response generation failed for tweet")
+                        .contains(DataIntegrityViolationException.class.getSimpleName())
+                        .doesNotContain("23502"));
+    }
+
+    /**
+     * Runs {@code call} with a {@link ListAppender} attached to the {@link ResponseService} logger at
+     * {@code DEBUG} and returns everything it recorded.
+     *
+     * <p>The previous level and appender set are restored before returning, whether {@code call}
+     * completes or raises.
+     *
+     * @param call the work to run while records are captured
+     * @return the captured records in order, never {@code null}
+     */
+    private static List<ILoggingEvent> recordsOf(Runnable call) {
+        ch.qos.logback.classic.Logger serviceLogger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(ResponseService.class);
+        Level restoreLevel = serviceLogger.getLevel();
+        ListAppender<ILoggingEvent> records = new ListAppender<>();
+        records.start();
+        serviceLogger.addAppender(records);
+        serviceLogger.setLevel(Level.DEBUG);
+        try {
+            call.run();
+        } finally {
+            serviceLogger.setLevel(restoreLevel);
+            serviceLogger.detachAppender(records);
+            records.stop();
+        }
+        return List.copyOf(records.list);
+    }
+
+    /**
+     * Answers every read one page request can issue with an empty result and the supplied row total:
+     * the single page statement, the bounded chunk statement and the row count.
+     *
+     * @param total the value {@code count()} and the page's {@code total} report
+     */
+    private void stubEveryWindowRead(long total) {
+        lenient().when(responseRepository.findAllRows(any(Pageable.class))).thenAnswer(invocation ->
+                new PageImpl<>(List.of(), invocation.<Pageable>getArgument(0), total));
+        lenient().when(responseRepository.findRowChunk(any(Pageable.class))).thenReturn(List.of());
+        lenient().when(responseRepository.count()).thenReturn(total);
+    }
+
+    /**
+     * Collects every {@link Pageable} the service handed to the repository during this test.
+     *
+     * @return the windows asked for, in call order
+     */
+    private List<Pageable> pageRequestsIssued() {
+        return mockingDetails(responseRepository).getInvocations().stream()
+                .flatMap(invocation -> Arrays.stream(invocation.getArguments()))
+                .filter(Pageable.class::isInstance)
+                .map(Pageable.class::cast)
+                .toList();
+    }
+
+    /**
+     * Asserts that no statement was asked for more rows than the declared chunk bound — DL-249.
+     */
+    private void assertThatEveryWindowIsBounded() {
+        assertThat(pageRequestsIssued()).as("windows the page read asked for")
+                .isNotEmpty()
+                .allSatisfy(window -> assertThat(window.getPageSize())
+                        .as("rows one statement was asked for")
+                        .isLessThanOrEqualTo(declaredChunkBound()));
+    }
+
+    /**
+     * Reads the chunk bound the service declares, so these assertions and the service cannot drift.
+     *
+     * @return the value of the service's declared chunk bound
+     */
+    private static int declaredChunkBound() {
+        try {
+            Field bound = ResponseService.class.getDeclaredField("PAGE_FETCH_CHUNK_ROWS");
+            bound.setAccessible(true);
+            return (int) bound.get(null);
+        } catch (ReflectiveOperationException absent) {
+            throw new AssertionError("ResponseService must declare PAGE_FETCH_CHUNK_ROWS.", absent);
+        }
     }
 
     /**
@@ -1575,5 +2180,37 @@ class ResponseServiceTest {
                 // Intentionally empty.
             }
         });
+    }
+
+    /**
+     * Attaches a recorder to the class under test's logger.
+     *
+     * @return the attached recorder
+     */
+    private static ListAppender<ILoggingEvent> attachLogRecorder() {
+        ListAppender<ILoggingEvent> records = new ListAppender<>();
+        records.start();
+        ((Logger) org.slf4j.LoggerFactory.getLogger(ResponseService.class)).addAppender(records);
+        return records;
+    }
+
+    /**
+     * Detaches a recorder from the class under test's logger.
+     *
+     * @param records the recorder to detach
+     */
+    private static void detachLogRecorder(ListAppender<ILoggingEvent> records) {
+        ((Logger) org.slf4j.LoggerFactory.getLogger(ResponseService.class)).detachAppender(records);
+        records.stop();
+    }
+
+    /**
+     * Renders every captured record with its arguments substituted.
+     *
+     * @param records the recorder to read
+     * @return the rendered messages
+     */
+    private static List<String> renderedRecords(ListAppender<ILoggingEvent> records) {
+        return records.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
     }
 }

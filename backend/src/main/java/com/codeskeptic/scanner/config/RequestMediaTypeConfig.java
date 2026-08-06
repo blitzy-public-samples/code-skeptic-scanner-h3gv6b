@@ -26,45 +26,32 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
 
-// Net-new (no Python counterpart; the retired tree ran no filter of its own) — DL-221 — see
+// Net-new (no Python counterpart; the retired tree ran no filter of its own) — DL-236 — see
 // docs/DECISION_LOG.md
 /**
  * Withholds a request {@code Content-Type} header that names no concrete media type from request
  * processing.
  *
- * <p>{@code HttpHeaders.setContentType} rejects a media type carrying a wildcard type or a wildcard
- * subtype with {@link IllegalArgumentException}, and {@code ServletServerHttpRequest.getHeaders}
- * calls it while copying the request's headers. Three components of the request path call that
- * method:
+ * <p>A media type carrying a wildcard type or a wildcard subtype, and a value
+ * {@link MediaType#parseMediaType(String)} rejects, are the two cases {@code Content-Type} may carry
+ * that no component of the request path can hold: {@code HttpHeaders.setContentType} answers each with
+ * {@link IllegalArgumentException}, and {@code ServletServerHttpRequest.getHeaders} calls it from the
+ * CORS processor inside the security filter chain, from the {@code @RequestBody} argument resolver and
+ * from the return-value writer — DL-236.
  *
- * <ul>
- *   <li>{@code org.springframework.web.cors.DefaultCorsProcessor.handleInternal}, reached from the
- *       {@code CorsFilter} that {@code security/SecurityConfig} installs, for every request carrying
- *       an {@code Origin} header</li>
- *   <li>{@code AbstractMessageConverterMethodArgumentResolver.readWithMessageConverters}, reached
- *       while a handler's {@code @RequestBody} parameter is resolved</li>
- *   <li>{@code AbstractMessageConverterMethodProcessor}, reached while a return value is written</li>
- * </ul>
- *
- * <p>The first of those runs inside the security filter chain, ahead of the
- * {@code DispatcherServlet}, so the exception it raises reaches no {@code @ExceptionHandler}: it
- * leaves the servlet, the container dispatches the request to the error page, and the response
- * carries neither the status the request earned nor a bounded log record. The filter published here
- * runs ahead of the security chain and presents such a request to every downstream component as a
- * request carrying no {@code Content-Type} at all, which
- * {@code api/GlobalExceptionHandler#handleUnsupportedMediaType} already answers
- * {@code 415 {"error": "Unsupported media type"}} — DL-221.
- *
- * <p>The header is withheld rather than the request rejected, so authorization still decides a
- * protected route before any media type does: a request carrying no accepted token is answered by
- * the chain's entry point with 401 and an empty body exactly as before — DL-115.
+ * <p>The filter published here runs ahead of the security chain and presents such a request to every
+ * downstream component as a request carrying no {@code Content-Type} at all, which
+ * {@code api/GlobalExceptionHandler#handleUnsupportedMediaType} answers
+ * {@code 415 {"error": "Unsupported media type"}}. The header is withheld and the request is not
+ * rejected here, so authorization still decides a protected route first: a request carrying no
+ * accepted token is answered by the chain's entry point with 401 and an empty body — DL-115.
  *
  * <p>A media type that parses and names one concrete type — {@code application/json},
  * {@code text/plain}, {@code multipart/mixed} — is passed through untouched.
  *
  * <p>This class holds no mutable state and its filter is safe to share across concurrent requests.
  *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-221;
+ * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-236;
  * construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  */
 @Configuration
@@ -82,10 +69,10 @@ public class RequestMediaTypeConfig {
     /**
      * Registers the filter ahead of every other filter the container runs.
      *
-     * <p>Spring Boot registers {@code springSecurityFilterChain} at
-     * {@code SecurityProperties.DEFAULT_FILTER_ORDER}, which is {@code Ordered.HIGHEST_PRECEDENCE}
-     * plus 100. This registration therefore precedes the security chain, and with it the
-     * {@code CorsFilter} inside that chain — DL-221.
+     * <p>The order is {@link Ordered#HIGHEST_PRECEDENCE}, ahead of
+     * {@code springSecurityFilterChain}, which Spring Boot registers at
+     * {@code SecurityProperties.DEFAULT_FILTER_ORDER} — {@code Ordered.HIGHEST_PRECEDENCE} plus 100 —
+     * and therefore ahead of the {@code CorsFilter} inside that chain — DL-236.
      *
      * <p>The registration names {@link DispatcherType#REQUEST} alone, the dispatch on which a client
      * supplies the header.
@@ -114,7 +101,7 @@ public class RequestMediaTypeConfig {
      *
      * <p>This is the single declaration of that question. The filter below reads it to decide whether
      * to withhold the header, and {@code api.GlobalExceptionHandler} reads it to decide the status of
-     * an {@link IllegalArgumentException} — DL-220, DL-221.
+     * an {@link IllegalArgumentException} — DL-235, DL-236.
      *
      * @param declared the raw header value, possibly {@code null}
      * @return {@code true} when the value holds a media type with a wildcard type or subtype, or a
@@ -148,8 +135,8 @@ public class RequestMediaTypeConfig {
                 return;
             }
 
-            // The header value is client-supplied, so it reaches the log only through the
-            // log-injection guard — DL-149 — see docs/DECISION_LOG.md
+            // The client-supplied header value reaches the log through the log-injection guard only
+            // — DL-149 — see docs/DECISION_LOG.md
             log.debug("Withholding a Content-Type naming no concrete media type from request "
                     + "processing: {}", LogSafe.logSafe(declared));
             filterChain.doFilter(new ContentTypeWithheldRequest(request), response);

@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -19,6 +21,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.time.LocalDateTime;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -35,6 +38,9 @@ import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -43,6 +49,11 @@ import org.springframework.scheduling.annotation.Schedules;
 
 import com.codeskeptic.scanner.dto.ResponseDto;
 import com.codeskeptic.scanner.entity.Tweet;
+
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.NotionService;
 import com.codeskeptic.scanner.service.ResponseService;
@@ -192,21 +203,21 @@ class ResponseGenerationSchedulerTest {
     void generatesAndMirrorsOneReplyForEachCandidateInOrder() {
         Tweet first = candidate(FIRST_CANDIDATE_ID);
         Tweet second = candidate(SECOND_CANDIDATE_ID);
-        when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(first, second));
-        when(responseService.generateResponseIfAbsent(first))
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class))).thenReturn(List.of(first, second));
+        when(responseService.generateResponseIfAbsentFor(first))
                 .thenReturn(Optional.of(reply(FIRST_REPLY_ID, FIRST_REPLY_TEXT,
                         FIRST_CANDIDATE_ID_TEXT)));
-        when(responseService.generateResponseIfAbsent(second))
+        when(responseService.generateResponseIfAbsentFor(second))
                 .thenReturn(Optional.of(reply(SECOND_REPLY_ID, SECOND_REPLY_TEXT,
                         SECOND_CANDIDATE_ID_TEXT)));
 
         scheduler.generatePendingResponses();
 
         InOrder pass = inOrder(tweetRepository, responseService, notionService);
-        pass.verify(tweetRepository).findByResponsesIsEmpty();
-        pass.verify(responseService).generateResponseIfAbsent(first);
+        pass.verify(tweetRepository).findUnansweredBatchAfter(isNull(), any(Pageable.class));
+        pass.verify(responseService).generateResponseIfAbsentFor(first);
         pass.verify(notionService).updateTweetResponse(FIRST_CANDIDATE_ID_TEXT, FIRST_REPLY_TEXT);
-        pass.verify(responseService).generateResponseIfAbsent(second);
+        pass.verify(responseService).generateResponseIfAbsentFor(second);
         pass.verify(notionService).updateTweetResponse(SECOND_CANDIDATE_ID_TEXT, SECOND_REPLY_TEXT);
         pass.verifyNoMoreInteractions();
     }
@@ -216,11 +227,11 @@ class ResponseGenerationSchedulerTest {
     void mirrorsEachGeneratedReplyAgainstItsOwnCandidate() {
         Tweet first = candidate(FIRST_CANDIDATE_ID);
         Tweet second = candidate(SECOND_CANDIDATE_ID);
-        when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(first, second));
-        when(responseService.generateResponseIfAbsent(first))
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class))).thenReturn(List.of(first, second));
+        when(responseService.generateResponseIfAbsentFor(first))
                 .thenReturn(Optional.of(reply(FIRST_REPLY_ID, FIRST_REPLY_TEXT,
                         FIRST_CANDIDATE_ID_TEXT)));
-        when(responseService.generateResponseIfAbsent(second))
+        when(responseService.generateResponseIfAbsentFor(second))
                 .thenReturn(Optional.of(reply(SECOND_REPLY_ID, SECOND_REPLY_TEXT,
                         SECOND_CANDIDATE_ID_TEXT)));
 
@@ -243,8 +254,8 @@ class ResponseGenerationSchedulerTest {
         Tweet only = candidate(FIRST_CANDIDATE_ID);
         AtomicReference<Thread> generatingThread = new AtomicReference<>();
         AtomicReference<Thread> mirroringThread = new AtomicReference<>();
-        when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(only));
-        when(responseService.generateResponseIfAbsent(any(Tweet.class))).thenAnswer(invocation -> {
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class))).thenReturn(List.of(only));
+        when(responseService.generateResponseIfAbsentFor(any(Tweet.class))).thenAnswer(invocation -> {
             generatingThread.set(Thread.currentThread());
             return Optional.of(reply(FIRST_REPLY_ID, FIRST_REPLY_TEXT, FIRST_CANDIDATE_ID_TEXT));
         });
@@ -259,8 +270,8 @@ class ResponseGenerationSchedulerTest {
         assertThat(generatingThread.get()).as("thread the reply was generated on").isSameAs(caller);
         assertThat(mirroringThread.get()).as("thread the reply was mirrored on").isSameAs(caller);
 
-        verify(tweetRepository).findByResponsesIsEmpty();
-        verify(responseService).generateResponseIfAbsent(only);
+        verify(tweetRepository).findUnansweredBatchAfter(isNull(), any(Pageable.class));
+        verify(responseService).generateResponseIfAbsentFor(only);
         verify(notionService).updateTweetResponse(FIRST_CANDIDATE_ID_TEXT, FIRST_REPLY_TEXT);
         verifyNoMoreInteractions(tweetRepository, responseService, notionService);
     }
@@ -271,21 +282,21 @@ class ResponseGenerationSchedulerTest {
     void reachesTheSameCollaboratorsWhateverTheApprovalFlagHolds(boolean approved) {
         Tweet first = candidate(FIRST_CANDIDATE_ID);
         Tweet second = candidate(SECOND_CANDIDATE_ID);
-        when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(first, second));
-        when(responseService.generateResponseIfAbsent(first))
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class))).thenReturn(List.of(first, second));
+        when(responseService.generateResponseIfAbsentFor(first))
                 .thenReturn(Optional.of(reply(FIRST_REPLY_ID, FIRST_REPLY_TEXT,
                         FIRST_CANDIDATE_ID_TEXT, approved)));
-        when(responseService.generateResponseIfAbsent(second))
+        when(responseService.generateResponseIfAbsentFor(second))
                 .thenReturn(Optional.of(reply(SECOND_REPLY_ID, SECOND_REPLY_TEXT,
                         SECOND_CANDIDATE_ID_TEXT, approved)));
 
         scheduler.generatePendingResponses();
 
         InOrder pass = inOrder(tweetRepository, responseService, notionService);
-        pass.verify(tweetRepository).findByResponsesIsEmpty();
-        pass.verify(responseService).generateResponseIfAbsent(first);
+        pass.verify(tweetRepository).findUnansweredBatchAfter(isNull(), any(Pageable.class));
+        pass.verify(responseService).generateResponseIfAbsentFor(first);
         pass.verify(notionService).updateTweetResponse(FIRST_CANDIDATE_ID_TEXT, FIRST_REPLY_TEXT);
-        pass.verify(responseService).generateResponseIfAbsent(second);
+        pass.verify(responseService).generateResponseIfAbsentFor(second);
         pass.verify(notionService).updateTweetResponse(SECOND_CANDIDATE_ID_TEXT, SECOND_REPLY_TEXT);
         pass.verifyNoMoreInteractions();
     }
@@ -293,7 +304,7 @@ class ResponseGenerationSchedulerTest {
     @Test
     @DisplayName("does nothing when no candidate awaits a reply")
     void doesNothingWhenNoCandidateAwaitsAReply() {
-        when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of());
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class))).thenReturn(List.of());
 
         assertThatCode(() -> scheduler.generatePendingResponses()).doesNotThrowAnyException();
 
@@ -304,13 +315,13 @@ class ResponseGenerationSchedulerTest {
     @DisplayName("mirrors nothing when the candidate already carried a reply")
     void mirrorsNothingWhenTheCandidateAlreadyCarriedAReply() {
         Tweet only = candidate(FIRST_CANDIDATE_ID);
-        when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(only));
-        when(responseService.generateResponseIfAbsent(any(Tweet.class)))
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class))).thenReturn(List.of(only));
+        when(responseService.generateResponseIfAbsentFor(any(Tweet.class)))
                 .thenReturn(Optional.empty());
 
         scheduler.generatePendingResponses();
 
-        verify(responseService).generateResponseIfAbsent(only);
+        verify(responseService).generateResponseIfAbsentFor(only);
         verifyNoInteractions(notionService);
     }
 
@@ -319,16 +330,16 @@ class ResponseGenerationSchedulerTest {
     void continuesWithTheNextCandidateAfterOneCandidateFails() {
         Tweet first = candidate(FIRST_CANDIDATE_ID);
         Tweet second = candidate(SECOND_CANDIDATE_ID);
-        when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(first, second));
-        when(responseService.generateResponseIfAbsent(first))
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class))).thenReturn(List.of(first, second));
+        when(responseService.generateResponseIfAbsentFor(first))
                 .thenThrow(new IllegalStateException("generation refused"));
-        when(responseService.generateResponseIfAbsent(second))
+        when(responseService.generateResponseIfAbsentFor(second))
                 .thenReturn(Optional.of(reply(SECOND_REPLY_ID, SECOND_REPLY_TEXT,
                         SECOND_CANDIDATE_ID_TEXT)));
 
         assertThatCode(() -> scheduler.generatePendingResponses()).doesNotThrowAnyException();
 
-        verify(responseService).generateResponseIfAbsent(second);
+        verify(responseService).generateResponseIfAbsentFor(second);
         verify(notionService).updateTweetResponse(SECOND_CANDIDATE_ID_TEXT, SECOND_REPLY_TEXT);
         verifyNoMoreInteractions(notionService);
     }
@@ -336,7 +347,7 @@ class ResponseGenerationSchedulerTest {
     @Test
     @DisplayName("returns normally when the candidate query fails")
     void returnsNormallyWhenTheCandidateQueryFails() {
-        when(tweetRepository.findByResponsesIsEmpty())
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
                 .thenThrow(new IllegalStateException("candidate query refused"));
 
         assertThatCode(() -> scheduler.generatePendingResponses()).doesNotThrowAnyException();
@@ -348,8 +359,8 @@ class ResponseGenerationSchedulerTest {
     @DisplayName("returns normally when mirroring a stored reply is rejected")
     void returnsNormallyWhenMirroringAStoredReplyIsRejected() {
         Tweet only = candidate(FIRST_CANDIDATE_ID);
-        when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(only));
-        when(responseService.generateResponseIfAbsent(any(Tweet.class)))
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class))).thenReturn(List.of(only));
+        when(responseService.generateResponseIfAbsentFor(any(Tweet.class)))
                 .thenReturn(Optional.of(reply(FIRST_REPLY_ID, FIRST_REPLY_TEXT,
                         FIRST_CANDIDATE_ID_TEXT)));
         doThrow(new IllegalStateException("mirror refused"))
@@ -360,6 +371,89 @@ class ResponseGenerationSchedulerTest {
         verify(notionService).updateTweetResponse(FIRST_CANDIDATE_ID_TEXT, FIRST_REPLY_TEXT);
         verify(tweetRepository, never()).save(any());
         verifyNoMoreInteractions(notionService);
+    }
+
+    // The pass counts a stored reply whose mirror Notion refused separately — DL-253 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("counts a stored reply whose mirror was rejected as stored without a mirror")
+    void countsAStoredReplyWhoseMirrorWasRejectedAsStoredWithoutAMirror() {
+        Tweet first = candidate(FIRST_CANDIDATE_ID);
+        Tweet second = candidate(SECOND_CANDIDATE_ID);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(List.of(first, second));
+        when(responseService.generateResponseIfAbsentFor(first))
+                .thenReturn(Optional.of(reply(FIRST_REPLY_ID, FIRST_REPLY_TEXT,
+                        FIRST_CANDIDATE_ID_TEXT)));
+        when(responseService.generateResponseIfAbsentFor(second))
+                .thenReturn(Optional.of(reply(SECOND_REPLY_ID, SECOND_REPLY_TEXT,
+                        SECOND_CANDIDATE_ID_TEXT)));
+        doThrow(new IllegalStateException("mirror refused"))
+                .when(notionService)
+                .updateTweetResponse(FIRST_CANDIDATE_ID_TEXT, FIRST_REPLY_TEXT);
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            scheduler.generatePendingResponses();
+
+            assertThat(passSummary(recorded))
+                    .isEqualTo("Response generation pass finished: 2 attempted, 2 succeeded "
+                            + "(1 stored without a Notion mirror), 0 skipped, 0 failed over "
+                            + "1 batch(es)");
+        } finally {
+            detachAppender(recorded);
+        }
+
+        // The second reply is mirrored even though Notion refused the first mirror
+        verify(notionService).updateTweetResponse(SECOND_CANDIDATE_ID_TEXT, SECOND_REPLY_TEXT);
+    }
+
+    // The pass counts a stored reply whose mirror landed separately — DL-253
+    @Test
+    @DisplayName("counts no reply as stored without a mirror when every mirror lands")
+    void countsNoReplyAsStoredWithoutAMirrorWhenEveryMirrorLands() {
+        Tweet only = candidate(FIRST_CANDIDATE_ID);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(List.of(only));
+        when(responseService.generateResponseIfAbsentFor(any(Tweet.class)))
+                .thenReturn(Optional.of(reply(FIRST_REPLY_ID, FIRST_REPLY_TEXT,
+                        FIRST_CANDIDATE_ID_TEXT)));
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            scheduler.generatePendingResponses();
+
+            assertThat(passSummary(recorded))
+                    .isEqualTo("Response generation pass finished: 1 attempted, 1 succeeded "
+                            + "(0 stored without a Notion mirror), 0 skipped, 0 failed over "
+                            + "1 batch(es)");
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
+    // A row another path answered is neither stored nor mirrored — DL-195, DL-253
+    @Test
+    @DisplayName("counts a row another path answered as skipped and not as stored")
+    void countsARowAnotherPathAnsweredAsSkippedAndNotAsStored() {
+        Tweet only = candidate(FIRST_CANDIDATE_ID);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(List.of(only));
+        when(responseService.generateResponseIfAbsentFor(any(Tweet.class))).thenReturn(Optional.empty());
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            scheduler.generatePendingResponses();
+
+            assertThat(passSummary(recorded))
+                    .isEqualTo("Response generation pass finished: 1 attempted, 0 succeeded "
+                            + "(0 stored without a Notion mirror), 1 skipped, 0 failed over "
+                            + "1 batch(es)");
+        } finally {
+            detachAppender(recorded);
+        }
+
+        verifyNoInteractions(notionService);
     }
 
     // dto/ResponseDto rejects a null content — DL-080 — see docs/DECISION_LOG.md
@@ -373,26 +467,76 @@ class ResponseGenerationSchedulerTest {
         verifyNoInteractions(tweetRepository, responseService, notionService);
     }
 
-    // The candidate query is the pass's only read of the tweets table — DL-226 — see
+    // One pass drains the whole backlog in consecutive bounded batches — DL-248 — see
     // docs/DECISION_LOG.md
     @Test
-    @DisplayName("reads the tweets table once for the whole pass, however many candidates it holds")
-    void readsTheTweetsTableOnceForTheWholePass() {
-        Tweet first = candidate(FIRST_CANDIDATE_ID);
-        Tweet second = candidate(SECOND_CANDIDATE_ID);
-        Tweet third = candidate(THIRD_CANDIDATE_ID);
-        when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(first, second, third));
-        when(responseService.generateResponseIfAbsent(any(Tweet.class)))
+    @DisplayName("drains a backlog larger than one batch within a single pass, advancing the cursor")
+    void drainsABacklogLargerThanOneBatchWithinASinglePass() {
+        int batchRows = declaredBatchBound();
+        List<Tweet> firstBatch = candidatesNumbered(1, batchRows);
+        List<Tweet> secondBatch = candidatesNumbered(batchRows + 1, 3);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(firstBatch);
+        when(tweetRepository.findUnansweredBatchAfter(eq(batchRows), any(Pageable.class)))
+                .thenReturn(secondBatch);
+        when(responseService.generateResponseIfAbsentFor(any(Tweet.class)))
                 .thenReturn(Optional.of(reply(FIRST_REPLY_ID, FIRST_REPLY_TEXT,
                         FIRST_CANDIDATE_ID_TEXT)));
 
         scheduler.generatePendingResponses();
 
-        verify(tweetRepository).findByResponsesIsEmpty();
+        verify(responseService, times(batchRows + secondBatch.size()))
+                .generateResponseIfAbsentFor(any(Tweet.class));
+        ArgumentCaptor<Pageable> batchRequests = ArgumentCaptor.forClass(Pageable.class);
+        ArgumentCaptor<Integer> cursors = ArgumentCaptor.forClass(Integer.class);
+        verify(tweetRepository, times(2))
+                .findUnansweredBatchAfter(cursors.capture(), batchRequests.capture());
+        assertThat(cursors.getAllValues()).as("cursor each batch was read from")
+                .containsExactly(null, batchRows);
+        assertThat(batchRequests.getAllValues()).as("row bound each batch asked for")
+                .allSatisfy(request -> {
+                    assertThat(request.getPageSize()).isEqualTo(batchRows);
+                    assertThat(request.getSort()).isEqualTo(Sort.by(Sort.Direction.ASC, "id"));
+                });
+    }
+
+    // A batch that comes back short ends the sweep — DL-248 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("ends the sweep at the batch that comes back short of its row bound")
+    void endsTheSweepAtTheBatchThatComesBackShortOfItsRowBound() {
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(List.of(candidate(FIRST_CANDIDATE_ID)));
+        when(responseService.generateResponseIfAbsentFor(any(Tweet.class)))
+                .thenReturn(Optional.of(reply(FIRST_REPLY_ID, FIRST_REPLY_TEXT,
+                        FIRST_CANDIDATE_ID_TEXT)));
+
+        scheduler.generatePendingResponses();
+
+        verify(tweetRepository).findUnansweredBatchAfter(isNull(), any(Pageable.class));
+        verify(tweetRepository, never())
+                .findUnansweredBatchAfter(eq(FIRST_CANDIDATE_ID), any(Pageable.class));
+    }
+
+    // One statement per candidate batch, and no per-candidate read — DL-226, DL-248 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reads the tweets table once per candidate batch and never per candidate")
+    void readsTheTweetsTableOncePerCandidateBatchAndNeverPerCandidate() {
+        Tweet first = candidate(FIRST_CANDIDATE_ID);
+        Tweet second = candidate(SECOND_CANDIDATE_ID);
+        Tweet third = candidate(THIRD_CANDIDATE_ID);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class))).thenReturn(List.of(first, second, third));
+        when(responseService.generateResponseIfAbsentFor(any(Tweet.class)))
+                .thenReturn(Optional.of(reply(FIRST_REPLY_ID, FIRST_REPLY_TEXT,
+                        FIRST_CANDIDATE_ID_TEXT)));
+
+        scheduler.generatePendingResponses();
+
+        verify(tweetRepository).findUnansweredBatchAfter(isNull(), any(Pageable.class));
         verifyNoMoreInteractions(tweetRepository);
 
         ArgumentCaptor<Tweet> handedOn = ArgumentCaptor.forClass(Tweet.class);
-        verify(responseService, times(3)).generateResponseIfAbsent(handedOn.capture());
+        verify(responseService, times(3)).generateResponseIfAbsentFor(handedOn.capture());
         assertThat(handedOn.getAllValues())
                 .as("rows handed to the generator")
                 .containsExactly(first, second, third);
@@ -402,8 +546,8 @@ class ResponseGenerationSchedulerTest {
     @DisplayName("leaves the responses collection of a candidate row untouched")
     void leavesTheResponsesCollectionOfACandidateRowUntouched() {
         Tweet only = candidate(FIRST_CANDIDATE_ID);
-        when(tweetRepository.findByResponsesIsEmpty()).thenReturn(List.of(only));
-        when(responseService.generateResponseIfAbsent(any(Tweet.class)))
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class))).thenReturn(List.of(only));
+        when(responseService.generateResponseIfAbsentFor(any(Tweet.class)))
                 .thenReturn(Optional.of(reply(FIRST_REPLY_ID, FIRST_REPLY_TEXT,
                         FIRST_CANDIDATE_ID_TEXT)));
 
@@ -411,6 +555,38 @@ class ResponseGenerationSchedulerTest {
 
         assertThat(only.getResponses()).as("responses collection of the candidate row").isEmpty();
         verify(tweetRepository, never()).save(any());
+    }
+
+    /**
+     * Builds consecutively numbered candidate rows.
+     *
+     * @param firstIdentifier the identifier the first row carries
+     * @param rows            the number of rows to build
+     * @return the rows
+     */
+    private static List<Tweet> candidatesNumbered(int firstIdentifier, int rows) {
+        List<Tweet> built = new ArrayList<>(rows);
+        for (int row = 0; row < rows; row++) {
+            built.add(candidate(firstIdentifier + row));
+        }
+        return List.copyOf(built);
+    }
+
+    /**
+     * Reads the batch bound the pass declares, so these assertions and the pass cannot drift.
+     *
+     * @return the value of the declared candidate batch bound
+     */
+    private static int declaredBatchBound() {
+        try {
+            Field bound = ResponseGenerationScheduler.class
+                    .getDeclaredField("CANDIDATE_BATCH_ROWS");
+            bound.setAccessible(true);
+            return (int) bound.get(null);
+        } catch (ReflectiveOperationException absent) {
+            throw new AssertionError(
+                    "ResponseGenerationScheduler must declare CANDIDATE_BATCH_ROWS.", absent);
+        }
     }
 
     /**
@@ -463,5 +639,44 @@ class ResponseGenerationSchedulerTest {
             pairs.add(identifiers.get(index) + "=" + text.get(index));
         }
         return pairs;
+    }
+
+    /**
+     * Attaches a recording appender to the logger of the unit under test.
+     *
+     * @return the attached appender
+     */
+    private static ListAppender<ILoggingEvent> attachAppender() {
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        ((Logger) LoggerFactory.getLogger(ResponseGenerationScheduler.class)).addAppender(appender);
+        return appender;
+    }
+
+    /**
+     * Detaches a recording appender from the logger of the unit under test.
+     *
+     * @param appender the appender to detach
+     */
+    private static void detachAppender(ListAppender<ILoggingEvent> appender) {
+        ((Logger) LoggerFactory.getLogger(ResponseGenerationScheduler.class))
+                .detachAppender(appender);
+    }
+
+    /**
+     * Returns the single closing summary the pass recorded.
+     *
+     * @param appender the appender that recorded the pass
+     * @return the formatted summary message
+     */
+    private static String passSummary(ListAppender<ILoggingEvent> appender) {
+        List<String> summaries = appender.list.stream()
+                .filter(event -> event.getLevel() == Level.INFO)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith("Response generation pass finished:"))
+                .toList();
+
+        assertThat(summaries).hasSize(1);
+        return summaries.get(0);
     }
 }

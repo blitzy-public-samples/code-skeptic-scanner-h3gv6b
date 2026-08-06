@@ -50,7 +50,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.reactive.function.client.WebClient;
 
@@ -197,6 +199,12 @@ class NotionServiceTest {
 
     /** Value handed to the {@code limit} parameter of {@code getTweets}. */
     private static final int LIMIT = 25;
+
+    /**
+     * Longest run of a guarded value a log record carries — the bound
+     * {@code util.LogSafe.logSafe(String)} applies to the provider-supplied rejection message.
+     */
+    private static final int GUARDED_VALUE_LIMIT = 64;
 
     /** Value handed to the {@code startCursor} parameter of {@code getTweets}. */
     private static final String START_CURSOR = "MTc5MzM1NTY4MDAwMDAwMDAwMQ";
@@ -877,12 +885,15 @@ class NotionServiceTest {
     // The record a rejected request leaves — DL-084, DL-153
     // -------------------------------------------------------------------------
 
+    // The provider explanation is reported by size, never by text — DL-269 — see
+    // docs/DECISION_LOG.md
     @Test
-    @DisplayName("records a rejection with the provider status, error code, request id and bounded "
-            + "message and never the body")
+    @DisplayName("records a rejection with the provider status, error code and request id, and the "
+            + "explanation by length only")
     void recordsARejectionWithTheProviderFieldsAndNeverTheBody() {
+        String explanation = "Media is not a property that exists.";
         String body = "{\"object\":\"error\",\"status\":400,\"code\":\"validation_error\","
-                + "\"message\":\"Media is not a property that exists.\"}";
+                + "\"message\":\"" + explanation + "\"}";
         stubPost();
         when(postSpec.uri(PAGES_PATH)).thenThrow(rejection(HttpStatus.BAD_REQUEST, body, "req-9zk"));
 
@@ -896,8 +907,49 @@ class NotionServiceTest {
                     .contains("HTTP 400")
                     .contains("Notion code validation_error")
                     .contains("request id req-9zk")
-                    .contains("Media is not a property that exists.");
+                    .contains("explanation length " + explanation.length());
+            assertThat(logged).doesNotContain(explanation);
             assertThat(logged).doesNotContain("\"object\"").doesNotContain("\"status\":400");
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
+    @Test
+    @DisplayName("carries no character of a control-character-bearing explanation into the record")
+    void carriesNoCharacterOfAControlCharacterBearingExplanationIntoTheRecord() {
+        String body = "{\"code\":\"validation_error\",\"message\":"
+                + "\"denied\\r\\n2026-01-01 ERROR forged administrator record\\u0000tail\"}";
+        stubPost();
+        when(postSpec.uri(PAGES_PATH)).thenThrow(rejection(HttpStatus.BAD_REQUEST, body, "req-2"));
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            assertThatThrownBy(() -> service.storeTweet(tweet()))
+                    .isInstanceOf(HttpClientErrorException.class);
+
+            String logged = onlyErrorRecord(recorded);
+            assertThat(logged).doesNotContain("forged").doesNotContain("denied");
+            assertThat(logged).doesNotContain("\r").doesNotContain("\n").doesNotContain("\u0000");
+            assertThat(logged).contains("explanation length 57");
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
+    @Test
+    @DisplayName("reports an absent explanation as a length below zero")
+    void reportsAnAbsentExplanationAsALengthBelowZero() {
+        stubPost();
+        when(postSpec.uri(PAGES_PATH)).thenThrow(rejection(HttpStatus.BAD_REQUEST,
+                "{\"code\":\"validation_error\"}", "req-3"));
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            assertThatThrownBy(() -> service.storeTweet(tweet()))
+                    .isInstanceOf(HttpClientErrorException.class);
+
+            assertThat(onlyErrorRecord(recorded)).contains("explanation length -1");
         } finally {
             detachAppender(recorded);
         }
@@ -919,14 +971,15 @@ class NotionServiceTest {
             String logged = onlyErrorRecord(recorded);
             assertThat(logged).contains("Notion code absent").contains("request id absent");
             assertThat(logged).doesNotContain("injected").doesNotContain("forged");
+            assertThat(logged).doesNotContain("nope").contains("explanation length 4");
         } finally {
             detachAppender(recorded);
         }
     }
 
     @Test
-    @DisplayName("cuts a rejection message to two hundred characters")
-    void cutsARejectionMessageToTwoHundredCharacters() {
+    @DisplayName("carries no run of a five hundred character rejection message into the record")
+    void carriesNoRunOfAFiveHundredCharacterRejectionMessageIntoTheRecord() {
         String longMessage = "x".repeat(500);
         String body = "{\"code\":\"validation_error\",\"message\":\"" + longMessage + "\"}";
         stubPost();
@@ -937,8 +990,9 @@ class NotionServiceTest {
             assertThatThrownBy(() -> service.storeTweet(tweet()))
                     .isInstanceOf(HttpClientErrorException.class);
 
-            assertThat(onlyErrorRecord(recorded)).contains("x".repeat(200))
-                    .doesNotContain("x".repeat(201));
+            assertThat(onlyErrorRecord(recorded))
+                    .doesNotContain("xx")
+                    .contains("explanation length 500");
         } finally {
             detachAppender(recorded);
         }
@@ -1197,6 +1251,151 @@ class NotionServiceTest {
                 .isSameAs(transportFailure);
 
         verify(pageUpdateResponse).toBodilessEntity();
+    }
+
+    // -------------------------------------------------------------------------
+    // Mirror retry — DL-253
+    // -------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("attempts a rate-limited mirror write again and reports the write once it lands")
+    void attemptsARateLimitedMirrorWriteAgain() {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, noProperties())));
+        stubPageUpdate();
+        when(pageUpdateResponse.toBodilessEntity())
+                .thenThrow(new HttpClientErrorException(HttpStatus.TOO_MANY_REQUESTS))
+                .thenReturn(new ResponseEntity<Void>(HttpStatus.OK));
+
+        serviceRetrying(DATABASE_ID, 1).updateTweetResponse(TWEET_ID, RESPONSE_TEXT);
+
+        verify(pageUpdateResponse, times(2)).toBodilessEntity();
+    }
+
+    @Test
+    @DisplayName("attempts a mirror write the provider answered with a server error again")
+    void attemptsAMirrorWriteAnsweredWithAServerErrorAgain() {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, noProperties())));
+        stubPageUpdate();
+        when(pageUpdateResponse.toBodilessEntity())
+                .thenThrow(new HttpServerErrorException(HttpStatus.SERVICE_UNAVAILABLE))
+                .thenReturn(new ResponseEntity<Void>(HttpStatus.OK));
+
+        serviceRetrying(DATABASE_ID, 1).updateTweetResponse(TWEET_ID, RESPONSE_TEXT);
+
+        verify(pageUpdateResponse, times(2)).toBodilessEntity();
+    }
+
+    @Test
+    @DisplayName("attempts a mirror write that failed without a status again")
+    void attemptsAMirrorWriteThatFailedWithoutAStatusAgain() {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, noProperties())));
+        stubPageUpdate();
+        when(pageUpdateResponse.toBodilessEntity())
+                .thenThrow(new IllegalStateException("the PATCH did not complete"))
+                .thenReturn(new ResponseEntity<Void>(HttpStatus.OK));
+
+        serviceRetrying(DATABASE_ID, 1).updateTweetResponse(TWEET_ID, RESPONSE_TEXT);
+
+        verify(pageUpdateResponse, times(2)).toBodilessEntity();
+    }
+
+    @ParameterizedTest(name = "a {0} answer is not attempted again")
+    @ValueSource(ints = {400, 401, 403, 404, 409})
+    @DisplayName("makes one attempt only when the provider answered with a status it will repeat")
+    void makesOneAttemptOnlyForAStatusTheProviderWillRepeat(int status) {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, noProperties())));
+        stubPageUpdate();
+        HttpClientErrorException rejected =
+                new HttpClientErrorException(HttpStatus.valueOf(status));
+        when(pageUpdateResponse.toBodilessEntity()).thenThrow(rejected);
+
+        NotionService retrying = serviceRetrying(DATABASE_ID, 3);
+
+        assertThatThrownBy(() -> retrying.updateTweetResponse(TWEET_ID, RESPONSE_TEXT))
+                .isSameAs(rejected);
+
+        verify(pageUpdateResponse, times(1)).toBodilessEntity();
+    }
+
+    @Test
+    @DisplayName("reports the failure once the retry budget is spent")
+    void reportsTheFailureOnceTheRetryBudgetIsSpent() {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, noProperties())));
+        stubPageUpdate();
+        HttpClientErrorException rateLimited =
+                new HttpClientErrorException(HttpStatus.TOO_MANY_REQUESTS);
+        when(pageUpdateResponse.toBodilessEntity()).thenThrow(rateLimited);
+
+        NotionService retrying = serviceRetrying(DATABASE_ID, 2);
+
+        assertThatThrownBy(() -> retrying.updateTweetResponse(TWEET_ID, RESPONSE_TEXT))
+                .isSameAs(rateLimited);
+
+        // One first attempt plus the two the budget allows
+        verify(pageUpdateResponse, times(3)).toBodilessEntity();
+    }
+
+    @Test
+    @DisplayName("makes one attempt only when the retry budget is zero")
+    void makesOneAttemptOnlyWhenTheRetryBudgetIsZero() {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, noProperties())));
+        stubPageUpdate();
+        HttpClientErrorException rateLimited =
+                new HttpClientErrorException(HttpStatus.TOO_MANY_REQUESTS);
+        when(pageUpdateResponse.toBodilessEntity()).thenThrow(rateLimited);
+
+        assertThatThrownBy(() -> service.updateTweetResponse(TWEET_ID, RESPONSE_TEXT))
+                .isSameAs(rateLimited);
+
+        verify(pageUpdateResponse, times(1)).toBodilessEntity();
+    }
+
+    @Test
+    @DisplayName("makes one attempt only when the notion group is unbound")
+    void makesOneAttemptOnlyWhenTheNotionGroupIsUnbound() {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, noProperties())));
+        stubPageUpdate();
+        HttpClientErrorException rateLimited =
+                new HttpClientErrorException(HttpStatus.TOO_MANY_REQUESTS);
+        when(pageUpdateResponse.toBodilessEntity()).thenThrow(rateLimited);
+
+        NotionService unbound = new NotionService(restClient,
+                new ScannerProperties(null, 100, 60L, null,
+                        new ScannerProperties.Notion(API_KEY, DATABASE_ID, "2022-06-28", 5L, 10L,
+                                0, 0L),
+                        null, null, null, null, null, null));
+
+        assertThatThrownBy(() -> unbound.updateTweetResponse(TWEET_ID, RESPONSE_TEXT))
+                .isSameAs(rateLimited);
+
+        verify(pageUpdateResponse, times(1)).toBodilessEntity();
+    }
+
+    @Test
+    @DisplayName("reads a negative retry budget and a negative backoff as zero")
+    void readsANegativeRetryBudgetAndANegativeBackoffAsZero() {
+        ScannerProperties.Notion group = new ScannerProperties.Notion(API_KEY, DATABASE_ID,
+                "2022-06-28", 5L, 10L, -4, -250L);
+
+        assertThat(group.mirrorMaxRetries()).isZero();
+        assertThat(group.mirrorRetryBackoffMillis()).isZero();
+    }
+
+    @Test
+    @DisplayName("keeps a configured retry budget and backoff as bound")
+    void keepsAConfiguredRetryBudgetAndBackoffAsBound() {
+        ScannerProperties.Notion group = new ScannerProperties.Notion(API_KEY, DATABASE_ID,
+                "2022-06-28", 5L, 10L, 3, 750L);
+
+        assertThat(group.mirrorMaxRetries()).isEqualTo(3);
+        assertThat(group.mirrorRetryBackoffMillis()).isEqualTo(750L);
     }
 
     @Test
@@ -1485,15 +1684,43 @@ class NotionServiceTest {
     }
 
     /**
+     * Builds the unit under test over a {@code scanner.notion} group whose mirror retry budget is the
+     * supplied one and whose backoff is zero, so no test waits — DL-253.
+     *
+     * @param databaseId value bound to {@code scanner.notion.database-id}
+     * @param retries    value bound to {@code scanner.notion.mirror-max-retries}
+     * @return the unit under test, holding {@link #restClient}
+     */
+    private NotionService serviceRetrying(String databaseId, int retries) {
+        return new NotionService(restClient, propertiesCarrying(databaseId, retries, 0L));
+    }
+
+    /**
      * Builds a configuration root carrying a {@code scanner.notion} group. Every group
      * {@link NotionService} does not read is left unbound.
      *
      * @param databaseId value bound to {@code scanner.notion.database-id}
-     * @return the configuration root
+     * @return the configuration root, carrying no mirror retry
      */
     private static ScannerProperties propertiesCarrying(String databaseId) {
+        return propertiesCarrying(databaseId, 0, 0L);
+    }
+
+    /**
+     * Builds a configuration root carrying a {@code scanner.notion} group with an explicit mirror
+     * retry budget — DL-253.
+     *
+     * @param databaseId     value bound to {@code scanner.notion.database-id}
+     * @param retries        value bound to {@code scanner.notion.mirror-max-retries}
+     * @param backoffMillis  value bound to {@code scanner.notion.mirror-retry-backoff-millis}
+     * @return the configuration root
+     */
+    private static ScannerProperties propertiesCarrying(String databaseId, int retries,
+            long backoffMillis) {
         return new ScannerProperties(null, 100, 60L, null,
-                new ScannerProperties.Notion(API_KEY, databaseId, "2022-06-28", 5L, 10L), null, null, null, null, null);
+                new ScannerProperties.Notion(API_KEY, databaseId, "2022-06-28", 5L, 10L, retries,
+                        backoffMillis),
+                null, null, null, null, null, null);
     }
 
     /**

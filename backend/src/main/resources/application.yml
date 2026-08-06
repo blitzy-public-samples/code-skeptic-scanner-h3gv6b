@@ -3,21 +3,27 @@
 # Ported from backend/app/main.py:L53 (faithful port) — DL-029 — see docs/DECISION_LOG.md
 server:
   port: ${PORT:5000}
-  # Net-new (no Python counterpart) — see docs/DECISION_LOG.md
-  # The platform terminates TLS and forwards X-Forwarded-Proto. With this strategy the request
-  # reports the forwarded scheme, so HttpServletRequest.isSecure() is true behind that terminator and
-  # Spring Security's Strict-Transport-Security writer emits its header.
+  # Net-new (no Python counterpart) — DL-241 — see docs/DECISION_LOG.md
+  # With this strategy HttpServletRequest.isSecure() reports the forwarded X-Forwarded-Proto scheme,
+  # which is what Spring Security's Strict-Transport-Security writer reads.
   forward-headers-strategy: ${FORWARD_HEADERS_STRATEGY:framework}
-  # Net-new (no Python counterpart) — DL-223 — see docs/DECISION_LOG.md
-  # The embedded container's own default, declared explicitly: request headers above this size are
-  # rejected by the connector before any filter runs, and the response is written by the error-report
-  # valve config/ContainerErrorResponseConfig installs.
+  # Net-new (no Python counterpart) — DL-238 — see docs/DECISION_LOG.md
+  # The embedded container's own default, declared explicitly. Request headers above this size are
+  # rejected by the connector before any filter runs; the response is written by the error-report valve
+  # config/ContainerErrorResponseConfig installs — DL-237.
   max-http-request-header-size: ${MAX_HTTP_REQUEST_HEADER_SIZE:8KB}
+  # Net-new (no Python counterpart) — DL-271 — see docs/DECISION_LOG.md
+  # The connector stops accepting requests and drains the requests already in flight before the
+  # context closes, so the connection pool config/DataSourceConfig publishes is closed only after the
+  # last request that could still borrow a connection has returned. The drain is bounded by
+  # spring.lifecycle.timeout-per-shutdown-phase below.
+  shutdown: ${SERVER_SHUTDOWN:graceful}
 
-# Net-new (the retired tree configured no logging framework) — DL-052 — see docs/DECISION_LOG.md
-# Spring Boot's default root level is INFO. This key names the application logger explicitly so the
-# DEBUG diagnostics of the ingestion, scheduling and adapter paths are reachable by configuration
-# alone, without a logback or log4j document.
+# Net-new (the retired tree configured no logging framework) — DL-052, DL-206 — see
+# docs/DECISION_LOG.md
+# The level of the application logger, which is the level the DEBUG diagnostics of the ingestion,
+# scheduling and adapter paths are emitted at. It is the only logging key in the tree and there is no
+# logback or log4j document.
 logging:
   level:
     com.codeskeptic.scanner: ${SCANNER_LOG_LEVEL:INFO}
@@ -27,7 +33,13 @@ spring:
   main:
     # Net-new (no Python counterpart) — DL-030 — see docs/DECISION_LOG.md
     web-application-type: servlet
-  # spring.datasource.url / .username / .password / .driver-class-name — not set — DL-027 — see docs/DECISION_LOG.md
+  # Net-new (no Python counterpart) — DL-271 — see docs/DECISION_LOG.md
+  # Ceiling on the graceful drain configured by server.shutdown above. A request still in flight at
+  # this bound is abandoned and shutdown proceeds, so a stuck request cannot hold the process open.
+  lifecycle:
+    timeout-per-shutdown-phase: ${SHUTDOWN_GRACE_PERIOD:30s}
+  # spring.datasource.url / .username / .password / .driver-class-name — not set, and refused when
+  # configured; the pool surface is scanner.datasource.pool.* — DL-027, DL-270 — see docs/DECISION_LOG.md
   # spring.jackson.property-naming-strategy — not set — DL-022 — see docs/DECISION_LOG.md
   jackson:
     parser:
@@ -51,6 +63,34 @@ spring:
 scanner:
   # Ported from backend/app/core/config.py:L9 and backend/app/db/database.py:L7 (faithful port) — DL-027 — see docs/DECISION_LOG.md
   database-url: ${DATABASE_URL}
+
+  datasource:
+    # Net-new (no Python counterpart: backend/app/db/database.py:L5-8 built a fresh unpooled engine
+    # per call) — DL-270, DL-271 — see docs/DECISION_LOG.md
+    # The complete pool surface. Geometry and timing only: no URL, credential, driver, catalog,
+    # schema, initialisation statement or driver-property map is configurable here, and the
+    # spring.datasource.* surface is not read at all. Every value below is range-checked as it binds
+    # and refuses to start outside its range.
+    pool:
+      # Connections this replica opens at most. Accepted range: 1 to 100 inclusive.
+      maximum-size: ${DB_POOL_MAXIMUM_SIZE:10}
+      # Connections kept open while idle. Accepted range: 0 to maximum-size inclusive. HikariCP's own
+      # default for this setting is maximum-size.
+      minimum-idle: ${DB_POOL_MINIMUM_IDLE:2}
+      # How long a caller waits for a connection. Accepted range: 250ms or greater.
+      connection-timeout-millis: ${DB_POOL_CONNECTION_TIMEOUT_MILLIS:30000}
+      # How long a connection test may take. Accepted range: 250ms or greater.
+      validation-timeout-millis: ${DB_POOL_VALIDATION_TIMEOUT_MILLIS:5000}
+      # Age at which a connection above minimum-idle is retired. Accepted: 0 — never — or 10000ms or
+      # greater.
+      idle-timeout-millis: ${DB_POOL_IDLE_TIMEOUT_MILLIS:600000}
+      # Age at which any connection is retired. Accepted: 0 — no maximum — or 30000ms or greater.
+      max-lifetime-millis: ${DB_POOL_MAX_LIFETIME_MILLIS:1800000}
+      # How long a connection may be held out of the pool before HikariCP reports it. Accepted: 0 —
+      # off — or 2000ms or greater.
+      leak-detection-threshold-millis: ${DB_POOL_LEAK_DETECTION_THRESHOLD_MILLIS:0}
+      # Name HikariCP carries on its own log records, threads and metrics.
+      name: ${DB_POOL_NAME:code-skeptic-scanner-pool}
   # Ported from backend/app/core/config.py:L10 and backend/app/services/twitter_service.py:L43,L46 (faithful port) — see docs/DECISION_LOG.md
   popularity-threshold: ${TWEET_POPULARITY_THRESHOLD:100}
   # Ported from backend/app/core/config.py:L11 and backend/app/tasks/response_generation.py:L50 (faithful port) — see docs/DECISION_LOG.md
@@ -70,8 +110,13 @@ scanner:
     access-token-secret: ${TWITTER_ACCESS_TOKEN_SECRET:}
     # Net-new (no Python counterpart) — DL-230 — see docs/DECISION_LOG.md
     # Bounds the app-only token exchange and the stream-rules calls. The filtered-stream
-    # subscription is deliberately unbounded. A value below 1 is read as 1 second.
+    # subscription is not bounded by it. A value below 1 is read as 1 second.
     request-timeout-seconds: ${TWITTER_REQUEST_TIMEOUT_SECONDS:10}
+    # Net-new (no Python counterpart) — DL-243 — see docs/DECISION_LOG.md
+    # Bounds the wait between two records the filtered stream delivers, keep-alive records
+    # included. Accepted range: 1 second or greater, and it must exceed the 20 second keep-alive
+    # cadence X documents. Exceeding it reconnects.
+    stream-idle-timeout-seconds: ${TWITTER_STREAM_IDLE_TIMEOUT_SECONDS:30}
 
   notion:
     # Ported from backend/app/core/config.py:L7 and backend/app/services/notion_service.py:L8 (faithful port) — see docs/DECISION_LOG.md
@@ -84,6 +129,12 @@ scanner:
     connect-timeout-seconds: ${NOTION_CONNECT_TIMEOUT_SECONDS:5}
     # Net-new (no Python counterpart) — DL-150 — see docs/DECISION_LOG.md
     read-timeout-seconds: ${NOTION_READ_TIMEOUT_SECONDS:10}
+    # Net-new (no Python counterpart) — DL-253 — see docs/DECISION_LOG.md
+    # Retries a mirror write makes after its first attempt, and the wait before the first retry which
+    # doubles before each later one. Only a retryable answer is retried: 429, a 5xx status and a
+    # transport failure.
+    mirror-max-retries: ${NOTION_MIRROR_MAX_RETRIES:2}
+    mirror-retry-backoff-millis: ${NOTION_MIRROR_RETRY_BACKOFF_MILLIS:500}
 
   openai:
     # Ported from backend/app/core/config.py:L8 and backend/app/services/llm_service.py:L9 (faithful port) — see docs/DECISION_LOG.md
@@ -91,20 +142,20 @@ scanner:
     # Net-new (no Python counterpart) — DL-033 — see docs/DECISION_LOG.md
     model: gpt-5.6-terra
     # Ported from backend/app/services/llm_service.py:L22 (faithful port) — DL-034, DL-202 — see docs/DECISION_LOG.md
-    # Source value: 150, carried unchanged. The whole budget is available to visible output because
+    # Source value: 150, carried unchanged. The whole budget is available to visible output while
     # scanner.openai.reasoning-effort is none.
     max-completion-tokens: ${OPENAI_MAX_COMPLETION_TOKENS:150}
     # Ported from backend/app/services/llm_service.py:L25 (faithful port) — DL-200 — see docs/DECISION_LOG.md
-    # Source value: 0.7, carried unchanged. The configured model accepts an explicit temperature only
-    # while scanner.openai.reasoning-effort is none — DL-145. Accepted range: 0 to 2 inclusive; the
-    # value is range-checked at the request. An empty value omits the parameter altogether.
+    # Source value: 0.7, carried unchanged. Accepted range: 0 to 2 inclusive. An empty value omits
+    # the parameter altogether. Carrying a value while scanner.openai.reasoning-effort names an
+    # effort other than none is refused before the request is built — DL-145.
     temperature: ${OPENAI_TEMPERATURE:0.7}
     # Ported from backend/app/services/llm_service.py:L23 (faithful port) — see docs/DECISION_LOG.md
     n: ${OPENAI_N:1}
     # Net-new (no Python counterpart) — DL-145 — see docs/DECISION_LOG.md
-    # Accepted by the configured model: none, low, medium, high, xhigh. A blank value omits the
-    # parameter. Measured against gpt-5.6-terra: minimal and max are answered HTTP 400
-    # unsupported_value — see docs/DECISION_LOG.md DL-145.
+    # Accepted values: none, low, medium, high, xhigh, max. A blank value omits the parameter. Any
+    # other value, minimal included, refuses to build the request. Only none permits an explicit
+    # scanner.openai.temperature — DL-145.
     reasoning-effort: ${OPENAI_REASONING_EFFORT:none}
     # Net-new (no Python counterpart) — DL-146 — see docs/DECISION_LOG.md
     # Accepted range: 1 second or greater.
@@ -114,12 +165,12 @@ scanner:
     max-retries: ${OPENAI_MAX_RETRIES:2}
 
   jwt:
-    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-016, DL-141, DL-184, DL-185 — see docs/DECISION_LOG.md
+    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-016, DL-184, DL-185, DL-186 — see docs/DECISION_LOG.md
     # Minimum length: 32 bytes. Startup fails below it.
     # Declared with no default: SECRET_KEY must be supplied. Startup fails when it is unset, blank or
     # still the unresolved text ${SECRET_KEY}.
     secret: ${SECRET_KEY}
-    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-015, DL-141, DL-184 — see docs/DECISION_LOG.md
+    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-015, DL-108, DL-184 — see docs/DECISION_LOG.md
     # Accepted value: HS256, in any letter case. Any other value — HS384, HS512, RS256, none — refuses
     # to start. Blank keeps HS256.
     algorithm: ${ALGORITHM:HS256}
@@ -145,3 +196,16 @@ scanner:
       - AI code assistant
       - AI generated code
       - GPT-4
+    # Number of stream rules the account tier accepts — DL-254 — see docs/DECISION_LOG.md
+    max-stream-rules: ${TWITTER_MAX_STREAM_RULES:25}
+    # Span without any byte from the stream after which the connection is treated as dead — DL-256
+    stream-idle-timeout-seconds: ${TWITTER_STREAM_IDLE_TIMEOUT_SECONDS:60}
+
+  background:
+    # Net-new (no Python counterpart) — DL-250 — see docs/DECISION_LOG.md
+    # Which background paths this process runs. A path runs only when `enabled` and that path's own
+    # switch both hold. Every process of a multi-replica deployment other than the designated
+    # background worker sets `enabled` to false.
+    enabled: ${SCANNER_BACKGROUND_ENABLED:true}
+    stream-enabled: ${TWITTER_STREAM_ENABLED:true}
+    response-generation-enabled: ${RESPONSE_GENERATION_ENABLED:true}

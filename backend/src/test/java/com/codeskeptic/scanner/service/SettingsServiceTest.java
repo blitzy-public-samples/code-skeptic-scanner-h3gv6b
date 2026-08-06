@@ -1289,7 +1289,33 @@ class SettingsServiceTest {
                 raised.add(new AssertionError("The concurrent callers did not finish in time."));
             }
         } finally {
-            callers.shutdownNow();
+            // The pool is awaited and its termination asserted, so no thread of this test outlives
+            // it — DL-273 — see docs/DECISION_LOG.md
+            awaitTermination(callers);
+        }
+    }
+
+    // Net-new: every test executor is awaited and its termination asserted — DL-273 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Shuts the supplied executor down and asserts that it terminates.
+     *
+     * <p>Termination is awaited for at most {@value #CONCURRENCY_TIMEOUT_SECONDS} seconds. A thread
+     * still running at that bound fails the test rather than being left behind for the rest of the
+     * build. An interrupt while awaiting is restored on the calling thread and reported, so the
+     * interrupt is neither swallowed nor mistaken for a clean termination.
+     *
+     * @param executor the executor to release
+     */
+    private static void awaitTermination(ExecutorService executor) {
+        executor.shutdownNow();
+        try {
+            assertThat(executor.awaitTermination(CONCURRENCY_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+                    .as("the concurrent-caller pool terminated").isTrue();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("Interrupted while awaiting the concurrent-caller pool.",
+                    interrupted);
         }
     }
 

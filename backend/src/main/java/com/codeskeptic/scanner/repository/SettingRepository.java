@@ -29,7 +29,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * DL-026.
  */
 // Ported from backend/app/db/database.py:L10-13 (faithful port) — see docs/DECISION_LOG.md
-// The identifier type parameter is String, matching the settings.key primary key — DL-070 — see
-// docs/DECISION_LOG.md
+// The identifier type parameter is String, matching the assigned settings.key primary key — DL-244
+// — see docs/DECISION_LOG.md
 public interface SettingRepository extends JpaRepository<Setting, String> {
 }

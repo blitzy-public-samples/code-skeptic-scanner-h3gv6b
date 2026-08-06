@@ -16,12 +16,12 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 
-// Net-new (no Python counterpart) — DL-198 — see docs/DECISION_LOG.md
+// Net-new (no Python counterpart) — DL-118 — see docs/DECISION_LOG.md
 /**
  * Verifies the charset the request wrapper decodes the cached login body with.
  *
- * <p>The wrapper is a private nested class of {@link SecurityConfig}, so it is reached reflectively
- * rather than by widening its visibility for the benefit of a test.
+ * <p>The wrapper is a private nested class of {@link SecurityConfig} and is reached reflectively; its
+ * declared visibility is unchanged.
  */
 class CachedBodyRequestTest {
 
@@ -44,7 +44,7 @@ class CachedBodyRequestTest {
     }
 
     // Charset.forName throws UnsupportedCharsetException and IllegalCharsetNameException, both
-    // unchecked — finding 24 — DL-198 — see docs/DECISION_LOG.md
+    // unchecked — DL-118 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] \"{0}\"")
     @ValueSource(strings = {
         "not-a-charset",

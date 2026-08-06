@@ -14,43 +14,31 @@ import jakarta.persistence.Table;
  * generated. The table is created from these annotations by
  * {@code spring.jpa.hibernate.ddl-auto} — see docs/DECISION_LOG.md DL-026.
  *
- * <p>{@code value} and {@code description} declare {@code length = Integer.MAX_VALUE} and are
- * generated as each vendor's unbounded character type. Their source declaration is the bare
- * {@code Column(String)} at backend/app/db/models.py:L43-44 — DL-068 — see docs/DECISION_LOG.md.
- * {@code key} declares {@link #KEY_LENGTH} and is generated as {@code varchar(768)} on H2,
- * PostgreSQL and MySQL — DL-069 — see docs/DECISION_LOG.md.
+ * <p>No column declares a not-null marker, a duplicate-value restriction or a width bound. All three
+ * carry a bare {@code @Column}, matching the bare {@code Column(String)} at
+ * backend/app/db/models.py:L42-44 — DL-068 — see docs/DECISION_LOG.md.
  */
 // Ported from backend/app/db/models.py:L39-44 (faithful port) — see docs/DECISION_LOG.md
 // Departures from the literal source declaration, each recorded in the decision log: key and value
-// are declared as JPA quoted identifiers, with the physical column names key and value — DL-061;
-// key declares length = 768 where the source declared no bound — DL-069 — see
-// docs/DECISION_LOG.md
-// equals(Object) and hashCode() are net-new Java persistence mechanics — DL-203 — see
+// are declared as JPA quoted identifiers, with the physical column names key and value — DL-061 —
+// see docs/DECISION_LOG.md
+// equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see
 // docs/DECISION_LOG.md
 @Entity
 @Table(name = "settings")
 public class Setting {
 
-    /**
-     * Declared character length of the {@code settings.key} primary-key column. It is generated as
-     * {@code varchar(768)} on H2, PostgreSQL and MySQL — DL-069 — see docs/DECISION_LOG.md.
-     */
-    static final int KEY_LENGTH = 768;
-
-    // backend/app/db/models.py:L42 — quoted identifier — DL-061 — and declared capacity 768 —
-    // DL-069 — see docs/DECISION_LOG.md
+    // backend/app/db/models.py:L42 — quoted identifier — DL-061 — see docs/DECISION_LOG.md
     @Id
-    @Column(name = "\"key\"", length = KEY_LENGTH)
+    @Column(name = "\"key\"")
     private String key;
 
-    // backend/app/db/models.py:L43 — quoted identifier — DL-061 — and unbounded character mapping
-    // — DL-068 — see docs/DECISION_LOG.md
-    @Column(name = "\"value\"", length = Integer.MAX_VALUE)
+    // backend/app/db/models.py:L43 — quoted identifier — DL-061 — see docs/DECISION_LOG.md
+    @Column(name = "\"value\"")
     private String value;
 
     // backend/app/db/models.py:L44
-    // Unbounded character mapping — DL-068 — see docs/DECISION_LOG.md
-    @Column(name = "description", length = Integer.MAX_VALUE)
+    @Column(name = "description")
     private String description;
 
     /**
@@ -97,7 +85,7 @@ public class Setting {
         this.description = description;
     }
 
-    // Net-new Java persistence mechanics (no Python counterpart) — DL-203 — see
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
     // docs/DECISION_LOG.md
     /**
      * Compares two settings by their {@code key} identifier.
@@ -126,7 +114,7 @@ public class Setting {
         return thisKey != null && thisKey.equals(that.getKey());
     }
 
-    // Net-new Java persistence mechanics (no Python counterpart) — DL-203 — see
+    // Net-new Java persistence mechanics (no Python counterpart) — DL-023 — see
     // docs/DECISION_LOG.md
     /**
      * Returns a hash code derived from the entity type. The value is identical

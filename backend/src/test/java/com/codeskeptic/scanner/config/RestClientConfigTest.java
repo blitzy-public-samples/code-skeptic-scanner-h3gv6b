@@ -1,30 +1,37 @@
 package com.codeskeptic.scanner.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.context.annotation.Bean;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.ClientHttpResponse;
 import org.springframework.mock.http.client.MockClientHttpResponse;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 
 import com.sun.net.httpserver.HttpServer;
 
+import jakarta.annotation.PreDestroy;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
@@ -53,6 +60,15 @@ class RestClientConfigTest {
     private static final Duration REQUEST_LIMIT = Duration.ofSeconds(20);
 
     private final List<HttpHeaders> captured = new ArrayList<>();
+
+    /** Every configuration built by a test, released by {@link #releaseTransports()} — DL-264. */
+    private final List<RestClientConfig> built = new ArrayList<>();
+
+    @AfterEach
+    void releaseTransports() {
+        built.forEach(RestClientConfig::shutdownNotionHttpClient);
+        built.clear();
+    }
 
     @Test
     @DisplayName("sends the configured Notion API version")
@@ -172,9 +188,9 @@ class RestClientConfigTest {
         });
         server.start();
         try {
-            RestClient client = new RestClientConfig(propertiesCarrying(notion(API_KEY,
-                    DEFAULT_API_VERSION)))
-                    .notionRestClient(RestClient.builder())
+            RestClientConfig config = configFor(notion(API_KEY, DEFAULT_API_VERSION));
+            RestClient client = config
+                    .notionRestClient(RestClient.builder(), config.notionHttpClient())
                     .mutate()
                     .baseUrl("http://" + LOOPBACK + ":" + server.getAddress().getPort())
                     .build();
@@ -194,6 +210,121 @@ class RestClientConfigTest {
         }
     }
 
+    // The transport is a retained bean with a bounded shutdown — DL-264 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("publishes a transport carrying the configured connect timeout")
+    void publishesATransportCarryingTheConfiguredConnectTimeout() {
+        HttpClient transport = configFor(notion(API_KEY, DEFAULT_API_VERSION, 7L, 11L))
+                .notionHttpClient();
+
+        assertThat(transport.connectTimeout()).contains(Duration.ofSeconds(7L));
+    }
+
+    @Test
+    @DisplayName("publishes a transport carrying the declared default connect timeout when the group is unbound")
+    void publishesATransportCarryingTheDeclaredDefaultConnectTimeoutWhenTheGroupIsUnbound() {
+        HttpClient transport = configFor(null).notionHttpClient();
+
+        assertThat(transport.connectTimeout()).contains(Duration.ofSeconds(5L));
+    }
+
+    @ParameterizedTest(name = "[{index}] {0}s")
+    @ValueSource(longs = {0L, -1L})
+    @DisplayName("rejects a connect timeout below one second, naming the key only")
+    void rejectsAConnectTimeoutBelowOneSecondNamingTheKeyOnly(long configured) {
+        RestClientConfig config = configFor(notion(API_KEY, DEFAULT_API_VERSION, configured, 11L));
+
+        assertThatThrownBy(config::notionHttpClient)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("scanner.notion.connect-timeout-seconds must be at least 1.");
+    }
+
+    @ParameterizedTest(name = "[{index}] {0}s")
+    @ValueSource(longs = {0L, -1L})
+    @DisplayName("rejects a read timeout below one second, naming the key only")
+    void rejectsAReadTimeoutBelowOneSecondNamingTheKeyOnly(long configured) {
+        RestClientConfig config = configFor(notion(API_KEY, DEFAULT_API_VERSION, 7L, configured));
+        HttpClient transport = config.notionHttpClient();
+
+        assertThatThrownBy(() -> config.notionRestClient(RestClient.builder(), transport))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("scanner.notion.read-timeout-seconds must be at least 1.");
+    }
+
+    @Test
+    @DisplayName("terminates the published transport at shutdown")
+    void terminatesThePublishedTransportAtShutdown() {
+        RestClientConfig config = configFor(notion(API_KEY, DEFAULT_API_VERSION));
+        HttpClient transport = config.notionHttpClient();
+        assertThat(transport.isTerminated()).isFalse();
+
+        config.shutdownNotionHttpClient();
+
+        assertThat(transport.isTerminated()).isTrue();
+    }
+
+    @Test
+    @DisplayName("leaves the transport terminated when shutdown runs a second time")
+    void leavesTheTransportTerminatedWhenShutdownRunsASecondTime() {
+        RestClientConfig config = configFor(notion(API_KEY, DEFAULT_API_VERSION));
+        HttpClient transport = config.notionHttpClient();
+        config.shutdownNotionHttpClient();
+
+        assertThatCode(config::shutdownNotionHttpClient).doesNotThrowAnyException();
+
+        assertThat(transport.isTerminated()).isTrue();
+    }
+
+    @Test
+    @DisplayName("returns at once when no transport was ever published")
+    void returnsAtOnceWhenNoTransportWasEverPublished() {
+        RestClientConfig config = configFor(notion(API_KEY, DEFAULT_API_VERSION));
+
+        assertThatCode(config::shutdownNotionHttpClient).doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("issues every Notion request through the published transport")
+    void issuesEveryNotionRequestThroughThePublishedTransport() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress(LOOPBACK, EPHEMERAL_PORT), 0);
+        server.createContext("/", exchange -> {
+            exchange.sendResponseHeaders(HttpStatus.NO_CONTENT.value(), -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            RestClientConfig config = configFor(notion(API_KEY, DEFAULT_API_VERSION));
+            RestClient client = config
+                    .notionRestClient(RestClient.builder(), config.notionHttpClient())
+                    .mutate()
+                    .baseUrl("http://" + LOOPBACK + ":" + server.getAddress().getPort())
+                    .build();
+            // The published transport carries the request, so releasing it stops the client.
+            config.shutdownNotionHttpClient();
+
+            assertThatThrownBy(() -> client.get().uri("/v1/pages").retrieve().toBodilessEntity())
+                    .isInstanceOf(ResourceAccessException.class);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    @DisplayName("declares no inferred destroy method for the transport bean")
+    void declaresNoInferredDestroyMethodForTheTransportBean() throws Exception {
+        Bean bean = RestClientConfig.class.getMethod("notionHttpClient").getAnnotation(Bean.class);
+
+        assertThat(bean).isNotNull();
+        assertThat(bean.destroyMethod()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("runs the bounded shutdown on the destruction callback")
+    void runsTheBoundedShutdownOnTheDestructionCallback() throws Exception {
+        assertThat(RestClientConfig.class.getMethod("shutdownNotionHttpClient")
+                .getAnnotation(PreDestroy.class)).isNotNull();
+    }
+
     /**
      * Builds the transport over the supplied group and returns the headers it installed.
      *
@@ -201,13 +332,25 @@ class RestClientConfigTest {
      * @return the headers of the single request the transport prepared
      */
     private HttpHeaders headersFor(ScannerProperties.Notion notion) {
-        RestClient client = new RestClientConfig(propertiesCarrying(notion))
-                .notionRestClient(capturingBuilder());
+        RestClientConfig config = configFor(notion);
+        RestClient client = config.notionRestClient(capturingBuilder(), config.notionHttpClient());
 
         client.get().uri("/v1/pages").retrieve().toBodilessEntity();
 
         assertThat(captured).hasSize(1);
         return captured.get(0);
+    }
+
+    /**
+     * Builds a configuration over the supplied group and registers it for release.
+     *
+     * @param notion the {@code scanner.notion} group to bind
+     * @return the configuration under test
+     */
+    private RestClientConfig configFor(ScannerProperties.Notion notion) {
+        RestClientConfig config = new RestClientConfig(propertiesCarrying(notion));
+        built.add(config);
+        return config;
     }
 
     /**
@@ -230,10 +373,16 @@ class RestClientConfigTest {
     }
 
     private static ScannerProperties.Notion notion(String apiKey, String apiVersion) {
-        return new ScannerProperties.Notion(apiKey, "database-id", apiVersion, 5L, 10L);
+        return notion(apiKey, apiVersion, 5L, 10L);
+    }
+
+    private static ScannerProperties.Notion notion(String apiKey, String apiVersion,
+            long connectTimeoutSeconds, long readTimeoutSeconds) {
+        return new ScannerProperties.Notion(apiKey, "database-id", apiVersion, connectTimeoutSeconds,
+                readTimeoutSeconds, 0, 0L);
     }
 
     private static ScannerProperties propertiesCarrying(ScannerProperties.Notion notion) {
-        return new ScannerProperties(null, 100, 60L, null, notion, null, null, null, null, null);
+        return new ScannerProperties(null, 100, 60L, null, notion, null, null, null, null, null, null);
     }
 }

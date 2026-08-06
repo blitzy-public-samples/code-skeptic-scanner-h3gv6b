@@ -1,18 +1,20 @@
 package com.codeskeptic.scanner.config;
 
+import java.net.http.HttpClient;
 import java.time.Duration;
 import java.util.Objects;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder;
-import org.springframework.boot.http.client.ClientHttpRequestFactorySettings;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.ClientHttpRequestFactory;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
+
+import jakarta.annotation.PreDestroy;
 
 /**
  * Transport for the Notion integration.
@@ -32,14 +34,14 @@ import org.springframework.web.client.RestClient;
  * <p>The framework defaults carried by the injected builder apply unchanged apart from the request
  * factory and its two timeout bounds — DL-013, DL-150, DL-221.
  *
- * <p>The published {@link RestClient} is fully configured before it is returned and is never mutated
- * afterwards, so it is safe to share across concurrent requests. Every operation it carries is
+ * <p>The published {@link RestClient} is fully configured before it is returned, is never mutated
+ * afterwards and is safe to share across concurrent requests. Every operation it carries is
  * synchronous and may be issued from any thread, including a reactive non-blocking thread — DL-221.
  *
  * @see ScannerProperties.Notion
  */
 // Ported from backend/app/services/notion_service.py:L8 (faithful port) — see docs/DECISION_LOG.md
-// DL-013, DL-052, DL-198.
+// DL-013, DL-052, DL-150, DL-193, DL-221.
 @Configuration
 public class RestClientConfig {
 
@@ -79,8 +81,20 @@ public class RestClientConfig {
     /** Scheme prefix of the {@code Authorization} header value. */
     private static final String BEARER_PREFIX = "Bearer ";
 
+    /**
+     * Longest {@link #shutdownNotionHttpClient()} awaits an in-flight Notion request before forcing
+     * the transport down, in seconds — DL-264.
+     */
+    private static final long SHUTDOWN_AWAIT_SECONDS = 10L;
+
     /** Bound configuration root; supplies {@code scanner.notion.api-key}. */
     private final ScannerProperties properties;
+
+    /**
+     * The transport published by {@link #notionHttpClient()}, retained so that
+     * {@link #shutdownNotionHttpClient()} can release it. Cleared once released — DL-264.
+     */
+    private volatile HttpClient httpClient;
 
     /**
      * Injects the bound configuration root, replacing the {@code get_settings()} call issued at
@@ -113,7 +127,7 @@ public class RestClientConfig {
      *     never {@code null}
      */
     @Bean
-    public RestClient notionRestClient(RestClient.Builder builder) {
+    public RestClient notionRestClient(RestClient.Builder builder, HttpClient notionHttpClient) {
         String apiKey = resolveApiKey();
         String apiVersion = resolveApiVersion();
 
@@ -126,7 +140,7 @@ public class RestClientConfig {
                 NOTION_API_BASE_URL, NOTION_VERSION_HEADER, apiVersion);
 
         return builder
-                .requestFactory(boundedRequestFactory())
+                .requestFactory(boundedRequestFactory(notionHttpClient))
                 .baseUrl(NOTION_API_BASE_URL)
                 .defaultHeader(NOTION_VERSION_HEADER, apiVersion)
                 .defaultHeader(HttpHeaders.AUTHORIZATION, BEARER_PREFIX + apiKey)
@@ -135,7 +149,7 @@ public class RestClientConfig {
                 .build();
     }
 
-    // The configured API version is the value actually sent — DL-198 — see docs/DECISION_LOG.md
+    // The configured API version is the value actually sent — DL-193 — see docs/DECISION_LOG.md
     /**
      * Reads {@code scanner.notion.api-key} and normalises it into a header-safe token.
      *
@@ -155,7 +169,8 @@ public class RestClientConfig {
      * Reads {@code scanner.notion.api-version} and normalises it into a header-safe token.
      *
      * <p>Falls back to {@link #DEFAULT_NOTION_API_VERSION} when the configured value is absent, blank
-     * or header-unsafe, so the header is never sent blank — DL-151.
+     * or header-unsafe, so the header is never sent blank — DL-193; the value and its default are
+     * DL-151.
      *
      * @return the version to send on every request; never {@code null} and never blank
      */
@@ -169,7 +184,7 @@ public class RestClientConfig {
         return safe;
     }
 
-    // Net-new (no Python counterpart; notion_client built the headers itself) — DL-195 — see
+    // Net-new (no Python counterpart; notion_client built the headers itself) — DL-193 — see
     // docs/DECISION_LOG.md
     /**
      * Strips a configured value and rejects it when it still carries a character that is not legal in
@@ -178,7 +193,7 @@ public class RestClientConfig {
      * <p>{@link String#strip()} removes a leading or trailing carriage return or line feed but leaves
      * an embedded one in place. Any value containing a character below {@code U+0020}, or
      * {@code U+007F}, is discarded and not sent; the property name is logged at {@code WARN} and no
-     * part of the value is logged, at any level — DL-052, DL-195.
+     * part of the value is logged, at any level — DL-052, DL-193.
      *
      * @param value the configured value, possibly {@code null}
      * @param propertyName the property the value came from, named in the warning
@@ -201,12 +216,13 @@ public class RestClientConfig {
         return stripped;
     }
 
-    // The Notion-Version header value is scanner.notion.api-version — DL-151 — see
+    // The Notion-Version header value is scanner.notion.api-version — DL-151, DL-193 — see
     // docs/DECISION_LOG.md
 
 
     /**
-     * Reads the {@code scanner.notion} group.
+     * Reads the {@code scanner.notion} group. Every reader in this class dereferences the group through
+     * this one accessor — DL-193.
      *
      * @return the bound group, or {@code null} when the group is not bound
      */
@@ -215,34 +231,105 @@ public class RestClientConfig {
     }
 
     /**
-     * Builds the request factory the Notion client uses, with finite connect and read timeouts taken
-     * from {@code scanner.notion.connect-timeout-seconds} and {@code scanner.notion.read-timeout-seconds}.
+     * Builds the request factory the Notion client uses, with a finite read timeout taken from
+     * {@code scanner.notion.read-timeout-seconds}.
      *
-     * <p>The transport is the JDK HTTP client, named rather than detected on the classpath, so a call
-     * issued from any thread behaves the same - see docs/DECISION_LOG.md DL-221. Only the two timeout
-     * bounds are supplied by this application - see docs/DECISION_LOG.md DL-150, DL-128.
+     * <p>The transport is the retained JDK HTTP client of {@link #notionHttpClient()}, named rather
+     * than detected on the classpath, so a call issued from any thread behaves the same and the
+     * transport can be shut down at context close - see docs/DECISION_LOG.md DL-221 and DL-264. The
+     * connect bound belongs to the client and is applied there; only the read bound is applied per
+     * request here - see docs/DECISION_LOG.md DL-150, DL-128.
      *
-     * <p>A {@code null} {@code scanner.notion} group yields {@value #DEFAULT_CONNECT_TIMEOUT_SECONDS}
-     * and {@value #DEFAULT_READ_TIMEOUT_SECONDS} seconds, the values the properties declare as their
-     * own defaults, matching how {@link #resolveApiKey()} and {@link #resolveApiVersion()} tolerate the
-     * same absent group.
+     * <p>A {@code null} {@code scanner.notion} group yields {@value #DEFAULT_READ_TIMEOUT_SECONDS}
+     * seconds, the value the property declares as its own default, matching how
+     * {@link #resolveApiKey()} and {@link #resolveApiVersion()} tolerate the same absent group.
      *
-     * @return a request factory carrying application-owned finite timeouts
+     * @param httpClient the retained transport every request is issued through; must not be
+     *     {@code null}
+     * @return a request factory carrying the application-owned finite read timeout
+     * @throws IllegalStateException when {@code scanner.notion.read-timeout-seconds} is below one
      */
-    private ClientHttpRequestFactory boundedRequestFactory() {
+    private ClientHttpRequestFactory boundedRequestFactory(HttpClient httpClient) {
+        ScannerProperties.Notion notion = notionGroup();
+        long readTimeoutSeconds = (notion == null)
+                ? DEFAULT_READ_TIMEOUT_SECONDS : notion.readTimeoutSeconds();
+        // Named transport, not ClientHttpRequestFactoryBuilder.detect() — see docs/DECISION_LOG.md
+        // DL-221. The transport is the retained bean, so it can be shut down — DL-264.
+        JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(httpClient);
+        factory.setReadTimeout(Duration.ofSeconds(requireAtLeastOne(readTimeoutSeconds,
+                "scanner.notion.read-timeout-seconds")));
+        return factory;
+    }
+
+    // Net-new retained transport with a bounded shutdown — DL-264 — see docs/DECISION_LOG.md
+    /**
+     * Publishes the JDK HTTP client the Notion transport uses.
+     *
+     * <p>The client is retained by this configuration so that
+     * {@link #shutdownNotionHttpClient()} can release its selector thread and connection pool at
+     * context shutdown. Without a retained reference Spring would build one beneath the request
+     * factory and leave it to the garbage collector.
+     *
+     * <p>The connect bound is {@code scanner.notion.connect-timeout-seconds}; the read bound is applied
+     * per request by {@link #boundedRequestFactory(HttpClient)} — DL-150.
+     *
+     * <p>{@code destroyMethod} is cleared deliberately: the inferred {@code close()} of
+     * {@link HttpClient} blocks for as long as any request is in flight, with no bound. The bounded
+     * sequence of {@link #shutdownNotionHttpClient()} is used instead.
+     *
+     * @return the transport the Notion {@link RestClient} issues every request through
+     * @throws IllegalStateException when {@code scanner.notion.connect-timeout-seconds} is below one
+     */
+    @Bean(destroyMethod = "")
+    public HttpClient notionHttpClient() {
         ScannerProperties.Notion notion = notionGroup();
         long connectTimeoutSeconds = (notion == null)
                 ? DEFAULT_CONNECT_TIMEOUT_SECONDS : notion.connectTimeoutSeconds();
-        long readTimeoutSeconds = (notion == null)
-                ? DEFAULT_READ_TIMEOUT_SECONDS : notion.readTimeoutSeconds();
-        ClientHttpRequestFactorySettings bounded = ClientHttpRequestFactorySettings.defaults()
-                .withConnectTimeout(Duration.ofSeconds(requireAtLeastOne(connectTimeoutSeconds,
-                        "scanner.notion.connect-timeout-seconds")))
-                .withReadTimeout(Duration.ofSeconds(requireAtLeastOne(readTimeoutSeconds,
-                        "scanner.notion.read-timeout-seconds")));
-        // Named transport, not ClientHttpRequestFactoryBuilder.detect() — see docs/DECISION_LOG.md
-        // DL-221
-        return ClientHttpRequestFactoryBuilder.jdk().build(bounded);
+        Duration connectTimeout = Duration.ofSeconds(requireAtLeastOne(connectTimeoutSeconds,
+                "scanner.notion.connect-timeout-seconds"));
+
+        HttpClient client = HttpClient.newBuilder()
+                .connectTimeout(connectTimeout)
+                .build();
+        this.httpClient = client;
+
+        log.info("Notion transport created with a {}s connect timeout", connectTimeout.toSeconds());
+
+        return client;
+    }
+
+    // Net-new retained transport with a bounded shutdown — DL-264 — see docs/DECISION_LOG.md
+    /**
+     * Releases the JDK HTTP client at context shutdown.
+     *
+     * <p>The shutdown is graceful and bounded: no new request is accepted, in-flight requests are
+     * awaited for at most {@value #SHUTDOWN_AWAIT_SECONDS} seconds, and a client still not terminated
+     * at that bound is forced down. A shutdown that has not completed is reported at {@code WARN}; an
+     * interrupt while awaiting forces the client down and restores the interrupt status.
+     *
+     * <p>The method is idempotent: a second call after the client has been released returns at once.
+     */
+    @PreDestroy
+    public void shutdownNotionHttpClient() {
+        HttpClient client = this.httpClient;
+        this.httpClient = null;
+        if (client == null) {
+            return;
+        }
+
+        log.info("Shutting down the Notion transport");
+        client.shutdown();
+        try {
+            if (!client.awaitTermination(Duration.ofSeconds(SHUTDOWN_AWAIT_SECONDS))) {
+                log.warn("The Notion transport was still handling requests after {}s; forcing it "
+                        + "down", SHUTDOWN_AWAIT_SECONDS);
+                client.shutdownNow();
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            log.warn("Awaiting the Notion transport was interrupted; forcing it down");
+            client.shutdownNow();
+        }
     }
 
     /**
@@ -251,7 +338,8 @@ public class RestClientConfig {
      * @param value the configured value
      * @param key   the configuration key the value binds from; named in the failure message
      * @return {@code value}, guaranteed to be at least one
-     * @throws IllegalStateException when {@code value} is below one
+     * @throws IllegalStateException when {@code value} is below one, which fails context refresh —
+     *                               DL-193
      */
     private static long requireAtLeastOne(long value, String key) {
         if (value < 1L) {

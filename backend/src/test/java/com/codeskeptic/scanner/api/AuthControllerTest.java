@@ -6,6 +6,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
@@ -24,6 +25,13 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
+import org.slf4j.LoggerFactory;
+
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+
 import jakarta.servlet.DispatcherType;
 
 import org.junit.jupiter.api.DisplayName;
@@ -33,6 +41,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -57,6 +66,7 @@ import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.test.context.ActiveProfiles;
@@ -72,6 +82,7 @@ import com.codeskeptic.scanner.dto.PaginationDto;
 import com.codeskeptic.scanner.dto.TweetDto;
 import com.codeskeptic.scanner.dto.TokenResponse;
 import com.codeskeptic.scanner.security.JwtService;
+import com.codeskeptic.scanner.util.LogSafe;
 import com.codeskeptic.scanner.service.SentimentAnalysisService;
 import com.codeskeptic.scanner.service.TwitterService;
 import com.codeskeptic.scanner.security.SecurityConfig;
@@ -93,8 +104,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * {@code src/test/resources/application-test.yml}. {@link GlobalExceptionHandler} is a
  * {@code @RestControllerAdvice} and is part of every web slice.
  *
- * <p>{@link TweetController} is registered so that a minted token reaches a mapped production
- * handler rather than an unmapped path: {@code GET /tweets} is one of the eleven routes the chain
+ * <p>{@link TweetController} is registered, so a minted token reaches a mapped production handler and
+ * not an unmapped path: {@code GET /tweets} is one of the eleven routes the chain
  * requires an authenticated principal on, and the assertions on it compare an exact 200 response
  * body. Only its two business collaborators, {@link TwitterService} and
  * {@link SentimentAnalysisService}, are replaced by mocks; nothing on the security path is.
@@ -114,6 +125,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 class AuthControllerTest {
 
     private static final String TOKEN_ENDPOINT = "/auth/token";
+
+    /** The 500 envelope the advice serves — see docs/DECISION_LOG.md DL-210. */
+    private static final String INTERNAL_ERROR_BODY = "{\"error\":\"Internal server error\"}";
+
+    /** The 404 envelope the advice serves — see docs/DECISION_LOG.md DL-210, DL-247. */
+    private static final String NOT_FOUND_BODY = "{\"error\":\"Not found\"}";
 
     /** The token route spelled with a percent-encoded letter; it decodes to {@value #TOKEN_ENDPOINT}. */
     private static final java.net.URI ENCODED_TOKEN_ENDPOINT =
@@ -136,6 +153,9 @@ class AuthControllerTest {
     private static final long EXPECTED_EXPIRATION_MINUTES = 60L;
 
     private static final int CREDENTIAL_LENGTH_CEILING = 256;
+
+    /** Rejected attempts issued back to back by the bounded-reporting tests — DL-272. */
+    private static final int REJECTION_BURST = 25;
 
     private static final int LOGIN_BODY_BYTE_CEILING = 4_096;
 
@@ -208,6 +228,37 @@ class AuthControllerTest {
                 .andExpect(jsonPath("$." + TOKEN_TYPE).value("bearer"))
                 .andExpect(jsonPath("$." + EXPIRES_IN).isNumber())
                 .andExpect(jsonPath("$." + EXPIRES_IN).value(EXPECTED_EXPIRES_IN_SECONDS));
+    }
+
+    // The success record carries no principal text — DL-242 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("records a successful issuance without writing the principal's own text")
+    void recordsASuccessfulIssuanceWithoutWritingThePrincipalsOwnText() throws Exception {
+        Logger controllerLogger = (Logger) LoggerFactory.getLogger(AuthController.class);
+        ListAppender<ILoggingEvent> recorded = new ListAppender<>();
+        recorded.start();
+        controllerLogger.addAppender(recorded);
+        List<ILoggingEvent> events;
+        try {
+            requestToken(configuredUsername(), TEST_PASSWORD);
+            events = List.copyOf(recorded.list);
+        } finally {
+            controllerLogger.detachAppender(recorded);
+            recorded.stop();
+        }
+
+        assertThat(events).as("records written while a token was issued").hasSize(1);
+        ILoggingEvent success = events.get(0);
+        assertThat(success.getLevel()).isEqualTo(Level.INFO);
+        assertThat(success.getThrowableProxy()).isNull();
+
+        String written = success.getFormattedMessage();
+        assertThat(written).contains("Issued a bearer token to principal ");
+        assertThat(written).contains(LogSafe.correlation(configuredUsername()));
+        assertThat(written).startsWith("Issued a bearer token to principal sha256:");
+        assertThat(written).doesNotContain(configuredUsername());
+        assertThat(written).doesNotContain(TEST_PASSWORD);
+        assertThat(written).doesNotContain(mintedToken());
     }
 
     @Test
@@ -500,7 +551,7 @@ class AuthControllerTest {
                 .andExpect(jsonPath("$.error").value("Bad request"));
     }
 
-    // Net-new (no Python counterpart) — DL-188, DL-193 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] {0}")
     @ValueSource(strings = {
         "{\"username\":\"admin\",\"password\":\"a\",\"password\":\"b\"}",
@@ -808,6 +859,80 @@ class AuthControllerTest {
         assertThat(byPassword.getBody()).isNull();
     }
 
+    // Bounded reporting of rejected credentials — DL-272 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reports a burst of rejected credentials with one warning carrying the count")
+    void reportsABurstOfRejectedCredentialsWithOneWarningCarryingTheCount() {
+        RecordingAuthenticationManager manager =
+                RecordingAuthenticationManager.rejecting(new BadCredentialsException("no"));
+        AuthController controller = new AuthController(manager, jwtService);
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            for (int attempt = 0; attempt < REJECTION_BURST; attempt++) {
+                assertThat(controller.issueToken(new LoginRequest(configuredUsername(), "wrong"))
+                        .getStatusCode().value()).isEqualTo(HttpStatus.UNAUTHORIZED.value());
+            }
+
+            assertThat(manager.invocations()).isEqualTo(REJECTION_BURST);
+            List<String> warnings = warningRecords(recorded);
+            assertThat(warnings).as("one warning for the whole burst").hasSize(1);
+            assertThat(warnings.get(0))
+                    .contains("credential(s) submitted to POST /auth/token")
+                    .contains("did not authenticate")
+                    .doesNotContain("wrong");
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
+    @Test
+    @DisplayName("reports a burst of over-length credentials with one warning naming the bound only")
+    void reportsABurstOfOverLengthCredentialsWithOneWarningNamingTheBoundOnly() {
+        RecordingAuthenticationManager manager =
+                RecordingAuthenticationManager.accepting(configuredUsername());
+        AuthController controller = new AuthController(manager, jwtService);
+        String oversized = "u".repeat(CREDENTIAL_LENGTH_CEILING + 1);
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            for (int attempt = 0; attempt < REJECTION_BURST; attempt++) {
+                assertThat(controller.issueToken(new LoginRequest(oversized, TEST_PASSWORD))
+                        .getStatusCode().value()).isEqualTo(HttpStatus.UNAUTHORIZED.value());
+            }
+
+            assertThat(manager.invocations()).isZero();
+            List<String> warnings = warningRecords(recorded);
+            assertThat(warnings).as("one warning for the whole burst").hasSize(1);
+            assertThat(warnings.get(0))
+                    .contains("exceeded the accepted length of " + CREDENTIAL_LENGTH_CEILING)
+                    .doesNotContain(oversized);
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
+    @Test
+    @DisplayName("counts the two rejection reasons independently")
+    void countsTheTwoRejectionReasonsIndependently() {
+        RecordingAuthenticationManager manager =
+                RecordingAuthenticationManager.rejecting(new BadCredentialsException("no"));
+        AuthController controller = new AuthController(manager, jwtService);
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            controller.issueToken(new LoginRequest(configuredUsername(), "wrong"));
+            controller.issueToken(new LoginRequest(
+                    "u".repeat(CREDENTIAL_LENGTH_CEILING + 1), TEST_PASSWORD));
+
+            List<String> warnings = warningRecords(recorded);
+            assertThat(warnings).as("one warning per reason").hasSize(2);
+            assertThat(warnings).anySatisfy(record ->
+                    assertThat(record).contains("did not authenticate"));
+            assertThat(warnings).anySatisfy(record ->
+                    assertThat(record).contains("exceeded the accepted length"));
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
     @ParameterizedTest(name = "[{index}] {0}")
     @MethodSource("credentialRejections")
     @DisplayName("answers a credential rejection with 401 and no body")
@@ -831,6 +956,27 @@ class AuthControllerTest {
                 Arguments.of("incorrect password", new BadCredentialsException("rejected")),
                 Arguments.of("unknown principal", new UsernameNotFoundException("rejected")),
                 Arguments.of("disabled principal", new DisabledException("rejected")));
+    }
+
+    @Test
+    @DisplayName("answers an undeclared auth route with 404 and the not-found envelope")
+    void answersAnUndeclaredAuthRouteWith404AndTheNotFoundEnvelope() throws Exception {
+        for (String path : List.of("/auth", "/auth/", "/auth/tokens", "/auth/token/refresh",
+                "/api/auth/token")) {
+
+            mockMvc.perform(get(path).with(user(BUILT_IN_USERNAME)))
+                    .andExpect(status().isNotFound())
+                    .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                    .andExpect(content().string(NOT_FOUND_BODY));
+        }
+    }
+
+    @Test
+    @DisplayName("refuses an unauthenticated undeclared auth route before the dispatcher")
+    void refusesAnUnauthenticatedUndeclaredAuthRouteBeforeTheDispatcher() throws Exception {
+        mockMvc.perform(get("/auth/tokens"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().string(""));
     }
 
     @Test
@@ -858,6 +1004,101 @@ class AuthControllerTest {
         assertThat(manager.invocations()).isEqualTo(1);
         assertThat(response.getStatusCode().value()).isEqualTo(HttpStatus.UNAUTHORIZED.value());
         assertThat(response.getBody()).isNull();
+    }
+
+    @Nested
+    @DisplayName("the record a token request leaves")
+    class TokenRequestLogRecords {
+
+        @Test
+        @DisplayName("names no principal in the record a successful issuance leaves")
+        void namesNoPrincipalInTheRecordASuccessfulIssuanceLeaves() {
+            AuthController controller = new AuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()), jwtService);
+            ListAppender<ILoggingEvent> records = attachRecorder();
+            try {
+                controller.issueToken(new LoginRequest(configuredUsername(), TEST_PASSWORD));
+
+                assertThat(rendered(records)).hasSize(1);
+                assertThat(rendered(records).get(0))
+                        .contains(String.valueOf(EXPECTED_EXPIRES_IN_SECONDS))
+                        .doesNotContain(configuredUsername())
+                        .doesNotContain(BUILT_IN_USERNAME);
+            } finally {
+                detachRecorder(records);
+            }
+        }
+
+        @Test
+        @DisplayName("records the first rejection of a window at WARN and every later one at DEBUG")
+        void recordsTheFirstRejectionOfAWindowAtWarnAndEveryLaterOneAtDebug() {
+            AuthController controller = new AuthController(
+                    RecordingAuthenticationManager.rejecting(
+                            new BadCredentialsException("rejected")),
+                    jwtService);
+            ListAppender<ILoggingEvent> records = attachRecorder();
+            try {
+                for (int attempt = 0; attempt < 25; attempt++) {
+                    controller.issueToken(new LoginRequest(UNKNOWN_USERNAME, WRONG_PASSWORD));
+                }
+
+                assertThat(levels(records, Level.WARN)).hasSize(1);
+                assertThat(levels(records, Level.DEBUG)).hasSize(24);
+                assertThat(levels(records, Level.WARN).get(0))
+                        .contains("BadCredentialsException")
+                        .doesNotContain(UNKNOWN_USERNAME)
+                        .doesNotContain(WRONG_PASSWORD);
+            } finally {
+                detachRecorder(records);
+            }
+        }
+
+        @Test
+        @DisplayName("names no submitted credential in the record an over-length member leaves")
+        void namesNoSubmittedCredentialInTheRecordAnOverLengthMemberLeaves() {
+            String overLength = "p".repeat(CREDENTIAL_LENGTH_CEILING + 1);
+            RecordingAuthenticationManager manager = RecordingAuthenticationManager.rejecting(
+                    new BadCredentialsException("rejected"));
+            AuthController controller = new AuthController(manager, jwtService);
+            ListAppender<ILoggingEvent> records = attachRecorder();
+            try {
+                controller.issueToken(new LoginRequest(configuredUsername(), overLength));
+
+                assertThat(manager.invocations()).isZero();
+                assertThat(levels(records, Level.WARN)).hasSize(1);
+                assertThat(levels(records, Level.WARN).get(0))
+                        .contains("exceeded the accepted length")
+                        .doesNotContain(overLength);
+            } finally {
+                detachRecorder(records);
+            }
+        }
+
+        private ListAppender<ILoggingEvent> attachRecorder() {
+            ListAppender<ILoggingEvent> records = new ListAppender<>();
+            records.start();
+            Logger logger = (Logger) LoggerFactory.getLogger(AuthController.class);
+            logger.setLevel(Level.DEBUG);
+            logger.addAppender(records);
+            return records;
+        }
+
+        private void detachRecorder(ListAppender<ILoggingEvent> records) {
+            Logger logger = (Logger) LoggerFactory.getLogger(AuthController.class);
+            logger.detachAppender(records);
+            logger.setLevel(null);
+        }
+
+        private List<String> rendered(ListAppender<ILoggingEvent> records) {
+            return records.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
+        }
+
+        private List<String> levels(ListAppender<ILoggingEvent> records, Level level) {
+            return records.list.stream()
+                    .filter(event -> event.getLevel() == level)
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .toList();
+        }
     }
 
     @Nested
@@ -1010,7 +1251,8 @@ class AuthControllerTest {
                 properties.jwt(),
                 new ScannerProperties.Auth(username, passwordHash),
                 properties.analytics(),
-                properties.ingestion());
+                properties.ingestion(),
+                properties.background());
         return new SecurityConfig(overridden, jwtService, corsConfigurationSource);
     }
 
@@ -1136,5 +1378,39 @@ class AuthControllerTest {
                 PROTECTED_TWEET_DOUBT_RATING, List.of("media-key-1"), null, "9001",
                 List.of("GPT-4"));
         return new PaginatedTweetsDto(List.of(row), new PaginationDto(1, 10, 1L, 1));
+    }
+
+    /**
+     * Attaches a recording appender to this controller's logger — DL-272.
+     *
+     * @return the attached appender
+     */
+    private static ListAppender<ILoggingEvent> attachAppender() {
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        ((Logger) LoggerFactory.getLogger(AuthController.class)).addAppender(appender);
+        return appender;
+    }
+
+    /**
+     * Detaches a recording appender from this controller's logger.
+     *
+     * @param appender the appender to detach
+     */
+    private static void detachAppender(ListAppender<ILoggingEvent> appender) {
+        ((Logger) LoggerFactory.getLogger(AuthController.class)).detachAppender(appender);
+    }
+
+    /**
+     * Returns the formatted message of every {@code WARN} record the appender holds.
+     *
+     * @param appender the appender to read
+     * @return the warning messages in the order they were written
+     */
+    private static List<String> warningRecords(ListAppender<ILoggingEvent> appender) {
+        return appender.list.stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .toList();
     }
 }

@@ -1,7 +1,6 @@
 package com.codeskeptic.scanner.task;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
-import com.codeskeptic.scanner.entity.AiTool;
 import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.repository.AiToolRepository;
 import com.codeskeptic.scanner.repository.SettingRepository;
@@ -23,9 +22,13 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpHeaders;
@@ -55,8 +58,9 @@ import reactor.util.retry.Retry;
  *       none is held.</li>
  *   <li>{@link #reconcileStreamRules(String, List)} brings the registered rules in line with the
  *       composed terms.</li>
- *   <li>{@link #consumeStream(String)} subscribes to the chunked newline-delimited body and calls
- *       {@link TweetStreamListener#onStatus(JsonNode)} once per complete record.</li>
+ *   <li>{@link #consumeStream(String, int)} subscribes to the chunked newline-delimited body and
+ *       calls {@link TweetStreamListener#onStatus(JsonNode, int)} once per complete record, against
+ *       the popularity threshold this cycle resolved once — DL-255.</li>
  * </ol>
  *
  * <p>The whole cycle runs again on every reconnection. An edit to the {@code stream_keywords}
@@ -74,11 +78,37 @@ import reactor.util.retry.Retry;
  * nothing the cycle records the condition at {@code ERROR}, opens no connection and leaves
  * {@link #isRunning()} reporting {@code false}.
  *
+ * <p>Every term is strictly validated before it is rendered as a rule expression: a term holding a
+ * character the rule syntax reserves is dropped, and no term value is written to the log — DL-257. The
+ * collection is bounded by {@code scanner.ingestion.max-stream-rules}, only {@code ai_tools.name} is
+ * selected, and each mutation is sent as consecutive requests of at most
+ * {@value #MAX_RULES_PER_REQUEST} rules — DL-254. A registered rule whose tag differs from the wanted
+ * one is replaced — see docs/DECISION_LOG.md DL-261.
+ *
+ * <p>At most {@value #STREAM_DISPATCH_PREFETCH} record and {@value #STREAM_CHUNK_PREFETCH} body chunk
+ * are queued ahead of the work in progress, so the memory a connection holds is bounded however long a
+ * provider or a database call takes — DL-258. A dropped record is counted and reported at most once per
+ * {@value #DROPPED_RECORD_REPORT_INTERVAL} — DL-260.
+ *
+ * <p>The body carries a signal-idle bound of
+ * {@code scanner.ingestion.stream-idle-timeout-seconds}: any chunk resets it, the keep-alive chunk
+ * included, so a silent half-open connection fails and reconnects rather than appearing healthy —
+ * DL-256.
+ *
  * <p>{@link #start()} schedules the cycle on {@link Schedulers#boundedElastic()} and returns without
  * blocking, issuing no request on the calling thread and raising nothing. Every delivered record is
  * handed to the listener on {@link Schedulers#boundedElastic()} as well, so no work the listener
  * performs runs on a connection thread. Every failure inside the cycle is recorded and confined to the
- * reactive chain. {@link #stop()} disposes the subscription, which closes the connection.
+ * reactive chain. {@link #stop()} waits up to {@value #SHUTDOWN_DRAIN_MILLIS} milliseconds for a
+ * record already handed to the listener and then disposes the subscription, which closes the
+ * connection; {@link #stop(Runnable)} reports that transition to the container. {@link #start()} and
+ * {@link #stop()} hold one lock for the whole transition, so the subscription handle is published and
+ * cancelled under one mutual exclusion — DL-259.
+ *
+ * <p>{@link #start()} opens no connection at all, and {@link #isAutoStartup()} reports
+ * {@code false}, when {@code scanner.background.enabled} or {@code scanner.background.stream-enabled}
+ * is {@code false}: only the process designated as the background worker streams — see
+ * docs/DECISION_LOG.md DL-250.
  *
  * <p>{@link #start()} opens no connection at all when {@code scanner.twitter.consumer-key} or
  * {@code scanner.twitter.consumer-secret} is unset or blank; it records the condition at
@@ -97,14 +127,16 @@ import reactor.util.retry.Retry;
  * side effect belongs to {@link TweetStreamListener}. It reads and writes no approval flag.
  *
  * <p>Collaborators arrive through the constructor and are held for the lifetime of the singleton.
- * The held token, the subscription handle and the two lifecycle flags are the only mutable state and
- * each is {@code volatile} or atomic. The lifecycle operations are safe to call from any thread.
+ * The held token, the subscription handle, the two lifecycle flags, the in-flight dispatch count and
+ * the four dropped-record counters are the only mutable state and each is {@code volatile} or atomic.
+ * The lifecycle operations are safe to call from any thread and are serialised against one another.
  *
- * <p>No credential and no whole record body is written to the log. Decisions covering this file are
- * recorded in {@code docs/DECISION_LOG.md} DL-012, DL-044, DL-045, DL-046 and DL-052;
- * construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * <p>No credential, no term value and no whole record body is written to the log. Decisions covering
+ * this file are recorded in {@code docs/DECISION_LOG.md} DL-012, DL-044, DL-045, DL-046, DL-052,
+ * DL-250 and DL-254 through DL-261; construct-level provenance is recorded in
+ * {@code docs/TRACEABILITY_MATRIX.md}.
  *
- * @see TweetStreamListener#onStatus(JsonNode)
+ * @see TweetStreamListener#onStatus(JsonNode, int)
  */
 // Ported from start_tweet_stream() at backend/app/tasks/tweet_monitoring.py:L36-55 and
 // stream_tweets() at backend/app/services/twitter_service.py:L16-23 (faithful port of intent) — see
@@ -168,12 +200,6 @@ public class TweetStreamClient implements SmartLifecycle {
     private static final String TWEET_FIELDS_VALUE =
             "created_at,public_metrics,referenced_tweets,attachments,author_id";
 
-    /** Query parameter naming the expansions the listener reads. */
-    private static final String EXPANSIONS_PARAM = "expansions";
-
-    /** Expansions that resolve the author and the media references of a delivered post. */
-    private static final String EXPANSIONS_VALUE = "author_id,attachments.media_keys";
-
     /** Response header carrying the UTC epoch second at which a rate-limit window resets. */
     private static final String RATE_LIMIT_RESET_HEADER = "x-rate-limit-reset";
 
@@ -194,6 +220,12 @@ public class TweetStreamClient implements SmartLifecycle {
 
     /** Property naming the app-only consumer secret, reported when it is unset or blank. */
     private static final String CONSUMER_SECRET_PROPERTY = "scanner.twitter.consumer-secret";
+
+    /** Property governing every background path of this process — DL-250. */
+    private static final String BACKGROUND_ENABLED_PROPERTY = "scanner.background.enabled";
+
+    /** Property governing this background path — DL-250. */
+    private static final String STREAM_ENABLED_PROPERTY = "scanner.background.stream-enabled";
 
     /** Rules-response member carrying the registered rule array. */
     private static final String RULES_KEY_DATA = "data";
@@ -216,8 +248,55 @@ public class TweetStreamClient implements SmartLifecycle {
     /** Deletion member carrying the identifiers to remove. */
     private static final String RULES_KEY_IDS = "ids";
 
-    /** Term count from which a registration is reported at {@code WARN} with its terms. */
-    private static final int LARGE_RULE_SET_THRESHOLD = 25;
+    // Rules-mutation outcome members read to surface a refused rule — DL-243 — see
+    // docs/DECISION_LOG.md
+    /** Rules-response member carrying one entry per refused rule. */
+    private static final String RULES_KEY_ERRORS = "errors";
+
+    /** Rules-response member carrying the outcome summary. */
+    private static final String RULES_KEY_META = "meta";
+
+    /** {@value #RULES_KEY_META} member carrying the per-outcome counts. */
+    private static final String RULES_KEY_SUMMARY = "summary";
+
+    /** {@value #RULES_KEY_SUMMARY} member counting the rules the endpoint did not create. */
+    private static final String RULES_KEY_NOT_CREATED = "not_created";
+
+    /** {@value #RULES_KEY_SUMMARY} member counting the rules the endpoint read as invalid. */
+    private static final String RULES_KEY_INVALID = "invalid";
+
+    /** Most rules one mutation request carries; a larger set is sent as consecutive requests. */
+    private static final int MAX_RULES_PER_REQUEST = 25;
+
+    // Bounds applied to every literal term before it reaches the rule DSL — DL-254, DL-257 — see
+    // docs/DECISION_LOG.md
+    /** Most characters an accepted term holds. A longer term is rejected. */
+    private static final int MAX_TERM_CHARS = 128;
+
+    /** Most segments the {@value #STREAM_KEYWORDS_SETTING_KEY} row is split into. */
+    private static final int MAX_OVERRIDE_SEGMENTS = 512;
+
+    /** Characters an accepted term may hold in addition to letters and digits — DL-257. */
+    private static final String ADDITIONAL_TERM_CHARACTERS = " -_.'";
+
+    // Bounded queueing between the connection and the dispatch worker — DL-258 — see
+    // docs/DECISION_LOG.md
+    /** Records the dispatch worker may hold ahead of the one it is handling. */
+    private static final int STREAM_DISPATCH_PREFETCH = 1;
+
+    /** Body chunks requested ahead of the one being drained. */
+    private static final int STREAM_CHUNK_PREFETCH = 1;
+
+    // Bounded lifecycle transitions and dispatch drain — DL-259 — see docs/DECISION_LOG.md
+    /** Longest {@link #stop(Runnable)} waits for a record being dispatched, in milliseconds. */
+    private static final long SHUTDOWN_DRAIN_MILLIS = 5_000L;
+
+    /** Interval between two checks of the in-flight dispatch count, in milliseconds. */
+    private static final long DRAIN_POLL_MILLIS = 10L;
+
+    // Bounded reporting of dropped records — DL-260 — see docs/DECISION_LOG.md
+    /** Shortest interval between two records of the same dropped-record condition. */
+    private static final Duration DROPPED_RECORD_REPORT_INTERVAL = Duration.ofMinutes(1L);
 
     /** Byte on which the response body is split into records. */
     private static final byte LINE_FEED = (byte) '\n';
@@ -226,8 +305,8 @@ public class TweetStreamClient implements SmartLifecycle {
     /**
      * Most bytes the accumulator holds for a single record. A record that reaches this size without a
      * terminating {@value #LINE_FEED} is discarded rather than accumulated further; the connection
-     * stays open. One post of the X API v2 filtered stream, with the requested fields and expansions,
-     * is orders of magnitude smaller.
+     * stays open. One post of the X API v2 filtered stream, with the requested fields, is orders of
+     * magnitude smaller.
      */
     private static final int MAX_RECORD_BYTES = 1_048_576;
 
@@ -277,6 +356,27 @@ public class TweetStreamClient implements SmartLifecycle {
     private volatile boolean stopRequested;
 
     /**
+     * Serialises {@link #start()} against {@link #stop()}, so the subscription handle is published and
+     * cancelled under one mutual exclusion — DL-259.
+     */
+    private final ReentrantLock lifecycleLock = new ReentrantLock();
+
+    /** Records handed to the listener that have not yet returned — DL-259. */
+    private final AtomicInteger inFlightDispatches = new AtomicInteger();
+
+    /** Records dropped for reaching {@link #MAX_RECORD_BYTES} since the last report — DL-260. */
+    private final AtomicLong unreportedOverlongRecords = new AtomicLong();
+
+    /** Nanosecond stamp of the last over-long-record report, {@code 0} until one is made — DL-260. */
+    private final AtomicLong lastOverlongReportNanos = new AtomicLong();
+
+    /** Records dropped for not parsing as JSON since the last report — DL-260. */
+    private final AtomicLong unreportedUnreadableRecords = new AtomicLong();
+
+    /** Nanosecond stamp of the last unreadable-record report, {@code 0} until one is made — DL-260. */
+    private final AtomicLong lastUnreadableReportNanos = new AtomicLong();
+
+    /**
      * Binds the five collaborators one connection cycle uses.
      *
      * @param webClient transport rooted at the X API host, must not be {@code null}
@@ -308,6 +408,9 @@ public class TweetStreamClient implements SmartLifecycle {
     /**
      * Schedules the ingestion cycle and returns.
      *
+     * <p>The method returns without contacting X when this process does not run the stream, which
+     * {@link #isAutoStartup()} reports — DL-250.
+     *
      * <p>The method reads {@code scanner.twitter.consumer-key} and
      * {@code scanner.twitter.consumer-secret} first. When either is unset or blank it records both
      * property names at {@code WARN}, contacts X in no way and returns with {@link #isRunning()}
@@ -327,35 +430,49 @@ public class TweetStreamClient implements SmartLifecycle {
     // docs/DECISION_LOG.md
     @Override
     public void start() {
-        if (!running.compareAndSet(false, true)) {
+        // Only the designated background worker streams — DL-250 — see docs/DECISION_LOG.md
+        if (!isAutoStartup()) {
+            log.info("X filtered stream ingestion not started in this process: {} and {} must both "
+                    + "hold", BACKGROUND_ENABLED_PROPERTY, STREAM_ENABLED_PROPERTY);
             return;
         }
 
-        ScannerProperties.Twitter twitter = properties.twitter();
-        String consumerKey = twitter == null ? null : twitter.consumerKey();
-        String consumerSecret = twitter == null ? null : twitter.consumerSecret();
+        // One transition at a time; the handle is published under this lock and cancelled under it —
+        // DL-259 — see docs/DECISION_LOG.md
+        lifecycleLock.lock();
+        try {
+            if (!running.compareAndSet(false, true)) {
+                return;
+            }
 
-        // Blank-credential guard — see docs/DECISION_LOG.md DL-046
-        if (isBlank(consumerKey) || isBlank(consumerSecret)) {
-            running.set(false);
-            log.warn("X filtered stream ingestion not started: both {} and {} must hold a value",
-                    CONSUMER_KEY_PROPERTY, CONSUMER_SECRET_PROPERTY);
-            return;
+            ScannerProperties.Twitter twitter = properties.twitter();
+            String consumerKey = twitter == null ? null : twitter.consumerKey();
+            String consumerSecret = twitter == null ? null : twitter.consumerSecret();
+
+            // Blank-credential guard — see docs/DECISION_LOG.md DL-046
+            if (isBlank(consumerKey) || isBlank(consumerSecret)) {
+                running.set(false);
+                log.warn("X filtered stream ingestion not started: both {} and {} must hold a value",
+                        CONSUMER_KEY_PROPERTY, CONSUMER_SECRET_PROPERTY);
+                return;
+            }
+
+            stopRequested = false;
+            bearerToken = null;
+            log.info("Starting X filtered stream ingestion");
+
+            subscription = ingestionCycle()
+                    .subscribeOn(Schedulers.boundedElastic())
+                    .subscribe(
+                            ignored -> {
+                                // Mono<Void>: the cycle emits no element.
+                            },
+                            failure -> log.error("X filtered stream ingestion stopped after {}",
+                                    describe(failure)),
+                            () -> log.info("X filtered stream ingestion completed"));
+        } finally {
+            lifecycleLock.unlock();
         }
-
-        stopRequested = false;
-        bearerToken = null;
-        log.info("Starting X filtered stream ingestion");
-
-        subscription = ingestionCycle()
-                .subscribeOn(Schedulers.boundedElastic())
-                .subscribe(
-                        ignored -> {
-                            // Mono<Void>: the cycle emits no element.
-                        },
-                        failure -> log.error("X filtered stream ingestion stopped after {}",
-                                describe(failure)),
-                        () -> log.info("X filtered stream ingestion completed"));
     }
 
     /**
@@ -363,20 +480,101 @@ public class TweetStreamClient implements SmartLifecycle {
      *
      * <p>The held token is discarded and {@link #isRunning()} reports {@code false} once this method
      * returns. A call made when no cycle is subscribed records the shutdown and returns.
+     *
+     * <p>The transition is serialised against {@link #start()}, so a handle published by a concurrent
+     * start is either cancelled by this call or published after it and cancelled by the next one; no
+     * handle is left subscribed — DL-259.
+     *
+     * <p>A record already handed to the listener is awaited before the subscription is cancelled, for
+     * at most {@value #SHUTDOWN_DRAIN_MILLIS} milliseconds, so a reply being generated or stored is not
+     * cut short by the cancellation. A record still in flight at that bound is reported at {@code WARN}
+     * and the cancellation proceeds — DL-259.
      */
     @Override
     public void stop() {
-        stopRequested = true;
-        running.set(false);
+        lifecycleLock.lock();
+        try {
+            stopRequested = true;
+            running.set(false);
 
-        Disposable current = this.subscription;
-        this.subscription = null;
-        if (current != null && !current.isDisposed()) {
-            current.dispose();
+            // The connection is cancelled only once no record is being handled — DL-259 — see
+            // docs/DECISION_LOG.md
+            awaitDispatchDrain();
+
+            Disposable current = this.subscription;
+            this.subscription = null;
+            if (current != null && !current.isDisposed()) {
+                current.dispose();
+            }
+            this.bearerToken = null;
+        } finally {
+            lifecycleLock.unlock();
         }
-        this.bearerToken = null;
 
         log.info("Stopped X filtered stream ingestion");
+    }
+
+    // Net-new bounded dispatch drain — DL-259 — see docs/DECISION_LOG.md
+    /**
+     * Stops the cycle and then reports completion to the container.
+     *
+     * <p>{@link #stop()} performs the whole transition, the bounded drain included, so {@code callback}
+     * runs once no record is in flight or once the drain bound has passed. {@code callback} runs even
+     * when the transition raises.
+     *
+     * @param callback the container's completion callback, must not be {@code null}
+     */
+    @Override
+    public void stop(Runnable callback) {
+        Objects.requireNonNull(callback, "callback must not be null.");
+        try {
+            stop();
+        } finally {
+            callback.run();
+        }
+    }
+
+    /**
+     * Waits until no record is being dispatched, for at most {@value #SHUTDOWN_DRAIN_MILLIS}
+     * milliseconds.
+     *
+     * <p>An interrupt ends the wait and restores the interrupt status of the calling thread.
+     */
+    // Net-new bounded dispatch drain — DL-259 — see docs/DECISION_LOG.md
+    private void awaitDispatchDrain() {
+        long deadline = System.nanoTime() + Duration.ofMillis(SHUTDOWN_DRAIN_MILLIS).toNanos();
+        while (inFlightDispatches.get() > 0) {
+            if (System.nanoTime() - deadline >= 0L) {
+                log.warn("{} record(s) were still being handled after the {}ms shutdown bound; the "
+                        + "shutdown continues", inFlightDispatches.get(), SHUTDOWN_DRAIN_MILLIS);
+                return;
+            }
+            try {
+                Thread.sleep(DRAIN_POLL_MILLIS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                log.warn("Waiting for {} record(s) to finish was interrupted; the shutdown continues",
+                        inFlightDispatches.get());
+                return;
+            }
+        }
+    }
+
+    /**
+     * Reports whether this process runs the X filtered stream.
+     *
+     * <p>The container calls this before {@link #start()}, and {@link #start()} applies the same
+     * answer, so a process for which {@code scanner.background.enabled} or
+     * {@code scanner.background.stream-enabled} is {@code false} reaches X in no way — see
+     * docs/DECISION_LOG.md DL-250.
+     *
+     * @return {@code true} when both properties hold, which is their default
+     */
+    // Net-new ownership switch — DL-250 — see docs/DECISION_LOG.md
+    @Override
+    public boolean isAutoStartup() {
+        ScannerProperties.Background background = properties.background();
+        return background == null || background.runsStream();
     }
 
     /**
@@ -428,7 +626,12 @@ public class TweetStreamClient implements SmartLifecycle {
                     }
                     return acquireBearerToken()
                             .flatMap(token -> reconcileStreamRules(token, terms).thenReturn(token))
-                            .flatMap(this::consumeStream);
+                            // The popularity threshold is resolved once for this cycle — DL-255 —
+                            // see docs/DECISION_LOG.md
+                            .flatMap(token -> Mono
+                                    .fromCallable(tweetStreamListener::popularityThresholdInForce)
+                                    .subscribeOn(Schedulers.boundedElastic())
+                                    .flatMap(threshold -> consumeStream(token, threshold)));
                 });
     }
 
@@ -448,15 +651,20 @@ public class TweetStreamClient implements SmartLifecycle {
      *   <li>A collection that still resolves to nothing yields the configured base terms.</li>
      * </ol>
      *
-     * <p>Every step trims each term, drops a {@code null} or blank term, and removes a repeat
-     * without regard to letter case while keeping the order in which terms were first seen and the
-     * letter case of the first occurrence.
+     * <p>Every step trims each term, drops a {@code null} or blank term, drops a term that fails
+     * {@link #isAcceptableTerm(String)}, and removes a repeat without regard to letter case while
+     * keeping the order in which terms were first seen and the letter case of the first occurrence.
+     *
+     * <p>The result holds at most {@code scanner.ingestion.max-stream-rules} terms. A composition that
+     * yields more is truncated to the first that many and the two counts are recorded at {@code WARN},
+     * so a term collection can never exceed the rule cap of the account tier — DL-254.
      *
      * <p>The two repository reads block. This method runs only on
      * {@link Schedulers#boundedElastic()}.
      *
-     * @return an ordered collection holding no repeat and no blank term; empty only when no term is
-     *     configured, no {@code ai_tools} row holds a name and the override row holds nothing
+     * @return an ordered collection holding no repeat, no blank term and no rejected term, of at most
+     *     {@code scanner.ingestion.max-stream-rules} entries; empty only when no term is configured,
+     *     no {@code ai_tools} row holds an acceptable name and the override row holds nothing
      */
     private List<String> composeRuleTerms() {
         ScannerProperties.Ingestion ingestion = properties.ingestion();
@@ -467,15 +675,58 @@ public class TweetStreamClient implements SmartLifecycle {
         if (!overrideTerms.isEmpty()) {
             log.info("Stream rule terms taken from the `{}` settings row: {} term(s)",
                     STREAM_KEYWORDS_SETTING_KEY, overrideTerms.size());
-            return overrideTerms;
+            return boundedToRuleCap(overrideTerms);
         }
 
         Map<String, String> merged = new LinkedHashMap<>();
         mergeTerms(merged, configuredTerms);
-        mergeTerms(merged, readAiToolNames());
+        mergeTerms(merged, readAiToolNames(maxStreamRules()));
         List<String> composed = List.copyOf(merged.values());
 
-        return composed.isEmpty() ? configuredTerms : composed;
+        return boundedToRuleCap(composed.isEmpty() ? configuredTerms : composed);
+    }
+
+    // Net-new client-side rule cap — DL-254 — see docs/DECISION_LOG.md
+    /**
+     * Truncates a term collection to {@code scanner.ingestion.max-stream-rules} entries.
+     *
+     * @param terms the composed terms, must not be {@code null}
+     * @return {@code terms} when it holds no more than the cap, and its first cap entries otherwise,
+     *     which is recorded at {@code WARN} with the two counts and no term value
+     */
+    private List<String> boundedToRuleCap(List<String> terms) {
+        int cap = maxStreamRules();
+        if (terms.size() <= cap) {
+            return terms;
+        }
+
+        // Counts only; no term value is recorded — DL-052, DL-257 — see docs/DECISION_LOG.md
+        log.warn("Composed {} stream rule term(s) against a cap of {}; the first {} are registered "
+                + "and the rest are dropped", terms.size(), cap, cap);
+        return List.copyOf(terms.subList(0, cap));
+    }
+
+    /**
+     * Reports the number of rules the account tier accepts.
+     *
+     * @return {@code scanner.ingestion.max-stream-rules}, and {@link #MAX_RULES_PER_REQUEST} when the
+     *     {@code scanner.ingestion} group is unbound
+     */
+    private int maxStreamRules() {
+        ScannerProperties.Ingestion ingestion = properties.ingestion();
+        return ingestion == null ? MAX_RULES_PER_REQUEST : ingestion.maxStreamRules();
+    }
+
+    /**
+     * Reports the span without any byte from the stream after which the connection is treated as dead.
+     *
+     * @return {@code scanner.ingestion.stream-idle-timeout-seconds} as a duration, and one minute when
+     *     the {@code scanner.ingestion} group is unbound
+     */
+    // Net-new signal-idle bound — DL-256 — see docs/DECISION_LOG.md
+    private Duration streamIdleTimeout() {
+        ScannerProperties.Ingestion ingestion = properties.ingestion();
+        return Duration.ofSeconds(ingestion == null ? 60L : ingestion.streamIdleTimeoutSeconds());
     }
 
     /**
@@ -499,23 +750,26 @@ public class TweetStreamClient implements SmartLifecycle {
             return List.of();
         }
 
-        return distinctTerms(List.of(stored.split(TERM_DELIMITER)));
+        // The stored value is split into at most this many segments, so an over-long row cannot
+        // produce an unbounded collection — DL-254 — see docs/DECISION_LOG.md
+        String[] segments = stored.split(TERM_DELIMITER, MAX_OVERRIDE_SEGMENTS);
+        return distinctTerms(List.of(segments));
     }
 
+    // Only ai_tools.name is selected, bounded by the rule cap — DL-254 — see docs/DECISION_LOG.md
     /**
-     * Reads the {@code name} of every {@code ai_tools} row.
+     * Reads at most {@code bound} {@code ai_tools} names.
      *
-     * @return the names held by the table, in the order the repository returns them, with a
-     *     {@code null} or blank name omitted
+     * <p>Only the {@code name} column is selected, so no other column of the table is transferred, and
+     * the query returns at most {@code bound} rows in {@code id} order.
+     *
+     * @param bound the greatest number of names to read, at least {@code 1}
+     * @return the names the bounded query returned, with a {@code null} or blank name omitted
      */
-    private List<String> readAiToolNames() {
-        List<AiTool> tools = aiToolRepository.findAll();
-        List<String> names = new ArrayList<>(tools.size());
-        for (AiTool tool : tools) {
-            if (tool == null) {
-                continue;
-            }
-            String name = tool.getName();
+    private List<String> readAiToolNames(int bound) {
+        List<String> selected = aiToolRepository.findNames(PageRequest.of(0, bound));
+        List<String> names = new ArrayList<>(selected.size());
+        for (String name : selected) {
             if (!isBlank(name)) {
                 names.add(name);
             }
@@ -537,9 +791,12 @@ public class TweetStreamClient implements SmartLifecycle {
      * assembled as text. Each term becomes one rule whose {@value #RULES_KEY_TAG} is the term in its
      * unquoted form, which is the value {@link TweetStreamListener} reads from a matched rule.
      *
-     * <p>A term count of {@value #LARGE_RULE_SET_THRESHOLD} or more is recorded at {@code WARN} with
-     * the count and the terms. No partitioning, expression grouping or cap-specific retry is applied:
-     * an account-tier rule cap surfaces as the API's own error through the reconnection path.
+     * <p>A registered rule is replaced when its match expression is no longer wanted and when its
+     * {@value #RULES_KEY_TAG} differs from the wanted one — see docs/DECISION_LOG.md DL-261.
+     *
+     * <p>Each mutation is sent as consecutive requests of at most {@value #MAX_RULES_PER_REQUEST}
+     * rules, and the composed collection is already bounded by
+     * {@code scanner.ingestion.max-stream-rules} — DL-254. No term value is recorded — DL-257.
      *
      * @param token the app-only bearer token, must not be {@code null}
      * @param terms the composed terms, must hold at least one term
@@ -549,11 +806,6 @@ public class TweetStreamClient implements SmartLifecycle {
         Map<String, String> desired = new LinkedHashMap<>();
         for (String term : terms) {
             desired.put(ruleExpression(term), term);
-        }
-
-        if (terms.size() >= LARGE_RULE_SET_THRESHOLD) {
-            log.warn("Registering {} stream rule term(s), which may exceed the rule cap of the "
-                    + "account tier: {}", terms.size(), terms);
         }
 
         return listStreamRules(token)
@@ -566,10 +818,10 @@ public class TweetStreamClient implements SmartLifecycle {
      * Lists the rules currently registered with X.
      *
      * @param token the app-only bearer token, must not be {@code null}
-     * @return the registered rules keyed by match expression with the identifier as value; empty
-     *     when the endpoint reports no rule
+     * @return the registered rules keyed by match expression, each carrying its identifier and its
+     *     tag; empty when the endpoint reports no rule
      */
-    private Mono<Map<String, String>> listStreamRules(String token) {
+    private Mono<Map<String, RegisteredRule>> listStreamRules(String token) {
         return webClient.get()
                 .uri(STREAM_RULES_PATH)
                 .header(HttpHeaders.AUTHORIZATION, BEARER_SCHEME + token)
@@ -584,45 +836,94 @@ public class TweetStreamClient implements SmartLifecycle {
     /**
      * Deletes the surplus rules and adds the missing ones.
      *
+     * <p>A registered rule is surplus when its match expression is not wanted and when the tag it
+     * carries differs from the wanted tag; the second case is deleted here and re-added below, so a
+     * stale tag is corrected — DL-261.
+     *
+     * <p>Both mutations are sent as consecutive requests of at most {@value #MAX_RULES_PER_REQUEST}
+     * rules each — DL-254.
+     *
      * @param token the app-only bearer token, must not be {@code null}
      * @param desired the wanted rules keyed by match expression with the tag as value, must not be
      *     {@code null}
-     * @param existing the registered rules keyed by match expression with the identifier as value,
-     *     must not be {@code null}
+     * @param existing the registered rules keyed by match expression, must not be {@code null}
      * @return a sequence that completes once both mutations have been applied or skipped
      */
     private Mono<Void> applyRuleDifference(String token,
             Map<String, String> desired,
-            Map<String, String> existing) {
+            Map<String, RegisteredRule> existing) {
         List<String> surplusIds = new ArrayList<>();
-        for (Map.Entry<String, String> registered : existing.entrySet()) {
-            if (!desired.containsKey(registered.getKey())) {
-                surplusIds.add(registered.getValue());
+        List<String> staleTagExpressions = new ArrayList<>();
+        for (Map.Entry<String, RegisteredRule> registered : existing.entrySet()) {
+            String expression = registered.getKey();
+            String wantedTag = desired.get(expression);
+            if (wantedTag == null) {
+                surplusIds.add(registered.getValue().id());
+                continue;
+            }
+            // The tag reaches tweets.ai_tools_mentioned, so a rule carrying a stale one is replaced —
+            // DL-261 — see docs/DECISION_LOG.md
+            if (!wantedTag.equals(registered.getValue().tag())) {
+                surplusIds.add(registered.getValue().id());
+                staleTagExpressions.add(expression);
             }
         }
 
         List<Map<String, String>> missingRules = new ArrayList<>();
         for (Map.Entry<String, String> wanted : desired.entrySet()) {
-            if (!existing.containsKey(wanted.getKey())) {
+            if (!existing.containsKey(wanted.getKey())
+                    || staleTagExpressions.contains(wanted.getKey())) {
                 missingRules.add(Map.of(
                         RULES_KEY_VALUE, wanted.getKey(),
                         RULES_KEY_TAG, wanted.getValue()));
             }
         }
 
-        Mono<Void> deletion = surplusIds.isEmpty()
-                ? Mono.empty()
-                : mutateStreamRules(token, Map.of(
-                        RULES_KEY_DELETE, Map.of(RULES_KEY_IDS, List.copyOf(surplusIds))));
-
-        Mono<Void> addition = missingRules.isEmpty()
-                ? Mono.empty()
-                : mutateStreamRules(token, Map.of(RULES_KEY_ADD, List.copyOf(missingRules)));
-
-        return deletion.then(addition)
+        int replaced = staleTagExpressions.size();
+        return deleteRules(token, surplusIds)
+                .then(addRules(token, missingRules))
                 .doOnSuccess(ignored -> log.info("Stream rules reconciled: {} rule(s) registered, "
-                        + "{} added, {} removed", desired.size(), missingRules.size(),
-                        surplusIds.size()));
+                        + "{} added, {} removed, {} replaced for a changed tag", desired.size(),
+                        missingRules.size(), surplusIds.size(), replaced));
+    }
+
+    // Net-new batching of both mutations — DL-254 — see docs/DECISION_LOG.md
+    /**
+     * Deletes the supplied rule identifiers in consecutive bounded requests.
+     *
+     * @param token the app-only bearer token, must not be {@code null}
+     * @param surplusIds the identifiers to delete, must not be {@code null}
+     * @return a sequence that completes once every batch has been sent, and at once when the
+     *     collection is empty
+     */
+    private Mono<Void> deleteRules(String token, List<String> surplusIds) {
+        List<Mono<Void>> batches = new ArrayList<>();
+        for (int from = 0; from < surplusIds.size(); from += MAX_RULES_PER_REQUEST) {
+            int to = Math.min(from + MAX_RULES_PER_REQUEST, surplusIds.size());
+            List<String> batch = List.copyOf(surplusIds.subList(from, to));
+            batches.add(mutateStreamRules(token,
+                    Map.of(RULES_KEY_DELETE, Map.of(RULES_KEY_IDS, batch))));
+        }
+        return Flux.concat(batches).then();
+    }
+
+    // Net-new batching of both mutations — DL-254 — see docs/DECISION_LOG.md
+    /**
+     * Adds the supplied rules in consecutive bounded requests.
+     *
+     * @param token the app-only bearer token, must not be {@code null}
+     * @param missingRules the rules to add, must not be {@code null}
+     * @return a sequence that completes once every batch has been sent, and at once when the
+     *     collection is empty
+     */
+    private Mono<Void> addRules(String token, List<Map<String, String>> missingRules) {
+        List<Mono<Void>> batches = new ArrayList<>();
+        for (int from = 0; from < missingRules.size(); from += MAX_RULES_PER_REQUEST) {
+            int to = Math.min(from + MAX_RULES_PER_REQUEST, missingRules.size());
+            List<Map<String, String>> batch = List.copyOf(missingRules.subList(from, to));
+            batches.add(mutateStreamRules(token, Map.of(RULES_KEY_ADD, batch)));
+        }
+        return Flux.concat(batches).then();
     }
 
     /**
@@ -643,19 +944,69 @@ public class TweetStreamClient implements SmartLifecycle {
                 .bodyToMono(JsonNode.class)
                 // Bounded control-plane call — DL-230 — see docs/DECISION_LOG.md
                 .timeout(controlPlaneTimeout())
+                // A rule the endpoint refused is surfaced rather than discarded — DL-243 — see
+                // docs/DECISION_LOG.md
+                .doOnNext(TweetStreamClient::reportRefusedRules)
                 .then();
+    }
+
+    // Net-new: the rules-mutation answer is read so a partial refusal is observable — DL-243 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Records the rules the mutation endpoint refused.
+     *
+     * <p>Nothing is recorded when the answer carries no {@value #RULES_KEY_ERRORS} entry and both the
+     * {@value #RULES_KEY_NOT_CREATED} and {@value #RULES_KEY_INVALID} summary members are absent or
+     * zero. A refusal does not fail the mutation: the stream still connects with the rules the
+     * endpoint did accept.
+     *
+     * <p>The record names the refused match expressions, which this application composed, and never
+     * any free text the provider returned — DL-052, DL-084.
+     *
+     * @param payload the mutation answer, may be {@code null}
+     */
+    private static void reportRefusedRules(JsonNode payload) {
+        if (payload == null) {
+            return;
+        }
+
+        JsonNode summary = payload.path(RULES_KEY_META).path(RULES_KEY_SUMMARY);
+        int notCreated = summary.path(RULES_KEY_NOT_CREATED).asInt(0);
+        int invalid = summary.path(RULES_KEY_INVALID).asInt(0);
+
+        JsonNode errors = payload.path(RULES_KEY_ERRORS);
+        List<String> refused = new ArrayList<>();
+        if (errors.isArray()) {
+            for (JsonNode error : errors) {
+                String expression = error.path(RULES_KEY_VALUE).asText("");
+                if (!expression.isBlank()) {
+                    refused.add(expression);
+                }
+            }
+        }
+
+        if (refused.isEmpty() && notCreated == 0 && invalid == 0) {
+            return;
+        }
+
+        log.warn("X refused {} stream rule(s) ({} not created, {} invalid); refused expression(s): {}",
+                Math.max(refused.size(), notCreated + invalid), notCreated, invalid, refused);
     }
 
     /**
      * Reads the registered rules out of a rules-endpoint payload.
      *
+     * <p>The {@value #RULES_KEY_TAG} member is read alongside the identifier: a rule whose tag
+     * no longer matches the wanted one is replaced — see docs/DECISION_LOG.md DL-261. A rule carrying
+     * no tag is read as carrying an empty one.
+     *
      * @param payload the endpoint payload, may be {@code null}
-     * @return the registered rules keyed by match expression with the identifier as value; empty
-     *     when the payload is {@code null}, carries no {@value #RULES_KEY_DATA} array, or carries
-     *     only entries missing an identifier or a match expression
+     * @return the registered rules keyed by match expression, each carrying its identifier and its
+     *     tag; empty when the payload is {@code null}, carries no {@value #RULES_KEY_DATA} array, or
+     *     carries only entries missing an identifier or a match expression
      */
-    private static Map<String, String> readRegisteredRules(JsonNode payload) {
-        Map<String, String> registered = new LinkedHashMap<>();
+    private static Map<String, RegisteredRule> readRegisteredRules(JsonNode payload) {
+        Map<String, RegisteredRule> registered = new LinkedHashMap<>();
         if (payload == null) {
             return registered;
         }
@@ -668,11 +1019,22 @@ public class TweetStreamClient implements SmartLifecycle {
         for (JsonNode rule : rules) {
             String expression = rule.path(RULES_KEY_VALUE).asText("");
             String identifier = rule.path(RULES_KEY_ID).asText("");
+            String tag = rule.path(RULES_KEY_TAG).asText("");
             if (!expression.isBlank() && !identifier.isBlank()) {
-                registered.put(expression, identifier);
+                registered.put(expression, new RegisteredRule(identifier, tag));
             }
         }
         return registered;
+    }
+
+    // Net-new: the identifier and the tag of one registered rule — DL-261 — see docs/DECISION_LOG.md
+    /**
+     * One rule as X reports it.
+     *
+     * @param id the rule identifier, used to delete the rule, never {@code null}
+     * @param tag the rule tag, which reaches {@code tweets.ai_tools_mentioned}, never {@code null}
+     */
+    private record RegisteredRule(String id, String tag) {
     }
 
     // The bound applied to every short request/response call on the X API — DL-230 — see
@@ -696,7 +1058,12 @@ public class TweetStreamClient implements SmartLifecycle {
     /**
      * Renders one term as an X rule match expression.
      *
-     * @param term a trimmed, non-blank term, must not be {@code null}
+     * <p>{@link #isAcceptableTerm(String)} has already rejected every character the rule syntax
+     * reserves, the double quote and the backslash included, so wrapping a multi-word term in double
+     * quotes cannot be escaped and no character needs replacing — DL-257.
+     *
+     * @param term a trimmed, non-blank term that {@link #isAcceptableTerm(String)} accepted, must not
+     *     be {@code null}
      * @return the term wrapped in double quotes when it holds whitespace, and the term unchanged
      *     otherwise
      */
@@ -802,21 +1169,29 @@ public class TweetStreamClient implements SmartLifecycle {
      * Consumes the filtered stream until the listener reports that streaming should stop or the
      * connection ends.
      *
-     * <p>Records are handed to {@link #dispatchRecord(String)} on {@link Schedulers#boundedElastic()},
-     * not on the thread the response body is emitted on, so the listener's persistence and external
-     * calls never run on a connection thread. Delivery stays in arrival order on a single worker, and
-     * the connection thread is free to keep reading while a record is being handled.
+     * <p>Records are handed to {@link #dispatchRecord(String, int)} on
+     * {@link Schedulers#boundedElastic()}, not on the thread the response body is emitted on, so the
+     * listener's persistence and external calls never run on a connection thread. Delivery stays in
+     * arrival order on a single worker, and the connection thread is free to keep reading while a
+     * record is being handled.
+     *
+     * <p>The hand-over requests {@value #STREAM_DISPATCH_PREFETCH} record at a time, so at most that
+     * many records are queued between the connection and the dispatch worker however long a provider or
+     * a database call takes — DL-258.
      *
      * @param token the app-only bearer token, must not be {@code null}
+     * @param popularityThreshold the popularity threshold resolved for this cycle — DL-255
      * @return a sequence that completes when the listener reports that streaming should stop and
      *     fails when the connection ends for any other reason
      */
     // Per-record dispatch runs on a blocking-capable scheduler, not on the connection thread — see
     // docs/DECISION_LOG.md DL-220
-    private Mono<Void> consumeStream(String token) {
+    private Mono<Void> consumeStream(String token, int popularityThreshold) {
         return streamRecords(token)
-                .publishOn(Schedulers.boundedElastic())
-                .map(this::dispatchRecord)
+                // Bounded queueing between the connection and the dispatch worker — DL-258 — see
+                // docs/DECISION_LOG.md
+                .publishOn(Schedulers.boundedElastic(), STREAM_DISPATCH_PREFETCH)
+                .map(record -> dispatchRecord(record, popularityThreshold))
                 .takeWhile(Boolean::booleanValue)
                 .then(Mono.defer(() -> stopRequested
                         ? Mono.<Void>empty()
@@ -843,6 +1218,14 @@ public class TweetStreamClient implements SmartLifecycle {
      * {@code scanner.twitter.request-timeout-seconds} applies only to the token exchange and the
      * stream-rules calls — DL-230.
      *
+     * <p>The body does carry a signal-idle bound of
+     * {@code scanner.ingestion.stream-idle-timeout-seconds}: any chunk resets it, the periodic
+     * keep-alive chunk included, and a connection that delivers no byte at all for that span fails with
+     * a timeout and reconnects rather than appearing healthy — DL-256.
+     *
+     * <p>At most {@value #STREAM_CHUNK_PREFETCH} chunk is requested ahead of the one being drained, so
+     * no unreleased buffer is queued — DL-258.
+     *
      * @param token the app-only bearer token, must not be {@code null}
      * @return the complete records the connection delivers, including the blank keep-alive records X
      *     sends periodically
@@ -855,12 +1238,15 @@ public class TweetStreamClient implements SmartLifecycle {
                     .uri(uriBuilder -> uriBuilder
                             .path(STREAM_PATH)
                             .queryParam(TWEET_FIELDS_PARAM, TWEET_FIELDS_VALUE)
-                            .queryParam(EXPANSIONS_PARAM, EXPANSIONS_VALUE)
                             .build())
                     .header(HttpHeaders.AUTHORIZATION, BEARER_SCHEME + token)
                     .exchangeToFlux(TweetStreamClient::openStreamBody)
+                    // Any chunk resets this bound; it is not a bound on the whole response — DL-256 —
+                    // see docs/DECISION_LOG.md
+                    .timeout(streamIdleTimeout())
                     .concatMap(chunk ->
-                            Flux.fromIterable(drainCompleteRecords(chunk, pending, discarding)));
+                            Flux.fromIterable(drainCompleteRecords(chunk, pending, discarding)),
+                            STREAM_CHUNK_PREFETCH);
         });
     }
 
@@ -888,10 +1274,10 @@ public class TweetStreamClient implements SmartLifecycle {
      * {@code pending} for the next chunk.
      *
      * <p>A record whose accumulated bytes reach {@value #MAX_RECORD_BYTES} is discarded: the
-     * accumulator is emptied, the condition is recorded once at {@code WARN}, and {@code discarding} is
-     * raised so that the remaining bytes of that record are dropped up to and including its next line
-     * feed. Accumulation of the following record then resumes normally and the connection is never
-     * ended.
+     * accumulator is emptied, the condition is counted and reported at most once per
+     * {@value #DROPPED_RECORD_REPORT_INTERVAL} — DL-260 — and {@code discarding} is raised so that the
+     * remaining bytes of that record are dropped up to and including its next line feed. Accumulation of
+     * the following record then resumes normally and the connection is never ended.
      *
      * @param chunk one body chunk, released before this method returns; must not be {@code null}
      * @param pending the accumulator holding the bytes of the record in progress, must not be
@@ -901,7 +1287,7 @@ public class TweetStreamClient implements SmartLifecycle {
      * @return the records the chunk completed, in arrival order; empty when the chunk completed none
      */
     // Bounded accumulation: log and skip, never end the connection — see docs/DECISION_LOG.md DL-222
-    private static List<String> drainCompleteRecords(DataBuffer chunk,
+    private List<String> drainCompleteRecords(DataBuffer chunk,
             ByteArrayOutputStream pending, AtomicBoolean discarding) {
         byte[] bytes;
         try {
@@ -925,11 +1311,10 @@ public class TweetStreamClient implements SmartLifecycle {
             } else {
                 pending.write(value);
                 if (pending.size() >= MAX_RECORD_BYTES) {
-                    // Neither the accumulated bytes nor any part of them is written: the byte count
-                    // and the bound only — see docs/DECISION_LOG.md DL-222
-                    log.warn("Skipping an X filtered stream record that reached {} byte(s) with no "
-                            + "line feed; the bound is {} byte(s) and the bytes up to the next line "
-                            + "feed are dropped", pending.size(), MAX_RECORD_BYTES);
+                    // Neither the accumulated bytes nor any part of them is written: the counts and
+                    // the bound only — DL-222, DL-260 — see docs/DECISION_LOG.md
+                    reportDroppedRecords(unreportedOverlongRecords, lastOverlongReportNanos,
+                            "reached the {} byte bound with no line feed", MAX_RECORD_BYTES);
                     pending.reset();
                     discarding.set(true);
                 }
@@ -946,11 +1331,18 @@ public class TweetStreamClient implements SmartLifecycle {
      * failure's type, never as its content, and skipped. A listener failure is recorded at
      * {@code ERROR} and skipped. Neither ends the connection.
      *
+     * <p>A record that cannot be read as JSON is counted and reported at most once per
+     * {@value #DROPPED_RECORD_REPORT_INTERVAL} — DL-260.
+     *
+     * <p>A record handed to the listener is counted as in flight until the listener returns, so
+     * {@link #stop(Runnable)} can wait for it — DL-259.
+     *
      * @param record one complete record, may be {@code null}
+     * @param popularityThreshold the popularity threshold resolved for this cycle — DL-255
      * @return {@code true} to keep the connection open, and {@code false} once the listener has
      *     reported that streaming should stop
      */
-    private boolean dispatchRecord(String record) {
+    private boolean dispatchRecord(String record, int popularityThreshold) {
         String candidate = record == null ? "" : record.trim();
         if (candidate.isEmpty()) {
             return true;
@@ -960,17 +1352,19 @@ public class TweetStreamClient implements SmartLifecycle {
         try {
             payload = OBJECT_MAPPER.readTree(candidate);
         } catch (JsonProcessingException failure) {
-            // Neither the record nor the parse failure's message is written: a non-reversible
-            // correlation token and the failure's type only — DL-149 — see docs/DECISION_LOG.md
-            log.warn("Skipping an unreadable X filtered stream record; record {}: {}",
-                    LogSafe.correlation(candidate), LogSafe.type(failure));
+            // Neither the record nor the parse failure's message is written: the counts and the
+            // failure's type only — DL-149, DL-260 — see docs/DECISION_LOG.md
+            reportDroppedRecords(unreportedUnreadableRecords, lastUnreadableReportNanos,
+                    "could not be read as JSON ({})", LogSafe.type(failure));
             return true;
         }
 
+        // The record is in flight until the listener returns — DL-259 — see docs/DECISION_LOG.md
+        inFlightDispatches.incrementAndGet();
         try {
             // Honours the documented contract of on_status at
             // documentation/Code Structure.md:L1393 — see docs/DECISION_LOG.md
-            boolean keepStreaming = tweetStreamListener.onStatus(payload);
+            boolean keepStreaming = tweetStreamListener.onStatus(payload, popularityThreshold);
             if (!keepStreaming) {
                 stopRequested = true;
                 log.info("Closing the X filtered stream connection: the listener reported that "
@@ -983,7 +1377,44 @@ public class TweetStreamClient implements SmartLifecycle {
             log.error("Skipping an X filtered stream record: the listener failed after {}",
                     LogSafe.type(failure));
             return true;
+        } finally {
+            inFlightDispatches.decrementAndGet();
         }
+    }
+
+    // Net-new bounded reporting of dropped records — DL-260 — see docs/DECISION_LOG.md
+    /**
+     * Counts one dropped record and reports the running count at most once per
+     * {@value #DROPPED_RECORD_REPORT_INTERVAL}.
+     *
+     * <p>The count is raised on every call. A report is emitted at {@code WARN} when no report of the
+     * same condition has been emitted within the interval, carries the number of records dropped since
+     * the previous report, and resets that number; every other call records the condition at
+     * {@code DEBUG} only. No part of a dropped record is ever written.
+     *
+     * @param unreported the running count of this condition, must not be {@code null}
+     * @param lastReportNanos the nanosecond stamp of the last report of this condition, must not be
+     *     {@code null}
+     * @param reason a fixed description of the condition, holding one {@code {}} placeholder for
+     *     {@code detail}, must not be {@code null}
+     * @param detail the value substituted into {@code reason}, must not be {@code null}
+     */
+    private static void reportDroppedRecords(AtomicLong unreported, AtomicLong lastReportNanos,
+            String reason, Object detail) {
+        unreported.incrementAndGet();
+
+        long now = System.nanoTime();
+        long previous = lastReportNanos.get();
+        boolean due = previous == 0L
+                || now - previous >= DROPPED_RECORD_REPORT_INTERVAL.toNanos();
+        if (!due || !lastReportNanos.compareAndSet(previous, now)) {
+            log.debug("Skipping an X filtered stream record that " + reason, detail);
+            return;
+        }
+
+        long dropped = unreported.getAndSet(0L);
+        log.warn("Skipped {} X filtered stream record(s) in the last {}s that " + reason,
+                dropped, DROPPED_RECORD_REPORT_INTERVAL.toSeconds(), detail);
     }
 
     // Reconnection with exponential backoff, one WARN per reconnection — see
@@ -1116,6 +1547,10 @@ public class TweetStreamClient implements SmartLifecycle {
     /**
      * Adds every usable term of {@code terms} to {@code target}.
      *
+     * <p>A {@code null} term, a term that is blank once trimmed, and a term that fails
+     * {@link #isAcceptableTerm(String)} are all dropped. A dropped term is recorded at {@code WARN}
+     * with its length and a correlation token only, never with its characters — DL-257.
+     *
      * @param target accumulator keyed by the lower-cased term with the trimmed term as value, must
      *     not be {@code null}
      * @param terms the terms to add, must not be {@code null}; individual elements may be
@@ -1130,8 +1565,52 @@ public class TweetStreamClient implements SmartLifecycle {
             if (trimmed.isEmpty()) {
                 continue;
             }
+            // Only a strictly validated term reaches the rule DSL — DL-257 — see
+            // docs/DECISION_LOG.md
+            if (!isAcceptableTerm(trimmed)) {
+                log.warn("Dropping a stream rule term that holds a character the rule syntax "
+                        + "reserves, or that exceeds {} character(s); term {} is {} character(s) long",
+                        MAX_TERM_CHARS, LogSafe.correlation(trimmed), trimmed.length());
+                continue;
+            }
             target.putIfAbsent(trimmed.toLowerCase(Locale.ROOT), trimmed);
         }
+    }
+
+    // Net-new strict term validation — DL-257 — see docs/DECISION_LOG.md
+    /**
+     * Reports whether a term may be rendered as an X rule match expression.
+     *
+     * <p>A term is accepted when it holds at most {@value #MAX_TERM_CHARS} characters and every
+     * character is a letter, a digit, or one of {@value #ADDITIONAL_TERM_CHARACTERS}. Every character
+     * the rule syntax reserves — the double quote, the backslash, the parentheses, the colon, the
+     * leading negation, the hashtag, the mention sign and every control character — is therefore
+     * rejected, so no term can close a quoted expression, introduce an operator or forge a log line.
+     *
+     * <p>A term is also rejected when it begins or ends with a character of
+     * {@value #ADDITIONAL_TERM_CHARACTERS}, so a leading hyphen cannot negate the expression.
+     *
+     * @param term the trimmed, non-blank term to inspect, must not be {@code null}
+     * @return {@code true} when the term may be rendered
+     */
+    private static boolean isAcceptableTerm(String term) {
+        if (term.length() > MAX_TERM_CHARS) {
+            return false;
+        }
+        if (!Character.isLetterOrDigit(term.charAt(0))
+                || !Character.isLetterOrDigit(term.charAt(term.length() - 1))) {
+            return false;
+        }
+        for (int index = 0; index < term.length(); index++) {
+            char character = term.charAt(index);
+            if (Character.isLetterOrDigit(character)) {
+                continue;
+            }
+            if (ADDITIONAL_TERM_CHARACTERS.indexOf(character) < 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

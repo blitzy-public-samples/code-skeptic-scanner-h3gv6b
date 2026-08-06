@@ -51,10 +51,11 @@ import com.fasterxml.jackson.databind.JsonNode;
  * {@code tweet.author}, {@code tweet.timestamp}, {@code tweet.sentiment} and
  * {@code tweet.engagement}; the last four name no field of the source model
  * ({@code backend/app/schema/tweet.py:L5-14}) and no component of {@link TweetDto}. The map written
- * here carries one property per component of {@link TweetDto} — DL-088:
+ * here carries the seven properties below, which is fewer than one per component of
+ * {@link TweetDto} — DL-088:
  *
  * <table border="1">
- *   <caption>Notion property map</caption>
+ *   <caption>Notion properties written by {@link #storeTweet(TweetDto)}</caption>
  *   <tr><th>Property</th><th>Type</th><th>Source</th></tr>
  *   <tr><td>{@code Content}</td><td>title</td><td>{@link TweetDto#content()}</td></tr>
  *   <tr><td>{@code Author}</td><td>rich_text</td><td>{@link TweetDto#userId()}</td></tr>
@@ -62,21 +63,19 @@ import com.fasterxml.jackson.databind.JsonNode;
  *   <tr><td>{@code Doubt Rating}</td><td>number</td><td>{@link TweetDto#doubtRating()}</td></tr>
  *   <tr><td>{@code Engagement}</td><td>number</td><td>{@link TweetDto#likeCount()}</td></tr>
  *   <tr><td>{@code Tweet Id}</td><td>rich_text</td><td>{@link TweetDto#id()}</td></tr>
- *   <tr><td>{@code Media}</td><td>rich_text</td><td>{@link TweetDto#media()}, delimited</td></tr>
- *   <tr><td>{@code Quoted Tweet Id}</td><td>rich_text</td>
- *       <td>{@link TweetDto#quotedTweetId()}</td></tr>
- *   <tr><td>{@code AI Tools Mentioned}</td><td>rich_text</td>
- *       <td>{@link TweetDto#aiToolsMentioned()}, delimited</td></tr>
  *   <tr><td>{@code Response}</td><td>rich_text</td>
  *       <td>{@link #updateTweetResponse(String, String)} only</td></tr>
  * </table>
  *
  * <p>The mirror carries exactly those seven properties and no others. {@link TweetDto#media()},
  * {@link TweetDto#aiToolsMentioned()} and {@link TweetDto#quotedTweetId()} are not mirrored: no
- * property is written for them, and a read leaves {@code media} and {@code aiToolsMentioned} empty
- * and {@code quotedTweetId} {@code null} — DL-088. Notion answers HTTP 400 {@code validation_error}
- * for any page write naming a property the target database does not define, so a write beyond this
- * set fails the whole request.
+ * property is written for them, no property name is declared for them, and a read leaves
+ * {@code media} and {@code aiToolsMentioned} empty and {@code quotedTweetId} {@code null} — DL-088,
+ * DL-090. No value written or read here passes through
+ * {@code util/DelimitedStringListConverter}, whose one reader is {@code entity/Tweet} — DL-164.
+ *
+ * <p>Notion answers HTTP 400 {@code validation_error} for any page write naming a property the target
+ * database does not define, so a write beyond this set fails the whole request.
  *
  * <p>{@code Doubt Rating} replaces the {@code Sentiment} select of
  * {@code backend/app/services/notion_service.py:L18}; {@code Tweet Id} and {@code Response} are
@@ -91,12 +90,17 @@ import com.fasterxml.jackson.databind.JsonNode;
  * failure rather than read as an empty result — DL-089. The source indexed {@code [0]} directly at
  * {@code backend/app/services/notion_service.py:L45-49}.
  *
- * <p>This adapter carries no retry, no backoff, no request pacing and no cache. A request Notion
- * rejects — including HTTP 429 {@code rate_limited} against Notion's published request ceiling — is
- * logged with the provider status, error {@code code} and short {@code message}, then raised to the
- * caller as an {@link IllegalStateException}. Re-attempting a rejected mirror is the caller's
- * responsibility, not this class's. The relational row is committed before any Notion call, so a
- * rejected mirror never costs data — see docs/DECISION_LOG.md DL-190.
+ * <p>This adapter carries no request pacing and no cache. Exactly one operation retries: the mirror
+ * write of {@link #updateTweetResponse}, which re-attempts an HTTP 429, any 5xx and a transport
+ * failure up to {@code scanner.notion.mirror-max-retries} times, waiting
+ * {@code scanner.notion.mirror-retry-backoff-millis} before the first retry and doubling that wait
+ * once per earlier retry up to a ten-second ceiling — DL-253. Every other operation issues exactly
+ * one HTTP request. A request Notion rejects — including HTTP 429 {@code rate_limited} against
+ * Notion's published request ceiling — is logged with the provider status, error {@code code},
+ * request id and the length of the provider explanation, never its text — DL-269 — then raised to the
+ * caller as an {@link IllegalStateException}. Re-attempting a rejected read or create is the caller's
+ * responsibility. The relational row is committed before any Notion call, so a rejected mirror never
+ * costs data — see docs/DECISION_LOG.md DL-190.
  *
  * <p>This class reaches no repository and holds no entity. No credential is read at construction and
  * no request is issued there, so the application context loads with {@code NOTION_API_KEY} and
@@ -253,8 +257,11 @@ public class NotionService {
     /** Notion error-body member carrying the human-readable explanation. */
     private static final String KEY_MESSAGE = "message";
 
-    /** Longest run of a Notion error message a log record carries. */
-    private static final int ERROR_MESSAGE_LIMIT = 200;
+    /**
+     * Reported as the explanation length when a Notion error body carries no explanation, so an absent
+     * member is distinguishable from an empty one — DL-269.
+     */
+    private static final int ABSENT_MESSAGE_LENGTH = -1;
 
     /** Reported in place of an absent Notion error component. */
     private static final String ABSENT = "absent";
@@ -265,14 +272,23 @@ public class NotionService {
     /** Response header carrying Notion's own identifier for the answered request. */
     private static final String HEADER_REQUEST_ID = "x-request-id";
 
-    /** Accepted shape of the {@value #HEADER_REQUEST_ID} header value. */
-    private static final Pattern REQUEST_ID_SHAPE = Pattern.compile("[A-Za-z0-9-]{1,64}");
-
     /** Page size of the correlation query issued by {@link #updateTweetResponse(String, String)}. */
     private static final int SINGLE_PAGE = 1;
 
     /** Returned in place of a title, rich-text or identifier value that is absent. */
     private static final String EMPTY_TEXT = "";
+
+    /** Status Notion answers when a request exceeded its rate limit — DL-253. */
+    private static final int TOO_MANY_REQUESTS_STATUS = 429;
+
+    /** Lowest status Notion answers for a fault on its own side — DL-253. */
+    private static final int SERVER_ERROR_STATUS = 500;
+
+    /** Longest wait a mirror retry can take, in milliseconds — DL-253. */
+    private static final long MAXIMUM_RETRY_BACKOFF_MILLIS = 30_000L;
+
+    /** Times the base retry wait can be doubled — DL-253. */
+    private static final int MAXIMUM_BACKOFF_DOUBLINGS = 10;
 
     /**
      * Notion API transport, published by {@code config/RestClientConfig#notionRestClient}. Replaces
@@ -331,7 +347,7 @@ public class NotionService {
     public String storeTweet(TweetDto tweet) {
         Objects.requireNonNull(tweet, "tweet must not be null.");
 
-        log.debug("Mirroring tweet {} to the Notion database", tweet.id());
+        log.debug("Mirroring tweet {} to the Notion database", LogSafe.logSafe(tweet.id()));
         try {
             String databaseId = requireDatabaseId();
 
@@ -440,6 +456,14 @@ public class NotionService {
      *
      * <p>This operation writes to Notion only and reaches no repository.
      *
+     * <p>A failure the provider could answer differently later — {@code 429}, any {@code 5xx} and a
+     * transport failure — is attempted again up to {@code scanner.notion.mirror-max-retries} times,
+     * waiting {@code scanner.notion.mirror-retry-backoff-millis} before the first retry and doubling
+     * that wait before each later one, bounded at {@value #MAXIMUM_RETRY_BACKOFF_MILLIS} milliseconds.
+     * Every other status is not retried. The calling thread waits during a backoff, and an interrupt
+     * while it waits ends the attempts and restores the interrupt status — see docs/DECISION_LOG.md
+     * DL-253.
+     *
      * @param tweetId identifier of the post whose page is updated; a {@code null} or blank value
      *     leaves Notion untouched
      * @param responseText the generated reply to write; {@code null} is written as an empty string
@@ -459,29 +483,133 @@ public class NotionService {
         String databaseId = requireDatabaseId();
         String content = (responseText == null) ? EMPTY_TEXT : responseText;
 
-        try {
-            String pageId = findPageIdByTweetId(databaseId, tweetId);
-            if (pageId == null) {
-                // Caller-propagated value rendered through the log guard — DL-149 — see
-                // docs/DECISION_LOG.md
-                log.warn("No Notion page carries the {} property {}; the generated response is not "
-                        + "mirrored", PROPERTY_TWEET_ID, LogSafe.logSafe(tweetId));
+        int retries = retryBudget();
+        long backoffMillis = retryBackoffMillis();
+
+        for (int attempt = 0; ; attempt++) {
+            try {
+                String pageId = findPageIdByTweetId(databaseId, tweetId);
+                if (pageId == null) {
+                    // Caller-propagated value rendered through the log guard — DL-149 — see
+                    // docs/DECISION_LOG.md
+                    log.warn("No Notion page carries the {} property {}; the generated response is "
+                            + "not mirrored", PROPERTY_TWEET_ID, LogSafe.logSafe(tweetId));
+                    return;
+                }
+
+                restClient.patch()
+                        .uri(PAGE_PATH, pageId)
+                        .body(Map.of(KEY_PROPERTIES,
+                                Map.of(PROPERTY_RESPONSE, richTextProperty(content))))
+                        .retrieve()
+                        .toBodilessEntity();
+
+                log.info("The generated response for tweet {} is mirrored to Notion after {} "
+                        + "attempt(s)", LogSafe.logSafe(tweetId), attempt + 1);
                 return;
+            } catch (RuntimeException e) {
+                // A retryable answer is attempted again within the configured budget — DL-253 — see
+                // docs/DECISION_LOG.md
+                if (attempt < retries && isRetryable(e)) {
+                    long wait = backoffFor(backoffMillis, attempt);
+                    log.warn("Mirroring the generated response for tweet {} failed with {}; "
+                            + "attempt {} of {} follows in {}ms", LogSafe.logSafe(tweetId),
+                            LogSafe.type(e), attempt + 2, retries + 1, wait);
+                    if (!pause(wait)) {
+                        logFailure("Mirroring the generated response for tweet "
+                                + LogSafe.logSafe(tweetId) + " to Notion", e);
+                        throw e;
+                    }
+                    continue;
+                }
+
+                logFailure("Mirroring the generated response for tweet " + LogSafe.logSafe(tweetId)
+                        + " to Notion", e);
+                throw e;
             }
+        }
+    }
 
-            restClient.patch()
-                    .uri(PAGE_PATH, pageId)
-                    .body(Map.of(KEY_PROPERTIES,
-                            Map.of(PROPERTY_RESPONSE, richTextProperty(content))))
-                    .retrieve()
-                    .toBodilessEntity();
+    /**
+     * Reads the number of retries a mirror write may make after its first attempt.
+     *
+     * @return the configured value, and {@code 0} when the group is unbound
+     */
+    // Net-new bounded mirror retry — DL-253 — see docs/DECISION_LOG.md
+    private int retryBudget() {
+        ScannerProperties.Notion notion = properties.notion();
+        return notion == null ? 0 : notion.mirrorMaxRetries();
+    }
 
-            log.info("The generated response for tweet {} is mirrored to Notion",
-                    LogSafe.logSafe(tweetId));
-        } catch (RuntimeException e) {
-            logFailure("Mirroring the generated response for tweet " + LogSafe.logSafe(tweetId)
-                    + " to Notion", e);
-            throw e;
+    /**
+     * Reads the wait before the first retry of a mirror write.
+     *
+     * @return the configured value in milliseconds, and {@code 0} when the group is unbound
+     */
+    // Net-new bounded mirror retry — DL-253 — see docs/DECISION_LOG.md
+    private long retryBackoffMillis() {
+        ScannerProperties.Notion notion = properties.notion();
+        return notion == null ? 0L : notion.mirrorRetryBackoffMillis();
+    }
+
+    /**
+     * Reports whether a failure is one a later attempt could answer differently.
+     *
+     * <p>A status answer is retryable when it is {@code 429} or any {@code 5xx}; every other status is
+     * not. A failure carrying no status is a transport failure and is retryable.
+     *
+     * @param failure the failure to classify; never {@code null}
+     * @return {@code true} when another attempt is worth making
+     */
+    // Net-new bounded mirror retry — DL-253 — see docs/DECISION_LOG.md
+    private static boolean isRetryable(RuntimeException failure) {
+        if (failure instanceof RestClientResponseException answered) {
+            int status = answered.getStatusCode().value();
+            return status == TOO_MANY_REQUESTS_STATUS || status >= SERVER_ERROR_STATUS;
+        }
+        return true;
+    }
+
+    /**
+     * Returns the wait before a given retry, doubling the base wait once per earlier retry.
+     *
+     * @param baseMillis the wait before the first retry
+     * @param attempt    the 0-based index of the attempt that just failed
+     * @return the wait in milliseconds, never negative and never above
+     *     {@value #MAXIMUM_RETRY_BACKOFF_MILLIS}
+     */
+    // Net-new bounded mirror retry — DL-253 — see docs/DECISION_LOG.md
+    private static long backoffFor(long baseMillis, int attempt) {
+        if (baseMillis <= 0L) {
+            return 0L;
+        }
+        int doublings = Math.min(attempt, MAXIMUM_BACKOFF_DOUBLINGS);
+        long scaled = baseMillis;
+        for (int doubling = 0; doubling < doublings && scaled < MAXIMUM_RETRY_BACKOFF_MILLIS;
+                doubling++) {
+            scaled += scaled;
+        }
+        return Math.min(scaled, MAXIMUM_RETRY_BACKOFF_MILLIS);
+    }
+
+    /**
+     * Waits the supplied number of milliseconds.
+     *
+     * @param millis the wait; a value of {@code 0} returns at once
+     * @return {@code true} when the wait completed, and {@code false} when the calling thread was
+     *     interrupted, in which case its interrupt status is restored
+     */
+    // Net-new bounded mirror retry — DL-253 — see docs/DECISION_LOG.md
+    private static boolean pause(long millis) {
+        if (millis <= 0L) {
+            return true;
+        }
+        try {
+            Thread.sleep(millis);
+            return true;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
         }
     }
 
@@ -489,20 +617,23 @@ public class NotionService {
      * Records a failed Notion operation with sanitized metadata only.
      *
      * <p>The record carries the operation, the failure's type and, when the failure reports one, the
-     * HTTP status code Notion answered with. It carries no exception message, no stack trace, no
-     * request URI, no response body and no Notion page or database identifier — see
-     * docs/DECISION_LOG.md DL-084. The failure itself is rethrown unchanged.
+     * HTTP status code Notion answered with, the shaped {@code code} member of its error body, the
+     * provider request identifier and the character count of the provider explanation. It carries no
+     * exception message, no stack trace, no request URI, no run of response body text and no Notion
+     * page or database identifier — see docs/DECISION_LOG.md DL-084 and DL-269. The failure itself is
+     * rethrown unchanged.
      *
      * @param operation the operation that failed, naming only this service's own identifiers
      * @param failure   the failure to record
      */
-    // DL-084 — see docs/DECISION_LOG.md
+    // DL-084 and DL-269 — see docs/DECISION_LOG.md
     private static void logFailure(String operation, RuntimeException failure) {
         if (failure instanceof RestClientResponseException answered) {
-            log.error("{} failed: {} after HTTP {}; Notion code {}, request id {}, message {}",
+            log.error("{} failed: {} after HTTP {}; Notion code {}, request id {}, "
+                    + "explanation length {}",
                     operation, LogSafe.type(failure), answered.getStatusCode().value(),
                     notionErrorCode(answered), notionRequestId(answered),
-                    notionErrorMessage(answered));
+                    notionErrorMessageLength(answered));
             return;
         }
         log.error("{} failed: {}", operation, LogSafe.type(failure));
@@ -511,70 +642,72 @@ public class NotionService {
     /**
      * Reads the {@code code} member of a Notion error body.
      *
-     * <p>The value is returned only when it is shaped like a provider error identifier, so no free
-     * text can reach a log record through this field.
-     *
      * @param answered the answered rejection; not {@code null}
-     * @return the error identifier, or {@value #ABSENT} when the body carries none of that shape
+     * @return the error identifier under {@link LogSafe#token(String)}, or {@code absent}
      */
+    // DL-119 — see docs/DECISION_LOG.md
     private static String notionErrorCode(RestClientResponseException answered) {
-        String code = notionErrorField(answered, KEY_CODE);
-        return ERROR_CODE_SHAPE.matcher(code).matches() ? code : ABSENT;
+        String code = notionErrorFieldOrNull(answered, KEY_CODE);
+        return (code != null && ERROR_CODE_SHAPE.matcher(code).matches()) ? code : ABSENT;
     }
 
     /**
      * Reads the provider request identifier a Notion rejection carries.
      *
-     * <p>The header value is returned only when it is shaped like an identifier; it correlates a
-     * failure with the provider's own record of the same request.
+     * <p>It correlates a failure with the provider's own record of the same request.
      *
      * @param answered the answered rejection; not {@code null}
-     * @return the request identifier, or {@value #ABSENT} when the response carries none
+     * @return the request identifier under {@link LogSafe#token(String)}, or {@code absent}
      */
+    // DL-119 — see docs/DECISION_LOG.md
     private static String notionRequestId(RestClientResponseException answered) {
-        String requestId = answered.getResponseHeaders() == null
-                ? null : answered.getResponseHeaders().getFirst(HEADER_REQUEST_ID);
-        if (requestId == null) {
-            return ABSENT;
-        }
-        String trimmed = requestId.trim();
-        return REQUEST_ID_SHAPE.matcher(trimmed).matches() ? trimmed : ABSENT;
+        return LogSafe.token(answered.getResponseHeaders() == null
+                ? null : answered.getResponseHeaders().getFirst(HEADER_REQUEST_ID));
     }
 
     /**
-     * Reads one field of a Notion error body.
+     * Reads one field of a Notion error body, reporting an absent field as {@code null}.
      *
-     * <p>Only the named field is read; the body itself never reaches a log record.
+     * <p>Only the named field is read; the body itself never reaches a log record. An absent field, an
+     * empty field, an absent body and a body that cannot be read as JSON all read as {@code null}, so
+     * a caller cannot mistake the {@value #ABSENT} placeholder for a value the provider sent — DL-269.
      *
      * @param answered the answered rejection; not {@code null}
      * @param field    the field to read
-     * @return the field's text, or {@value #ABSENT} when the body carries none
+     * @return the field's text, or {@code null} when the body carries none
      */
-    private static String notionErrorField(RestClientResponseException answered, String field) {
+    private static String notionErrorFieldOrNull(RestClientResponseException answered, String field) {
         try {
             JsonNode body = answered.getResponseBodyAs(JsonNode.class);
             if (body == null) {
-                return ABSENT;
+                return null;
             }
             String value = readString(body.path(field));
-            return value.isEmpty() ? ABSENT : value;
+            return value.isEmpty() ? null : value;
         } catch (RuntimeException unreadable) {
-            return ABSENT;
+            return null;
         }
     }
 
+    // Net-new: the provider explanation is reported by size, never by text — DL-269 — see
+    // docs/DECISION_LOG.md
     /**
-     * Reads the message of a Notion error body, cut to {@value #ERROR_MESSAGE_LIMIT} characters.
+     * Reports how many characters of explanation a Notion error body carries, without carrying any of
+     * them.
+     *
+     * <p>The {@code message} member is provider-controlled free text. It can carry any character,
+     * including the control characters that would let it forge a line of its own in a log record, and
+     * it can echo submitted content back. A count carries neither hazard, and the shaped {@code code}
+     * member and the provider request identifier the same record already carries are what identify the
+     * rejection and locate the provider's own copy of the explanation — DL-269.
      *
      * @param answered the answered rejection; not {@code null}
-     * @return the shortened message, or {@value #ABSENT} when the body carries none
+     * @return the character count of the explanation, and {@value #ABSENT_MESSAGE_LENGTH} when the
+     *     body carries none or cannot be read
      */
-    private static String notionErrorMessage(RestClientResponseException answered) {
-        String message = notionErrorField(answered, KEY_MESSAGE);
-        if (message.length() <= ERROR_MESSAGE_LIMIT) {
-            return message;
-        }
-        return message.substring(0, ERROR_MESSAGE_LIMIT);
+    private static int notionErrorMessageLength(RestClientResponseException answered) {
+        String message = notionErrorFieldOrNull(answered, KEY_MESSAGE);
+        return message == null ? ABSENT_MESSAGE_LENGTH : message.length();
     }
 
     /**

@@ -3,8 +3,12 @@ package com.codeskeptic.scanner.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mockingDetails;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -17,6 +21,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.RecordComponent;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
@@ -29,15 +34,23 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
+import org.slf4j.LoggerFactory;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.reactive.function.client.WebClient;
+
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.PaginatedTweetsDto;
@@ -118,7 +131,12 @@ class TwitterServiceTest {
             "getPaginatedTweets",
             "getTweet",
             "updateTweetAnalysis",
-            "meetsPopularityThreshold");
+            "meetsPopularityThreshold",
+            // The overload taking a threshold the caller resolved — DL-255
+            "meetsPopularityThreshold",
+            "popularityThresholdInForce",
+            // The single orchestration of the analyze route — DL-263
+            "analyzeTweet");
 
     @Mock
     private TweetRepository tweetRepository;
@@ -301,6 +319,160 @@ class TwitterServiceTest {
     }
 
     // -----------------------------------------------------------------------
+    // One threshold resolution per ingestion cycle — DL-255
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("resolves the threshold in force from the stored row")
+    void resolvesTheThresholdInForceFromTheStoredRow() {
+        when(settingRepository.findById(POPULARITY_THRESHOLD_KEY))
+                .thenReturn(Optional.of(thresholdRow("250")));
+
+        int inForce = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD)
+                .popularityThresholdInForce();
+
+        assertThat(inForce).isEqualTo(250);
+    }
+
+    @Test
+    @DisplayName("resolves the threshold in force from the configured value when no row is stored")
+    void resolvesTheThresholdInForceFromTheConfiguredValue() {
+        when(settingRepository.findById(POPULARITY_THRESHOLD_KEY)).thenReturn(Optional.empty());
+
+        int inForce = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD)
+                .popularityThresholdInForce();
+
+        assertThat(inForce).isEqualTo(CONFIGURED_THRESHOLD);
+    }
+
+    @ParameterizedTest(name = "a like count of {0} against a supplied threshold of 100")
+    @CsvSource({"99,false", "100,true", "101,true"})
+    @DisplayName("compares a like count against a supplied threshold inclusively")
+    void comparesALikeCountAgainstASuppliedThresholdInclusively(int likeCount, boolean expected) {
+        boolean meetsThreshold = serviceWithConfiguredThreshold(1)
+                .meetsPopularityThreshold(likeCount, 100);
+
+        assertThat(meetsThreshold).isEqualTo(expected);
+    }
+
+    @Test
+    @DisplayName("reads no table when the threshold is supplied")
+    void readsNoTableWhenTheThresholdIsSupplied() {
+        TwitterService service = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD);
+
+        service.meetsPopularityThreshold(60, 50);
+        service.meetsPopularityThreshold(60, 50);
+        service.meetsPopularityThreshold(60, 50);
+
+        verifyNoInteractions(settingRepository);
+    }
+
+    @Test
+    @DisplayName("reports false for an absent like count against a supplied threshold")
+    void reportsFalseForAnAbsentLikeCountAgainstASuppliedThreshold() {
+        assertThat(serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD)
+                .meetsPopularityThreshold(null, 0)).isFalse();
+    }
+
+    @Test
+    @DisplayName("warns once while the stored threshold keeps holding the same unparseable value")
+    void warnsOnceWhileTheStoredThresholdKeepsHoldingTheSameUnparseableValue() {
+        when(settingRepository.findById(POPULARITY_THRESHOLD_KEY))
+                .thenReturn(Optional.of(thresholdRow("not a number")));
+        TwitterService service = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD);
+
+        ListAppender<ILoggingEvent> recorded = attachServiceAppender();
+        try {
+            service.popularityThresholdInForce();
+            service.popularityThresholdInForce();
+            service.popularityThresholdInForce();
+
+            assertThat(unparseableWarnings(recorded)).hasSize(1);
+            assertThat(unparseableWarnings(recorded).get(0))
+                    .contains("tweet_popularity_threshold")
+                    .doesNotContain("not a number");
+        } finally {
+            detachServiceAppender(recorded);
+        }
+    }
+
+    @Test
+    @DisplayName("warns again when the stored threshold holds a different unparseable value")
+    void warnsAgainWhenTheStoredThresholdHoldsADifferentUnparseableValue() {
+        when(settingRepository.findById(POPULARITY_THRESHOLD_KEY))
+                .thenReturn(Optional.of(thresholdRow("first")),
+                        Optional.of(thresholdRow("second")));
+        TwitterService service = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD);
+
+        ListAppender<ILoggingEvent> recorded = attachServiceAppender();
+        try {
+            service.popularityThresholdInForce();
+            service.popularityThresholdInForce();
+
+            assertThat(unparseableWarnings(recorded)).hasSize(2);
+        } finally {
+            detachServiceAppender(recorded);
+        }
+    }
+
+    @Test
+    @DisplayName("warns again when a value that parses is stored between two unparseable ones")
+    void warnsAgainWhenAValueThatParsesIsStoredBetweenTwoUnparseableOnes() {
+        when(settingRepository.findById(POPULARITY_THRESHOLD_KEY))
+                .thenReturn(Optional.of(thresholdRow("bad")),
+                        Optional.of(thresholdRow("50")),
+                        Optional.of(thresholdRow("bad")));
+        TwitterService service = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD);
+
+        ListAppender<ILoggingEvent> recorded = attachServiceAppender();
+        try {
+            service.popularityThresholdInForce();
+            service.popularityThresholdInForce();
+            service.popularityThresholdInForce();
+
+            assertThat(unparseableWarnings(recorded)).hasSize(2);
+        } finally {
+            detachServiceAppender(recorded);
+        }
+    }
+
+    /**
+     * Attaches a recording appender to the logger of the unit under test.
+     *
+     * @return the attached appender
+     */
+    private static ListAppender<ILoggingEvent> attachServiceAppender() {
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        ((Logger) LoggerFactory.getLogger(TwitterService.class)).addAppender(appender);
+        return appender;
+    }
+
+    /**
+     * Detaches a recording appender from the logger of the unit under test.
+     *
+     * @param appender the appender to detach
+     */
+    private static void detachServiceAppender(ListAppender<ILoggingEvent> appender) {
+        ((Logger) LoggerFactory.getLogger(TwitterService.class)).detachAppender(appender);
+        appender.stop();
+    }
+
+    /**
+     * Reads the unparseable-threshold warnings the appender recorded.
+     *
+     * @param appender the appender that recorded the calls
+     * @return the formatted messages, in order
+     */
+    private static List<String> unparseableWarnings(ListAppender<ILoggingEvent> appender) {
+        return appender.list.stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.contains("does not hold an integer"))
+                .toList();
+    }
+
+    // -----------------------------------------------------------------------
     // getTweet(String)
     // -----------------------------------------------------------------------
 
@@ -392,7 +564,9 @@ class TwitterServiceTest {
     @Test
     @DisplayName("throws not found and writes nothing when analysing a row that is not present")
     void throwsNotFoundAndWritesNothingWhenAnalysingARowThatIsNotPresent() {
-        when(tweetRepository.findById(TWEET_ID)).thenReturn(Optional.empty());
+        when(sentimentAnalysisService.calculateDoubtRating(anyDouble()))
+                .thenReturn(STUBBED_DOUBT_RATING);
+        when(tweetRepository.updateDoubtRating(TWEET_ID, STUBBED_DOUBT_RATING)).thenReturn(0);
         TwitterService service = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD);
 
         assertThatThrownBy(() -> service.updateTweetAnalysis(TWEET_ID_PATH_VALUE, ANALYSIS_SCORE))
@@ -400,7 +574,7 @@ class TwitterServiceTest {
                 .hasMessage(TWEET_NOT_FOUND);
 
         verify(tweetRepository, never()).save(any(Tweet.class));
-        verifyNoInteractions(sentimentAnalysisService);
+        verify(tweetRepository, never()).findById(any());
     }
 
     // -----------------------------------------------------------------------
@@ -410,15 +584,14 @@ class TwitterServiceTest {
     @Test
     @DisplayName("writes the doubt rating the calculation returned")
     void writesTheDoubtRatingTheCalculationReturned() {
-        Tweet row = fullyPopulatedTweet();
-        when(tweetRepository.findById(TWEET_ID)).thenReturn(Optional.of(row));
         when(sentimentAnalysisService.calculateDoubtRating(ANALYSIS_SCORE))
                 .thenReturn(STUBBED_DOUBT_RATING);
+        when(tweetRepository.updateDoubtRating(TWEET_ID, STUBBED_DOUBT_RATING)).thenReturn(1);
 
         serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD)
                 .updateTweetAnalysis(TWEET_ID_PATH_VALUE, ANALYSIS_SCORE);
 
-        assertThat(savedRow().getDoubtRating()).isEqualTo(STUBBED_DOUBT_RATING);
+        verify(tweetRepository).updateDoubtRating(TWEET_ID, STUBBED_DOUBT_RATING);
     }
 
     @ParameterizedTest(name = "a returned doubt rating of {0} is written unchanged")
@@ -430,23 +603,23 @@ class TwitterServiceTest {
     })
     @DisplayName("writes every doubt rating the calculation returns unchanged")
     void writesEveryDoubtRatingTheCalculationReturnsUnchanged(double doubtRating) {
-        Tweet row = fullyPopulatedTweet();
-        when(tweetRepository.findById(TWEET_ID)).thenReturn(Optional.of(row));
         when(sentimentAnalysisService.calculateDoubtRating(anyDouble())).thenReturn(doubtRating);
+        when(tweetRepository.updateDoubtRating(eq(TWEET_ID), anyDouble())).thenReturn(1);
 
         serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD)
                 .updateTweetAnalysis(TWEET_ID_PATH_VALUE, ANALYSIS_SCORE);
 
-        assertThat(savedRow().getDoubtRating()).isEqualTo(doubtRating);
+        ArgumentCaptor<Double> written = ArgumentCaptor.forClass(Double.class);
+        verify(tweetRepository).updateDoubtRating(eq(TWEET_ID), written.capture());
+        assertThat(written.getValue()).isEqualTo(doubtRating);
     }
 
     @Test
     @DisplayName("forwards the score it received to the doubt rating calculation")
     void forwardsTheScoreItReceivedToTheDoubtRatingCalculation() {
-        Tweet row = fullyPopulatedTweet();
-        when(tweetRepository.findById(TWEET_ID)).thenReturn(Optional.of(row));
         when(sentimentAnalysisService.calculateDoubtRating(anyDouble()))
                 .thenReturn(STUBBED_DOUBT_RATING);
+        when(tweetRepository.updateDoubtRating(TWEET_ID, STUBBED_DOUBT_RATING)).thenReturn(1);
 
         serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD)
                 .updateTweetAnalysis(TWEET_ID_PATH_VALUE, -0.625d);
@@ -456,41 +629,167 @@ class TwitterServiceTest {
         assertThat(forwardedScore.getValue()).isEqualTo(-0.625d);
     }
 
+    // One statement writes one column by identifier; the row is neither read nor re-saved — DL-263
     @Test
-    @DisplayName("saves the instance it loaded")
-    void savesTheInstanceItLoaded() {
-        Tweet row = fullyPopulatedTweet();
-        when(tweetRepository.findById(TWEET_ID)).thenReturn(Optional.of(row));
+    @DisplayName("writes one column by identifier without reading or saving the row")
+    void writesOneColumnByIdentifierWithoutReadingOrSavingTheRow() {
         when(sentimentAnalysisService.calculateDoubtRating(ANALYSIS_SCORE))
                 .thenReturn(STUBBED_DOUBT_RATING);
+        when(tweetRepository.updateDoubtRating(TWEET_ID, STUBBED_DOUBT_RATING)).thenReturn(1);
 
         serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD)
                 .updateTweetAnalysis(TWEET_ID_PATH_VALUE, ANALYSIS_SCORE);
 
-        assertThat(savedRow()).isSameAs(row);
+        verify(tweetRepository, times(1)).updateDoubtRating(TWEET_ID, STUBBED_DOUBT_RATING);
+        verify(tweetRepository, never()).findById(any());
+        verify(tweetRepository, never()).findAnalysisSubjectById(any());
+        verify(tweetRepository, never()).save(any(Tweet.class));
+        verifyNoInteractions(tweetMapper);
+    }
+
+    // -----------------------------------------------------------------------
+    // analyzeTweet(String) — one read, one provider call, one write — DL-263
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("reads the row once, scores its text and writes the derived rating once")
+    void readsTheRowOnceScoresItsTextAndWritesTheDerivedRatingOnce() {
+        when(tweetRepository.findAnalysisSubjectById(TWEET_ID))
+                .thenReturn(Optional.of(analysisSubject(TWEET_ID, CONTENT)));
+        when(sentimentAnalysisService.analyzeSentiment(CONTENT)).thenReturn(ANALYSIS_SCORE);
+        when(sentimentAnalysisService.calculateDoubtRating(ANALYSIS_SCORE))
+                .thenReturn(STUBBED_DOUBT_RATING);
+        when(tweetRepository.updateDoubtRating(TWEET_ID, STUBBED_DOUBT_RATING)).thenReturn(1);
+
+        double score = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD)
+                .analyzeTweet(TWEET_ID_PATH_VALUE);
+
+        assertThat(score).isEqualTo(ANALYSIS_SCORE);
+        verify(tweetRepository, times(1)).findAnalysisSubjectById(TWEET_ID);
+        verify(sentimentAnalysisService, times(1)).analyzeSentiment(CONTENT);
+        verify(tweetRepository, times(1)).updateDoubtRating(TWEET_ID, STUBBED_DOUBT_RATING);
+        // The nine-column read and the second read of the same row are both gone — DL-263
+        verify(tweetRepository, never()).findById(any());
+        verify(tweetRepository, never()).save(any(Tweet.class));
+        verifyNoInteractions(tweetMapper);
     }
 
     @Test
-    @DisplayName("leaves every column other than the doubt rating unchanged")
-    void leavesEveryColumnOtherThanTheDoubtRatingUnchanged() {
-        Tweet row = fullyPopulatedTweet();
-        when(tweetRepository.findById(TWEET_ID)).thenReturn(Optional.of(row));
+    @DisplayName("orders the read before the provider call and the provider call before the write")
+    void ordersTheReadBeforeTheProviderCallAndTheProviderCallBeforeTheWrite() {
+        when(tweetRepository.findAnalysisSubjectById(TWEET_ID))
+                .thenReturn(Optional.of(analysisSubject(TWEET_ID, CONTENT)));
+        when(sentimentAnalysisService.analyzeSentiment(CONTENT)).thenReturn(ANALYSIS_SCORE);
         when(sentimentAnalysisService.calculateDoubtRating(ANALYSIS_SCORE))
                 .thenReturn(STUBBED_DOUBT_RATING);
+        when(tweetRepository.updateDoubtRating(TWEET_ID, STUBBED_DOUBT_RATING)).thenReturn(1);
 
-        serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD)
-                .updateTweetAnalysis(TWEET_ID_PATH_VALUE, ANALYSIS_SCORE);
+        serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).analyzeTweet(TWEET_ID_PATH_VALUE);
 
-        Tweet written = savedRow();
-        assertThat(written.getId()).isEqualTo(TWEET_ID);
-        assertThat(written.getContent()).isEqualTo(CONTENT);
-        assertThat(written.getLikeCount()).isEqualTo(LIKE_COUNT);
-        assertThat(written.getCreatedAt()).isEqualTo(CREATED_AT);
-        assertThat(written.getMedia()).containsExactly(MEDIA_URL);
-        assertThat(written.getQuotedTweetId()).isEqualTo(QUOTED_TWEET_ID);
-        assertThat(written.getUserId()).isEqualTo(USER_ID);
-        assertThat(written.getAiToolsMentioned()).containsExactly(AI_TOOL);
-        assertThat(written.getResponses()).isEmpty();
+        InOrder ordering = inOrder(tweetRepository, sentimentAnalysisService);
+        ordering.verify(tweetRepository).findAnalysisSubjectById(TWEET_ID);
+        ordering.verify(sentimentAnalysisService).analyzeSentiment(CONTENT);
+        ordering.verify(sentimentAnalysisService).calculateDoubtRating(ANALYSIS_SCORE);
+        ordering.verify(tweetRepository).updateDoubtRating(TWEET_ID, STUBBED_DOUBT_RATING);
+        ordering.verifyNoMoreInteractions();
+    }
+
+    @ParameterizedTest(name = "the identifier [{0}] is reported as a row that is not present")
+    @NullAndEmptySource
+    @ValueSource(strings = {"not-a-number", "12abc", "3.5", " 7 "})
+    @DisplayName("reports an identifier that holds no number without scoring anything")
+    void reportsAnIdentifierThatHoldsNoNumberWithoutScoringAnything(String tweetId) {
+        TwitterService service = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD);
+
+        assertThatThrownBy(() -> service.analyzeTweet(tweetId))
+                .isExactlyInstanceOf(NotFoundException.class)
+                .hasMessage(TWEET_NOT_FOUND);
+
+        verifyNoInteractions(sentimentAnalysisService, tweetMapper);
+        verify(tweetRepository, never()).findAnalysisSubjectById(any());
+    }
+
+    @Test
+    @DisplayName("reports a row that is not present before any provider call is made")
+    void reportsARowThatIsNotPresentBeforeAnyProviderCallIsMade() {
+        when(tweetRepository.findAnalysisSubjectById(TWEET_ID)).thenReturn(Optional.empty());
+        TwitterService service = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD);
+
+        assertThatThrownBy(() -> service.analyzeTweet(TWEET_ID_PATH_VALUE))
+                .isExactlyInstanceOf(NotFoundException.class)
+                .hasMessage(TWEET_NOT_FOUND);
+
+        verifyNoInteractions(sentimentAnalysisService);
+        verify(tweetRepository, never()).updateDoubtRating(any(), any());
+    }
+
+    @Test
+    @DisplayName("reports a row deleted between the read and the write as a row that is not present")
+    void reportsARowDeletedBetweenTheReadAndTheWrite() {
+        when(tweetRepository.findAnalysisSubjectById(TWEET_ID))
+                .thenReturn(Optional.of(analysisSubject(TWEET_ID, CONTENT)));
+        when(sentimentAnalysisService.analyzeSentiment(CONTENT)).thenReturn(ANALYSIS_SCORE);
+        when(sentimentAnalysisService.calculateDoubtRating(ANALYSIS_SCORE))
+                .thenReturn(STUBBED_DOUBT_RATING);
+        when(tweetRepository.updateDoubtRating(TWEET_ID, STUBBED_DOUBT_RATING)).thenReturn(0);
+        TwitterService service = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD);
+
+        assertThatThrownBy(() -> service.analyzeTweet(TWEET_ID_PATH_VALUE))
+                .isExactlyInstanceOf(NotFoundException.class)
+                .hasMessage(TWEET_NOT_FOUND);
+    }
+
+    @Test
+    @DisplayName("rejects a row whose content column holds nothing, as the wire form does")
+    void rejectsARowWhoseContentColumnHoldsNothing() {
+        when(tweetRepository.findAnalysisSubjectById(TWEET_ID))
+                .thenReturn(Optional.of(analysisSubject(TWEET_ID, null)));
+        TwitterService service = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD);
+
+        assertThatThrownBy(() -> service.analyzeTweet(TWEET_ID_PATH_VALUE))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("content must not be null.");
+
+        verifyNoInteractions(sentimentAnalysisService);
+        verify(tweetRepository, never()).updateDoubtRating(any(), any());
+    }
+
+    @Test
+    @DisplayName("writes the rating again for a row that already carried one")
+    void writesTheRatingAgainForARowThatAlreadyCarriedOne() {
+        when(tweetRepository.findAnalysisSubjectById(TWEET_ID))
+                .thenReturn(Optional.of(analysisSubject(TWEET_ID, CONTENT)));
+        when(sentimentAnalysisService.analyzeSentiment(CONTENT)).thenReturn(ANALYSIS_SCORE);
+        when(sentimentAnalysisService.calculateDoubtRating(ANALYSIS_SCORE))
+                .thenReturn(STUBBED_DOUBT_RATING);
+        when(tweetRepository.updateDoubtRating(TWEET_ID, STUBBED_DOUBT_RATING)).thenReturn(1);
+        TwitterService service = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD);
+
+        service.analyzeTweet(TWEET_ID_PATH_VALUE);
+        service.analyzeTweet(TWEET_ID_PATH_VALUE);
+
+        verify(tweetRepository, times(2)).updateDoubtRating(TWEET_ID, STUBBED_DOUBT_RATING);
+    }
+
+    /**
+     * Builds the analyze projection carrying the supplied column values.
+     *
+     * @param id      value of {@code tweets.id}
+     * @param content value of {@code tweets.content}, possibly {@code null}
+     * @return the projection
+     */
+    private static TweetRepository.AnalysisSubject analysisSubject(Integer id, String content) {
+        return new TweetRepository.AnalysisSubject() {
+            @Override
+            public Integer getId() {
+                return id;
+            }
+
+            @Override
+            public String getContent() {
+                return content;
+            }
+        };
     }
 
     // -----------------------------------------------------------------------
@@ -518,7 +817,7 @@ class TwitterServiceTest {
         assertThat(pageRequest.getValue().getPageSize()).isEqualTo(expectedSize);
     }
 
-    // The offset ceiling of a paged query — DL-219 — see docs/DECISION_LOG.md
+    // The offset ceiling of a paged query — DL-225 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "page {0} of size {1} is queried, its offset being at most 2147483647")
     @CsvSource({
             "214748365,10",
@@ -528,21 +827,19 @@ class TwitterServiceTest {
     })
     @DisplayName("queries a page whose offset the paged query can express")
     void queriesAPageWhoseOffsetThePagedQueryCanExpress(int page, int perPage) {
-        when(tweetRepository.findAll(any(Pageable.class)))
-                .thenAnswer(invocation -> new PageImpl<>(List.of(), invocation.getArgument(0), 3L));
-        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+        stubEveryWindowRead(3L);
 
         PaginatedTweetsDto envelope =
                 serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(page, perPage);
 
-        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
-        verify(tweetRepository).findAll(pageRequest.capture());
-        assertThat(pageRequest.getValue().getOffset()).isLessThanOrEqualTo(Integer.MAX_VALUE);
+        assertThat(pageRequestsIssued()).as("windows the page read asked for")
+                .isNotEmpty()
+                .allMatch(window -> window.getOffset() <= Integer.MAX_VALUE);
         assertThat(envelope.pagination().page()).isEqualTo(page);
-        verify(tweetRepository, never()).count();
+        assertThatEveryWindowIsBounded();
     }
 
-    // The offset ceiling of a paged query — DL-219 — see docs/DECISION_LOG.md
+    // The offset ceiling of a paged query — DL-225 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "page {0} of size {1} is answered empty without a paged query")
     @CsvSource({
             "2147483647,10",
@@ -566,7 +863,7 @@ class TwitterServiceTest {
         verify(tweetRepository, never()).findAll(any(Pageable.class));
     }
 
-    // The offset ceiling of a paged query — DL-219 — see docs/DECISION_LOG.md
+    // The offset ceiling of a paged query — DL-225 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("reports an empty table for a page beyond the queryable offset")
     void reportsAnEmptyTableForAPageBeyondTheQueryableOffset() {
@@ -580,18 +877,18 @@ class TwitterServiceTest {
         assertThat(envelope.pagination().totalPages()).isZero();
     }
 
-    @ParameterizedTest(name = "a per_page of {0} reaches the repository unreduced")
+    @ParameterizedTest(name = "a per_page of {0} is restated unreduced and read in bounded windows")
     @ValueSource(ints = {100, 101, 500, 10_000, Integer.MAX_VALUE})
-    @DisplayName("applies no upper bound to per_page")
+    @DisplayName("applies no upper bound to per_page and reads it in bounded windows")
     void appliesNoUpperBoundToPerPage(int perPage) {
-        when(tweetRepository.findAll(any(Pageable.class))).thenReturn(emptyPage());
-        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+        stubEveryWindowRead(0L);
 
-        serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+        PaginatedTweetsDto rendered =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
 
-        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
-        verify(tweetRepository).findAll(pageRequest.capture());
-        assertThat(pageRequest.getValue().getPageSize()).isEqualTo(perPage);
+        assertThat(rendered.pagination().perPage())
+                .as("per_page the envelope restates").isEqualTo(perPage);
+        assertThatEveryWindowIsBounded();
     }
 
     @Test
@@ -675,6 +972,73 @@ class TwitterServiceTest {
         assertThat(rendered.pagination().totalPages()).as("total_pages the envelope reports").isZero();
     }
 
+    // One page larger than the chunk bound is read as consecutive bounded chunks — DL-249 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reads a page larger than the chunk bound as consecutive chunks that cover it once")
+    void readsAPageLargerThanTheChunkBoundAsConsecutiveChunks() {
+        int chunkBound = declaredChunkBound();
+        int perPage = chunkBound * 2;
+        List<Tweet> firstChunk = rowsNumbered(chunkBound);
+        List<Tweet> secondChunk = rowsNumbered(chunkBound / 2);
+        when(tweetRepository.findChunk(any(Pageable.class)))
+                .thenReturn(firstChunk)
+                .thenReturn(secondChunk);
+        when(tweetRepository.count()).thenReturn((long) chunkBound + secondChunk.size());
+        when(tweetMapper.toDtoList(anyList()))
+                .thenAnswer(invocation -> dtosFor(invocation.getArgument(0)));
+
+        PaginatedTweetsDto rendered =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+
+        assertThat(rendered.tweets()).as("rows the page rendered")
+                .hasSize(chunkBound + secondChunk.size());
+        assertThat(rendered.pagination().perPage())
+                .as("per_page the envelope restates").isEqualTo(perPage);
+        assertThat(rendered.pagination().total()).as("total the envelope reports")
+                .isEqualTo((long) chunkBound + secondChunk.size());
+        assertThat(pageRequestsIssued()).as("windows the page read asked for").hasSize(2);
+        assertThat(pageRequestsIssued()).extracting(Pageable::getOffset)
+                .as("first row of each window").containsExactly(0L, (long) chunkBound);
+        verify(tweetMapper, times(2)).toDtoList(anyList());
+        verify(tweetRepository, never()).findAll(any(Pageable.class));
+        assertThatEveryWindowIsBounded();
+    }
+
+    // A page at or below the chunk bound is read by one statement — DL-249 — see
+    // docs/DECISION_LOG.md
+    @ParameterizedTest(name = "a per_page of {0} is read by the single page statement")
+    @ValueSource(ints = {1, 10, 499, 500})
+    @DisplayName("reads a page at or below the chunk bound with one page statement and no row count")
+    void readsAPageAtOrBelowTheChunkBoundWithOnePageStatement(int perPage) {
+        when(tweetRepository.findAll(any(Pageable.class)))
+                .thenAnswer(invocation -> new PageImpl<>(List.of(), invocation.getArgument(0), 0L));
+        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+
+        serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+
+        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
+        verify(tweetRepository).findAll(pageRequest.capture());
+        assertThat(pageRequest.getValue().getPageSize())
+                .as("rows the single statement was asked for").isEqualTo(perPage);
+        verify(tweetRepository, never()).findChunk(any(Pageable.class));
+        verify(tweetRepository, never()).count();
+    }
+
+    // Every page read carries a total order — DL-249 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("orders every page read by identifier ascending")
+    void ordersEveryPageReadByIdentifierAscending() {
+        stubEveryWindowRead(0L);
+
+        serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(2, 10);
+
+        assertThat(pageRequestsIssued()).as("windows the page read asked for")
+                .isNotEmpty()
+                .allSatisfy(window -> assertThat(window.getSort())
+                        .as("sort of one window").isEqualTo(Sort.by(Sort.Direction.ASC, "id")));
+    }
+
     // -----------------------------------------------------------------------
     // getPaginatedTweets(int, int) — the envelope
     // -----------------------------------------------------------------------
@@ -690,25 +1054,17 @@ class TwitterServiceTest {
     })
     @DisplayName("reads a per_page above the former upper bound unreduced")
     void readsAPerPageAboveTheUpperBoundAsTheUpperBound(int perPage, int expectedSize) {
-        when(tweetRepository.findAll(any(Pageable.class)))
-                .thenAnswer(invocation -> {
-                    Pageable requested = invocation.getArgument(0);
-                    return new PageImpl<>(List.of(), requested, 0L);
-                });
-        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+        stubEveryWindowRead(0L);
 
         PaginatedTweetsDto rendered =
                 serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
 
-        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
-        verify(tweetRepository).findAll(pageRequest.capture());
-        assertThat(pageRequest.getValue().getPageSize())
-                .as("page size the repository was asked for").isEqualTo(expectedSize);
         assertThat(rendered.pagination().perPage())
                 .as("per_page the envelope restates").isEqualTo(expectedSize);
+        assertThatEveryWindowIsBounded();
     }
 
-    // Lower bounds applied to page and per_page — DL-077 — see docs/DECISION_LOG.md
+    // Lower bounds applied to page and per_page — DL-123 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "page {0} of size {1} reads page index {2} of size {3}")
     @CsvSource({
             "0,10,0,10",
@@ -826,19 +1182,22 @@ class TwitterServiceTest {
     }
 
     // backend/app/api/tweets.py:L12-13 declares a default for an absent parameter and no bound —
-    // DL-077 — see docs/DECISION_LOG.md
+    // DL-123 and DL-217 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("requests the page size asked for, however large, applying no upper bound")
+    @DisplayName("serves the page size asked for, however large, applying no upper bound")
     void requestsThePageSizeAskedForHoweverLarge() {
-        when(tweetRepository.findAll(any(Pageable.class))).thenReturn(emptyPage());
-        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+        stubEveryWindowRead(0L);
 
-        serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, 99999);
+        PaginatedTweetsDto rendered =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, 99999);
 
-        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
-        verify(tweetRepository).findAll(pageRequest.capture());
-        assertThat(pageRequest.getValue().getPageNumber()).isZero();
-        assertThat(pageRequest.getValue().getPageSize()).isEqualTo(99999);
+        assertThat(rendered.pagination().page()).as("page the envelope restates").isEqualTo(1);
+        assertThat(rendered.pagination().perPage())
+                .as("per_page the envelope restates").isEqualTo(99999);
+        assertThat(pageRequestsIssued()).as("windows the page read asked for")
+                .isNotEmpty()
+                .allSatisfy(window -> assertThat(window.getOffset()).isZero());
+        assertThatEveryWindowIsBounded();
     }
 
     // The per_page cap of DL-123 — see docs/DECISION_LOG.md
@@ -852,14 +1211,13 @@ class TwitterServiceTest {
     })
     @DisplayName("passes the page size through with no upper bound")
     void passesThePageSizeThroughWithNoUpperBound(int perPage, int expectedSize) {
-        when(tweetRepository.findAll(any(Pageable.class))).thenReturn(emptyPage());
-        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+        stubEveryWindowRead(0L);
 
-        serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+        PaginatedTweetsDto rendered =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
 
-        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
-        verify(tweetRepository).findAll(pageRequest.capture());
-        assertThat(pageRequest.getValue().getPageSize()).isEqualTo(expectedSize);
+        assertThat(rendered.pagination().perPage()).isEqualTo(expectedSize);
+        assertThatEveryWindowIsBounded();
     }
 
     // The per_page cap of DL-123 — see docs/DECISION_LOG.md
@@ -876,22 +1234,21 @@ class TwitterServiceTest {
         assertThat(rendered.pagination().perPage()).isEqualTo(500);
     }
 
-    // The source applied no upper bound to per_page at backend/app/api/tweets.py:L13 — DL-193
+    // The source applied no upper bound to per_page at backend/app/api/tweets.py:L13 — DL-123
     @ParameterizedTest(name = "per_page {0} is requested as {0}")
     @ValueSource(ints = {1, 99, 100, 101, 1_000, 10_000, Integer.MAX_VALUE})
-    @DisplayName("requests the page size it was given however large it is")
+    @DisplayName("restates the page size it was given however large it is")
     void requestsThePageSizeItWasGivenHoweverLargeItIs(int perPage) {
-        when(tweetRepository.findAll(any(Pageable.class))).thenReturn(emptyPage());
-        when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+        stubEveryWindowRead(0L);
 
-        serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+        PaginatedTweetsDto rendered =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
 
-        ArgumentCaptor<Pageable> pageRequest = ArgumentCaptor.forClass(Pageable.class);
-        verify(tweetRepository).findAll(pageRequest.capture());
-        assertThat(pageRequest.getValue().getPageSize()).isEqualTo(perPage);
+        assertThat(rendered.pagination().perPage()).isEqualTo(perPage);
+        assertThatEveryWindowIsBounded();
     }
 
-    // The values api.TweetController derives from a malformed page or per_page — DL-193
+    // The values api.TweetController derives from a malformed page or per_page — DL-217
     @ParameterizedTest(name = "\"{0}\" reads as page {1} of size {2}")
     @CsvSource(nullValues = "NULL", value = {
             "NULL,NULL,1,10",
@@ -967,8 +1324,8 @@ class TwitterServiceTest {
     }
 
     @Test
-    @DisplayName("declares exactly four public operations")
-    void declaresExactlyFourPublicOperations() {
+    @DisplayName("declares exactly the six public operations, the gate carrying two overloads")
+    void declaresExactlyTheSixPublicOperations() {
         List<String> declaredOperations = Arrays.stream(TwitterService.class.getDeclaredMethods())
                 .filter(method -> Modifier.isPublic(method.getModifiers()))
                 .filter(method -> !method.isSynthetic())
@@ -1007,8 +1364,88 @@ class TwitterServiceTest {
                 List.of(MEDIA_URL), null, USER_ID, List.of(AI_TOOL));
     }
 
+    /**
+     * Builds the requested number of {@code tweets} rows carrying consecutive identifiers.
+     *
+     * @param rows the number of rows to build
+     * @return the rows
+     */
+    private static List<Tweet> rowsNumbered(int rows) {
+        List<Tweet> built = new ArrayList<>(rows);
+        for (int row = 1; row <= rows; row++) {
+            built.add(tweetWithIdentifier(row));
+        }
+        return List.copyOf(built);
+    }
+
+    /**
+     * Builds one wire form per supplied row, as the mapper does.
+     *
+     * @param rows the rows to render
+     * @return one wire form per row
+     */
+    private static List<TweetDto> dtosFor(List<Tweet> rows) {
+        return rows.stream()
+                .map(row -> new TweetDto(String.valueOf(row.getId()), "content", 1,
+                        LocalDateTime.of(2026, 1, 1, 12, 0), 5.0, List.of(), null, "42", List.of()))
+                .toList();
+    }
+
     private static Page<Tweet> emptyPage() {
         return new PageImpl<>(List.of(), PageRequest.of(0, 10), 0L);
+    }
+
+    /**
+     * Answers every read one page request can issue with an empty result and the supplied row total:
+     * the single page statement, the bounded chunk statement and the row count.
+     *
+     * @param total the value {@code count()} and the page's {@code total} report
+     */
+    private void stubEveryWindowRead(long total) {
+        lenient().when(tweetRepository.findAll(any(Pageable.class)))
+                .thenAnswer(invocation -> new PageImpl<>(List.of(), invocation.getArgument(0), total));
+        lenient().when(tweetRepository.findChunk(any(Pageable.class))).thenReturn(List.of());
+        lenient().when(tweetRepository.count()).thenReturn(total);
+        lenient().when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+    }
+
+    /**
+     * Collects every {@link Pageable} the service handed to the repository during this test.
+     *
+     * @return the windows asked for, in call order
+     */
+    private List<Pageable> pageRequestsIssued() {
+        return mockingDetails(tweetRepository).getInvocations().stream()
+                .flatMap(invocation -> Arrays.stream(invocation.getArguments()))
+                .filter(Pageable.class::isInstance)
+                .map(Pageable.class::cast)
+                .toList();
+    }
+
+    /**
+     * Asserts that no statement was asked for more rows than the declared chunk bound — DL-249.
+     */
+    private void assertThatEveryWindowIsBounded() {
+        assertThat(pageRequestsIssued()).as("windows the page read asked for")
+                .isNotEmpty()
+                .allSatisfy(window -> assertThat(window.getPageSize())
+                        .as("rows one statement was asked for")
+                        .isLessThanOrEqualTo(declaredChunkBound()));
+    }
+
+    /**
+     * Reads the chunk bound the service declares, so these assertions and the service cannot drift.
+     *
+     * @return the value of the service's declared chunk bound
+     */
+    private static int declaredChunkBound() {
+        try {
+            Field bound = TwitterService.class.getDeclaredField("PAGE_FETCH_CHUNK_ROWS");
+            bound.setAccessible(true);
+            return (int) bound.get(null);
+        } catch (ReflectiveOperationException absent) {
+            throw new AssertionError("TwitterService must declare PAGE_FETCH_CHUNK_ROWS.", absent);
+        }
     }
 
     /**
@@ -1046,6 +1483,6 @@ class TwitterServiceTest {
      */
     private static ScannerProperties propertiesWithPopularityThreshold(int popularityThreshold) {
         return new ScannerProperties(
-                null, popularityThreshold, 0L, null, null, null, null, null, null, null);
+                null, popularityThreshold, 0L, null, null, null, null, null, null, null, null);
     }
 }

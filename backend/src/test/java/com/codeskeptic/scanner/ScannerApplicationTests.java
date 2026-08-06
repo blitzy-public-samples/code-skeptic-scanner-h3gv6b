@@ -1,31 +1,46 @@
 package com.codeskeptic.scanner;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.web.servlet.error.BasicErrorController;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.web.servlet.error.ErrorAttributes;
 import org.springframework.boot.web.servlet.error.ErrorController;
 import org.springframework.context.ApplicationContext;
-import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.http.ResponseEntity;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+import org.springframework.scheduling.config.ScheduledTask;
+import org.springframework.scheduling.config.ScheduledTaskHolder;
+import org.springframework.scheduling.config.TaskExecutionOutcome.Status;
+import org.springframework.scheduling.config.TriggerTask;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.cors.CorsConfigurationSource;
 
@@ -35,7 +50,11 @@ import com.codeskeptic.scanner.api.GlobalExceptionHandler;
 import com.codeskeptic.scanner.api.ResponseController;
 import com.codeskeptic.scanner.api.SettingController;
 import com.codeskeptic.scanner.api.TweetController;
+import com.codeskeptic.scanner.config.DataSourcePoolProperties;
 import com.codeskeptic.scanner.config.ScannerProperties;
+import com.zaxxer.hikari.HikariDataSource;
+
+import javax.sql.DataSource;
 import com.codeskeptic.scanner.repository.AiToolRepository;
 import com.codeskeptic.scanner.repository.ResponseRepository;
 import com.codeskeptic.scanner.repository.SettingRepository;
@@ -58,8 +77,13 @@ import com.codeskeptic.scanner.task.TweetStreamListener;
  * Proves the whole application context assembles and that the route surface is the one the retired
  * blueprints served.
  *
- * <p>This is the widest test in the suite: it starts every bean the application declares, on a
- * random port, under the {@code test} profile. Nothing is mocked and nothing is stubbed out.
+ * <p>This is the widest test in the suite: it starts every bean the application declares under the
+ * {@code test} profile, and nothing is mocked or stubbed out. The web environment is
+ * {@link SpringBootTest.WebEnvironment#MOCK} and requests are issued through {@link MockMvc}, so the
+ * real {@code SecurityFilterChain}, the real dispatcher and the real controllers all run without a
+ * connector, a port or a server thread — DL-274. The connector itself is exercised by
+ * {@code security.RequestBodyLimitIntegrationTest}, the one narrowly scoped test in this suite that
+ * needs a running server.
  *
  * <p>The {@code test} profile supplies an in-memory database, a JWT secret, one
  * {@code scanner.auth} principal whose password is {@code test-password}, and blank X consumer
@@ -78,7 +102,8 @@ import com.codeskeptic.scanner.task.TweetStreamListener;
  * {@code scanner.analytics.trend-window-days} values the {@code test} profile publishes — DL-042,
  * DL-209.
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
+@AutoConfigureMockMvc
 @ActiveProfiles("test")
 @DisplayName("ScannerApplication")
 class ScannerApplicationTests {
@@ -90,7 +115,7 @@ class ScannerApplicationTests {
     private ApplicationContext context;
 
     @Autowired
-    private TestRestTemplate rest;
+    private MockMvc mockMvc;
 
     @Test
     @DisplayName("assembles the application context")
@@ -154,14 +179,13 @@ class ScannerApplicationTests {
     @ParameterizedTest(name = "[{index}] {0} {1}")
     @MethodSource("protectedRoutes")
     @DisplayName("answers every pre-existing route with a bare 401 for a caller carrying no token")
-    void answersEveryPreExistingRouteWithABare401(HttpMethod method, String path) {
-        ResponseEntity<String> response = rest.exchange(path, method,
-                new HttpEntity<>(bodyFor(method), jsonHeaders()), String.class);
+    void answersEveryPreExistingRouteWithABare401(HttpMethod method, String path) throws Exception {
+        MockHttpServletResponse response = mockMvc.perform(jsonRequest(method, path))
+                .andReturn().getResponse();
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
-        assertThat(response.getBody()).isNull();
-        assertThat(response.getHeaders().getFirst(HttpHeaders.WWW_AUTHENTICATE))
-                .isEqualTo("Bearer");
+        assertThat(response.getStatus()).isEqualTo(HttpStatus.UNAUTHORIZED.value());
+        assertThat(response.getContentAsString()).isEmpty();
+        assertThat(response.getHeader(HttpHeaders.WWW_AUTHENTICATE)).isEqualTo("Bearer");
     }
 
     /**
@@ -186,14 +210,14 @@ class ScannerApplicationTests {
 
     @Test
     @DisplayName("answers the token route with 200 for the configured credentials")
-    void answersTheTokenRouteWith200ForTheConfiguredCredentials() {
-        ResponseEntity<String> response = rest.exchange("/auth/token", HttpMethod.POST,
-                new HttpEntity<>("{\"username\":\"admin\",\"password\":\"" + PASSWORD + "\"}",
-                        jsonHeaders()),
-                String.class);
+    void answersTheTokenRouteWith200ForTheConfiguredCredentials() throws Exception {
+        MockHttpServletResponse response = mockMvc.perform(post("/auth/token")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"username\":\"admin\",\"password\":\"" + PASSWORD + "\"}"))
+                .andReturn().getResponse();
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(response.getBody())
+        assertThat(response.getStatus()).isEqualTo(HttpStatus.OK.value());
+        assertThat(response.getContentAsString())
                 .contains("access_token")
                 .contains("\"token_type\":\"bearer\"")
                 .contains("expires_in");
@@ -201,15 +225,14 @@ class ScannerApplicationTests {
 
     @Test
     @DisplayName("serves an authenticated read once a token is presented")
-    void servesAnAuthenticatedReadOnceATokenIsPresented() {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(accessToken());
+    void servesAnAuthenticatedReadOnceATokenIsPresented() throws Exception {
+        MockHttpServletResponse response = mockMvc.perform(get("/settings")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken()))
+                .andReturn().getResponse();
 
-        ResponseEntity<String> response =
-                rest.exchange("/settings", HttpMethod.GET, new HttpEntity<>(headers), String.class);
-
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(response.getBody()).startsWith("[").contains("tweet_popularity_threshold");
+        assertThat(response.getStatus()).isEqualTo(HttpStatus.OK.value());
+        assertThat(response.getContentAsString()).startsWith("[")
+                .contains("tweet_popularity_threshold");
     }
 
     @Test
@@ -218,13 +241,47 @@ class ScannerApplicationTests {
         assertThat(context.getBean(TweetStreamClient.class).isRunning()).isFalse();
     }
 
+    // Full-context scheduler state under the test profile — DL-239 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("keeps the one response-generation trigger pending beyond the suite window")
+    void keepsTheOneResponseGenerationTriggerPendingBeyondTheSuiteWindow() {
+        Map<String, ScheduledTaskHolder> holders =
+                context.getBeansOfType(ScheduledTaskHolder.class);
+        assertThat(holders).hasSize(1);
+
+        ScheduledTaskHolder holder = holders.values().iterator().next();
+        assertThat(holder.getScheduledTasks()).hasSize(1);
+
+        ScheduledTask scheduled = holder.getScheduledTasks().iterator().next();
+        assertThat(scheduled.getTask()).isInstanceOf(TriggerTask.class);
+
+        ThreadPoolTaskScheduler taskScheduler =
+                context.getBean(ThreadPoolTaskScheduler.class);
+
+        // The first pass runs at startup, which is the work-then-sleep order of
+        // backend/app/tasks/response_generation.py:L41-50 — DL-245, DL-251 — so what the test profile
+        // guarantees is that no second pass falls inside the suite window: the interval in force is a
+        // day, and at most the one startup pass can have completed.
+        assertThat(context.getBean(ScannerProperties.class).responseGenerationDelaySeconds())
+                .isEqualTo(86_400L);
+        assertThat(taskScheduler.getScheduledThreadPoolExecutor().getCompletedTaskCount())
+                .isLessThanOrEqualTo(1L);
+
+        Instant nextExecution = scheduled.nextExecution();
+        assertThat(nextExecution).isNotNull();
+        assertThat(nextExecution).isBefore(Instant.now().plus(Duration.ofHours(25)));
+    }
+
     // The error-dispatch strategy of DL-183 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("keeps the framework error controller and replaces only its attribute source")
-    void keepsTheFrameworkErrorControllerAndReplacesOnlyItsAttributeSource() {
+    @DisplayName("serves the error path with this application's own controller and attribute source")
+    void servesTheErrorPathWithThisApplicationsOwnControllerAndAttributeSource() {
         assertThat(context.getBeansOfType(ErrorController.class).values())
                 .singleElement()
-                .isInstanceOf(BasicErrorController.class);
+                .isNotInstanceOf(BasicErrorController.class)
+                .satisfies(controller -> assertThat(controller.getClass().getEnclosingClass())
+                        .isEqualTo(GlobalExceptionHandler.class));
+        assertThat(context.getBeansOfType(BasicErrorController.class)).isEmpty();
         assertThat(context.getBeansOfType(ErrorAttributes.class)).hasSize(1);
         assertThat(context.getBean(ErrorAttributes.class).getClass().getEnclosingClass())
                 .isEqualTo(GlobalExceptionHandler.class);
@@ -232,35 +289,54 @@ class ScannerApplicationTests {
 
     // The api package of AAP 0.3.1 — DL-183 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("declares no request-mapped class in the api package beyond the five controllers")
+    @DisplayName("declares no request-mapped class in the api package beyond the five controllers "
+            + "and the error path")
     void declaresNoRequestMappedClassInTheApiPackageBeyondTheFiveControllers() {
         assertThat(context.getBeanNamesForAnnotation(RestController.class))
                 .containsExactlyInAnyOrder("tweetController", "responseController",
                         "settingController", "analyticsController", "authController");
+        // The one further request-mapped bean is the error-path handler, which carries no stereotype
+        // and is nested in the advice that declares the envelope — DL-183
+        assertThat(context.getBeanNamesForAnnotation(RequestMapping.class))
+                .containsExactly("errorEnvelopeController");
     }
 
-    // The measured consequence DL-183 records for a direct request to the error path — see
-    // docs/DECISION_LOG.md
+    // A direct request to the error path — DL-183 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("answers a direct request to the error path with the internal server error envelope")
-    void answersADirectRequestToTheErrorPathWithTheInternalServerErrorEnvelope() {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(accessToken());
+    void answersADirectRequestToTheErrorPathWithTheInternalServerErrorEnvelope() throws Exception {
+        MockHttpServletResponse response = mockMvc.perform(get("/error")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken()))
+                .andReturn().getResponse();
 
-        ResponseEntity<String> response =
-                rest.exchange("/error", HttpMethod.GET, new HttpEntity<>(headers), String.class);
+        assertThat(response.getStatus()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
+        assertThat(response.getContentAsString())
+                .isEqualTo("{\"error\":\"Internal server error\"}");
+    }
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
-        assertThat(response.getBody()).isEqualTo("{\"error\":\"Internal server error\"}");
+    // A browser-shaped request must not reach the Whitelabel HTML page — DL-183, DL-236 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("answers the error path with the JSON envelope even when only HTML is acceptable")
+    void answersTheErrorPathWithTheJsonEnvelopeEvenWhenOnlyHtmlIsAcceptable() throws Exception {
+        MockHttpServletResponse response = mockMvc.perform(get("/error")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken())
+                        .accept(MediaType.TEXT_HTML))
+                .andReturn().getResponse();
+
+        assertThat(response.getStatus()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
+        assertThat(response.getContentType()).startsWith(MediaType.APPLICATION_JSON_VALUE);
+        assertThat(response.getContentAsString())
+                .isEqualTo("{\"error\":\"Internal server error\"}");
     }
 
     @Test
     @DisplayName("answers a direct unauthenticated request to the error path with a bare 401")
-    void answersADirectUnauthenticatedRequestToTheErrorPathWithABare401() {
-        ResponseEntity<String> response = rest.getForEntity("/error", String.class);
+    void answersADirectUnauthenticatedRequestToTheErrorPathWithABare401() throws Exception {
+        MockHttpServletResponse response = mockMvc.perform(get("/error")).andReturn().getResponse();
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
-        assertThat(response.getBody()).isNull();
+        assertThat(response.getStatus()).isEqualTo(HttpStatus.UNAUTHORIZED.value());
+        assertThat(response.getContentAsString()).isEmpty();
     }
 
     // The popularity gate of backend/app/core/config.py:L10 and
@@ -289,45 +365,97 @@ class ScannerApplicationTests {
         assertThat(openai.reasoningEffort()).isEqualTo("none");
     }
 
+    // Net-new background ownership group — DL-250 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("binds the background ownership group from the test profile")
+    void bindsTheBackgroundOwnershipGroupFromTheTestProfile() {
+        ScannerProperties.Background background =
+                context.getBean(ScannerProperties.class).background();
+
+        assertThat(background).isNotNull();
+        assertThat(background.enabled()).isTrue();
+        assertThat(background.streamEnabled()).isTrue();
+        assertThat(background.responseGenerationEnabled()).isTrue();
+        assertThat(background.runsStream()).isTrue();
+        assertThat(background.runsResponseGeneration()).isTrue();
+    }
+
+    // Net-new bounded mirror retry — DL-253 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("binds the notion mirror retry group from the test profile, so no test waits")
+    void bindsTheNotionMirrorRetryGroupFromTheTestProfile() {
+        ScannerProperties.Notion notion = context.getBean(ScannerProperties.class).notion();
+
+        assertThat(notion.mirrorMaxRetries()).isZero();
+        assertThat(notion.mirrorRetryBackoffMillis()).isZero();
+    }
+
+    // The allowlisted pool surface and the bounded graceful shutdown — DL-270, DL-271 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("publishes one pool carrying the geometry the test profile declares")
+    void publishesOnePoolCarryingTheGeometryTheTestProfileDeclares() {
+        assertThat(context.getBeansOfType(DataSource.class)).hasSize(1);
+        HikariDataSource pool = context.getBean(HikariDataSource.class);
+
+        assertThat(pool.getPoolName()).isEqualTo("code-skeptic-scanner-test-pool");
+        assertThat(pool.getMaximumPoolSize()).isEqualTo(4);
+        assertThat(pool.getMinimumIdle()).isEqualTo(1);
+        assertThat(pool.getMinimumIdle()).isLessThan(pool.getMaximumPoolSize());
+        assertThat(pool.getJdbcUrl()).startsWith("jdbc:h2:mem:scanner_test");
+    }
+
+    @Test
+    @DisplayName("binds the allowlisted pool group and reads no spring.datasource key")
+    void bindsTheAllowlistedPoolGroupAndReadsNoSpringDataSourceKey() {
+        DataSourcePoolProperties pool = context.getBean(DataSourcePoolProperties.class);
+
+        assertThat(pool.maximumSize()).isEqualTo(4);
+        assertThat(pool.connectionTimeoutMillis()).isEqualTo(30_000L);
+        assertThat(pool.leakDetectionThresholdMillis()).isZero();
+        assertThat(context.getEnvironment().containsProperty("spring.datasource.url")).isFalse();
+        assertThat(context.getEnvironment().containsProperty("spring.datasource.hikari.jdbc-url"))
+                .isFalse();
+    }
+
+    @Test
+    @DisplayName("declares a bounded graceful shutdown so the pool closes after the last request")
+    void declaresABoundedGracefulShutdown() {
+        assertThat(context.getEnvironment().getProperty("server.shutdown")).isEqualTo("graceful");
+        assertThat(context.getEnvironment()
+                .getProperty("spring.lifecycle.timeout-per-shutdown-phase")).isEqualTo("30s");
+    }
+
     /**
      * Authenticates the single configured principal and returns the token minted for it.
      *
      * @return the value of the {@code access_token} member of the token response
      */
-    private String accessToken() {
-        ResponseEntity<String> response = rest.exchange("/auth/token", HttpMethod.POST,
-                new HttpEntity<>("{\"username\":\"admin\",\"password\":\"" + PASSWORD + "\"}",
-                        jsonHeaders()),
-                String.class);
+    private String accessToken() throws Exception {
+        MockHttpServletResponse response = mockMvc.perform(post("/auth/token")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"username\":\"admin\",\"password\":\"" + PASSWORD + "\"}"))
+                .andReturn().getResponse();
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        String body = response.getBody();
-        assertThat(body).isNotNull();
+        assertThat(response.getStatus()).isEqualTo(HttpStatus.OK.value());
+        String body = response.getContentAsString();
+        assertThat(body).isNotEmpty();
         int start = body.indexOf("\"access_token\":\"") + "\"access_token\":\"".length();
         return body.substring(start, body.indexOf('"', start));
     }
 
     /**
-     * Builds a minimal JSON body for a method that carries one.
+     * Builds a request for one route, carrying a minimal JSON body for a method that takes one.
      *
      * @param method the request method
-     * @return a body, or {@code null} for a method that carries none
+     * @param path   the route to address
+     * @return the request, carrying no {@code Authorization} header
      */
-    private static String bodyFor(HttpMethod method) {
+    private static MockHttpServletRequestBuilder jsonRequest(HttpMethod method, String path) {
+        MockHttpServletRequestBuilder request = request(method, path);
         if (HttpMethod.POST.equals(method) || HttpMethod.PUT.equals(method)) {
-            return "{}";
+            request.contentType(MediaType.APPLICATION_JSON).content("{}");
         }
-        return null;
-    }
-
-    /**
-     * Builds headers declaring a JSON request body.
-     *
-     * @return the headers
-     */
-    private static HttpHeaders jsonHeaders() {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        return headers;
+        return request;
     }
 }

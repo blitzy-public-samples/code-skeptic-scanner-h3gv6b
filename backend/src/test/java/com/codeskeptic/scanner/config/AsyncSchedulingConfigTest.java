@@ -3,8 +3,10 @@ package com.codeskeptic.scanner.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Field;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -17,15 +19,18 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.scheduling.Trigger;
 import org.springframework.scheduling.TriggerContext;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.scheduling.config.ScheduledTaskRegistrar;
 import org.springframework.scheduling.config.TriggerTask;
 
+import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.task.ResponseGenerationScheduler;
@@ -74,7 +79,7 @@ class AsyncSchedulingConfigTest {
     @BeforeEach
     void setUp() {
         ScannerProperties properties = new ScannerProperties("jdbc:h2:mem:scheduling", 100,
-                CONFIGURED_DELAY_SECONDS, null, null, null, null, null, null, null);
+                CONFIGURED_DELAY_SECONDS, null, null, null, null, null, null, null, null);
         config = new AsyncSchedulingConfig(responseGenerationScheduler, settingRepository,
                 properties);
     }
@@ -86,6 +91,74 @@ class AsyncSchedulingConfigTest {
 
         assertThat(scheduler).isNotNull();
         assertThat(scheduler.getThreadNamePrefix()).isEqualTo("scanner-scheduler-");
+    }
+
+    // Bounded graceful termination — DL-251 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("publishes a scheduler that awaits a running pass for a bounded time at shutdown")
+    void publishesASchedulerThatAwaitsARunningPassAtShutdown() throws Exception {
+        ThreadPoolTaskScheduler scheduler = config.taskScheduler();
+
+        assertThat(readBoolean(scheduler, "waitForTasksToCompleteOnShutdown"))
+                .as("waits for a running pass at shutdown").isTrue();
+        assertThat(readInt(scheduler, "awaitTerminationMillis"))
+                .as("bounded termination wait in milliseconds").isEqualTo(30_000);
+    }
+
+    // A settings read that fails leaves the configured value in force — DL-251
+    @Test
+    @DisplayName("applies the configured delay when the settings row cannot be read")
+    void appliesTheConfiguredDelayWhenTheSettingsRowCannotBeRead() {
+        when(settingRepository.findById(DELAY_KEY))
+                .thenThrow(new DataAccessResourceFailureException("no connection"));
+
+        Instant next = nextExecution(triggerContextCompletedAt(LAST_COMPLETION));
+
+        assertThat(next).isEqualTo(LAST_COMPLETION.plusSeconds(CONFIGURED_DELAY_SECONDS));
+    }
+
+    // A resolved interval is read within the accepted bound — DL-251
+    @Test
+    @DisplayName("reads a stored interval above the one-year bound as that bound")
+    void readsAStoredIntervalAboveTheBoundAsTheBound() {
+        long oneYearSeconds = 365L * 24L * 60L * 60L;
+        when(settingRepository.findById(DELAY_KEY)).thenReturn(Optional.of(
+                new Setting(DELAY_KEY, String.valueOf(Long.MAX_VALUE), "d")));
+
+        Instant next = nextExecution(triggerContextCompletedAt(LAST_COMPLETION));
+
+        assertThat(next).isEqualTo(LAST_COMPLETION.plusSeconds(oneYearSeconds));
+    }
+
+    // Only the designated background worker registers the pass — DL-250
+    @ParameterizedTest(name = "enabled={0}, responseGenerationEnabled={1} registers no task")
+    @CsvSource({"false,true", "false,false", "true,false"})
+    @DisplayName("registers no task in a process that does not run the pass")
+    void registersNoTaskInAProcessThatDoesNotRunThePass(boolean enabled,
+            boolean responseGenerationEnabled) {
+        AsyncSchedulingConfig nonOwner = configWithBackground(
+                new ScannerProperties.Background(enabled, true, responseGenerationEnabled));
+        ScheduledTaskRegistrar registrar = new ScheduledTaskRegistrar();
+
+        nonOwner.configureTasks(registrar);
+
+        assertThat(registrar.getTriggerTaskList()).as("triggered tasks").isEmpty();
+        assertThat(registrar.getFixedDelayTaskList()).as("fixed-delay tasks").isEmpty();
+        assertThat(registrar.getFixedRateTaskList()).as("fixed-rate tasks").isEmpty();
+        assertThat(registrar.getCronTaskList()).as("cron tasks").isEmpty();
+        verifyNoInteractions(responseGenerationScheduler, settingRepository);
+    }
+
+    @Test
+    @DisplayName("registers the pass in a process that runs it")
+    void registersThePassInAProcessThatRunsIt() {
+        AsyncSchedulingConfig owner = configWithBackground(
+                new ScannerProperties.Background(true, true, true));
+        ScheduledTaskRegistrar registrar = new ScheduledTaskRegistrar();
+
+        owner.configureTasks(registrar);
+
+        assertThat(registrar.getTriggerTaskList()).as("triggered tasks").hasSize(1);
     }
 
     @Test
@@ -114,14 +187,14 @@ class AsyncSchedulingConfigTest {
         assertThat(next).isEqualTo(LAST_COMPLETION.plusSeconds(CONFIGURED_DELAY_SECONDS));
     }
 
+    // The first pass runs immediately — DL-251 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("measures the first interval from the current instant")
-    void measuresTheFirstIntervalFromTheCurrentInstant() {
-        when(settingRepository.findById(DELAY_KEY)).thenReturn(Optional.empty());
-
+    @DisplayName("runs the first pass at the current instant, reading no interval for it")
+    void runsTheFirstPassAtTheCurrentInstant() {
         Instant next = nextExecution(triggerContextCompletedAt(null));
 
-        assertThat(next).isEqualTo(NOW.plusSeconds(CONFIGURED_DELAY_SECONDS));
+        assertThat(next).isEqualTo(NOW);
+        verifyNoInteractions(settingRepository);
     }
 
     @Test
@@ -178,7 +251,7 @@ class AsyncSchedulingConfigTest {
     @DisplayName("never schedules a pass at or before the completion of the previous one")
     void neverSchedulesAPassAtOrBeforeTheCompletionOfThePreviousOne() {
         ScannerProperties zeroDelay = new ScannerProperties("jdbc:h2:mem:scheduling", 100, 0L,
-                null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null);
         AsyncSchedulingConfig withZeroDelay =
                 new AsyncSchedulingConfig(responseGenerationScheduler, settingRepository, zeroDelay);
         when(settingRepository.findById(DELAY_KEY)).thenReturn(Optional.empty());
@@ -204,6 +277,57 @@ class AsyncSchedulingConfigTest {
         Trigger trigger = registrar.getTriggerTaskList().get(0).getTrigger();
         assertThat(trigger).isNotNull();
         return trigger;
+    }
+
+    /**
+     * Builds the unit under test over a configuration root carrying the supplied background group.
+     *
+     * @param background the {@code scanner.background} group to bind
+     * @return the unit under test
+     */
+    private AsyncSchedulingConfig configWithBackground(ScannerProperties.Background background) {
+        ScannerProperties properties = new ScannerProperties("jdbc:h2:mem:scheduling", 100,
+                CONFIGURED_DELAY_SECONDS, null, null, null, null, null, null, null, background);
+        return new AsyncSchedulingConfig(responseGenerationScheduler, settingRepository, properties);
+    }
+
+    /**
+     * Reads a declared boolean field of the published scheduler.
+     *
+     * @param target the scheduler to inspect
+     * @param name   the field to read, declared by the scheduler or one of its supertypes
+     * @return the field's value
+     * @throws ReflectiveOperationException when the field is absent
+     */
+    private static boolean readBoolean(Object target, String name)
+            throws ReflectiveOperationException {
+        return (boolean) readField(target, name);
+    }
+
+    /**
+     * Reads a declared {@code int} or {@code long} field of the published scheduler.
+     *
+     * @param target the scheduler to inspect
+     * @param name   the field to read, declared by the scheduler or one of its supertypes
+     * @return the field's value
+     * @throws ReflectiveOperationException when the field is absent
+     */
+    private static long readInt(Object target, String name) throws ReflectiveOperationException {
+        Object value = readField(target, name);
+        return ((Number) value).longValue();
+    }
+
+    private static Object readField(Object target, String name) throws ReflectiveOperationException {
+        for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
+            try {
+                Field field = type.getDeclaredField(name);
+                field.setAccessible(true);
+                return field.get(target);
+            } catch (NoSuchFieldException absentHere) {
+                continue;
+            }
+        }
+        throw new NoSuchFieldException(name);
     }
 
     private TriggerContext triggerContextCompletedAt(Instant lastCompletion) {

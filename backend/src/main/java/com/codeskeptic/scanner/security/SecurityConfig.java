@@ -76,11 +76,15 @@ import jakarta.servlet.http.HttpServletResponse;
  * {@code backend/app/api/settings.py:L8,L14} and {@code backend/app/api/analytics.py:L8,L18}, each
  * applied without parentheses. The chain declared here authenticates all eleven — DL-021.
  *
- * <p>Five beans are published, and no other:
+ * <p>Six beans are published, and no other:
  *
  * <ul>
  *   <li>{@link #securityFilterChain(HttpSecurity)} — the chain, carrying the authorization rules,
  *       the unauthenticated-request entry point and {@link JwtAuthenticationFilter}.
+ *   <li>{@link #transportSecurityHeaderWriter()} — the composed transport-security header policy,
+ *       injected into {@code com.codeskeptic.scanner.config.ContainerErrorResponseConfig} so a
+ *       rejection the container answers before any filter runs carries the same headers the chain
+ *       writes — DL-194, DL-237.
  *   <li>{@link #securityContextRepository()} — the request-scoped context store the chain reads and
  *       {@link JwtAuthenticationFilter} writes — DL-112.
  *   <li>{@link #passwordEncoder()} — successor of the passlib bcrypt helpers at
@@ -346,7 +350,7 @@ public class SecurityConfig {
         return http.build();
     }
 
-    // Net-new (no Python counterpart) — DL-194, DL-237 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-241 — see docs/DECISION_LOG.md
     /**
      * Publishes the transport-security header policy of this application, as one writer.
      *
@@ -354,14 +358,15 @@ public class SecurityConfig {
      * default, in its order: {@code X-Content-Type-Options}, {@code X-XSS-Protection},
      * the cache directives {@code Cache-Control}, {@code Pragma} and {@code Expires},
      * {@code Strict-Transport-Security} on a secure request only, and {@code X-Frame-Options}. This
-     * class customises none of them, so the chain's {@code HeaderWriterFilter} and this bean apply the
-     * same policy from the same declaration — DL-194.
+     * class customises none of them, and the chain's {@code HeaderWriterFilter} and this bean apply the
+     * same policy from the same declaration — see docs/DECISION_LOG.md DL-194.
      *
      * <p>Each composed writer either skips a name the response already carries or replaces its value
      * through {@code setHeader}, so applying this bean to a response the chain has already written
      * leaves each header with exactly one value.
      * {@code com.codeskeptic.scanner.config.ContainerErrorResponseConfig} applies it to a rejection the
-     * container answers before any filter runs, which {@code HeaderWriterFilter} never sees — DL-237.
+     * container answers before any filter runs, which {@code HeaderWriterFilter} never sees — DL-237,
+     * DL-241.
      *
      * @return the composed policy; never {@code null}
      */
@@ -373,8 +378,8 @@ public class SecurityConfig {
     /**
      * Builds the policy {@link #transportSecurityHeaderWriter()} publishes.
      *
-     * <p>Declared on this class so the policy has one declaration site: the bean above returns it, and
-     * a caller outside the container obtains the same composition — DL-194.
+     * <p>This is the one declaration site of the policy: the bean above returns it, and a caller
+     * outside the container obtains the same composition — see docs/DECISION_LOG.md DL-194.
      *
      * @return a writer composing Spring Security's default header writers; never {@code null}
      */
@@ -598,8 +603,8 @@ public class SecurityConfig {
      * Bounds the encoded request body on an authenticated route before any converter reads it.
      *
      * <p>The filter runs after {@link AuthorizationFilter}, so a request that carries no
-     * authenticated principal is still answered with the chain's bare 401 rather than with this
-     * bound. It does nothing on a request whose method carries no body, and nothing on
+     * authenticated principal is answered with the chain's bare 401 and never reaches this bound. It
+     * does nothing on a request whose method carries no body, and nothing on
      * {@code POST /auth/token}, which {@link LoginRequestBodyLimitFilter} bounds at the smaller
      * {@value #MAXIMUM_LOGIN_REQUEST_BYTES} bytes.
      *
@@ -663,15 +668,13 @@ public class SecurityConfig {
             return new CachedBodyServletInputStream(body);
         }
 
-        // Net-new (no Python counterpart) — DL-198 — see docs/DECISION_LOG.md
+        // Net-new (no Python counterpart) — DL-118 — see docs/DECISION_LOG.md
         /**
          * {@inheritDoc}
          *
-         * <p>Falls back to UTF-8 when the request declares no charset, declares one this JVM does not
-         * provide, or declares one that is not a legal charset name. {@link Charset#forName(String)}
-         * throws {@link java.nio.charset.UnsupportedCharsetException} and
-         * {@link java.nio.charset.IllegalCharsetNameException}, both unchecked, so without this guard
-         * a caller-supplied {@code Content-Type} charset could raise from inside the filter chain.
+         * <p>Decodes the cached body with the charset the request declared, and with UTF-8 when the
+         * request declares no charset, declares one this JVM does not provide, or declares one that is
+         * not a legal charset name — DL-118.
          */
         @Override
         public BufferedReader getReader() {

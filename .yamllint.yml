@@ -1,0 +1,79 @@
+# Yamllint policy for this repository - see backend/docs/DECISION_LOG.md DL-259
+#
+# Every rule that can detect a defect is kept at error. The relaxations below name conventions the
+# delivered YAML follows deliberately and consistently:
+#
+#   document-start   GitHub Actions workflows, Dependabot config and Spring profiles are single
+#                    documents and none carries a "---" marker.
+#   truthy           A workflow's trigger key is spelled "on", which the YAML 1.1 resolver reads as
+#                    a boolean. Values are still checked; keys are not.
+#   brackets         Branch filters are written "[ main ]", the spelling GitHub's own documentation
+#                    uses.
+#   indentation      Step sequences are indented level with their "steps:" key, the prevailing
+#                    GitHub Actions style.
+#   comments         A trailing comment is separated from content by one space throughout.
+#   line-length      Comment blocks carry provenance paths and decision pointers; 170 characters
+#                    bounds them while still catching a runaway line.
+
+extends: default
+
+rules:
+  document-start: disable
+
+  truthy:
+    check-keys: false
+    level: error
+
+  brackets:
+    min-spaces-inside: 0
+    max-spaces-inside: 1
+    min-spaces-inside-empty: 0
+    max-spaces-inside-empty: 0
+    level: error
+
+  indentation:
+    spaces: consistent
+    indent-sequences: whatever
+    check-multi-line-strings: false
+    level: error
+
+  comments:
+    require-starting-space: true
+    ignore-shebangs: true
+    min-spaces-from-content: 1
+    level: error
+
+  comments-indentation: disable
+
+  line-length:
+    max: 170
+    allow-non-breakable-words: true
+    allow-non-breakable-inline-mappings: true
+    level: error
+
+  # Defect detection, all kept at error
+  key-duplicates:
+    level: error
+  trailing-spaces:
+    level: error
+  new-line-at-end-of-file:
+    level: error
+  empty-values:
+    forbid-in-block-mappings: true
+    forbid-in-flow-mappings: true
+    level: error
+  octal-values:
+    forbid-implicit-octal: true
+    forbid-explicit-octal: true
+    level: error
+  colons:
+    level: error
+  commas:
+    level: error
+  hyphens:
+    level: error
+  anchors:
+    level: error
+  empty-lines:
+    max: 2
+    level: error

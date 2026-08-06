@@ -8,7 +8,7 @@ import com.codeskeptic.scanner.dto.TweetDto;
 import com.codeskeptic.scanner.entity.Tweet;
 
 // Net-new (no Python counterpart method) — call sites backend/app/api/tweets.py:L19,L30 —
-// DL-023, DL-024, DL-080, DL-139 — see docs/DECISION_LOG.md
+// DL-023, DL-024, DL-080 — see docs/DECISION_LOG.md
 /**
  * Converts {@link Tweet} entities into their {@link TweetDto} wire form.
  *
@@ -20,7 +20,7 @@ import com.codeskeptic.scanner.entity.Tweet;
  *
  * <p>Every other column value is copied verbatim.
  *
- * <p>Null policy — see docs/DECISION_LOG.md DL-080 and DL-139. Every one of the nine {@code tweets}
+ * <p>Null policy — see docs/DECISION_LOG.md DL-080. Every one of the nine {@code tweets}
  * columns is declared without {@code nullable=false}, so a stored row may carry {@code null} in any of
  * them, and this class carries a {@code null} column value through as a {@code null} component. No
  * conversion here unboxes a column value, defaults a component, substitutes a neutral value or

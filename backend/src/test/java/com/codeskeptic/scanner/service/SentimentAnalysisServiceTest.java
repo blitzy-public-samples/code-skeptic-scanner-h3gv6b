@@ -2,18 +2,29 @@ package com.codeskeptic.scanner.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import jakarta.annotation.PreDestroy;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -63,6 +74,20 @@ class SentimentAnalysisServiceTest {
     /** Message of the {@link IllegalStateException} raised once the bean has been destroyed. */
     private static final String DESTROYED_MESSAGE =
             "SentimentAnalysisService has been destroyed; the Natural Language API client is closed";
+
+    // Bounds of the shutdown-drain tests — DL-268 — see docs/DECISION_LOG.md
+
+    /** Longest any latch, future or thread in this class is waited for. */
+    private static final long LATCH_LIMIT_SECONDS = 10L;
+
+    /** Window allowed for a wait to be observed as still waiting. */
+    private static final long SETTLE_MILLIS = 300L;
+
+    /** Milliseconds in one second, used where an API takes milliseconds. */
+    private static final long MILLIS_PER_SECOND = 1_000L;
+
+    /** Nanoseconds in one millisecond, used to report an elapsed window. */
+    private static final long NANOS_PER_MILLI = 1_000_000L;
 
     /** Message carried by the provider failure the stubbed client raises. */
     private static final String PROVIDER_FAILURE_MESSAGE = "the provider rejected the request";
@@ -420,6 +445,110 @@ class SentimentAnalysisServiceTest {
         assertThat(close.getParameterCount()).isZero();
     }
 
+    // ---------------------------------------------------------------------
+    // The shutdown rejects new work before it drains — DL-268 — see docs/DECISION_LOG.md
+    // ---------------------------------------------------------------------
+
+    @Test
+    @DisplayName("awaits an in-flight analysis before releasing the language client")
+    void awaitsAnInFlightAnalysisBeforeReleasingTheLanguageClient() throws Exception {
+        CountDownLatch analysisEntered = new CountDownLatch(1);
+        CountDownLatch releaseAnalysis = new CountDownLatch(1);
+        SentimentAnalysisService holdingAClient = serviceHoldingClient(languageServiceClient);
+        stubLatchedDocumentSentiment(analysisEntered, releaseAnalysis, 0.25f);
+
+        ExecutorService analyser = Executors.newSingleThreadExecutor();
+        ExecutorService closer = Executors.newSingleThreadExecutor();
+        try {
+            Future<Double> analysis =
+                    analyser.submit(() -> holdingAClient.analyzeSentiment(TWEET_TEXT));
+            assertThat(analysisEntered.await(LATCH_LIMIT_SECONDS, TimeUnit.SECONDS)).isTrue();
+
+            Future<?> shutdown = closer.submit(holdingAClient::closeLanguageClient);
+            // The shutdown cannot complete while the analysis holds the read lock.
+            assertThatExceptionOfType(TimeoutException.class)
+                    .isThrownBy(() -> shutdown.get(SETTLE_MILLIS, TimeUnit.MILLISECONDS));
+            verify(languageServiceClient, never()).close();
+
+            releaseAnalysis.countDown();
+            assertThat(analysis.get(LATCH_LIMIT_SECONDS, TimeUnit.SECONDS))
+                    .isCloseTo(0.25d, within(1e-6d));
+            shutdown.get(LATCH_LIMIT_SECONDS, TimeUnit.SECONDS);
+
+            verify(languageServiceClient, times(1)).close();
+        } finally {
+            releaseAnalysis.countDown();
+            awaitTermination(analyser, closer);
+        }
+    }
+
+    @Test
+    @DisplayName("rejects an analysis that arrives while a shutdown is waiting, without queueing it")
+    void rejectsAnAnalysisThatArrivesWhileAShutdownIsWaiting() throws Exception {
+        CountDownLatch analysisEntered = new CountDownLatch(1);
+        CountDownLatch releaseAnalysis = new CountDownLatch(1);
+        SentimentAnalysisService holdingAClient = serviceHoldingClient(languageServiceClient);
+        stubLatchedDocumentSentiment(analysisEntered, releaseAnalysis, 0.25f);
+
+        ExecutorService analyser = Executors.newSingleThreadExecutor();
+        ExecutorService closer = Executors.newSingleThreadExecutor();
+        try {
+            analyser.submit(() -> holdingAClient.analyzeSentiment(TWEET_TEXT));
+            assertThat(analysisEntered.await(LATCH_LIMIT_SECONDS, TimeUnit.SECONDS)).isTrue();
+
+            Future<?> shutdown = closer.submit(holdingAClient::closeLanguageClient);
+            assertThatExceptionOfType(TimeoutException.class)
+                    .isThrownBy(() -> shutdown.get(SETTLE_MILLIS, TimeUnit.MILLISECONDS));
+
+            long startedAt = System.nanoTime();
+            assertThatThrownBy(() -> holdingAClient.analyzeSentiment(TWEET_TEXT))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage(DESTROYED_MESSAGE);
+            long elapsedMillis = (System.nanoTime() - startedAt) / NANOS_PER_MILLI;
+
+            assertThat(elapsedMillis)
+                    .as("the rejection did not queue behind the release")
+                    .isLessThan(SETTLE_MILLIS);
+
+            releaseAnalysis.countDown();
+            shutdown.get(LATCH_LIMIT_SECONDS, TimeUnit.SECONDS);
+        } finally {
+            releaseAnalysis.countDown();
+            awaitTermination(analyser, closer);
+        }
+    }
+
+    @Test
+    @DisplayName("releases the language client and restores the interrupt when the wait is interrupted")
+    void releasesTheLanguageClientAndRestoresTheInterruptWhenTheWaitIsInterrupted() throws Exception {
+        CountDownLatch analysisEntered = new CountDownLatch(1);
+        CountDownLatch releaseAnalysis = new CountDownLatch(1);
+        SentimentAnalysisService holdingAClient = serviceHoldingClient(languageServiceClient);
+        stubLatchedDocumentSentiment(analysisEntered, releaseAnalysis, 0.25f);
+
+        ExecutorService analyser = Executors.newSingleThreadExecutor();
+        try {
+            analyser.submit(() -> holdingAClient.analyzeSentiment(TWEET_TEXT));
+            assertThat(analysisEntered.await(LATCH_LIMIT_SECONDS, TimeUnit.SECONDS)).isTrue();
+
+            AtomicBoolean interruptRestored = new AtomicBoolean();
+            Thread closer = new Thread(() -> {
+                holdingAClient.closeLanguageClient();
+                interruptRestored.set(Thread.currentThread().isInterrupted());
+            }, "sentiment-shutdown-under-interrupt");
+            closer.start();
+            closer.interrupt();
+            closer.join(LATCH_LIMIT_SECONDS * MILLIS_PER_SECOND);
+
+            assertThat(closer.isAlive()).as("the interrupted shutdown returned").isFalse();
+            assertThat(interruptRestored).isTrue();
+            verify(languageServiceClient, times(1)).close();
+        } finally {
+            releaseAnalysis.countDown();
+            awaitTermination(analyser);
+        }
+    }
+
     @Test
     @DisplayName("leaves the client accessor open to a subclass")
     void leavesTheClientAccessorOpenToASubclass() throws NoSuchMethodException {
@@ -501,6 +630,64 @@ class SentimentAnalysisServiceTest {
                 .setDocumentSentiment(Sentiment.newBuilder().setScore(score).build())
                 .build();
         when(languageServiceClient.analyzeSentiment(any(Document.class))).thenReturn(response);
+    }
+
+    /**
+     * Makes the stubbed client report it has been entered and then block until it is released,
+     * answering with a document sentiment carrying {@code score}.
+     *
+     * @param entered counted down once the stubbed call is running
+     * @param release awaited by the stubbed call; counting it down completes the analysis
+     * @param score   the document sentiment score reported once released — DL-268
+     */
+    private void stubLatchedDocumentSentiment(CountDownLatch entered, CountDownLatch release,
+            float score) {
+        AnalyzeSentimentResponse response = AnalyzeSentimentResponse.newBuilder()
+                .setDocumentSentiment(Sentiment.newBuilder().setScore(score).build())
+                .build();
+        when(languageServiceClient.analyzeSentiment(any(Document.class))).thenAnswer(invocation -> {
+            entered.countDown();
+            if (!release.await(LATCH_LIMIT_SECONDS, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("the latched analysis was never released");
+            }
+            return response;
+        });
+    }
+
+    /**
+     * Builds a service whose client field already holds {@code heldClient}, so the real accessor
+     * returns it and the release closes it.
+     *
+     * @param heldClient the client the service holds
+     * @return the service under test
+     * @throws ReflectiveOperationException if the field cannot be written
+     */
+    private static SentimentAnalysisService serviceHoldingClient(LanguageServiceClient heldClient)
+            throws ReflectiveOperationException {
+        SentimentAnalysisService service = new SentimentAnalysisService();
+        Field field = SentimentAnalysisService.class.getDeclaredField("client");
+        field.setAccessible(true);
+        field.set(service, heldClient);
+        return service;
+    }
+
+    /**
+     * Shuts every supplied executor down and asserts each one terminates.
+     *
+     * @param workers the executors to release
+     * @throws InterruptedException if the awaiting thread is interrupted
+     */
+    private static void awaitTermination(ExecutorService... workers) throws InterruptedException {
+        for (ExecutorService worker : workers) {
+            worker.shutdown();
+        }
+        for (ExecutorService worker : workers) {
+            if (!worker.awaitTermination(LATCH_LIMIT_SECONDS, TimeUnit.SECONDS)) {
+                worker.shutdownNow();
+                assertThat(worker.awaitTermination(LATCH_LIMIT_SECONDS, TimeUnit.SECONDS))
+                        .as("the test executor terminated").isTrue();
+            }
+        }
     }
 
     /**

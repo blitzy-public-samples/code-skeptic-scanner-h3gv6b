@@ -1,11 +1,18 @@
 package com.codeskeptic.scanner.service;
 
 import java.time.Duration;
-import java.util.Arrays;
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
@@ -110,28 +117,79 @@ public class LlmService {
     /** Configuration key of the reasoning effort, named by the failure message it can raise. */
     private static final String REASONING_EFFORT_KEY = "scanner.openai.reasoning-effort";
 
-    /** Reasoning-effort values rendered from {@link ReasoningEffort.Value}, excluding {@code _UNKNOWN}. */
+    /** Configuration key of the temperature, named by the failure message it can raise. */
+    private static final String TEMPERATURE_KEY = "scanner.openai.temperature";
+
+    // Model-specific reasoning-effort allowlist — DL-145 — see docs/DECISION_LOG.md
+    /**
+     * The reasoning-effort values the configured GPT-5.x model accepts. It is narrower than the
+     * SDK-global {@link ReasoningEffort.Value} set, which the client carries for every model it can
+     * address: {@code minimal} is refused by the configured model with HTTP 400
+     * {@code unsupported_value}, so it is rejected here rather than sent — DL-145, DL-245.
+     */
+    private static final Set<ReasoningEffort.Value> ACCEPTED_REASONING_EFFORT_VALUES =
+            Collections.unmodifiableSet(EnumSet.of(
+                    ReasoningEffort.Value.NONE,
+                    ReasoningEffort.Value.LOW,
+                    ReasoningEffort.Value.MEDIUM,
+                    ReasoningEffort.Value.HIGH,
+                    ReasoningEffort.Value.XHIGH,
+                    ReasoningEffort.Value.MAX));
+
+    /** {@link #ACCEPTED_REASONING_EFFORT_VALUES} rendered for a failure message, in enum order. */
     private static final String ACCEPTED_REASONING_EFFORTS =
-            Arrays.stream(ReasoningEffort.Value.values())
-                    .filter(value -> value != ReasoningEffort.Value._UNKNOWN)
+            ACCEPTED_REASONING_EFFORT_VALUES.stream()
                     .map(value -> value.name().toLowerCase(Locale.ROOT))
                     .collect(Collectors.joining(", "));
 
 
     /**
      * Longest run of post body carried into the prompt. A longer body is cut to this length and
-     * marked with {@value #BODY_TRUNCATION_MARK}.
+     * marked with {@value #BODY_TRUNCATION_MARK} — DL-203.
      */
     private static final int PROMPT_BODY_LIMIT = 1000;
 
     /** Appended to a post body cut to {@value #PROMPT_BODY_LIMIT}. */
     private static final String BODY_TRUNCATION_MARK = "…";
 
+    // Bounds applied to the Context: value — DL-265 — see docs/DECISION_LOG.md
+    /** Most AI tool names carried into the prompt. Names past this many are not carried. */
+    private static final int PROMPT_AI_TOOL_LIMIT = 10;
+
+    /** Most characters the joined AI tool names occupy in the prompt. */
+    private static final int PROMPT_CONTEXT_LIMIT = 200;
+
+    /**
+     * Longest {@link #closeOpenAiClient()} awaits an in-flight completion before releasing the
+     * client, in seconds — DL-266.
+     */
+    private static final long SHUTDOWN_AWAIT_SECONDS = 30L;
+
     /** Highest accepted value of {@code scanner.openai.temperature}. */
     private static final double MAXIMUM_TEMPERATURE = 2.0d;
 
+    /**
+     * Longest time {@link #closeOpenAiClient()} awaits a generation request already in flight before
+     * closing the client.
+     */
+    private static final Duration ACTIVE_CALL_DRAIN_LIMIT = Duration.ofSeconds(30);
+
+    /** Interval between two reads of {@link #callsInFlight} while a drain is awaited. */
+    private static final Duration DRAIN_POLL_INTERVAL = Duration.ofMillis(25);
+
     /** Reported in place of an absent OpenAI error component. */
     private static final String ABSENT = "absent";
+
+    /**
+     * Accepted shape of a provider-controlled rejection member once the log guard has rendered it —
+     * DL-084, DL-119. A machine-readable member carries no intra-value spacing, so a rendering that
+     * does is free text and is refused rather than carried.
+     */
+    private static final Pattern GUARDED_MEMBER_SHAPE = Pattern.compile("\\S{1,64}");
+
+    /** Reported when work arrives after this bean has been destroyed — DL-266. */
+    private static final String DESTROYED_MESSAGE =
+            "LlmService has been destroyed; no OpenAI API client is created.";
 
     /**
      * Bound configuration root, supplying the OpenAI credential, the model identifier and the three
@@ -148,10 +206,25 @@ public class LlmService {
     private volatile OpenAIClient client;
 
     /**
-     * Set by {@link #closeOpenAiClient()} when the bean is destroyed. Written and read only inside a
-     * {@code synchronized (this)} block, so no client can be created after destruction.
+     * Set by {@link #closeOpenAiClient()} when the bean is destroyed. Read without the monitor by
+     * {@link #generateResponse(TweetDto)} so a request arriving during a shutdown is rejected before it
+     * queues on {@link #activeUseLock}, and written inside a {@code synchronized (this)} block so no
+     * client can be created after destruction — DL-266.
      */
-    private boolean destroyed;
+    private volatile boolean destroyed;
+
+    /**
+     * Held for reading while one completion is in flight and for writing while the client is released,
+     * so a context close cannot abort live work — DL-266.
+     */
+    private final ReentrantReadWriteLock activeUseLock = new ReentrantReadWriteLock();
+
+    /**
+     * Number of generation requests issued to the provider and not yet returned.
+     * {@link #closeOpenAiClient()} awaits this reaching zero, bounded by
+     * {@link #ACTIVE_CALL_DRAIN_LIMIT}, before the client is closed — DL-253.
+     */
+    private final AtomicInteger callsInFlight = new AtomicInteger();
 
     /**
      * Creates the service.
@@ -210,35 +283,57 @@ public class LlmService {
     public String generateResponse(TweetDto tweet) {
         Objects.requireNonNull(tweet, "tweet must not be null.");
 
+        // A request arriving during a shutdown is rejected before it queues on the lock — DL-266 —
+        // see docs/DECISION_LOG.md
+        if (destroyed) {
+            throw new IllegalStateException(DESTROYED_MESSAGE);
+        }
+
         String prompt = buildPrompt(tweet);
         String model = requireConfigured(openai().model(), "scanner.openai.model");
 
+        // Caller-propagated value rendered through the log guard — DL-149 — see
+        // docs/DECISION_LOG.md
         log.debug("Requesting a generated reply for tweet {} from model {} with a {} character prompt",
-                tweet.id(), model, prompt.length());
+                LogSafe.logSafe(tweet.id()), model, prompt.length());
 
         ChatCompletionCreateParams params = buildParams(model, prompt);
 
+        // The completion is in flight for as long as this lock is held, so a context close awaits it
+        // — DL-266 — see docs/DECISION_LOG.md
+        Lock activeUse = activeUseLock.readLock();
+        activeUse.lock();
         ChatCompletion completion;
+        // The call is counted for the duration of the drain window — DL-253 — see
+        // docs/DECISION_LOG.md
+        callsInFlight.incrementAndGet();
         try {
+            if (destroyed) {
+                throw new IllegalStateException(DESTROYED_MESSAGE);
+            }
             completion = openAiClient().chat().completions().create(params);
         } catch (OpenAIServiceException rejected) {
+            // Every provider-controlled member passes the log guard before it is recorded — DL-149
+            // — see docs/DECISION_LOG.md
             log.error("Model {} rejected the generation request for tweet {} with HTTP {}: "
                     + "type {}, code {}, param {}",
-                    model, tweet.id(), rejected.statusCode(),
-                    rejected.type().orElse(ABSENT),
-                    rejected.code().orElse(ABSENT),
-                    rejected.param().orElse(ABSENT));
+                    model, LogSafe.logSafe(tweet.id()), rejected.statusCode(),
+                    guarded(rejected.type()),
+                    guarded(rejected.code()),
+                    guarded(rejected.param()));
             throw rejected;
         } catch (RuntimeException failure) {
             log.error("Requesting a generated reply for tweet {} from model {} failed with {}",
-                    tweet.id(), model, LogSafe.type(failure));
+                    LogSafe.logSafe(tweet.id()), model, LogSafe.type(failure));
             throw failure;
+        } finally {
+            activeUse.unlock();
         }
 
         String generatedText = firstChoiceContent(completion);
 
         log.info("Model {} returned {} character(s) of generated text for tweet {}",
-                model, generatedText.length(), LogSafe.logSafe(tweet.id()));
+                LogSafe.logSafe(model), generatedText.length(), LogSafe.logSafe(tweet.id()));
 
         return generatedText;
     }
@@ -270,22 +365,45 @@ public class LlmService {
                 .addUserMessage(prompt)                                         // :L21
                 .maxCompletionTokens(requireAtLeastOne(openai.maxCompletionTokens(),
                         "scanner.openai.max-completion-tokens"))                // :L22 — DL-034
-                .n(requireAtLeastOne(openai.n(), "scanner.openai.n"));          // :L23
+                .n(requireExactlyOne(openai.n(), "scanner.openai.n"));          // :L23 — DL-267
         // :L24 stop=None — no stop parameter is set.
 
-        resolveReasoningEffort().ifPresent(builder::reasoningEffort);
+        Optional<ReasoningEffort> effort = resolveReasoningEffort();
+        effort.ifPresent(builder::reasoningEffort);
 
         Double temperature = openai.temperature();
         if (temperature != null) {
             if (!Double.isFinite(temperature) || temperature < 0.0d
                     || temperature > MAXIMUM_TEMPERATURE) {
-                throw new IllegalStateException("scanner.openai.temperature must lie between 0 and "
+                throw new IllegalStateException(TEMPERATURE_KEY + " must lie between 0 and "
                         + MAXIMUM_TEMPERATURE + " inclusive.");
             }
+            requireTemperatureIsAccepted(effort);
             builder.temperature(temperature);                                   // :L25
         }
 
         return builder.build();
+    }
+
+    // Net-new bound on scanner.openai.n — DL-267 — see docs/DECISION_LOG.md
+    /**
+     * Validates the configured number of choices.
+     *
+     * <p>{@link #firstChoiceContent(ChatCompletion)} consumes the first choice and no other, matching
+     * the {@code choices[0]} index at {@code backend/app/services/llm_service.py:L29}. Any value other
+     * than one is rejected before the request is issued — see docs/DECISION_LOG.md DL-267.
+     *
+     * @param value the configured value
+     * @param key   the configuration key the value binds from; named in the failure message
+     * @return {@code value}, guaranteed to be exactly one
+     * @throws IllegalStateException when {@code value} is not one
+     */
+    private static long requireExactlyOne(long value, String key) {
+        if (value != 1L) {
+            throw new IllegalStateException(key + " must be exactly 1, because only the first choice "
+                    + "is consumed; it is " + value + ".");
+        }
+        return value;
     }
 
     /**
@@ -338,8 +456,7 @@ public class LlmService {
         if (local == null) {
             synchronized (this) {
                 if (this.destroyed) {
-                    throw new IllegalStateException(
-                            "LlmService has been destroyed; no OpenAI API client is created.");
+                    throw new IllegalStateException(DESTROYED_MESSAGE);
                 }
                 local = this.client;
                 if (local == null) {
@@ -367,10 +484,15 @@ public class LlmService {
     /**
      * Closes the OpenAI client and clears it when this bean is destroyed.
      *
-     * <p>Runs on the container's destruction callback. The client field is read and written inside the
-     * same monitor {@link #openAiClient()} uses, so a client created before destruction is closed
-     * exactly once and {@link #openAiClient()} creates no replacement afterwards — see
-     * docs/DECISION_LOG.md DL-085.
+     * <p>Runs on the container's destruction callback. The bean is marked destroyed first, so a
+     * request arriving during the shutdown is rejected before it queues; the method then waits up to
+     * {@value #SHUTDOWN_AWAIT_SECONDS} seconds for a completion already in flight, and releases the
+     * client once it has returned. A completion still in flight at that bound, and an interrupt while
+     * waiting, are each reported at {@code WARN} and the client is released anyway — DL-266.
+     *
+     * <p>The client field is read and written inside the same monitor {@link #openAiClient()} uses, so
+     * a client created before destruction is closed exactly once and {@link #openAiClient()} creates no
+     * replacement afterwards — see docs/DECISION_LOG.md DL-085.
      *
      * <p>A failure raised while closing is reported at {@code WARN} by the failure's type and does not
      * propagate. The field is cleared whether or not closing succeeded.
@@ -380,9 +502,55 @@ public class LlmService {
     // docs/DECISION_LOG.md
     @PreDestroy
     public void closeOpenAiClient() {
-        OpenAIClient local;
+        // Closing is marked before the wait, so a request arriving during it is rejected rather than
+        // started — DL-266 — see docs/DECISION_LOG.md
+        markDestroyed();
+
+        Lock exclusive = activeUseLock.writeLock();
+        boolean drained = false;
+        try {
+            drained = exclusive.tryLock(SHUTDOWN_AWAIT_SECONDS, TimeUnit.SECONDS);
+            if (!drained) {
+                log.warn("A generation was still in flight after {}s; releasing the OpenAI API client "
+                        + "anyway", SHUTDOWN_AWAIT_SECONDS);
+            }
+            releaseClient();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            log.warn("Awaiting an in-flight generation was interrupted; releasing the OpenAI API "
+                    + "client");
+            releaseClient();
+        } finally {
+            if (drained) {
+                exclusive.unlock();
+            }
+        }
+    }
+
+    /**
+     * Sets the destroyed flag.
+     *
+     * <p>The flag is written inside the same monitor {@link #openAiClient()} reads it in, so a
+     * concurrent {@link #openAiClient()} either creates the client before the flag is set — in which
+     * case {@link #releaseClient()}, which enters the same monitor afterwards, closes it — or observes
+     * the flag and creates nothing — DL-266.
+     */
+    private void markDestroyed() {
         synchronized (this) {
             this.destroyed = true;
+        }
+    }
+
+    /**
+     * Closes the OpenAI client if one was created and clears the field.
+     *
+     * <p>The field is read and written inside the same monitor {@link #openAiClient()} uses, so a
+     * client created before destruction is closed exactly once. A failure raised while closing is
+     * reported at {@code WARN} by the failure's type and does not propagate — DL-266.
+     */
+    private void releaseClient() {
+        OpenAIClient local;
+        synchronized (this) {
             local = this.client;
             this.client = null;
         }
@@ -398,45 +566,82 @@ public class LlmService {
         }
     }
 
+    // Bounded graceful drain — DL-253 — see docs/DECISION_LOG.md
+    /**
+     * Awaits every generation request already issued to the provider, for at most {@code limit}.
+     *
+     * <p>{@link #destroyed} is already set when this runs and no further request is issued: a caller
+     * that reaches {@link #openAiClient()} afterwards is refused. This method returns as soon as
+     * {@link #callsInFlight} reaches zero, and returns once {@code limit} has elapsed whether or not it
+     * has. Overrunning the limit is recorded at {@code WARN} with the number of requests still in
+     * flight.
+     *
+     * <p>Must be called without holding this bean's monitor.
+     *
+     * <p>An interrupt while awaiting restores the interrupt flag and returns immediately.
+     *
+     * @param limit the longest time to await; a limit at or below zero awaits nothing
+     */
+    void awaitActiveCalls(Duration limit) {
+        int outstanding = callsInFlight.get();
+        if (outstanding == 0 || limit == null || limit.isNegative() || limit.isZero()) {
+            return;
+        }
+
+        log.info("Awaiting {} in-flight generation request(s) for at most {}ms before closing the "
+                + "OpenAI API client", outstanding, limit.toMillis());
+
+        long deadline = System.nanoTime() + limit.toNanos();
+        while (callsInFlight.get() > 0 && System.nanoTime() - deadline < 0) {
+            try {
+                Thread.sleep(DRAIN_POLL_INTERVAL.toMillis());
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                log.warn("Interrupted while awaiting in-flight generation request(s); {} remain",
+                        callsInFlight.get());
+                return;
+            }
+        }
+
+        int remaining = callsInFlight.get();
+        if (remaining > 0) {
+            log.warn("Closing the OpenAI API client after {}ms with {} generation request(s) still "
+                    + "in flight", limit.toMillis(), remaining);
+        } else {
+            log.info("Every in-flight generation request completed before the client was closed");
+        }
+    }
+
+    /**
+     * Reports the number of generation requests issued to the provider and not yet returned.
+     *
+     * @return the count, never negative
+     */
+    int callsInFlight() {
+        return callsInFlight.get();
+    }
+
     /**
      * Assembles the prompt, reproducing the source f-string segment for segment.
      *
-     * <p>The post body is interpolated exactly as supplied, unescaped and untruncated, matching the
-     * source. The {@code Context:} value comes from {@link #buildContext(TweetDto)}.
+     * <p>The template around the interpolated values is the source's, character for character. The
+     * post body itself is not carried verbatim: {@link #boundedBody(String)} folds its line breaks
+     * and cuts it at {@value #PROMPT_BODY_LIMIT} characters before it is interpolated — see
+     * docs/DECISION_LOG.md DL-035 and DL-203. The {@code Context:} value comes from
+     * {@link #buildContext(TweetDto)}.
      *
      * @param tweet the post to reply to; must not be {@code null}
      * @return the prompt carried as the single user message, never {@code null}
      */
-    // Ported from backend/app/services/llm_service.py:L16 (faithful port) — see
-    // docs/DECISION_LOG.md DL-035
+    // Ported from backend/app/services/llm_service.py:L16 (faithful port of the template; the
+    // interpolated body is bounded) — see docs/DECISION_LOG.md DL-035 and DL-203
     private String buildPrompt(TweetDto tweet) {
+        String content = tweet.content();
         return PROMPT_PREFIX
-                + boundedBody(tweet.content())
+                + (content == null ? "" : content)
                 + PROMPT_CONTEXT_SEPARATOR
                 + buildContext(tweet)
                 + PROMPT_SUFFIX;
-    }
-
-    /**
-     * Bounds the post body carried into the prompt.
-     *
-     * <p>The body is attacker-authored text. A body longer than {@value #PROMPT_BODY_LIMIT}
-     * characters is cut to that length and marked with {@value #BODY_TRUNCATION_MARK}, and every
-     * line break within it is folded to a space so the body cannot introduce a line of its own into
-     * the prompt structure. An absent body reads as the empty string.
-     *
-     * @param content the post body, possibly {@code null}
-     * @return the text to interpolate, never {@code null}
-     */
-    private static String boundedBody(String content) {
-        if (content == null) {
-            return "";
-        }
-        String folded = content.replace('\r', ' ').replace('\n', ' ');
-        if (folded.length() <= PROMPT_BODY_LIMIT) {
-            return folded;
-        }
-        return folded.substring(0, PROMPT_BODY_LIMIT) + BODY_TRUNCATION_MARK;
     }
 
     /**
@@ -459,9 +664,11 @@ public class LlmService {
     // model never declared (backend/app/schema/tweet.py:L5-14) — see docs/DECISION_LOG.md DL-035
     private String buildContext(TweetDto tweet) {
         List<String> aiToolsMentioned = tweet.aiToolsMentioned();
+        // The names originate in stream rule tags, so they are bounded and folded exactly as the post
+        // body is — DL-265 — see docs/DECISION_LOG.md
         String toolNames = (aiToolsMentioned == null || aiToolsMentioned.isEmpty())
                 ? NO_AI_TOOLS
-                : String.join(AI_TOOL_DELIMITER, aiToolsMentioned);
+                : boundedToolNames(aiToolsMentioned);
 
         Double doubtRating = tweet.doubtRating();
         String rating = (doubtRating != null && Double.isFinite(doubtRating))
@@ -471,28 +678,66 @@ public class LlmService {
         return CONTEXT_TOOLS_PREFIX + toolNames + CONTEXT_RATING_PREFIX + rating;
     }
 
+    // Net-new bound on the Context: value — DL-265 — see docs/DECISION_LOG.md
+    /**
+     * Joins the AI tool names carried into the prompt, bounded and folded.
+     *
+     * <p>At most {@value #PROMPT_AI_TOOL_LIMIT} names are joined with {@value #AI_TOOL_DELIMITER} in
+     * list order. Every line break within a name is folded to a space so no name can introduce a line
+     * of its own into the prompt structure. The joined value is cut to
+     * {@value #PROMPT_CONTEXT_LIMIT} characters and marked with {@value #BODY_TRUNCATION_MARK} when it
+     * is longer, so the prompt cost of this segment is bounded whatever the row carries.
+     *
+     * <p>{@link TweetDto} drops a {@code null} element from its list components, so every name here is
+     * present.
+     *
+     * @param aiToolsMentioned the names the row carries, never {@code null} and never empty
+     * @return the joined names, never {@code null} and never empty
+     */
+    private static String boundedToolNames(List<String> aiToolsMentioned) {
+        StringBuilder joined = new StringBuilder();
+        int carried = 0;
+        for (String name : aiToolsMentioned) {
+            if (carried >= PROMPT_AI_TOOL_LIMIT) {
+                break;
+            }
+            if (carried > 0) {
+                joined.append(AI_TOOL_DELIMITER);
+            }
+            joined.append(name.replace('\r', ' ').replace('\n', ' '));
+            carried++;
+        }
+
+        if (joined.length() <= PROMPT_CONTEXT_LIMIT) {
+            return joined.toString();
+        }
+        return joined.substring(0, PROMPT_CONTEXT_LIMIT) + BODY_TRUNCATION_MARK;
+    }
+
     /**
      * Extracts and trims the text of the first choice the response carries.
      *
      * <p>Choices past the first are ignored, matching the {@code choices[0]} index at
      * {@code backend/app/services/llm_service.py:L29}.
      *
-     * <p>Only a complete, non-blank reply is accepted. Four outcomes are reported at {@code WARN}
-     * under a fixed unusable-output code and raised as an {@link IllegalStateException} whose message
-     * is that code — see docs/DECISION_LOG.md DL-083 and DL-145:
+     * <p>Content decides. Non-blank content of the first choice is returned whatever finish reason
+     * accompanies it, including a reply the model cut short at the token cap, matching the source's
+     * {@code choices[0].text.strip()}. A finish reason other than
+     * {@code stop} accompanying accepted content is recorded once at {@code WARN} under
+     * {@value #INCOMPLETE_PREFIX} followed by that reason, which is an enumerated provider token
+     * rendered through {@link LogSafe#logSafe(String)} — DL-243.
+     *
+     * <p>Three outcomes carry no usable content. Each is reported at {@code WARN} under a fixed
+     * unusable-output code and raised as an {@link IllegalStateException} whose message is that code
+     * — see docs/DECISION_LOG.md DL-083, DL-145 and DL-243:
      *
      * <ul>
      *   <li>{@value #NO_CHOICE} — the response carries no choice.</li>
-     *   <li>{@value #REFUSAL} — the first choice carries a non-blank refusal. The refusal text is
-     *       model output and is never logged.</li>
-     *   <li>{@value #INCOMPLETE_PREFIX} followed by the finish reason — the first choice finished for
-     *       a reason other than {@code stop}. The finish reason is an enumerated provider token,
-     *       rendered through {@link LogSafe#logSafe(String)}.</li>
+     *   <li>{@value #REFUSAL} — the first choice carries no usable content and carries a non-blank
+     *       refusal. The refusal text is model output and is never logged.</li>
      *   <li>{@value #BLANK_TEXT} — the first choice carries no content, or content that is blank once
-     *       trimmed.</li>
+     *       trimmed, and carries no refusal.</li>
      * </ul>
-     *
-     * <p>The checks run in that order, so the earliest applicable code is the one reported.
      *
      * @param completion the Chat Completions response; must not be {@code null}
      * @return the trimmed generated text, never {@code null} and never blank
@@ -501,7 +746,7 @@ public class LlmService {
      */
     // Ported from backend/app/services/llm_service.py:L29 (faithful port); the refusal and
     // finish-reason states are net-new, the source's completions response carried neither field —
-    // see docs/DECISION_LOG.md DL-032, DL-083 and DL-145
+    // see docs/DECISION_LOG.md DL-032, DL-083, DL-145 and DL-243
     private String firstChoiceContent(ChatCompletion completion) {
         List<ChatCompletion.Choice> choices = completion.choices();
         if (choices == null || choices.isEmpty()) {
@@ -509,26 +754,64 @@ public class LlmService {
         }
         ChatCompletion.Choice choice = choices.get(0);
 
+        String content = choice.message().content().orElse(null);
+        String trimmed = (content == null) ? "" : content.trim();
+
+        if (!trimmed.isEmpty()) {
+            reportIncompleteFinish(choice.finishReason());
+            return trimmed;
+        }
+
         String refusal = choice.message().refusal().orElse(null);
         if (refusal != null && !refusal.isBlank()) {
-            throw unusableOutput(REFUSAL, "the first choice carried a refusal");
+            throw unusableOutput(REFUSAL,
+                    "the first choice carried a refusal and no usable content");
         }
-
-        ChatCompletion.Choice.FinishReason finishReason = choice.finishReason();
-        if (!ChatCompletion.Choice.FinishReason.STOP.equals(finishReason)) {
-            throw unusableOutput(INCOMPLETE_PREFIX + LogSafe.logSafe(finishReason.asString()),
-                    "the first choice did not finish");
-        }
-
-        String content = choice.message().content().orElse(null);
         if (content == null) {
             throw unusableOutput(BLANK_TEXT, "the first choice carried no content");
         }
-        String trimmed = content.trim();
-        if (trimmed.isEmpty()) {
-            throw unusableOutput(BLANK_TEXT, "the first choice carried blank content");
+        throw unusableOutput(BLANK_TEXT, "the first choice carried blank content");
+    }
+
+    /**
+     * Records a finish reason other than {@code stop} that accompanied accepted content.
+     *
+     * <p>Nothing is recorded for {@code stop} and nothing is recorded for an absent reason. The reply
+     * text is never logged — DL-243.
+     *
+     * @param finishReason the reason the first choice reported, possibly {@code null}
+     */
+    private void reportIncompleteFinish(ChatCompletion.Choice.FinishReason finishReason) {
+        if (finishReason == null || ChatCompletion.Choice.FinishReason.STOP.equals(finishReason)) {
+            return;
         }
-        return trimmed;
+        log.warn("The Chat Completions reply is accepted with an incomplete finish [{}{}]",
+                INCOMPLETE_PREFIX, LogSafe.logSafe(finishReason.asString()));
+    }
+
+    /**
+     * Renders one provider-controlled member of a rejection for a log record.
+     *
+     * <p>The rendering is guarded twice. {@link LogSafe#logSafe(String)} first replaces every
+     * character outside printable ASCII — which includes the carriage return and line feed a forged
+     * record boundary needs — and bounds the value at 64 characters. The bounded rendering is then
+     * held to {@link #GUARDED_MEMBER_SHAPE}: a member the provider publishes for a machine to read
+     * carries no intra-value spacing, so a rendering that does is free text and is reported as
+     * {@value #ABSENT} rather than carried into a record. An empty {@link Optional} is likewise
+     * rendered as {@value #ABSENT}.
+     *
+     * @param providerValue the member the provider supplied, possibly empty
+     * @return the guarded rendering; never {@code null}
+     */
+    // Log-injection guard plus shape check applied to every provider-supplied value — DL-084,
+    // DL-119, DL-149 — see docs/DECISION_LOG.md
+    private static String guarded(Optional<String> providerValue) {
+        String value = providerValue.orElse(null);
+        if (value == null) {
+            return ABSENT;
+        }
+        String rendered = LogSafe.logSafe(value);
+        return GUARDED_MEMBER_SHAPE.matcher(rendered).matches() ? rendered : ABSENT;
     }
 
     /**
@@ -547,13 +830,34 @@ public class LlmService {
         return new IllegalStateException(code);
     }
 
+    // Net-new guard: the two request members cannot be sent together — DL-267 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Refuses a configuration that would send {@code temperature} alongside a reasoning effort the
+     * model does not accept it with.
+     *
+     * @param effort the resolved reasoning effort, never {@code null}
+     * @throws IllegalStateException when an effort other than {@code none} is carried, naming both
+     *     configuration keys and echoing neither value
+     */
+    private static void requireTemperatureIsAccepted(Optional<ReasoningEffort> effort) {
+        ReasoningEffort carried = effort.orElse(null);
+        if (carried != null && carried.value() != ReasoningEffort.Value.NONE) {
+            throw new IllegalStateException(TEMPERATURE_KEY + " cannot be sent while "
+                    + REASONING_EFFORT_KEY + " names an effort other than none; set "
+                    + REASONING_EFFORT_KEY + " to none or leave " + TEMPERATURE_KEY + " blank.");
+        }
+    }
+
     /**
      * Reads {@code scanner.openai.reasoning-effort} and validates it against the values the SDK
      * recognises.
      *
-     * <p>A blank or absent value omits the parameter. A value the SDK does not recognise is rejected
-     * before the request is built, naming the key and the accepted set; the SDK itself carries an
-     * unrecognised value as {@code _UNKNOWN} rather than rejecting it.
+     * <p>A blank or absent value omits the parameter. A value outside
+     * {@link #ACCEPTED_REASONING_EFFORT_VALUES} is rejected before the request is built, naming the
+     * key and the accepted set but never echoing the configured value; the SDK itself neither
+     * rejects an unrecognised value, which it carries as {@code _UNKNOWN}, nor rejects
+     * {@code minimal}, which it recognises but the configured model does not accept.
      *
      * @return the effort to carry on the request, or {@link Optional#empty()} to omit the parameter
      * @throws IllegalStateException when the configured value is not one of the accepted values
@@ -564,7 +868,7 @@ public class LlmService {
             return Optional.empty();
         }
         ReasoningEffort effort = ReasoningEffort.of(configured.trim());
-        if (effort.value() == ReasoningEffort.Value._UNKNOWN) {
+        if (!ACCEPTED_REASONING_EFFORT_VALUES.contains(effort.value())) {
             throw new IllegalStateException(REASONING_EFFORT_KEY
                     + " is not one of the accepted values " + ACCEPTED_REASONING_EFFORTS
                     + "; leave it blank to omit the parameter.");

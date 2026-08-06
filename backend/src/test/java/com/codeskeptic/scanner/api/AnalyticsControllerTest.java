@@ -7,7 +7,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -61,12 +60,16 @@ class AnalyticsControllerTest {
     private static final String PRINCIPAL = "admin";
     private static final String INTERNAL_ERROR_BODY =
             "{\"error\":\"Internal server error\"}";
+    private static final String NOT_FOUND_BODY = "{\"error\":\"Not found\"}";
 
     @Autowired
     private MockMvc mockMvc;
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private JwtService jwtService;
 
     @MockitoBean
     private AnalyticsService analyticsService;
@@ -75,7 +78,7 @@ class AnalyticsControllerTest {
     void serializesSummaryContract() throws Exception {
         when(analyticsService.getSummary()).thenReturn(summary());
 
-        MvcResult result = mockMvc.perform(get("/analytics/summary").with(user(PRINCIPAL)))
+        MvcResult result = mockMvc.perform(get("/analytics/summary").header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
                 .andExpect(jsonPath("$.total_tweets").value(12))
@@ -124,7 +127,7 @@ class AnalyticsControllerTest {
         when(analyticsService.getSummary())
                 .thenReturn(new SummaryDto(0L, 0L, 0L, 0L, null, null, 0L));
 
-        MvcResult result = mockMvc.perform(get("/analytics/summary").with(user(PRINCIPAL)))
+        MvcResult result = mockMvc.perform(get("/analytics/summary").header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.average_doubt_rating").value(nullValue()))
                 .andExpect(jsonPath("$.average_like_count").value(nullValue()))
@@ -163,7 +166,7 @@ class AnalyticsControllerTest {
     void returnsInternalErrorEnvelopeForSummary() throws Exception {
         when(analyticsService.getSummary()).thenThrow(new RuntimeException("summary failure"));
 
-        MvcResult result = mockMvc.perform(get("/analytics/summary").with(user(PRINCIPAL)))
+        MvcResult result = mockMvc.perform(get("/analytics/summary").header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isInternalServerError())
                 .andExpect(content().string(INTERNAL_ERROR_BODY))
                 .andReturn();
@@ -178,7 +181,7 @@ class AnalyticsControllerTest {
     void serializesTrendsContract() throws Exception {
         when(analyticsService.getTrends()).thenReturn(trends());
 
-        MvcResult result = mockMvc.perform(get("/analytics/trends").with(user(PRINCIPAL)))
+        MvcResult result = mockMvc.perform(get("/analytics/trends").header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
                 .andExpect(jsonPath("$.trends").isArray())
@@ -218,7 +221,7 @@ class AnalyticsControllerTest {
     void serializesEmptyTrendsArray() throws Exception {
         when(analyticsService.getTrends()).thenReturn(new TrendsDto(List.of()));
 
-        MvcResult result = mockMvc.perform(get("/analytics/trends").with(user(PRINCIPAL)))
+        MvcResult result = mockMvc.perform(get("/analytics/trends").header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isOk())
                 .andExpect(content().string("{\"trends\":[]}"))
                 .andExpect(jsonPath("$.trends").isArray())
@@ -249,7 +252,7 @@ class AnalyticsControllerTest {
     void returnsInternalErrorEnvelopeForTrends() throws Exception {
         when(analyticsService.getTrends()).thenThrow(new RuntimeException("trends failure"));
 
-        MvcResult result = mockMvc.perform(get("/analytics/trends").with(user(PRINCIPAL)))
+        MvcResult result = mockMvc.perform(get("/analytics/trends").header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isInternalServerError())
                 .andExpect(content().string(INTERNAL_ERROR_BODY))
                 .andReturn();
@@ -265,13 +268,13 @@ class AnalyticsControllerTest {
         when(analyticsService.getSummary()).thenReturn(summary());
 
         MvcResult withoutParameters = mockMvc.perform(
-                        get("/analytics/summary").with(user(PRINCIPAL)))
+                        get("/analytics/summary").header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isOk())
                 .andReturn();
         MvcResult withParameters = mockMvc.perform(get("/analytics/summary")
                         .param("start_date", "2023-01-01")
                         .param("end_date", "2023-12-31")
-                        .with(user(PRINCIPAL)))
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isOk())
                 .andReturn();
 
@@ -286,28 +289,28 @@ class AnalyticsControllerTest {
         when(analyticsService.getTrends()).thenReturn(trends());
 
         MvcResult withoutParameters = mockMvc.perform(
-                        get("/analytics/trends").with(user(PRINCIPAL)))
+                        get("/analytics/trends").header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isOk())
                 .andReturn();
         MvcResult withDateRange = mockMvc.perform(get("/analytics/trends")
                         .param("start_date", "2023-01-01")
                         .param("end_date", "2023-12-31")
-                        .with(user(PRINCIPAL)))
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isOk())
                 .andReturn();
         MvcResult withDays = mockMvc.perform(get("/analytics/trends")
                         .param("days", "7")
-                        .with(user(PRINCIPAL)))
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isOk())
                 .andReturn();
         MvcResult withGranularity = mockMvc.perform(get("/analytics/trends")
                         .param("granularity", "week")
-                        .with(user(PRINCIPAL)))
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isOk())
                 .andReturn();
         MvcResult withInvalidDate = mockMvc.perform(get("/analytics/trends")
                         .param("start_date", "not-a-date")
-                        .with(user(PRINCIPAL)))
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isOk())
                 .andReturn();
 
@@ -320,6 +323,8 @@ class AnalyticsControllerTest {
         verifyNoMoreInteractions(analyticsService);
     }
 
+    // An unmapped path answers the envelope of backend/app/main.py:L31-33 — DL-059, DL-243 —
+    // see docs/DECISION_LOG.md
     @Test
     void rejectsUndeclaredAnalyticsRoutes() throws Exception {
         for (String path : List.of(
@@ -328,9 +333,43 @@ class AnalyticsControllerTest {
                 "/analytics/summary/2023",
                 "/analytics/trends/2023")) {
 
-            MvcResult result = mockMvc.perform(get(path).with(user(PRINCIPAL))).andReturn();
+            MvcResult result = mockMvc.perform(
+                            get(path).header(HttpHeaders.AUTHORIZATION, bearer()))
+                    .andExpect(status().isNotFound())
+                    .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                    .andExpect(content().string(NOT_FOUND_BODY))
+                    .andReturn();
 
-            assertThat(result.getResponse().getStatus() / 100).isNotEqualTo(2);
+            assertThat(readObject(result))
+                    .as("error envelope served at %s", path)
+                    .containsExactly(Map.entry("error", "Not found"));
+        }
+
+        verifyNoInteractions(analyticsService);
+    }
+
+    // Every mapped route requires a token the chain can verify — DL-021, DL-115 — see
+    // docs/DECISION_LOG.md
+    @Test
+    void rejectsACredentialTheChainCannotVerify() throws Exception {
+        String minted = jwtService.generateToken(PRINCIPAL);
+
+        for (String credential : List.of(
+                "Bearer not-a-token",
+                "Bearer " + minted + "tampered",
+                minted,
+                "Basic YWRtaW46YWRtaW4=")) {
+
+            for (String path : List.of("/analytics/summary", "/analytics/trends")) {
+                MvcResult result = mockMvc.perform(
+                                get(path).header(HttpHeaders.AUTHORIZATION, credential))
+                        .andExpect(status().isUnauthorized())
+                        .andExpect(content().string(""))
+                        .andExpect(header().string(HttpHeaders.WWW_AUTHENTICATE, "Bearer"))
+                        .andReturn();
+
+                assertBareUnauthorized(result);
+            }
         }
 
         verifyNoInteractions(analyticsService);
@@ -392,6 +431,19 @@ class AnalyticsControllerTest {
             assertThat(requestMapping.params()).isEmpty();
             assertThat(requestMapping.headers()).isEmpty();
         }
+    }
+
+    /**
+     * Builds the {@code Authorization} header value of an authenticated request.
+     *
+     * <p>The token is minted by the same {@code security/JwtService} the imported
+     * {@code security/SecurityConfig} chain verifies, so every request carrying it crosses
+     * {@code security/JwtAuthenticationFilter} — DL-021, DL-115, DL-242.
+     *
+     * @return the {@code Bearer} credential of the principal {@value #PRINCIPAL}
+     */
+    private String bearer() {
+        return "Bearer " + jwtService.generateToken(PRINCIPAL);
     }
 
     private void assertBareUnauthorized(MvcResult result) throws Exception {

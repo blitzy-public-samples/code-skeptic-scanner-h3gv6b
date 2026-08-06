@@ -6,42 +6,35 @@ import com.fasterxml.jackson.databind.JsonNode;
 /**
  * Inbound request body for {@code PUT /responses/{responseId}}.
  *
- * <p>The two updatable properties are the {@code content} and {@code is_approved} columns of the
+ * <p>The two updatable members are the {@code content} and {@code is_approved} columns of the
  * {@code responses} table ({@code backend/app/db/models.py:L24,L26}). Wire keys stay snake_case and
- * no identifier is carried in the body. No Bean Validation constraint is declared — see
- * docs/DECISION_LOG.md DL-050.
+ * no identifier is carried in the body. No Bean Validation constraint is declared and this record
+ * rejects no value: it is the free-form {@code request.json} of
+ * {@code backend/app/api/responses.py:L54} — see docs/DECISION_LOG.md DL-050 and DL-082.
  *
- * <p>Each component is held as the raw JSON node the body carried. The accessors expose only values
- * their target columns can hold — see docs/DECISION_LOG.md DL-082:
+ * <p>Each component is held as the raw JSON node the body carried, which makes the three inbound
+ * states distinguishable — see docs/DECISION_LOG.md DL-082:
  *
  * <ul>
- *   <li>a key the body omits binds to {@code null}, and {@link #writesContent()} /
- *       {@link #writesApproval()} report {@code false};
- *   <li>a key the body carries with a value its column can hold binds to that value, and the presence
- *       accessor reports {@code true};
- *   <li>a key the body carries with any other value — a JSON {@code null} included — is rejected by
- *       the constructor, so no instance carries one.
+ *   <li>a key the body omits binds to {@code null}: {@link #writesContent()} /
+ *       {@link #writesApproval()} report {@code false} and the column is left untouched;
+ *   <li>a key the body carries with a JSON {@code null} binds to a null node:
+ *       the presence accessor reports {@code true} and the value accessor reports {@code null}, so
+ *       the column is written {@code null};
+ *   <li>a key the body carries with any other value binds to that node: the presence accessor
+ *       reports {@code true} and the value accessor reports the value its column can hold.
  * </ul>
  *
- * <p>The constructor accepts a {@code content} node only when it is a JSON string and an
- * {@code is_approved} node only when it is a JSON boolean, which are the types
- * {@code backend/app/db/models.py:L24,L26} declares for the two columns and
- * {@code backend/app/schema/response.py:L6,L8} declares as required on the wire. Any other carried
- * node, including an explicit JSON {@code null}, raises {@link IllegalArgumentException}; through the
- * request-body converter that reaches the client as HTTP 400 with the body
- * {@code {"error": "Bad request"}} — see docs/DECISION_LOG.md DL-082, DL-092 and DL-231.
+ * <p>{@link #contentValue()} and {@link #approvalValue()} interpret a carried node the way Jackson
+ * interprets a scalar bound to a {@link String} and to a {@link Boolean}; a structured node is
+ * carried through as its compact JSON text and as {@code false} respectively. No carried node
+ * produces an error here, so no request body is answered 400 on account of this record.
  *
- * <p>A component that is present therefore always carries a usable value: for an instance that
- * exists, {@link #writesContent()} implies a non-null {@link #contentValue()} and
- * {@link #writesApproval()} implies a non-null {@link #approvalValue()}.
- *
- * @param content    raw {@code content} node, {@code null} when the body omits the key, and otherwise
- *                   a JSON string
- * @param isApproved raw {@code is_approved} node, {@code null} when the body omits the key, and
- *                   otherwise a JSON boolean
+ * @param content    raw {@code content} node, {@code null} when the body omits the key
+ * @param isApproved raw {@code is_approved} node, {@code null} when the body omits the key
  */
 // Ported from backend/app/api/responses.py:L54 (faithful port; source read request.json free-form) —
-// see docs/DECISION_LOG.md DL-050 and DL-082
+// see docs/DECISION_LOG.md DL-050, DL-082 and DL-244
 public record UpdateResponseRequest(
 
         @JsonProperty("content")
@@ -53,76 +46,60 @@ public record UpdateResponseRequest(
 ) {
 
     /**
-     * Rejects a carried node whose type its column cannot hold.
-     *
-     * <p>An omitted key, which binds to {@code null}, is accepted by both components.
-     *
-     * @throws IllegalArgumentException when {@code content} is carried and is not a JSON string, or
-     *                                  when {@code isApproved} is carried and is not a JSON boolean.
-     *                                  A JSON {@code null} node is carried and is neither of those,
-     *                                  so it is rejected by whichever component carries it
-     */
-    // The two column types of backend/app/db/models.py:L24,L26 — DL-082, DL-231 — see
-    // docs/DECISION_LOG.md
-    public UpdateResponseRequest {
-        if (content != null && !content.isTextual()) {
-            throw new IllegalArgumentException(
-                    "The content member of a response update must be a JSON string.");
-        }
-        if (isApproved != null && !isApproved.isBoolean()) {
-            throw new IllegalArgumentException(
-                    "The is_approved member of a response update must be a JSON boolean.");
-        }
-    }
-
-    /**
      * Reports whether the request body carried the {@code content} key.
      *
-     * @return {@code true} when the body carried the key, in which case {@link #contentValue()}
-     *     carries its text
+     * @return {@code true} when the body carried the key, with any value, a JSON {@code null}
+     *     included
      */
     public boolean writesContent() {
-        return content != null && content.isTextual();
+        return content != null;
     }
 
     /**
-     * Returns the {@code content} value the request body carried.
+     * Returns the value to write to the {@code content} column.
      *
-     * @return the text, or {@code null} when the body omitted the key; never {@code null} when
-     *     {@link #writesContent()} reports {@code true}
+     * @return {@code null} when the body omitted the key or carried a JSON {@code null}; the text of
+     *     a carried scalar; the compact JSON text of a carried object or array
      */
     public String contentValue() {
-        return (content == null) ? null : content.textValue();
+        if (content == null || content.isNull()) {
+            return null;
+        }
+        return content.isValueNode() ? content.asText() : content.toString();
     }
 
     /**
-     * Reports whether the request body carried the {@code is_approved} key.
+     * Reports whether the {@code is_approved} column is written by this request.
      *
-     * @return {@code true} when the body carried the key, in which case {@link #approvalValue()}
-     *     carries its flag
+     * @return {@code true} when the body carried the key, with any value, a JSON {@code null}
+     *     included
      */
     public boolean writesApproval() {
-        return isApproved != null && isApproved.isBoolean();
+        return isApproved != null;
     }
 
     /**
-     * Returns the {@code is_approved} value the request body carried.
+     * Returns the value to write to the {@code is_approved} column.
      *
-     * @return the flag, or {@code null} when the body omitted the key; never {@code null} when
-     *     {@link #writesApproval()} reports {@code true}
+     * @return {@code null} when the body omitted the key or carried a JSON {@code null}; otherwise
+     *     the carried node read as a flag — {@code true} for a true boolean, for the text
+     *     {@code "true"} and for a non-zero number, and {@code false} for every other carried node
      */
     public Boolean approvalValue() {
-        return (isApproved == null) ? null : isApproved.booleanValue();
+        if (isApproved == null || isApproved.isNull()) {
+            return null;
+        }
+        return isApproved.asBoolean();
     }
 
     /**
-     * Reports whether the request carries no value either target column can hold.
+     * Reports whether the request body carried neither updatable member.
      *
-     * @return {@code true} when neither a textual {@code content} nor a boolean
-     *     {@code is_approved} value is present
+     * @return {@code true} when the body carried neither the {@code content} key nor the
+     *     {@code is_approved} key
      */
-    public boolean carriesNoWritableValue() {
-        return !writesContent() && !writesApproval();
+    public boolean carriesNoUpdatableMember() {
+        return content == null && isApproved == null;
     }
 
 }

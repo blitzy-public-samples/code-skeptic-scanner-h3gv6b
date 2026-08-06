@@ -828,7 +828,7 @@ class JwtServiceTest {
      * @return the configuration root
      */
     private static ScannerProperties propertiesWith(ScannerProperties.Jwt jwt) {
-        return new ScannerProperties(null, 0, 0L, null, null, null, jwt, null, null, null);
+        return new ScannerProperties(null, 0, 0L, null, null, null, jwt, null, null, null, null);
     }
 
     /**

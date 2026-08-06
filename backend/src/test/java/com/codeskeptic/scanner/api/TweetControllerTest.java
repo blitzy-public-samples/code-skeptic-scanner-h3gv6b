@@ -36,6 +36,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.json.JsonCompareMode;
@@ -51,7 +52,6 @@ import com.codeskeptic.scanner.dto.TweetDto;
 import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.security.JwtService;
 import com.codeskeptic.scanner.security.SecurityConfig;
-import com.codeskeptic.scanner.service.SentimentAnalysisService;
 import com.codeskeptic.scanner.service.TwitterService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -81,9 +81,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  * {@link GlobalExceptionHandler} is a {@code @RestControllerAdvice} and is part of every web slice.
  * Each error envelope asserted below is the one that advice produces.
  *
- * <p>{@link TwitterService} and {@link SentimentAnalysisService} are the only replaced beans. No
- * test here resolves a Google credential, opens a database connection, reaches an external system or
- * reads the network.
+ * <p>{@link TwitterService} is the only replaced bean; the analyze route reaches it alone — DL-263.
+ * No test here resolves a Google credential, opens a database connection, reaches an external system
+ * or reads the network.
  *
  * <p>Every authenticated request carries a bearer credential minted by the real {@link JwtService}
  * for the principal {@code scanner.auth.username} names, and every route is also exercised with no
@@ -114,6 +114,9 @@ class TweetControllerTest {
 
     /** Wire literal of {@code backend/app/api/tweets.py:L32,L43}. */
     private static final String TWEET_NOT_FOUND = "{\"error\":\"Tweet not found\"}";
+
+    /** The sanctioned envelope of an unmatched path — backend/app/main.py:L31-33, DL-243. */
+    private static final String NOT_FOUND_BODY = "{\"error\":\"Not found\"}";
 
     /** Wire literal of {@code backend/app/main.py:L37}. */
     private static final String INTERNAL_SERVER_ERROR = "{\"error\":\"Internal server error\"}";
@@ -149,7 +152,7 @@ class TweetControllerTest {
 
     private static final List<String> ROW_AI_TOOLS_MENTIONED = List.of("GPT-4", "AI code assistant");
 
-    /** Document sentiment score {@code service.SentimentAnalysisService.analyzeSentiment} returns. */
+    /** Document sentiment score {@code service.TwitterService.analyzeTweet} returns. */
     private static final double SENTIMENT_SCORE = -0.25d;
 
     // ---------------------------------------------------------------------
@@ -197,9 +200,6 @@ class TweetControllerTest {
 
     @MockitoBean
     private TwitterService twitterService;
-
-    @MockitoBean
-    private SentimentAnalysisService sentimentAnalysisService;
 
     // =====================================================================
     // GET /tweets — backend/app/api/tweets.py:L9-21
@@ -489,16 +489,20 @@ class TweetControllerTest {
     }
 
     // The eleven routes are served unprefixed; frontend/src/services/api.ts:L25 calls /api/tweets —
-    // DL-059 — see docs/DECISION_LOG.md
+    // DL-059, DL-243 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("GET /api/tweets does not reach the listing handler")
     void prefixedListRouteDoesNotReachTheListingHandler() throws Exception {
         MvcResult result = mockMvc.perform(get(PREFIXED_LIST_ROUTE)
                         .header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(content().json(NOT_FOUND_BODY, JsonCompareMode.STRICT))
                 .andReturn();
 
-        assertThat(result.getResponse().getStatus()).isNotEqualTo(HttpStatus.OK.value());
-        verifyNoInteractions(twitterService, sentimentAnalysisService);
+        assertThat(bodyAsMap(result)).containsOnlyKeys(ERROR_KEY);
+        assertThat(bodyAsMap(result)).containsEntry(ERROR_KEY, "Not found");
+        verifyNoInteractions(twitterService);
     }
 
     // =====================================================================
@@ -621,13 +625,12 @@ class TweetControllerTest {
     // POST /tweets/{tweetId}/analyze — backend/app/api/tweets.py:L36-55
     // =====================================================================
 
-    // The text of the addressed row is what is scored — backend/app/api/tweets.py:L46;
-    // backend/app/services/sentiment_analysis.py:L14 — DL-036 — see docs/DECISION_LOG.md
+    // The route delegates the read, the scoring and the write to one service operation — DL-263 —
+    // see docs/DECISION_LOG.md
     @Test
-    @DisplayName("POST /tweets/{tweetId}/analyze scores the row text and records the analysis once")
-    void analyzeScoresTheRowTextAndRecordsTheAnalysisOnce() throws Exception {
-        when(twitterService.getTweet(TWEET_ID)).thenReturn(row());
-        when(sentimentAnalysisService.analyzeSentiment(anyString())).thenReturn(SENTIMENT_SCORE);
+    @DisplayName("POST /tweets/{tweetId}/analyze delegates to one service operation and renders it")
+    void analyzeDelegatesToOneServiceOperationAndRendersIt() throws Exception {
+        when(twitterService.analyzeTweet(TWEET_ID)).thenReturn(SENTIMENT_SCORE);
 
         MvcResult result = mockMvc.perform(post(analyzeRoute(TWEET_ID))
                         .header(HttpHeaders.AUTHORIZATION, bearer()))
@@ -638,24 +641,20 @@ class TweetControllerTest {
 
         assertThat(bodyAsMap(result)).containsOnlyKeys(ANALYSIS_KEYS);
 
-        ArgumentCaptor<String> scoredText = ArgumentCaptor.forClass(String.class);
-        verify(sentimentAnalysisService, times(1)).analyzeSentiment(scoredText.capture());
-        assertThat(scoredText.getValue()).isEqualTo(ROW_CONTENT);
-        assertThat(scoredText.getValue()).isEqualTo(row().content());
-
-        verify(twitterService, times(1)).getTweet(TWEET_ID);
-        verify(twitterService, times(1)).updateTweetAnalysis(TWEET_ID, SENTIMENT_SCORE);
+        verify(twitterService, times(1)).analyzeTweet(TWEET_ID);
+        // The route reads no row and writes none of its own — DL-263
+        verify(twitterService, never()).getTweet(any());
+        verify(twitterService, never()).updateTweetAnalysis(any(), anyDouble());
 
         // No route reached from here publishes to X — AAP IR7
-        verifyNoMoreInteractions(twitterService, sentimentAnalysisService);
+        verifyNoMoreInteractions(twitterService);
     }
 
     // analysis_result is the score as a floating-point number — DL-037 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("POST /tweets/{tweetId}/analyze renders analysis_result as a bare number")
     void analyzeRendersAnalysisResultAsABareNumber() throws Exception {
-        when(twitterService.getTweet(TWEET_ID)).thenReturn(row());
-        when(sentimentAnalysisService.analyzeSentiment(anyString())).thenReturn(SENTIMENT_SCORE);
+        when(twitterService.analyzeTweet(TWEET_ID)).thenReturn(SENTIMENT_SCORE);
 
         MvcResult result = mockMvc.perform(post(analyzeRoute(TWEET_ID))
                         .header(HttpHeaders.AUTHORIZATION, bearer()))
@@ -677,8 +676,7 @@ class TweetControllerTest {
     @ValueSource(strings = {"7", "007", "0000000000000000000042"})
     @DisplayName("POST /tweets/{tweetId}/analyze renders the identifier as received on the wire")
     void analyzeRendersTheIdentifierAsReceivedOnTheWire(String tweetId) throws Exception {
-        when(twitterService.getTweet(tweetId)).thenReturn(row());
-        when(sentimentAnalysisService.analyzeSentiment(anyString())).thenReturn(SENTIMENT_SCORE);
+        when(twitterService.analyzeTweet(tweetId)).thenReturn(SENTIMENT_SCORE);
 
         MvcResult result = mockMvc.perform(post(analyzeRoute(tweetId))
                         .header(HttpHeaders.AUTHORIZATION, bearer()))
@@ -692,16 +690,15 @@ class TweetControllerTest {
         assertThat(body.get("tweet_id")).isInstanceOf(String.class).isEqualTo(tweetId);
 
         ArgumentCaptor<String> addressed = ArgumentCaptor.forClass(String.class);
-        verify(twitterService).getTweet(addressed.capture());
+        verify(twitterService).analyzeTweet(addressed.capture());
         assertThat(addressed.getValue()).isEqualTo(tweetId);
-        verify(twitterService).updateTweetAnalysis(tweetId, SENTIMENT_SCORE);
     }
 
     // The branch of backend/app/api/tweets.py:L42-43, carrying the literal of :L32
     @Test
     @DisplayName("POST /tweets/{tweetId}/analyze answers 404 and scores nothing for an absent row")
     void analyzeAnswers404AndScoresNothingForAnAbsentRow() throws Exception {
-        when(twitterService.getTweet(TWEET_ID)).thenThrow(NotFoundException.tweetNotFound());
+        when(twitterService.analyzeTweet(TWEET_ID)).thenThrow(NotFoundException.tweetNotFound());
 
         MvcResult result = mockMvc.perform(post(analyzeRoute(TWEET_ID))
                         .header(HttpHeaders.AUTHORIZATION, bearer()))
@@ -711,12 +708,11 @@ class TweetControllerTest {
 
         assertThat(bodyAsMap(result)).containsOnlyKeys(ERROR_KEY);
 
-        verify(sentimentAnalysisService, never()).analyzeSentiment(anyString());
         verify(twitterService, never()).updateTweetAnalysis(any(), anyDouble());
-        verifyNoInteractions(sentimentAnalysisService);
+        verify(twitterService, never()).getTweet(any());
 
-        verify(twitterService).getTweet(TWEET_ID);
-        verifyNoMoreInteractions(twitterService, sentimentAnalysisService);
+        verify(twitterService).analyzeTweet(TWEET_ID);
+        verifyNoMoreInteractions(twitterService);
     }
 
     // Flask's default path converter delivered a string at backend/app/api/tweets.py:L36 — DL-048 —
@@ -725,7 +721,7 @@ class TweetControllerTest {
     @ValueSource(strings = {"not-a-number", "abc-123", "~id_2026.08.05-x"})
     @DisplayName("POST /tweets/{tweetId}/analyze answers 404 when the identifier holds no decimal number")
     void analyzeAnswers404WhenTheIdentifierHoldsNoDecimalNumber(String tweetId) throws Exception {
-        when(twitterService.getTweet(tweetId)).thenThrow(NotFoundException.tweetNotFound());
+        when(twitterService.analyzeTweet(tweetId)).thenThrow(NotFoundException.tweetNotFound());
 
         MvcResult result = mockMvc.perform(post(analyzeRoute(tweetId))
                         .header(HttpHeaders.AUTHORIZATION, bearer()))
@@ -739,10 +735,9 @@ class TweetControllerTest {
         assertThat(observed).isNotEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
 
         ArgumentCaptor<String> addressed = ArgumentCaptor.forClass(String.class);
-        verify(twitterService).getTweet(addressed.capture());
+        verify(twitterService).analyzeTweet(addressed.capture());
         assertThat(addressed.getValue()).isInstanceOf(String.class).isEqualTo(tweetId);
         verify(twitterService, never()).updateTweetAnalysis(any(), anyDouble());
-        verifyNoInteractions(sentimentAnalysisService);
     }
 
     // No length, pattern or range constraint exists at backend/app/schema/tweet.py:L5-14 — DL-050 —
@@ -750,7 +745,7 @@ class TweetControllerTest {
     @Test
     @DisplayName("POST /tweets/{tweetId}/analyze answers 404 for a path segment of 2048 characters")
     void analyzeAnswers404ForAPathSegmentOf2048Characters() throws Exception {
-        when(twitterService.getTweet(OVERLONG_ID)).thenThrow(NotFoundException.tweetNotFound());
+        when(twitterService.analyzeTweet(OVERLONG_ID)).thenThrow(NotFoundException.tweetNotFound());
 
         MvcResult result = mockMvc.perform(post(analyzeRoute(OVERLONG_ID))
                         .header(HttpHeaders.AUTHORIZATION, bearer()))
@@ -760,15 +755,13 @@ class TweetControllerTest {
 
         assertThat(result.getResponse().getStatus())
                 .isNotEqualTo(HttpStatus.BAD_REQUEST.value());
-        verify(twitterService).getTweet(OVERLONG_ID);
-        verifyNoInteractions(sentimentAnalysisService);
+        verify(twitterService).analyzeTweet(OVERLONG_ID);
     }
 
     @Test
     @DisplayName("POST /tweets/{tweetId}/analyze answers 500 with the internal server error envelope")
     void analyzeAnswers500WithTheInternalServerErrorEnvelope() throws Exception {
-        when(twitterService.getTweet(TWEET_ID)).thenReturn(row());
-        when(sentimentAnalysisService.analyzeSentiment(anyString()))
+        when(twitterService.analyzeTweet(TWEET_ID))
                 .thenThrow(new RuntimeException("the document could not be scored"));
 
         MvcResult result = mockMvc.perform(post(analyzeRoute(TWEET_ID))
@@ -796,7 +789,7 @@ class TweetControllerTest {
                 .andReturn();
 
         assertBare401(result);
-        verifyNoInteractions(twitterService, sentimentAnalysisService);
+        verifyNoInteractions(twitterService);
     }
 
     @Test
@@ -808,7 +801,7 @@ class TweetControllerTest {
                 .andReturn();
 
         assertBare401(result);
-        verifyNoInteractions(twitterService, sentimentAnalysisService);
+        verifyNoInteractions(twitterService);
     }
 
     @Test
@@ -820,7 +813,7 @@ class TweetControllerTest {
                 .andReturn();
 
         assertBare401(result);
-        verifyNoInteractions(twitterService, sentimentAnalysisService);
+        verifyNoInteractions(twitterService);
     }
 
     @Test
@@ -833,7 +826,7 @@ class TweetControllerTest {
                 .andReturn();
 
         assertBare401(result);
-        verifyNoInteractions(twitterService, sentimentAnalysisService);
+        verifyNoInteractions(twitterService);
     }
 
     // =====================================================================

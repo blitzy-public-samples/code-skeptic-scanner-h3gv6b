@@ -11,7 +11,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-// Net-new shared helper extracted from three copies — DL-197 — see docs/DECISION_LOG.md
+// Net-new shared helper extracted from three copies — DL-186 — see docs/DECISION_LOG.md
 /**
  * Verifies the single definition of the unresolved-placeholder shape that
  * {@code security/SecurityConfig}, {@code security/JwtService} and
@@ -35,7 +35,7 @@ class ConfiguredValuesTest {
         assertThat(ConfiguredValues.isUnset(value)).isTrue();
     }
 
-    // The trim keeps all three call sites symmetric — finding 21 — DL-197
+    // The trim keeps all three call sites symmetric — DL-186
     @ParameterizedTest(name = "[{index}] \"{0}\"")
     @ValueSource(strings = {
         " ${SECRET_KEY}",

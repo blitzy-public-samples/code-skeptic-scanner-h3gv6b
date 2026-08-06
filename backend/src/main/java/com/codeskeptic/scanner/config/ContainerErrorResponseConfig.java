@@ -34,36 +34,33 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
 
-// Net-new (no Python counterpart; the retired tree ran no servlet container) — DL-222 — see
+// Net-new (no Python counterpart; the retired tree ran no servlet container) — DL-237 — see
 // docs/DECISION_LOG.md
 /**
  * Answers a request the servlet container rejects before any filter or servlet runs with this
  * service's error envelope.
  *
- * <p>A request whose headers exceed {@code server.max-http-request-header-size}, whose target holds
- * an encoded character the connector refuses, or whose framing the protocol layer rejects never
+ * <p>A request whose headers exceed {@code server.max-http-request-header-size} (DL-238), whose target
+ * holds an encoded character the connector refuses, or whose framing the protocol layer rejects never
  * reaches the filter chain: the connector records a status and the container's error-report valve
- * writes the body. Spring Boot installs {@code ErrorReportValve} for that purpose, which writes an
- * HTML document and none of this service's headers, so such a response carried neither the
- * single-key JSON envelope nor {@code X-Content-Type-Options}, {@code X-Frame-Options}, the cache
- * directives or the CORS headers every other response carries — DL-222.
+ * writes the body. The valve declared here replaces the {@code ErrorReportValve} Spring Boot installs,
+ * which writes an HTML document and none of this service's headers — DL-237.
  *
- * <p>The valve declared here replaces it. The status and the literal are the ones
- * {@code api/GlobalExceptionHandler} declares, so the three error surfaces —
- * {@code api/GlobalExceptionHandler} for a {@code REQUEST} dispatch,
- * {@code api/GlobalExceptionHandler} for an {@code ERROR} dispatch and this valve for a
- * container-level rejection — put the same literals on the wire. The header policy is the
- * {@code HeaderWriter} bean {@code security/SecurityConfig} publishes, the same policy
- * {@code HeaderWriterFilter} applies inside the chain — DL-194. The CORS headers mirror the
- * permissive policy {@code config/CorsConfig} declares, read from that same bean — DL-051.
+ * <p>The status and the literal are the ones {@code api/GlobalExceptionHandler} declares, so the three
+ * error surfaces — that advice for a {@code REQUEST} dispatch, its nested error-path controller for an
+ * {@code ERROR} dispatch, and this valve for a container-level rejection — put the same literals on
+ * the wire. The header policy is the {@code HeaderWriter} bean {@code security/SecurityConfig}
+ * publishes, the same policy {@code HeaderWriterFilter} applies inside the chain — DL-241. The CORS
+ * headers mirror the permissive policy {@code config/CorsConfig} declares, read from that same bean —
+ * DL-051.
  *
  * <p>A status that carries no body inside the chain carries none here either: 401 and 403 keep the
  * bare shape the chain's entry point produces — DL-115.
  *
  * <p>This class holds no mutable state and its valve is safe to share across concurrent requests.
  *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-222 and DL-223;
- * construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-237, DL-238 and
+ * DL-241; construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  */
 @Configuration
 public class ContainerErrorResponseConfig {
@@ -71,7 +68,7 @@ public class ContainerErrorResponseConfig {
     // Logging baseline — DL-052 — see docs/DECISION_LOG.md
     private static final Logger log = LoggerFactory.getLogger(ContainerErrorResponseConfig.class);
 
-    /** The application's transport-security header policy — DL-194. */
+    /** The application's transport-security header policy — DL-241. */
     private final HeaderWriter transportSecurityHeaderWriter;
 
     /** The application's permissive CORS policy — DL-051. */
@@ -120,13 +117,12 @@ public class ContainerErrorResponseConfig {
     /**
      * Replaces the container's error-report valve with {@link ErrorEnvelopeReportValve}.
      *
-     * <p>Two orderings decide whether the replacement takes effect, and both are handled here.
-     * {@code Pipeline.addValve} appends, and every error-report valve reports only after the valves
-     * beneath it have run, so the valve added last is the one that reports; this customizer is
-     * therefore ordered after Spring Boot's own, which installs the HTML valve. And
-     * {@code StandardHost} installs a further valve of its configured error-report class at start
-     * unless one is already present, so that class name is cleared once the replacement is in place —
-     * DL-222.
+     * <p>Two container behaviours fix the shape of this method. {@code Pipeline.addValve} appends and
+     * an error-report valve reports only after the valves beneath it have run, so the valve added last
+     * is the one that reports and this customizer is ordered after Spring Boot's own, which installs
+     * the HTML valve. {@code StandardHost} installs a further valve of its configured error-report
+     * class at start unless one is already present, so that class name is cleared once the replacement
+     * is in place — DL-237.
      *
      * @return the customizer; never {@code null}
      */
@@ -149,7 +145,7 @@ public class ContainerErrorResponseConfig {
                 }
             }
             if (host instanceof StandardHost standardHost) {
-                // Empty is the value StandardHost.startInternal reads as "install none" — DL-222
+                // Empty is the value StandardHost.startInternal reads as "install none" — DL-237
                 standardHost.setErrorReportValveClass("");
             }
             pipeline.addValve(new ErrorEnvelopeReportValve(transportSecurityHeaderWriter,
@@ -252,9 +248,8 @@ public class ContainerErrorResponseConfig {
                     return;
                 }
 
-                // The literals this valve writes hold printable ASCII only, so the content type
-                // carries no charset parameter and matches every other error response of this
-                // service — DL-222
+                // The content type carries no charset parameter, matching every other error
+                // response of this service — DL-237
                 response.setContentType(MediaType.APPLICATION_JSON_VALUE);
 
                 Writer reporter = response.getReporter();
@@ -302,7 +297,7 @@ public class ContainerErrorResponseConfig {
          * Adds one {@code Vary} value the response does not already carry.
          *
          * <p>A response the filter chain reached before the failure was recorded already carries the
-         * three values {@code DefaultCorsProcessor} writes, so each value stays single — DL-222.
+         * three values {@code DefaultCorsProcessor} writes; each value stays single — DL-237.
          *
          * @param response the response being written
          * @param value the {@code Vary} value to add
@@ -335,14 +330,13 @@ public class ContainerErrorResponseConfig {
         /**
          * The view of a rejected request the header and CORS policies are applied against.
          *
-         * <p>Two properties of such a request are unusable as they stand. Its target is what the
-         * connector rejected, so it need not parse as a path a policy can be looked up under; the
-         * view reports {@value #POLICY_LOOKUP_TARGET} instead, which the single policy
-         * {@code config/CorsConfig} registers for every path covers. And no filter has run, so the
-         * forwarded scheme has not been applied to the request; when
-         * {@code server.forward-headers-strategy} declares that scheme authoritative, the view
-         * reports the request as secure for a forwarded {@code https}, which is what
-         * {@code HstsHeaderWriter} reads — DL-222.
+         * <p>Two properties of such a request are restated by this view. Its target is what the
+         * connector rejected and need not parse as a path a policy can be looked up under, so the view
+         * reports {@value #POLICY_LOOKUP_TARGET}, which the single policy {@code config/CorsConfig}
+         * registers for every path covers. No filter has run, so the forwarded scheme has not been
+         * applied; when {@code server.forward-headers-strategy} declares that scheme authoritative,
+         * the view reports the request as secure for a forwarded {@code https}, which is what
+         * {@code HstsHeaderWriter} reads — DL-237, DL-241.
          */
         static final class RejectedRequestView extends HttpServletRequestWrapper {
 

@@ -26,6 +26,7 @@ import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.service.mapper.SettingMapper;
 import com.codeskeptic.scanner.util.LogSafe;
+import com.codeskeptic.scanner.util.StreamRuleTerms;
 
 // Net-new (no Python module existed; signatures dictated by backend/app/api/settings.py:L10,L20) —
 // see docs/DECISION_LOG.md DL-039, DL-040, DL-043
@@ -89,10 +90,13 @@ public class SettingsService {
             "Minimum like count for a monitored post to be processed.";
 
     /**
-     * Seeded key whose value spaces the response-generation sweeps. The value is seeded from
-     * {@code scanner.response-generation-delay-seconds}, declared with the default {@code 60} as
+     * Seeded key that reports the interval between response-generation sweeps. The value is seeded
+     * from {@code scanner.response-generation-delay-seconds}, declared with the default {@code 60} as
      * {@code RESPONSE_GENERATION_DELAY} at {@code backend/app/core/config.py:L11} — DL-040 — see
-     * docs/DECISION_LOG.md.
+     * docs/DECISION_LOG.md. The interval in force is resolved before every pass by
+     * {@code config.AsyncSchedulingConfig}, which reads this row first and falls back to the configured
+     * property; editing this row through {@code PUT /settings/{key}} paces every pass after the one
+     * already scheduled — DL-227, DL-228.
      */
     private static final String RESPONSE_GENERATION_DELAY_KEY = "response_generation_delay";
 
@@ -215,6 +219,10 @@ public class SettingsService {
      *         as supplied
      * @throws BadRequestException when {@code value} is {@code null}, carrying the wire literal of
      *                             {@code backend/app/api/settings.py:L18}
+     * <p>An edit of the {@value #STREAM_KEYWORDS_KEY} row that leaves no term the X rule grammar can
+     * carry is stored and reported at {@code WARN} naming the key and the term counts; the wire
+     * outcome is unchanged and ingestion falls back to the configured base terms — DL-249.
+     *
      * @throws NotFoundException   when {@code key} names no row, carrying the wire literal of
      *                             {@code backend/app/api/settings.py:L22}
      */
@@ -243,7 +251,44 @@ public class SettingsService {
         setting.setValue(value);
         SettingDto updated = settingMapper.toDto(settingRepository.save(setting));
         log.info("Updated setting '{}'.", LogSafe.logSafe(key));
+        reportUnusableStreamKeywords(key, value);
         return updated;
+    }
+
+    // The X rule grammar the stored terms must satisfy — DL-249 — see docs/DECISION_LOG.md
+    /**
+     * Records a {@value #STREAM_KEYWORDS_KEY} edit that leaves no term the X rule grammar can carry.
+     *
+     * <p>Nothing is recorded for any other key, and nothing is recorded when the stored value holds at
+     * least one usable term or is blank — a blank value is the seeded "no override" state
+     * {@code task/TweetStreamClient} reads, not an unusable one — DL-044.
+     *
+     * <p>The record names the key and the two counts only. No stored term reaches it — DL-249,
+     * DL-208. The stored value is left exactly as the operator supplied it: ingestion falls back to
+     * the configured base terms, so an unusable edit withholds nothing that was already working.
+     *
+     * @param key   the key that was written, possibly {@code null}
+     * @param value the value that was stored, never {@code null}
+     */
+    private void reportUnusableStreamKeywords(String key, String value) {
+        if (!STREAM_KEYWORDS_KEY.equals(key) || value.isBlank()) {
+            return;
+        }
+        int supplied = StreamRuleTerms.split(value).size();
+        int usable = StreamRuleTerms.countUsable(value);
+        if (usable > 0) {
+            if (usable < supplied) {
+                log.warn("Setting '{}' holds {} term(s) of which {} cannot be carried as an X stream "
+                        + "rule; those are dropped when the rule set is next composed",
+                        STREAM_KEYWORDS_KEY, supplied, supplied - usable);
+            }
+            return;
+        }
+        log.warn("Setting '{}' holds {} term(s) and none can be carried as an X stream rule; "
+                + "ingestion falls back to scanner.ingestion.stream-base-keywords. A term may hold "
+                + "no double quote, no backslash and no control character, and its match expression "
+                + "may not exceed {} characters",
+                STREAM_KEYWORDS_KEY, supplied, StreamRuleTerms.MAX_RULE_EXPRESSION_LENGTH);
     }
 
 

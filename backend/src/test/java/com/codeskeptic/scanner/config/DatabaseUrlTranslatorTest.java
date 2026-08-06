@@ -11,6 +11,7 @@ import java.lang.reflect.Modifier;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /**
@@ -482,6 +483,127 @@ class DatabaseUrlTranslatorTest {
     void carriesNoFragmentIntoTheReassembledUrl() {
         assertThat(DatabaseUrlTranslator.translate("postgresql://host/db#frag").jdbcUrl())
                 .isEqualTo("jdbc:postgresql://host/db");
+    }
+
+    // -----------------------------------------------------------------------
+    // One property-separator grammar: '&' and ';' both extract — DL-072
+    // -----------------------------------------------------------------------
+
+    // A ';' separated credential property is extracted, exactly as an '&' separated one is — DL-072 —
+    // see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {0}")
+    @CsvSource(delimiter = '|', value = {
+        "postgresql://host/db?sslmode=require;user=admin        | jdbc:postgresql://host/db?sslmode=require        | admin | ",
+        "postgresql://host/db?sslmode=require;password=s3cret   | jdbc:postgresql://host/db?sslmode=require        |       | s3cret",
+        "postgresql://host/db?sslmode=require;PASSWD=s3cret     | jdbc:postgresql://host/db?sslmode=require        |       | s3cret",
+        "postgresql://host/db?user=admin;password=s3cret        | jdbc:postgresql://host/db                       | admin | s3cret",
+        "mysql://host/db?useSSL=true;user=root                  | jdbc:mysql://host/db?useSSL=true                | root  | ",
+        "h2://host:9092/db?MODE=PostgreSQL;pwd=s3cret           | jdbc:h2:tcp://host:9092/db?MODE=PostgreSQL       |       | s3cret",
+        "postgresql://host/db?user=admin&password=s3cret        | jdbc:postgresql://host/db                       | admin | s3cret",
+        "postgresql://host/db?sslmode=require&user=admin;pwd=x  | jdbc:postgresql://host/db?sslmode=require        | admin | x",
+    })
+    @DisplayName("extracts a credential property separated by a semicolon or an ampersand and leaves "
+            + "neither in the jdbc url")
+    void extractsACredentialPropertyUnderEitherSeparator(String databaseUrl, String expectedUrl,
+            String expectedUsername, String expectedPassword) {
+        TranslatedDatabaseUrl translated = DatabaseUrlTranslator.translate(databaseUrl.strip());
+
+        assertThat(translated.jdbcUrl()).isEqualTo(expectedUrl.strip());
+        assertThat(translated.username())
+                .isEqualTo(expectedUsername == null ? null : expectedUsername.strip());
+        assertThat(translated.password())
+                .isEqualTo(expectedPassword == null ? null : expectedPassword.strip());
+    }
+
+    // A retained property keeps the separator that preceded it, so an H2 property list is not
+    // rewritten — DL-072 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("retains semicolon-separated properties that name no credential with their own "
+            + "separators")
+    void retainsSemicolonSeparatedPropertiesThatNameNoCredential() {
+        assertThat(DatabaseUrlTranslator
+                        .translate("h2://host:9092/db?MODE=PostgreSQL;DB_CLOSE_DELAY=-1").jdbcUrl())
+                .isEqualTo("jdbc:h2:tcp://host:9092/db?MODE=PostgreSQL;DB_CLOSE_DELAY=-1");
+        assertThat(DatabaseUrlTranslator
+                        .translate("postgresql://host/db?a=1&b=2;c=3&d=4").jdbcUrl())
+                .isEqualTo("jdbc:postgresql://host/db?a=1&b=2;c=3&d=4");
+    }
+
+    // Removing the first property does not promote its separator into the leading position — DL-072 —
+    // see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("opens the retained query with no separator when the first property was a credential")
+    void opensTheRetainedQueryWithNoSeparatorWhenTheFirstPropertyWasACredential() {
+        assertThat(DatabaseUrlTranslator
+                        .translate("h2://host:9092/db?user=sa;MODE=PostgreSQL;DB_CLOSE_DELAY=-1")
+                        .jdbcUrl())
+                .isEqualTo("jdbc:h2:tcp://host:9092/db?MODE=PostgreSQL;DB_CLOSE_DELAY=-1");
+        assertThat(DatabaseUrlTranslator
+                        .translate("postgresql://host/db?password=s3cret&sslmode=require").jdbcUrl())
+                .isEqualTo("jdbc:postgresql://host/db?sslmode=require");
+    }
+
+    // A credential property never swallows the properties after it — DL-072 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("takes only its own value from a credential property, never the properties after it")
+    void takesOnlyItsOwnValueFromACredentialProperty() {
+        TranslatedDatabaseUrl translated = DatabaseUrlTranslator
+                .translate("postgresql://host/db?user=admin;sslmode=require;password=s3cret");
+
+        assertThat(translated.username()).isEqualTo("admin");
+        assertThat(translated.password()).isEqualTo("s3cret");
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:postgresql://host/db?sslmode=require");
+    }
+
+    // A ';' separated credential property is rejected on the jdbc: pass-through path, where nothing is
+    // extracted — DL-072 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {0}")
+    @ValueSource(strings = {
+        "jdbc:h2:tcp://host:9092/db?MODE=PostgreSQL;user=sa",
+        "jdbc:h2:tcp://host:9092/db;user=sa",
+        "jdbc:postgresql://host/db?sslmode=require;password=s3cret",
+    })
+    @DisplayName("rejects a semicolon-separated credential property on the jdbc pass-through path")
+    void rejectsASemicolonSeparatedCredentialPropertyOnThePassThroughPath(String databaseUrl) {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate(databaseUrl))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("a username or a password must not appear in the JDBC URL");
+    }
+
+    // -----------------------------------------------------------------------
+    // Padding: classification trims, translation does not — DL-072, DL-186
+    // -----------------------------------------------------------------------
+
+    // ConfiguredValues.isUnset trims before classifying, so a padded placeholder is still unset —
+    // DL-186 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] \"{0}\"")
+    @ValueSource(strings = {
+        " ${DATABASE_URL}",
+        "${DATABASE_URL} ",
+        "  ${DATABASE_URL}  ",
+        "\t${DATABASE_URL}\n",
+        " ${DATABASE_URL:${DB_URL}} ",
+    })
+    @DisplayName("rejects a padded unresolved placeholder as an unset value")
+    void rejectsAPaddedUnresolvedPlaceholder(String databaseUrl) {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate(databaseUrl))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("DATABASE_URL must be set");
+    }
+
+    // Nothing is trimmed on the way into a returned URL, so a padded URL is simply unparseable —
+    // DL-072 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] \"{0}\"")
+    @ValueSource(strings = {
+        " postgresql://host/db",
+        "postgresql://host/db ",
+        "  postgresql://host/db  ",
+        " jdbc:postgresql://host/db",
+    })
+    @DisplayName("rejects a padded url rather than trimming it into a translatable value")
+    void rejectsAPaddedUrlRatherThanTrimmingIt(String databaseUrl) {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate(databaseUrl))
+                .isInstanceOf(IllegalStateException.class);
     }
 
     // -----------------------------------------------------------------------

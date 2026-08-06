@@ -44,7 +44,7 @@ import com.codeskeptic.scanner.security.SecurityConfig;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
-// Net-new (no Python counterpart) — DL-222 — see docs/DECISION_LOG.md
+// Net-new (no Python counterpart) — DL-237 — see docs/DECISION_LOG.md
 /**
  * Exercises the container-level error surface: the valve that answers a request the connector
  * rejects before any filter runs, the view the valve applies its policies against, and the

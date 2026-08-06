@@ -33,6 +33,7 @@ import org.springframework.beans.TypeMismatchException;
 import org.springframework.boot.web.error.ErrorAttributeOptions;
 import org.springframework.boot.web.servlet.error.DefaultErrorAttributes;
 import org.springframework.boot.web.servlet.error.ErrorAttributes;
+import org.springframework.boot.web.servlet.error.ErrorController;
 import org.springframework.core.MethodParameter;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -50,6 +51,7 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.AuthenticationServiceException;
 import org.springframework.security.core.AuthenticationException;
+import org.springframework.stereotype.Controller;
 import org.springframework.validation.BeanPropertyBindingResult;
 import org.springframework.web.HttpMediaTypeNotAcceptableException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
@@ -58,7 +60,9 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.ServletWebRequest;
 import org.springframework.web.method.annotation.ExceptionHandlerMethodResolver;
@@ -128,7 +132,7 @@ class GlobalExceptionHandlerTest {
 
     /**
      * A value distinctive enough that finding it anywhere in a log record proves a credential reached
-     * the log — see docs/DECISION_LOG.md DL-201.
+     * the log — see docs/DECISION_LOG.md DL-197.
      */
     private static final String SUBMITTED_CREDENTIAL = "Zq7-distinctive-credential-value-4711";
 
@@ -258,6 +262,55 @@ class GlobalExceptionHandlerTest {
         assertErrorEnvelope(response, FAILED_TO_GENERATE_RESPONSE);
         assertThat(response.getBody().error()).doesNotContain(CAUSE_MESSAGE);
         assertThat(envelopeOf(response).toString()).doesNotContain(CAUSE_MESSAGE);
+    }
+
+    // The public outcome is recorded once; the ERROR owner sits upstream — DL-252 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("records the generation outcome once at WARN, naming the cause class only")
+    void recordsTheGenerationOutcomeOnceAtWarnNamingTheCauseClassOnly() {
+        ResponseGenerationException reported =
+                new ResponseGenerationException(new IllegalStateException(CAUSE_MESSAGE));
+
+        ListAppender<ILoggingEvent> recorded = attachAdviceAppender();
+        try {
+            handler.handleResponseGenerationFailure(reported);
+
+            List<ILoggingEvent> warnings = recorded.list.stream()
+                    .filter(event -> event.getLevel() == Level.WARN)
+                    .toList();
+            assertThat(warnings).hasSize(1);
+            ILoggingEvent warning = warnings.get(0);
+
+            assertThat(warning.getFormattedMessage())
+                    .contains("Responding HTTP 500 with the generation literal")
+                    .contains("IllegalStateException");
+            assertThat(warning.getFormattedMessage()).doesNotContain(CAUSE_MESSAGE);
+            assertThat(warning.getThrowableProxy()).isNull();
+        } finally {
+            detachAdviceAppender(recorded);
+        }
+    }
+
+    // The public outcome is recorded once; the ERROR owner sits upstream — DL-252 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("records no ERROR for a generation failure the failing layer already reported")
+    void recordsNoErrorForAGenerationFailureTheFailingLayerAlreadyReported() {
+        ListAppender<ILoggingEvent> recorded = attachAdviceAppender();
+        try {
+            handler.handleResponseGenerationFailure(new ResponseGenerationException());
+
+            assertThat(recorded.list).noneMatch(event -> event.getLevel() == Level.ERROR);
+            assertThat(recorded.list)
+                    .filteredOn(event -> event.getLevel() == Level.WARN)
+                    .hasSize(1)
+                    .allSatisfy(event -> assertThat(event.getFormattedMessage())
+                            .contains("Responding HTTP 500 with the generation literal")
+                            .contains("ResponseGenerationException"));
+        } finally {
+            detachAdviceAppender(recorded);
+        }
     }
 
     @ParameterizedTest(name = "[{index}] {0} -> {1}")
@@ -407,7 +460,7 @@ class GlobalExceptionHandlerTest {
         assertThat(envelopeOf(response).toString()).doesNotContain(CAUSE_MESSAGE);
     }
 
-    // Converter-failure log sanitisation — DL-199 — see docs/DECISION_LOG.md
+    // Converter-failure log sanitisation — DL-197 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("records only the exception class for a message-conversion failure, never its message")
     void recordsOnlyTheExceptionClassForAMessageConversionFailure() throws JsonProcessingException {
@@ -466,7 +519,7 @@ class GlobalExceptionHandlerTest {
         assertThat(envelopeOf(response).toString()).doesNotContain("password");
     }
 
-    // Net-new (no Python counterpart) — DL-196 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-197 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] {0}")
     @ValueSource(strings = {
         "Unexpected token at [Source: (String)\"{\"a\":\"\r\nWARN forged log record\"}\"]",
@@ -507,7 +560,7 @@ class GlobalExceptionHandlerTest {
         assertThat(event.getThrowableProxy()).isNull();
     }
 
-    // Net-new (no Python counterpart) — DL-196 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-197 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("names the exception class in the conversion-failure log record")
     void namesTheExceptionClassInTheConversionFailureLogRecord() {
@@ -611,7 +664,7 @@ class GlobalExceptionHandlerTest {
         assertThat(((LoginRequest) bound).password()).isEqualTo(expectedPassword);
     }
 
-    // Net-new (no Python counterpart) — DL-193 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("writes no part of a converter message or of a submitted value to the log")
     void writesNoPartOfAConverterMessageToTheLog() {
@@ -938,7 +991,7 @@ class GlobalExceptionHandlerTest {
         assertErrorEnvelope(response, UNSUPPORTED_MEDIA_TYPE);
     }
 
-    // Net-new (no Python counterpart) — DL-219 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-234 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("returns 415 for a multipart request no route of this service consumes")
     void returns415ForAMultipartRequestNoRouteConsumes() throws JsonProcessingException {
@@ -949,7 +1002,7 @@ class GlobalExceptionHandlerTest {
         assertErrorEnvelope(response, UNSUPPORTED_MEDIA_TYPE);
     }
 
-    // Net-new (no Python counterpart) — DL-219 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-234 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("records only the exception class for a multipart failure, never its message or a "
             + "stack trace")
@@ -969,7 +1022,7 @@ class GlobalExceptionHandlerTest {
         }
     }
 
-    // Net-new (no Python counterpart) — DL-219 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-234 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("keeps a missing multipart part on the 400 path and a multipart parse failure on "
             + "the 415 path")
@@ -985,7 +1038,7 @@ class GlobalExceptionHandlerTest {
                 .isEqualTo(handlerMethodFor(MultipartException.class));
     }
 
-    // Net-new (no Python counterpart) — DL-220 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-235 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] Content-Type {0}")
     @ValueSource(strings = {"*/*", "application/*", "text/*", "multipart/*"})
     @DisplayName("returns 415 when the request Content-Type names no concrete media type")
@@ -1000,7 +1053,7 @@ class GlobalExceptionHandlerTest {
         assertErrorEnvelope(response, UNSUPPORTED_MEDIA_TYPE);
     }
 
-    // Net-new (no Python counterpart) — DL-220 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-235 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("returns 415 when the request Content-Type cannot be parsed as a media type at all")
     void returns415WhenTheRequestContentTypeCannotBeParsed() throws JsonProcessingException {
@@ -1012,7 +1065,7 @@ class GlobalExceptionHandlerTest {
         assertErrorEnvelope(response, UNSUPPORTED_MEDIA_TYPE);
     }
 
-    // Net-new (no Python counterpart) — DL-220 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-235 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] Content-Type {0}")
     @ValueSource(strings = {"application/json", "text/plain", "application/json;charset=UTF-8"})
     @DisplayName("returns 500 for an illegal-argument failure on a request naming a concrete media "
@@ -1028,7 +1081,7 @@ class GlobalExceptionHandlerTest {
         assertErrorEnvelope(response, INTERNAL_SERVER_ERROR);
     }
 
-    // Net-new (no Python counterpart) — DL-220 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-235 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("returns 500 for an illegal-argument failure on a request carrying no Content-Type")
     void returns500ForAnIllegalArgumentFailureWithoutAContentType() throws JsonProcessingException {
@@ -1039,7 +1092,7 @@ class GlobalExceptionHandlerTest {
         assertErrorEnvelope(response, INTERNAL_SERVER_ERROR);
     }
 
-    // Net-new (no Python counterpart) — DL-220 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-235 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("records a non-concrete media type at WARN without a stack trace and keeps the "
             + "stack trace for a genuine illegal-argument failure")
@@ -1071,7 +1124,7 @@ class GlobalExceptionHandlerTest {
         }
     }
 
-    // Net-new (no Python counterpart) — DL-220 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-235 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("resolves an illegal-argument failure to its own handler rather than the catch-all")
     void resolvesAnIllegalArgumentFailureToItsOwnHandler() {
@@ -1188,16 +1241,6 @@ class GlobalExceptionHandlerTest {
     // -----------------------------------------------------------------------
     // The servlet container's error path — DL-183 — see docs/DECISION_LOG.md
     // -----------------------------------------------------------------------
-
-    @ParameterizedTest(name = "an error dispatch recording {0} returns {0} carrying {1}")
-    @CsvSource({
-        "400,Bad request",
-        "404,Not found",
-        "405,Method not allowed",
-        "406,Not acceptable",
-        "415,Unsupported media type",
-        "500,Internal server error"
-    })
 
     /**
      * Asserts that a response body is the single-key envelope carrying exactly the given message.
@@ -1391,9 +1434,115 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
-    @DisplayName("names an attribute source the framework error controller resolves")
-    void namesAnAttributeSourceTheFrameworkErrorControllerResolves() {
+    @DisplayName("names an attribute source that records the dispatched exception as the framework does")
+    void namesAnAttributeSourceThatRecordsTheDispatchedException() {
         assertThat(errorAttributes()).isInstanceOf(DefaultErrorAttributes.class);
+    }
+
+    // The error path is served by this advice's own handler, in one representation — DL-183 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("publishes an ErrorController mapped to the configured error path")
+    void publishesAnErrorControllerMappedToTheConfiguredErrorPath() {
+        Object controller = errorController();
+
+        assertThat(controller).isInstanceOf(ErrorController.class);
+        assertThat(controller.getClass().getEnclosingClass()).isEqualTo(GlobalExceptionHandler.class);
+        assertThat(controller.getClass().getAnnotation(RequestMapping.class)).isNotNull();
+        assertThat(controller.getClass().getAnnotation(RequestMapping.class).value())
+                .containsExactly("${server.error.path:${error.path:/error}}");
+        // The stereotype Spring MVC requires to detect a handler, under the one bean name — DL-183
+        assertThat(controller.getClass().getAnnotation(Controller.class)).isNotNull();
+        assertThat(controller.getClass().getAnnotation(Controller.class).value())
+                .isEqualTo("errorEnvelopeController");
+        assertThat(controller.getClass().getAnnotation(RestController.class)).isNull();
+    }
+
+    @ParameterizedTest(name = "a dispatch recording {0} is answered {1} carrying {2}")
+    @CsvSource({
+        "400,400,Bad request",
+        "404,404,Not found",
+        "405,405,Method not allowed",
+        "406,406,Not acceptable",
+        "415,415,Unsupported media type",
+        "409,409,Bad request",
+        "429,429,Bad request",
+        "500,500,Internal server error",
+        "502,500,Internal server error",
+        "503,500,Internal server error",
+        "504,500,Internal server error"
+    })
+    @DisplayName("answers a dispatched status with the mapped status and the single-key JSON envelope")
+    void answersADispatchedStatusWithTheMappedStatusAndTheSingleKeyEnvelope(int dispatchedStatus,
+            int expectedStatus, String expectedMessage) {
+
+        ResponseEntity<Map<String, Object>> response = errorResponseFor(dispatchedStatus, null);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(expectedStatus);
+        assertThat(response.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_JSON);
+        assertThat(response.getBody()).containsExactly(entry("error", expectedMessage));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {UNAUTHORIZED, FORBIDDEN})
+    @DisplayName("answers a dispatched 401 or 403 with that status and no body at all")
+    void answersADispatchedUnauthorizedOrForbiddenWithNoBody(int dispatchedStatus) {
+        ResponseEntity<Map<String, Object>> response = errorResponseFor(dispatchedStatus, null);
+
+        assertThat(response.getStatusCode().value()).isEqualTo(dispatchedStatus);
+        assertThat(response.getBody()).isNull();
+        assertThat(response.getHeaders().getContentType()).isNull();
+    }
+
+    @ParameterizedTest(name = "Accept: {0}")
+    @ValueSource(strings = {"text/html", "text/html,application/xhtml+xml,*/*;q=0.8", "text/plain",
+        "*/*", "application/xml"})
+    @DisplayName("answers the error path as JSON whatever the Accept header names")
+    void answersTheErrorPathAsJsonWhateverTheAcceptHeaderNames(String accept) {
+        ResponseEntity<Map<String, Object>> response = errorResponseFor(404, accept);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(response.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_JSON);
+        assertThat(response.getBody()).containsExactly(entry("error", NOT_FOUND));
+    }
+
+    @Test
+    @DisplayName("answers a dispatch recording no status with the internal server error envelope")
+    void answersADispatchRecordingNoStatusWithTheInternalServerErrorEnvelope() {
+        ResponseEntity<Map<String, Object>> response =
+                errorController().handleError(new MockHttpServletRequest());
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(response.getBody()).containsExactly(entry("error", INTERNAL_SERVER_ERROR));
+    }
+
+    @Test
+    @DisplayName("carries every error-path body value from the closed literal set this advice declares")
+    void carriesEveryErrorPathBodyValueFromTheClosedLiteralSet() {
+        Set<String> rendered = new LinkedHashSet<>();
+        for (int status = 400; status < 600; status++) {
+            Map<String, Object> body = errorResponseFor(status, null).getBody();
+            if (body != null) {
+                assertThat(body).hasSize(1);
+                rendered.add(String.valueOf(body.get("error")));
+            }
+        }
+
+        assertThat(rendered).containsExactlyInAnyOrder(NOT_FOUND, INTERNAL_SERVER_ERROR,
+                "Bad request", "Method not allowed", "Not acceptable", "Unsupported media type");
+    }
+
+    private GlobalExceptionHandler.ErrorEnvelopeController errorController() {
+        return new GlobalExceptionHandler.ErrorEnvelopeController(errorAttributes());
+    }
+
+    private ResponseEntity<Map<String, Object>> errorResponseFor(int dispatchedStatus, String accept) {
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setAttribute(RequestDispatcher.ERROR_STATUS_CODE, dispatchedStatus);
+        if (accept != null) {
+            request.addHeader(HttpHeaders.ACCEPT, accept);
+        }
+        return errorController().handleError(request);
     }
 
     private ErrorAttributes errorAttributes() {

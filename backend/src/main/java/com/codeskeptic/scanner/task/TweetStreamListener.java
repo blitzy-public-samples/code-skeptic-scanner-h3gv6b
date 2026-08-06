@@ -1,5 +1,6 @@
 package com.codeskeptic.scanner.task;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -60,11 +61,11 @@ import com.fasterxml.jackson.databind.JsonNode;
  *
  * <p>Every row this class stores has a wire form: a record whose {@code data.text},
  * {@code data.public_metrics.like_count}, {@code data.created_at} or {@code data.author_id} is absent
- * or does not carry its wire type is named at {@code WARN} and skipped rather than stored, and no
+ * or does not carry its wire type is named at {@code WARN} and skipped, no row is stored for it, and no
  * neutral value is substituted for it — DL-080, DL-223. No stored row is therefore left unrenderable
  * by {@link TweetMapper}, unmirrorable or unanswerable. Preparing a stored row's wire form is
- * nevertheless guarded, and a failure there is reported at {@code WARN} because no adapter is reached
- * that would otherwise report it — DL-224.
+ * nevertheless guarded, and a failure there is reported at {@code WARN} — see docs/DECISION_LOG.md
+ * DL-224.
  *
  * <p>{@code spring.jpa.open-in-view} is {@code false}. The stored entity is converted to its wire
  * form by {@link TweetMapper}, which reads only loaded scalar values and never traverses the lazy
@@ -108,6 +109,16 @@ public class TweetStreamListener {
 
     /** Value of {@value #KEY_TYPE} that maps a reference to {@code tweets.quoted_tweet_id}. */
     private static final String QUOTED_REFERENCE_TYPE = "quoted";
+
+    /**
+     * Minutes past the arrival instant a delivered {@code created_at} may carry and still be stored
+     * — DL-247 — see docs/DECISION_LOG.md.
+     */
+    private static final long CREATED_AT_FUTURE_TOLERANCE_MINUTES = 5L;
+
+    /** {@value #CREATED_AT_FUTURE_TOLERANCE_MINUTES} minutes, as a duration — DL-247. */
+    private static final Duration CREATED_AT_FUTURE_TOLERANCE =
+            Duration.ofMinutes(CREATED_AT_FUTURE_TOLERANCE_MINUTES);
 
     // Payload log redaction — DL-197 — see docs/DECISION_LOG.md
     /**
@@ -221,6 +232,39 @@ public class TweetStreamListener {
      */
     // Payload type at the ingestion boundary — see docs/DECISION_LOG.md DL-199
     public boolean onStatus(JsonNode payload) {
+        return handleRecord(payload, null);
+    }
+
+    // Net-new: the threshold is resolved by the caller, once per ingestion cycle — DL-255 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Handles one delivered record against an already resolved popularity threshold.
+     *
+     * <p>Behaves exactly as {@link #onStatus(JsonNode)} in every respect except one: the popularity
+     * threshold is the supplied value and the gate resolves none, so this overload reads the
+     * {@code settings} table not at all — see docs/DECISION_LOG.md DL-255. The order of the four
+     * steps, every log record and every stored value are unchanged.
+     *
+     * @param payload one record of the filtered stream, may be {@code null}
+     * @param popularityThreshold the threshold the gate compares a like count against, as returned by
+     *     {@link TwitterService#popularityThresholdInForce()}
+     * @return {@code true} to continue streaming, {@code false} to stop, as documented at
+     *         {@code documentation/Code Structure.md:L1393}
+     */
+    public boolean onStatus(JsonNode payload, int popularityThreshold) {
+        return handleRecord(payload, popularityThreshold);
+    }
+
+    // The single body both overloads run — DL-255 — see docs/DECISION_LOG.md
+    /**
+     * Performs the four documented steps for one delivered record.
+     *
+     * @param payload one record of the filtered stream, may be {@code null}
+     * @param resolvedThreshold the threshold the gate compares against, or {@code null} for the gate
+     *     to resolve it itself at the moment it is evaluated
+     * @return {@code true} to continue streaming, {@code false} to stop
+     */
+    private boolean handleRecord(JsonNode payload, Integer resolvedThreshold) {
         if (payload == null) {
             log.warn("Skipping a stream record that carries no payload.");
             return true;
@@ -260,7 +304,10 @@ public class TweetStreamListener {
             return true;
         }
 
-        if (!twitterService.meetsPopularityThreshold(likeCount)) {
+        boolean popularEnough = (resolvedThreshold == null)
+                ? twitterService.meetsPopularityThreshold(likeCount)
+                : twitterService.meetsPopularityThreshold(likeCount, resolvedThreshold);
+        if (!popularEnough) {
             log.debug("Skipping a stream record with like count {}: the popularity gate reports "
                     + "false.", likeCount);
             return true;
@@ -300,6 +347,21 @@ public class TweetStreamListener {
         return true;
     }
 
+    // Net-new: one threshold resolution per ingestion cycle — DL-255 — see docs/DECISION_LOG.md
+    /**
+     * Resolves the popularity threshold in force and returns it.
+     *
+     * <p>{@code task.TweetStreamClient} calls this once per connection cycle and hands the value to
+     * {@link #onStatus(JsonNode, int)} for every record of that cycle, so the {@code settings} table
+     * is read once per cycle — see docs/DECISION_LOG.md DL-255. The value is not retained by this
+     * class.
+     *
+     * @return the threshold {@link TwitterService#popularityThresholdInForce()} reports
+     */
+    public int popularityThresholdInForce() {
+        return twitterService.popularityThresholdInForce();
+    }
+
     // Ported from store_tweet at backend/app/services/notion_service.py:L12-28 (faithful port) — see
     // docs/DECISION_LOG.md
     /**
@@ -310,10 +372,9 @@ public class TweetStreamListener {
      * delimited columns as arrays.
      *
      * <p>The two steps report at different levels. A failure raised while the wire form is prepared
-     * is recorded here at {@code WARN}, because no adapter is reached and no other record would name
-     * it. A failure raised by the mirror write itself is recorded at {@code DEBUG}, because
-     * {@link NotionService} reports it at {@code ERROR}. Neither is rethrown and the stored row is
-     * unaffected either way.
+     * is recorded here at {@code WARN}; a failure raised by the mirror write itself is recorded here at
+     * {@code DEBUG} and by {@link NotionService} at {@code ERROR} — see docs/DECISION_LOG.md DL-224.
+     * Neither is rethrown and the stored row is unaffected either way.
      *
      * @param saved the stored row, never {@code null}
      */
@@ -323,8 +384,7 @@ public class TweetStreamListener {
         try {
             mirrored = tweetMapper.toDto(saved);
         } catch (RuntimeException failure) {
-            // No adapter is reached, so this record is the only report of the condition — see
-            // docs/DECISION_LOG.md DL-224
+            // The only report of this condition — see docs/DECISION_LOG.md DL-224
             log.warn("Preparing the Notion mirror of tweet row {} failed with {}; the row is stored "
                     + "and is not mirrored.", saved.getId(), LogSafe.type(failure));
             return;
@@ -352,7 +412,10 @@ public class TweetStreamListener {
      * reply for one row — see docs/DECISION_LOG.md DL-195.
      *
      * <p>An empty result is recorded at {@code DEBUG}. A failure raised by the call is recorded at
-     * {@code ERROR} and is not rethrown; the stored row is unaffected.
+     * {@code DEBUG} and is not rethrown; the stored row is unaffected. This method writes no
+     * {@code ERROR} record; the layer that raised the failure writes the single one —
+     * {@code service.LlmService} for a provider failure, {@code service.ResponseService} for a
+     * repository or transaction failure — DL-252.
      *
      * @param saved the stored row, never {@code null}
      */
@@ -373,7 +436,9 @@ public class TweetStreamListener {
             log.info("Triggered response generation for tweet row {}; stored response {}.",
                     tweetId, generated.id());
         } catch (RuntimeException failure) {
-            log.error("Triggering response generation for tweet row {} failed with {}.",
+            // The failing layer owns the ERROR record — DL-252 — see docs/DECISION_LOG.md
+            log.debug("Triggering response generation for tweet row {} failed with {}; ingestion "
+                    + "continues and the stored row carries no reply.",
                     tweetId, LogSafe.type(failure));
             return;
         }
@@ -425,21 +490,31 @@ public class TweetStreamListener {
      * wrong-typed or unparseable value yields {@code null}; {@link #onStatus(JsonNode)} then rejects
      * the record before persistence.
      *
+     * <p>A parsed value more than {@value #CREATED_AT_FUTURE_TOLERANCE_MINUTES} minutes past the
+     * arrival instant is treated as invalid — DL-247 — see docs/DECISION_LOG.md.
+     *
      * @param node the {@code created_at} member, possibly a missing node
-     * @return the creation time to store, or {@code null} when the member is missing or invalid
+     * @return the creation time to store, or {@code null} when the member is missing, unparseable or
+     *     stamped beyond the accepted tolerance
      */
     private static LocalDateTime readCreatedAt(JsonNode node) {
         String raw = readTextValue(node);
         if (raw == null) {
             return null;
         }
+        LocalDateTime parsed;
         try {
-            return OffsetDateTime.parse(raw)
+            parsed = OffsetDateTime.parse(raw)
                     .withOffsetSameInstant(ZoneOffset.UTC)
                     .toLocalDateTime();
         } catch (DateTimeParseException ignored) {
             return null;
         }
+        // A timestamp beyond the arrival instant plus the tolerance is not stored — DL-247 — see
+        // docs/DECISION_LOG.md
+        return parsed.isAfter(LocalDateTime.now(ZoneOffset.UTC).plus(CREATED_AT_FUTURE_TOLERANCE))
+                ? null
+                : parsed;
     }
 
     /**

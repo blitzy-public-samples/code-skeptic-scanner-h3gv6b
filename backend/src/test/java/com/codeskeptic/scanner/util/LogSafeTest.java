@@ -118,6 +118,53 @@ class LogSafeTest {
     }
 
     @Nested
+    @DisplayName("token")
+    class ProviderToken {
+
+        @ParameterizedTest(name = "the provider field \"{0}\" is carried literally")
+        @ValueSource(strings = {"validation_error", "object_not_found", "insufficient_quota",
+                "invalid_request_error", "model_not_found", "reasoning_effort", "temperature",
+                "messages[0].content", "req-9zk", "8f0a5c1e-3b7d-4a21-9c66-0d1e2f3a4b5c"})
+        @DisplayName("carries a provider-shaped field literally")
+        void carriesAProviderShapedFieldLiterally(String field) {
+            assertThat(LogSafe.token(field)).isEqualTo(field);
+        }
+
+        @ParameterizedTest(name = "the provider field \"{0}\" is reported absent")
+        @ValueSource(strings = {"Validation Error\ninjected", "bad id\nforged",
+                "Media is not a property that exists.", "rejected\r\nERROR forged", "a b",
+                "caf\u00e9", "quote\"d", "semi;colon", "{\"code\":\"x\"}"})
+        @DisplayName("reports a field that fails the shape check as absent, echoing nothing of it")
+        void reportsAFieldThatFailsTheShapeCheckAsAbsent(String field) {
+            assertThat(LogSafe.token(field)).isEqualTo(ABSENT);
+        }
+
+        @Test
+        @DisplayName("removes surrounding whitespace before checking the shape")
+        void removesSurroundingWhitespaceBeforeCheckingTheShape() {
+            assertThat(LogSafe.token("  req-9zk  ")).isEqualTo("req-9zk");
+            assertThat(LogSafe.token("\treq-9zk\n")).isEqualTo("req-9zk");
+        }
+
+        @Test
+        @DisplayName("reports a field at the bound literally and a longer one as absent")
+        void reportsAFieldAtTheBoundLiterallyAndALongerOneAsAbsent() {
+            String atTheBound = "c".repeat(LOG_VALUE_LIMIT);
+
+            assertThat(LogSafe.token(atTheBound)).isEqualTo(atTheBound);
+            assertThat(LogSafe.token("c".repeat(LOG_VALUE_LIMIT + 1))).isEqualTo(ABSENT);
+        }
+
+        @Test
+        @DisplayName("reports an absent, an empty and a blank field by name")
+        void reportsAnAbsentAnEmptyAndABlankFieldByName() {
+            assertThat(LogSafe.token(null)).isEqualTo(ABSENT);
+            assertThat(LogSafe.token("")).isEqualTo(ABSENT);
+            assertThat(LogSafe.token("   ")).isEqualTo(ABSENT);
+        }
+    }
+
+    @Nested
     @DisplayName("type")
     class FailureType {
 
@@ -142,7 +189,8 @@ class LogSafeTest {
     void rendersNoControlCharacterForAnyUnsafeValue() {
         String unsafe = "a\r\nb\tc\u0000d\u001b[31m";
 
-        for (String rendered : List.of(LogSafe.logSafe(unsafe), LogSafe.correlation(unsafe))) {
+        for (String rendered : List.of(LogSafe.logSafe(unsafe), LogSafe.correlation(unsafe),
+                LogSafe.token(unsafe))) {
             assertThat(rendered.chars()).allMatch(character -> character >= ' ' && character <= '~');
         }
     }

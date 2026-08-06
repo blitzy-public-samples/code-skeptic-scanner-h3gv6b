@@ -9,6 +9,10 @@
 #                                 once the managed version reaches it (DL-082, DL-171).
 #   github-actions at /         - every action reference in .github/workflows is pinned to a commit
 #                                 SHA (DL-103), and a pinned SHA does not move on its own.
+#   docker at /infrastructure/docker
+#                               - both stages of Dockerfile.backend are pinned by patch tag and
+#                                 SHA-256 digest (DL-106, DL-248), and a pinned digest does not move
+#                                 on its own.
 #
 # npm at /frontend is not watched: frontend/** is out of scope and never modified, and the frontend
 # CI inputs are frozen - see backend/docs/DECISION_LOG.md DL-135.
@@ -44,3 +48,16 @@ updates:
     labels:
       - dependencies
       - ci
+
+  - package-ecosystem: docker
+    directory: /infrastructure/docker
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
+      include: scope
+    labels:
+      - dependencies
+      - docker

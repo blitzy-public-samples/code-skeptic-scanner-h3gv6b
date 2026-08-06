@@ -31,6 +31,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -90,8 +92,9 @@ import jakarta.validation.Constraint;
  * {@code Internal server error} ({@code backend/app/main.py:L37}).
  *
  * <p>Decisions covered by the assertions here are recorded in {@code docs/DECISION_LOG.md} DL-021,
- * DL-022, DL-023, DL-038, DL-048, DL-050, DL-059, DL-076, DL-077, DL-082, DL-092, DL-193, DL-217 and
- * DL-219; construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * DL-022, DL-023, DL-038, DL-048, DL-050, DL-059, DL-076, DL-082, DL-092, DL-123, DL-217,
+ * DL-225, DL-231 and DL-240; construct-level provenance is recorded in
+ * {@code docs/TRACEABILITY_MATRIX.md}.
  */
 @WebMvcTest(ResponseController.class)
 @ActiveProfiles("test")
@@ -143,6 +146,9 @@ class ResponseControllerTest {
 
     /** The single member name of every error envelope — {@code backend/app/main.py:L31-37}. */
     private static final String ERROR_KEY = "error";
+
+    /** The sanctioned envelope of an unmatched path — backend/app/main.py:L31-33, DL-243. */
+    private static final String NOT_FOUND_BODY = "{\"error\":\"Not found\"}";
 
     @Autowired
     private MockMvc mockMvc;
@@ -289,7 +295,7 @@ class ResponseControllerTest {
                 .andExpect(jsonPath("$.responses[0].tweet").doesNotExist());
     }
 
-    // A page beyond the queryable offset is answered — DL-217, DL-219 — see docs/DECISION_LOG.md
+    // A page beyond the queryable offset is answered — DL-217, DL-225 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] page={0}")
     @ValueSource(ints = {2147483647, 2147483646, 214748366})
     @DisplayName("answers 200 and passes an out-of-range page through to the service unchanged")
@@ -305,7 +311,7 @@ class ResponseControllerTest {
         verify(responseService).getPaginatedResponses(page, 10);
     }
 
-    // request.args.get(..., type=int) answers with the default — DL-077, DL-193 — see
+    // request.args.get(..., type=int) answers with the default — DL-217 — see
     // docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] page={0}")
     @ValueSource(strings = {"abc", "", " ", "3.5", "0x10", "99999999999999999999", "--3"})
@@ -503,12 +509,30 @@ class ResponseControllerTest {
         verifyNoMoreInteractions(responseService);
     }
 
-    // backend/app/api/responses.py:L40-41 — the body names no tweet
+    // backend/app/api/responses.py:L40-41 — every value the guard `if not tweet_id` read as false —
+    // DL-240 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] body={0}")
-    @ValueSource(strings = {"{}", "{\"tweet_id\":null}"})
+    @ValueSource(strings = {
+        "{}",
+        "{\"tweet_id\":null}",
+        "{\"tweet_id\":\"\"}",
+        "{\"tweet_id\":0}",
+        "{\"tweet_id\":-0}",
+        "{\"tweet_id\":0.0}",
+        "{\"tweet_id\":-0.0}",
+        "{\"tweet_id\":0.00}",
+        "{\"tweet_id\":0e0}",
+        "{\"tweet_id\":false}",
+        "{\"tweet_id\":[]}",
+        "{\"tweet_id\":{}}"
+    })
     @DisplayName("answers 400 with the Tweet ID is required envelope when the body names no tweet")
     void answers400WithTheTweetIdIsRequiredEnvelopeWhenTheBodyNamesNoTweet(String body)
             throws Exception {
+
+        // The service reports the same literal for the normalised absent identifier as the constraint
+        // reports for the omitted member — backend/app/api/responses.py:L40-41 — DL-240
+        when(responseService.generateResponse(null)).thenThrow(BadRequestException.tweetIdRequired());
 
         mockMvc.perform(post("/responses").contentType(MediaType.APPLICATION_JSON).content(body)
                         .header(HttpHeaders.AUTHORIZATION, bearer()))
@@ -529,19 +553,26 @@ class ResponseControllerTest {
                 .andExpect(bodyDoesNotContain("NotNull"));
 
         verify(responseService, never()).generateResponse(anyString());
-        verifyNoInteractions(responseService);
     }
 
-    // backend/app/api/responses.py:L40 — `if not tweet_id` also rejects the empty string
-    @Test
-    @DisplayName("answers 400 with the Tweet ID is required envelope when the body carries an empty tweet id")
-    void answers400WithTheTweetIdIsRequiredEnvelopeWhenTheBodyCarriesAnEmptyTweetId()
+    // backend/app/api/responses.py:L40 — a value the guard read as false never reaches the identifier
+    // parser or the generator — DL-240 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] body={0}")
+    @ValueSource(strings = {
+        "{\"tweet_id\":\"\"}",
+        "{\"tweet_id\":0}",
+        "{\"tweet_id\":0.0}",
+        "{\"tweet_id\":false}",
+        "{\"tweet_id\":[]}",
+        "{\"tweet_id\":{}}"
+    })
+    @DisplayName("carries no identifier to the generator for a value the source guard rejected")
+    void carriesNoIdentifierToTheGeneratorForAValueTheSourceGuardRejected(String body)
             throws Exception {
 
-        when(responseService.generateResponse("")).thenThrow(BadRequestException.tweetIdRequired());
+        when(responseService.generateResponse(null)).thenThrow(BadRequestException.tweetIdRequired());
 
-        mockMvc.perform(post("/responses").contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"tweet_id\":\"\"}")
+        mockMvc.perform(post("/responses").contentType(MediaType.APPLICATION_JSON).content(body)
                         .header(HttpHeaders.AUTHORIZATION, bearer()))
                 .andExpect(status().isBadRequest())
                 .andExpect(content().json(TWEET_ID_REQUIRED, JsonCompareMode.STRICT))
@@ -550,7 +581,36 @@ class ResponseControllerTest {
 
         ArgumentCaptor<String> generatedFor = ArgumentCaptor.forClass(String.class);
         verify(responseService).generateResponse(generatedFor.capture());
-        assertThat(generatedFor.getValue()).isEmpty();
+        assertThat(generatedFor.getValue()).as("identifier handed to the generator").isNull();
+    }
+
+    // backend/app/api/responses.py:L40,L49 — a value the guard read as true reaches generation, so one
+    // that names no row answers the 500 literal and never the guard's 400 — DL-240 — see
+    // docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] body={0} -> {1}")
+    @CsvSource(delimiter = '|', value = {
+        "{\"tweet_id\":7}                  | 7",
+        "{\"tweet_id\":\"7\"}              | 7",
+        "{\"tweet_id\":0.5}                | 0.5",
+        "{\"tweet_id\":true}               | true",
+        "{\"tweet_id\":\" \"}              | ' '",
+        "{\"tweet_id\":[1]}                | [1]",
+        "{\"tweet_id\":{\"a\":1}}           | {\"a\":1}"
+    })
+    @DisplayName("carries a value the source guard accepted to the generator unchanged")
+    void carriesAValueTheSourceGuardAcceptedToTheGeneratorUnchanged(String body, String expected)
+            throws Exception {
+
+        when(responseService.generateResponse(expected)).thenThrow(new ResponseGenerationException());
+
+        mockMvc.perform(post("/responses").contentType(MediaType.APPLICATION_JSON).content(body)
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isInternalServerError())
+                .andExpect(statusIsNot(HttpStatus.BAD_REQUEST))
+                .andExpect(content().json(GENERATION_FAILED, JsonCompareMode.STRICT))
+                .andExpect(bodyDoesNotContain(BadRequestException.TWEET_ID_IS_REQUIRED));
+
+        verify(responseService).generateResponse(expected);
     }
 
     // backend/app/api/responses.py:L49 — the 500 literal of this route
@@ -620,7 +680,7 @@ class ResponseControllerTest {
         assertThat(written.contentValue()).isEqualTo("A revised reply");
         assertThat(written.writesApproval()).isTrue();
         assertThat(written.approvalValue()).isEqualTo(Boolean.TRUE);
-        assertThat(written.carriesNoWritableValue()).isFalse();
+        assertThat(written.carriesNoUpdatableMember()).isFalse();
     }
 
     // The two writable members are content and is_approved — backend/app/db/models.py:L24,L26
@@ -684,36 +744,56 @@ class ResponseControllerTest {
         assertThat(written.writesContent()).isFalse();
     }
 
-    // A carried member carries a usable value — DL-082, DL-092 — see docs/DECISION_LOG.md
+    // No carried member is rejected at binding time — DL-244 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] body={0}")
-    @ValueSource(strings = {
-            "{\"is_approved\":\"true\"}",
-            "{\"is_approved\":\"false\"}",
-            "{\"is_approved\":1}",
-            "{\"is_approved\":null}",
-            "{\"content\":null}",
-            "{\"content\":123}",
-            "{\"content\":true}",
-            "{\"content\":[\"a\"]}",
-            "{\"content\":{\"x\":1}}",
-            "{\"content\":\"valid\",\"is_approved\":\"true\"}"
-    })
-    @DisplayName("answers 400 with the generic envelope when a carried member holds an unusable value")
-    void answers400WithTheGenericEnvelopeWhenACarriedMemberHoldsAnUnusableValue(String body)
-            throws Exception {
+    @MethodSource("freeFormUpdateBodies")
+    @DisplayName("forwards every carried member without answering 400")
+    void forwardsEveryCarriedMemberWithoutAnswering400(String body,
+            boolean writesContent, String contentValue,
+            boolean writesApproval, Boolean approvalValue) throws Exception {
+
+        when(responseService.updateResponse(eq(RESPONSE_ID), any())).thenReturn(response(true));
 
         mockMvc.perform(put("/responses/" + RESPONSE_ID).contentType(MediaType.APPLICATION_JSON)
                         .content(body)
                         .header(HttpHeaders.AUTHORIZATION, bearer()))
-                .andExpect(status().isBadRequest())
-                .andExpect(content().json(BAD_REQUEST, JsonCompareMode.STRICT))
-                .andExpect(jsonPath("$.*", hasSize(1)));
+                .andExpect(status().isOk())
+                .andExpect(statusIsNot(HttpStatus.BAD_REQUEST));
 
-        verifyNoInteractions(responseService);
+        UpdateResponseRequest written = capturedUpdate();
+        assertThat(written.writesContent()).isEqualTo(writesContent);
+        assertThat(written.contentValue()).isEqualTo(contentValue);
+        assertThat(written.writesApproval()).isEqualTo(writesApproval);
+        assertThat(written.approvalValue()).isEqualTo(approvalValue);
+        assertThat(written.carriesNoUpdatableMember()).isFalse();
+    }
+
+    /**
+     * The request bodies an earlier revision answered 400, with the values each one now forwards.
+     *
+     * @return one argument set per body: the body, whether {@code content} is written and the value
+     *     it writes, then whether {@code is_approved} is written and the value it writes
+     */
+    private static Stream<Arguments> freeFormUpdateBodies() {
+        return Stream.of(
+                Arguments.of("{\"is_approved\":\"true\"}", false, null, true, Boolean.TRUE),
+                Arguments.of("{\"is_approved\":\"false\"}", false, null, true, Boolean.FALSE),
+                Arguments.of("{\"is_approved\":1}", false, null, true, Boolean.TRUE),
+                Arguments.of("{\"is_approved\":null}", false, null, true, null),
+                Arguments.of("{\"content\":null}", true, null, false, null),
+                Arguments.of("{\"content\":123}", true, "123", false, null),
+                Arguments.of("{\"content\":true}", true, "true", false, null),
+                Arguments.of("{\"content\":[\"a\"]}", true, "[\"a\"]", false, null),
+                Arguments.of("{\"content\":{\"x\":1}}", true, "{\"x\":1}", false, null),
+                Arguments.of("{\"content\":\"valid\",\"is_approved\":\"true\"}", true,
+                        "valid", true, Boolean.TRUE));
     }
 
     // backend/app/api/responses.py:L56-57 — the body-level guard
     @ParameterizedTest(name = "[{index}] body={0}")
+    // A body carrying a recognised member is a write whatever JSON type it holds — that is validation
+    // parity with the free-form request.json of backend/app/api/responses.py:L54 — so only a body
+    // carrying neither recognised member reaches this literal — DL-082, DL-050.
     @ValueSource(strings = { "{}", "{\"isApproved\":true}", "{\"id\":\"9\"}" })
     @DisplayName("answers 400 with the Update data is required envelope when the body carries no writable member")
     void answers400WithTheUpdateDataIsRequiredEnvelopeWhenTheBodyCarriesNoWritableMember(String body)
@@ -731,7 +811,7 @@ class ResponseControllerTest {
                 .andExpect(jsonPath("$.error").value(BadRequestException.UPDATE_DATA_IS_REQUIRED));
 
         UpdateResponseRequest written = capturedUpdate();
-        assertThat(written.carriesNoWritableValue()).isTrue();
+        assertThat(written.carriesNoUpdatableMember()).isTrue();
     }
 
     // backend/app/api/responses.py:L65 — the 404 literal of this route
@@ -908,7 +988,9 @@ class ResponseControllerTest {
         mockMvc.perform(post(path).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"tweet_id\":\"" + TWEET_ID + "\"}")
                         .header(HttpHeaders.AUTHORIZATION, bearer()))
-                .andExpect(statusIsNot(HttpStatus.CREATED));
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(content().json(NOT_FOUND_BODY, JsonCompareMode.STRICT));
 
         verifyNoInteractions(responseService);
     }
@@ -918,7 +1000,9 @@ class ResponseControllerTest {
     @DisplayName("lists no row at a prefixed or differently cased path")
     void listsNoRowAtAPrefixedOrDifferentlyCasedPath(String path) throws Exception {
         mockMvc.perform(get(path).header(HttpHeaders.AUTHORIZATION, bearer()))
-                .andExpect(statusIsNot(HttpStatus.OK));
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(content().json(NOT_FOUND_BODY, JsonCompareMode.STRICT));
 
         verifyNoInteractions(responseService);
     }

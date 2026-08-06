@@ -7,11 +7,13 @@ import org.springframework.stereotype.Component;
 import com.codeskeptic.scanner.dto.ResponseDto;
 import com.codeskeptic.scanner.entity.Response;
 import com.codeskeptic.scanner.entity.Tweet;
+import com.codeskeptic.scanner.repository.ResponseRepository.ResponseRow;
 
 // Net-new (no Python counterpart method) — call sites backend/app/api/responses.py:L18,L29,L47,L63 —
-// DL-023, DL-080, DL-081, DL-139 — see docs/DECISION_LOG.md
+// DL-023, DL-080, DL-081 — see docs/DECISION_LOG.md
 /**
- * Converts {@link Response} entities into their {@link ResponseDto} wire form.
+ * Converts {@link Response} entities and {@link ResponseRow} page projections into their
+ * {@link ResponseDto} wire form.
  *
  * <p>A conversion copies the five {@code responses} columns in the source declaration order —
  * {@code id}, {@code content}, {@code generated_at}, {@code is_approved} and {@code tweet_id} — and
@@ -25,7 +27,7 @@ import com.codeskeptic.scanner.entity.Tweet;
  * <p>The remaining three components are copied verbatim after the source-required wire fields are
  * validated.
  *
- * <p>Null policy — see docs/DECISION_LOG.md DL-080 and DL-139. Every one of the five
+ * <p>Null policy — see docs/DECISION_LOG.md DL-080. Every one of the five
  * {@code responses} columns is declared without {@code nullable=false}, so a stored row may carry
  * {@code null} in any of them, and this class carries a {@code null} column value through as a
  * {@code null} component. No conversion here unboxes a column value, defaults a component,
@@ -78,6 +80,47 @@ public final class ResponseMapper {
             return List.of();
         }
         return responses.stream()
+                .map(this::toDto)
+                .toList();
+    }
+
+    /**
+     * Converts a projected page row into its wire form.
+     *
+     * <p>The projection already carries {@code responses.tweet_id} as a value, so no association is
+     * traversed here — see docs/DECISION_LOG.md DL-245.
+     *
+     * @param row the projected row to convert, may be {@code null}
+     * @return a DTO holding the row's five values, with both identifiers rendered as strings and every
+     *         {@code null} value carried as a {@code null} component; or {@code null} when
+     *         {@code row} is {@code null}
+     */
+    public ResponseDto toDto(ResponseRow row) {
+        if (row == null) {
+            return null;
+        }
+        return new ResponseDto(
+                identifierAsString(row.getId()),
+                row.getContent(),
+                row.getGeneratedAt(),
+                row.getIsApproved(),
+                identifierAsString(row.getTweetId()));
+    }
+
+    /**
+     * Converts a list of projected page rows into their wire form, preserving the order of the input.
+     *
+     * @param rows the projected rows to convert, may be {@code null}, may be empty and may contain
+     *             {@code null} elements
+     * @return an unmodifiable list holding one DTO per input element in the same order, where a
+     *         {@code null} element yields a {@code null} element; empty when {@code rows} is
+     *         {@code null} or empty. Never {@code null}
+     */
+    public List<ResponseDto> toDtoRowList(List<ResponseRow> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return List.of();
+        }
+        return rows.stream()
                 .map(this::toDto)
                 .toList();
     }

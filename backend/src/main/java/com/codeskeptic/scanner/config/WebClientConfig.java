@@ -13,13 +13,13 @@ import org.springframework.web.reactive.function.client.WebClient;
  *
  * <p>This class supplies transport only. It carries no {@code Authorization} header: its single
  * consumer, {@code task.TweetStreamClient}, sets that header per request from the app-only bearer
- * token it holds at runtime — see docs/DECISION_LOG.md DL-191.
+ * token it holds at runtime — see docs/DECISION_LOG.md DL-046.
  *
  * <p>No response timeout, no read timeout and no codec buffer limit are configured on the client, so
  * the framework defaults apply and the long-lived chunked stream body is neither cut short nor
- * buffered whole — see docs/DECISION_LOG.md DL-193. The two short request/response calls that share
- * this client — the app-only token exchange and the stream-rules calls — are bounded per request by
- * {@code task.TweetStreamClient} from {@code scanner.twitter.request-timeout-seconds} — DL-230.
+ * buffered whole. The two short request/response calls that share this client — the app-only token
+ * exchange and the stream-rules calls — are bounded per request by {@code task.TweetStreamClient} from
+ * {@code scanner.twitter.request-timeout-seconds} — see docs/DECISION_LOG.md DL-230.
  */
 // Replaces the tweepy.Stream construction at backend/app/tasks/tweet_monitoring.py:L45-51. The
 // transport itself is net-new: the source targeted the retired v1.1 statuses/filter API over the
@@ -42,9 +42,9 @@ public class WebClientConfig {
     /**
      * Publishes the X API transport.
      *
-     * <p>Only the two constant headers below are applied; rule reconciliation, authentication,
-     * reconnection and payload handling belong to {@code task.TweetStreamClient} — see
-     * docs/DECISION_LOG.md DL-190, DL-192, DL-194.
+     * <p>Only the two constant headers below are applied. Rule reconciliation belongs to
+     * {@code task.TweetStreamClient} — DL-045 — as do authentication — DL-046 — reconnection —
+     * DL-207 — and payload handling — DL-220, DL-222 — see docs/DECISION_LOG.md.
      *
      * @param builder the auto-configured, prototype-scoped builder, which supplies the default
      *     connector and codecs

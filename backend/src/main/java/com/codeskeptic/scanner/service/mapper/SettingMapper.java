@@ -8,7 +8,7 @@ import com.codeskeptic.scanner.dto.SettingDto;
 import com.codeskeptic.scanner.entity.Setting;
 
 // Net-new (no Python counterpart method) — call sites backend/app/api/settings.py:L11,L24 —
-// DL-204 — see docs/DECISION_LOG.md
+// DL-039 — see docs/DECISION_LOG.md
 /**
  * Converts {@link Setting} entities into their {@link SettingDto} wire form.
  *

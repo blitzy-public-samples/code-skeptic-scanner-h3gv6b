@@ -25,7 +25,7 @@ import jakarta.annotation.PreDestroy;
 // The two public operations are ported from backend/app/services/sentiment_analysis.py:L12-24 and
 // :L26-35 (faithful port) — see docs/DECISION_LOG.md DL-036, DL-037. The client lifecycle below is
 // net-new: the source constructed the client eagerly at :L8 and closed it nowhere — see
-// docs/DECISION_LOG.md DL-207.
+// docs/DECISION_LOG.md DL-245.
 /**
  * Adapter for the Google Cloud Natural Language API and the single home of the
  * doubt-rating calculation.
@@ -40,7 +40,7 @@ import jakarta.annotation.PreDestroy;
  * {@code AnalyzeSentiment} call the client issues carries a bounded deadline.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md}
- * DL-010, DL-036, DL-037, DL-052 and DL-207; construct-level provenance is recorded in
+ * DL-010, DL-036, DL-037, DL-052 and DL-245; construct-level provenance is recorded in
  * {@code docs/TRACEABILITY_MATRIX.md}.
  *
  * <p>This class is thread-safe. It is a singleton bean, and client acquisition,
@@ -51,14 +51,18 @@ import jakarta.annotation.PreDestroy;
  *   <li>{@link #analyzeSentiment(String)} holds the read lock for the whole
  *       acquisition-and-call sequence. The client it obtains is not closed while
  *       the call is in flight.</li>
- *   <li>{@link #closeLanguageClient()} takes the write lock. It waits for every
- *       in-flight call to return, for at most
- *       {@value #AWAIT_ACTIVE_USE_SECONDS} seconds, before releasing the
- *       client.</li>
+ *   <li>{@link #closeLanguageClient()} sets the destroyed flag before it begins
+ *       waiting, then takes the write lock. It waits for every in-flight call to
+ *       return, for at most {@value #AWAIT_ACTIVE_USE_SECONDS} seconds, and
+ *       releases the client once the wait has drained or that bound has
+ *       elapsed.</li>
  *   <li>Once the bean is destroyed, {@link #languageClient()} and
  *       {@link #analyzeSentiment(String)} both throw
  *       {@link IllegalStateException}: no client is created and no request is
- *       issued after shutdown.</li>
+ *       issued after shutdown. {@link #analyzeSentiment(String)} tests the flag
+ *       before it queues on the read lock and again once it holds it, so work
+ *       arriving while a shutdown is waiting is rejected rather than
+ *       started — DL-268.</li>
  * </ul>
  */
 @Service
@@ -113,8 +117,10 @@ public class SentimentAnalysisService {
     private volatile LanguageServiceClient client;
 
     /**
-     * Set once when the bean is destroyed. Written only inside a {@code synchronized (this)} block
-     * and read through a {@code volatile} field access.
+     * Set once by {@link #closeLanguageClient()}, before it begins waiting for in-flight calls, so
+     * work arriving during the wait is rejected rather than started — DL-268. Written only inside a
+     * {@code synchronized (this)} block, so no client is created after destruction, and read through
+     * a {@code volatile} field access.
      */
     private volatile boolean destroyed;
 
@@ -148,6 +154,10 @@ public class SentimentAnalysisService {
      * <p>The read lock of {@link #lifecycleLock} is held for the whole
      * acquisition-and-call sequence. The client is not released mid-call.
      *
+     * <p>The destroyed flag is tested before the read lock is requested and again once it is held, so
+     * a call arriving while {@link #closeLanguageClient()} is waiting is rejected immediately instead
+     * of queueing behind the release — see docs/DECISION_LOG.md DL-268.
+     *
      * @param text the tweet text to analyse; must not be {@code null}
      * @return the document sentiment score, a finite value conventionally between
      *         {@code -1.0} (negative) and {@code 1.0} (positive)
@@ -164,6 +174,14 @@ public class SentimentAnalysisService {
     // value is the bare document score — see docs/DECISION_LOG.md DL-037.
     public double analyzeSentiment(String text) {
         Objects.requireNonNull(text, "text must not be null");
+
+        // Work arriving while a shutdown is waiting is rejected before it queues on the read lock, so
+        // it can neither extend the drain nor be aborted by the release — DL-268 — see
+        // docs/DECISION_LOG.md
+        if (destroyed) {
+            throw new IllegalStateException(DESTROYED_MESSAGE);
+        }
+
         if (text.isBlank()) {
             log.warn("Analysing blank text; the Natural Language API request is issued unchanged");
         }
@@ -257,7 +275,7 @@ public class SentimentAnalysisService {
      */
     // Replaces the eager `self.client = LanguageServiceClient()` at
     // backend/app/services/sentiment_analysis.py:L8 (net-new lifecycle) — see docs/DECISION_LOG.md
-    // DL-207
+    // DL-245
     protected LanguageServiceClient languageClient() {
         LanguageServiceClient local = this.client;
         if (local == null) {
@@ -300,7 +318,7 @@ public class SentimentAnalysisService {
      * @throws IOException if the settings cannot be built
      */
     // Net-new (no Python counterpart: backend/app/services/sentiment_analysis.py:L8 created the
-    // client with no call settings) — see docs/DECISION_LOG.md DL-207
+    // client with no call settings) — see docs/DECISION_LOG.md DL-245
     private LanguageServiceSettings languageServiceSettings() throws IOException {
         LanguageServiceSettings.Builder builder = LanguageServiceSettings.newBuilder();
         UnaryCallSettings.Builder<AnalyzeSentimentRequest, AnalyzeSentimentResponse> callSettings =
@@ -325,21 +343,29 @@ public class SentimentAnalysisService {
      * Marks the bean destroyed and releases the Natural Language client, and only
      * if {@link #languageClient()} ever created one.
      *
-     * <p>The write lock of {@link #lifecycleLock} is acquired first. The method
-     * waits up to {@value #AWAIT_ACTIVE_USE_SECONDS} seconds for in-flight calls
-     * to return; if the wait elapses the client is released anyway and the wait is
-     * reported at {@code WARN}. A failure to close is logged at {@code WARN} and
-     * not propagated. Calling this method more than once has no further effect.
+     * <p>The destroyed flag is set first, before any wait begins, so
+     * {@link #analyzeSentiment(String)} and {@link #languageClient()} reject work arriving from that
+     * instant on; neither can extend the drain nor be aborted by the release — DL-268. The write lock
+     * of {@link #lifecycleLock} is then requested for at most
+     * {@value #AWAIT_ACTIVE_USE_SECONDS} seconds, which it is granted once every call already in
+     * flight has returned. The client is released after that drain, or after the bound elapses with a
+     * call still in flight, which is reported at {@code WARN}. An interrupt while waiting is reported
+     * at {@code WARN}, restores the interrupt and releases the client.
+     *
+     * <p>A failure to close is logged at {@code WARN} and not propagated. Calling this method more
+     * than once has no further effect.
      */
-    // Net-new (the source closed the client nowhere) — see docs/DECISION_LOG.md DL-207; the
-    // log-and-suppress close policy is the logging baseline — see docs/DECISION_LOG.md DL-052
+    // Net-new (the source closed the client nowhere) — see docs/DECISION_LOG.md DL-207 and DL-268;
+    // the log-and-suppress close policy is the logging baseline — see docs/DECISION_LOG.md DL-052
     @PreDestroy
     void closeLanguageClient() {
+        markDestroyed();
+
         Lock exclusive = lifecycleLock.writeLock();
-        boolean acquired = false;
+        boolean drained = false;
         try {
-            acquired = exclusive.tryLock(AWAIT_ACTIVE_USE_SECONDS, TimeUnit.SECONDS);
-            if (!acquired) {
+            drained = exclusive.tryLock(AWAIT_ACTIVE_USE_SECONDS, TimeUnit.SECONDS);
+            if (!drained) {
                 log.warn("Sentiment analysis still in flight after {}s; releasing the Natural "
                         + "Language API client anyway", AWAIT_ACTIVE_USE_SECONDS);
             }
@@ -350,24 +376,35 @@ public class SentimentAnalysisService {
                     + "Natural Language API client");
             releaseClient();
         } finally {
-            if (acquired) {
+            if (drained) {
                 exclusive.unlock();
             }
         }
     }
 
     /**
-     * Sets the destroyed flag and closes the client if one was created.
+     * Sets the destroyed flag.
      *
-     * <p>The flag and the field are read and written together inside a
-     * {@code synchronized (this)} block. A concurrent {@link #languageClient()}
-     * either creates the client before the flag is set or observes the flag and
-     * creates nothing.
+     * <p>The flag is written inside the same {@code synchronized (this)} block
+     * {@link #languageClient()} reads it in, so a concurrent {@link #languageClient()} either creates
+     * the client before the flag is set — in which case {@link #releaseClient()}, which enters the
+     * same monitor afterwards, closes it — or observes the flag and creates nothing — DL-268.
+     */
+    private void markDestroyed() {
+        synchronized (this) {
+            destroyed = true;
+        }
+    }
+
+    /**
+     * Closes the client if one was created and clears the field.
+     *
+     * <p>The field is read and cleared inside a {@code synchronized (this)} block, so a client
+     * created before {@link #markDestroyed()} took effect is closed exactly once.
      */
     private void releaseClient() {
         LanguageServiceClient local;
         synchronized (this) {
-            destroyed = true;
             local = this.client;
             this.client = null;
         }

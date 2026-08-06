@@ -2,12 +2,13 @@ package com.codeskeptic.scanner.service;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -35,9 +36,15 @@ import com.codeskeptic.scanner.util.QueryParameters;
  *       {@code GET /tweets}.
  *   <li>{@link #getTweet(String)} renders one row by identifier and backs
  *       {@code GET /tweets/{tweetId}}.
+ *   <li>{@link #analyzeTweet(String)} scores one row and records the doubt rating derived from that
+ *       score, and backs {@code POST /tweets/{tweetId}/analyze} — DL-263.
  *   <li>{@link #updateTweetAnalysis(String, double)} writes the {@code doubt_rating} column of one
- *       row and backs {@code POST /tweets/{tweetId}/analyze}.
- *   <li>{@link #meetsPopularityThreshold(Integer)} evaluates the ingestion popularity gate.
+ *       row from a score the caller already holds.
+ *   <li>{@link #meetsPopularityThreshold(Integer)} evaluates the ingestion popularity gate against
+ *       the threshold in force, and {@link #meetsPopularityThreshold(Integer, int)} against a
+ *       threshold the caller already resolved.
+ *   <li>{@link #popularityThresholdInForce()} resolves that threshold once, for a caller that
+ *       evaluates the gate repeatedly — DL-255.
  * </ul>
  *
  * <p>Every operation is a repository read, a repository write, or a comparison against a configured
@@ -88,6 +95,15 @@ public class TwitterService {
     /** Lowest {@code per_page} a page request accepts. */
     private static final int MINIMUM_PER_PAGE = 1;
 
+    /** Rows one page statement returns, however large {@code per_page} is — DL-249. */
+    private static final int PAGE_FETCH_CHUNK_ROWS = 500;
+
+    /**
+     * Order of every page read: {@code tweets.id} ascending, the total order consecutive chunks of one
+     * page are positioned in — DL-249 — see docs/DECISION_LOG.md.
+     */
+    private static final Sort PAGE_ORDER = Sort.by(Sort.Direction.ASC, "id");
+
     /** Data access for the {@code tweets} table. */
     private final TweetRepository tweetRepository;
 
@@ -102,6 +118,12 @@ public class TwitterService {
 
     /** Supplies the doubt rating written to {@code tweets.doubt_rating}. */
     private final SentimentAnalysisService sentimentAnalysisService;
+
+    /**
+     * Value of the {@value #POPULARITY_THRESHOLD_SETTING_KEY} row that the last unparseable-threshold
+     * warning was recorded for, {@code null} until one has been recorded — DL-255.
+     */
+    private final AtomicReference<String> lastUnparseableThreshold = new AtomicReference<>();
 
     /**
      * Creates the bean with its five collaborators.
@@ -147,8 +169,8 @@ public class TwitterService {
      *
      * <p>Arguments outside the accepted range are replaced and the replacement is logged at
      * {@code WARN}: a {@code page} below {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}, and
-     * a {@code perPage} below {@value #MINIMUM_PER_PAGE} is read as {@value #DEFAULT_PER_PAGE} —
-     * DL-077. No upper bound is applied to {@code perPage} — see docs/DECISION_LOG.md DL-200.
+     * a {@code perPage} below {@value #MINIMUM_PER_PAGE} is read as {@value #DEFAULT_PER_PAGE}, and no
+     * upper bound is applied to {@code perPage} — DL-123 — see docs/DECISION_LOG.md.
      *
      * <p>A {@code page} beyond the last populated page yields an empty {@link
      * PaginatedTweetsDto#tweets()} list while {@link PaginationDto#total()} and
@@ -163,6 +185,13 @@ public class TwitterService {
      * <p>The rows are converted inside this method's transaction and the returned lists are
      * unmodifiable.
      *
+     * <p>A page of at most {@value #PAGE_FETCH_CHUNK_ROWS} rows is read by one statement. A larger page
+     * is read as consecutive chunks of that bound, each chunk converted before the next is read, so the
+     * rows one statement returns are bounded however large {@code per_page} is — see
+     * docs/DECISION_LOG.md DL-249. Rows are ordered by {@code tweets.id} ascending. The rows the page
+     * itself holds are bounded by the table, which is the wire contract this migration preserves — see
+     * docs/DECISION_LOG.md DL-123, DL-200 and DL-249.
+     *
      * @param page    the 1-based page number requested through the {@code page} query parameter; a
      *                value below {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}
      * @param perPage the page size requested through the {@code per_page} query parameter; a value
@@ -174,7 +203,7 @@ public class TwitterService {
     @Transactional(readOnly = true)
     public PaginatedTweetsDto getPaginatedTweets(int page, int perPage) {
         // Only the values PageRequest.of cannot express are replaced; a large per_page is honoured
-        // as requested — DL-193, DL-217 — see docs/DECISION_LOG.md
+        // as requested — DL-123, DL-217 — see docs/DECISION_LOG.md
         int effectivePage = (page < DEFAULT_PAGE) ? DEFAULT_PAGE : page;
         // No upper bound is applied; the source declared none — see docs/DECISION_LOG.md DL-123
         int effectivePerPage = (perPage < MINIMUM_PER_PAGE) ? DEFAULT_PER_PAGE : perPage;
@@ -184,20 +213,33 @@ public class TwitterService {
         }
 
         // Wire page numbers are 1-based and repository page indexes are 0-based — DL-038
-        PageRequest requested = PageRequest.of(effectivePage - 1, effectivePerPage);
+        PageRequest requested =
+                PageRequest.of(effectivePage - 1, effectivePerPage, PAGE_ORDER);
 
-        // A page whose first row lies past the offset the query can express is answered without a
-        // query — DL-225 — see docs/DECISION_LOG.md
-        Page<Tweet> tweetPage = QueryParameters.withinQueryableOffset(requested)
-                ? tweetRepository.findAll(requested)
-                : new PageImpl<>(List.of(), requested, tweetRepository.count());
+        List<TweetDto> tweets;
+        long total;
+        if (!QueryParameters.withinQueryableOffset(requested)) {
+            // A page whose first row lies past the offset the query can express is answered without a
+            // paged query — DL-225 — see docs/DECISION_LOG.md
+            tweets = List.of();
+            total = tweetRepository.count();
+        } else if (effectivePerPage <= PAGE_FETCH_CHUNK_ROWS) {
+            Page<Tweet> tweetPage = tweetRepository.findAll(requested);
+            tweets = tweetMapper.toDtoList(tweetPage.getContent());
+            total = tweetPage.getTotalElements();
+        } else {
+            // A page larger than the chunk bound is read as consecutive bounded chunks, each mapped
+            // before the next is read — DL-249 — see docs/DECISION_LOG.md
+            tweets = QueryParameters.mapInChunks(requested, PAGE_FETCH_CHUNK_ROWS,
+                    tweetRepository::findChunk, tweetMapper::toDtoList);
+            total = tweetRepository.count();
+        }
 
-        List<TweetDto> tweets = tweetMapper.toDtoList(tweetPage.getContent());
         PaginationDto pagination = new PaginationDto(
-                tweetPage.getNumber() + 1,
-                tweetPage.getSize(),
-                tweetPage.getTotalElements(),
-                tweetPage.getTotalPages());
+                effectivePage,
+                effectivePerPage,
+                total,
+                QueryParameters.totalPages(total, effectivePerPage));
 
         log.debug("Rendering {} tweet row(s) for page {} of {}, {} row(s) in total.",
                 tweets.size(), pagination.page(), pagination.totalPages(), pagination.total());
@@ -253,15 +295,71 @@ public class TwitterService {
      *                       {@link SentimentAnalysisService#analyzeSentiment(String)}
      * @throws NotFoundException when the identifier does not parse, or parses but addresses no row
      */
-    @Transactional
     public void updateTweetAnalysis(String tweetId, double analysisResult) {
-        int identifier = parseTweetIdOrNotFound(tweetId);
-        Tweet tweet = tweetRepository.findById(identifier)
-                .orElseThrow(NotFoundException::tweetNotFound);
+        recordDoubtRating(parseTweetIdOrNotFound(tweetId), analysisResult);
+    }
 
+    // Net-new orchestration of the three steps of backend/app/api/tweets.py:L36-55 — DL-263 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Scores one {@code tweets} row and records the doubt rating derived from that score.
+     *
+     * <p>The three steps of {@code backend/app/api/tweets.py:L36-55} run here in their original order
+     * and with their original outcomes, over one read and one write:
+     *
+     * <ol>
+     *   <li>The addressed row's identifier and {@code content} are read in one statement. An
+     *       identifier that does not parse, a {@code null} identifier and an identifier addressing no
+     *       row all raise a {@link NotFoundException} carrying
+     *       {@link NotFoundException#TWEET_NOT_FOUND} — DL-048, and nothing further happens.</li>
+     *   <li>The text is scored by {@link SentimentAnalysisService#analyzeSentiment(String)}. No
+     *       transaction is open and no database connection is held while that call runs.</li>
+     *   <li>{@code doubt_rating} is written by one statement addressing the row by identifier, whether
+     *       or not the row already carried a rating.</li>
+     * </ol>
+     *
+     * <p>The row is read once and written once: nine columns are no longer transferred to write one,
+     * and the row is no longer read a second time before the write — DL-263.
+     *
+     * <p>A row deleted between the read and the write is reported with
+     * {@link NotFoundException#TWEET_NOT_FOUND}, the same literal an unknown identifier produces.
+     *
+     * @param tweetId the {@code tweetId} path value, as received
+     * @return the document sentiment score, which the caller carries as {@code analysis_result}
+     * @throws NotFoundException when the identifier does not parse, or parses but addresses no row
+     */
+    public double analyzeTweet(String tweetId) {
+        int identifier = parseTweetIdOrNotFound(tweetId);
+
+        TweetRepository.AnalysisSubject subject = tweetRepository
+                .findAnalysisSubjectById(identifier)
+                .orElseThrow(NotFoundException::tweetNotFound);
+        // dto/TweetDto declares content non-null — DL-080 — so the analyze route rejects a row that
+        // carries none in exactly the way the wire form does
+        String content = Objects.requireNonNull(subject.getContent(), "content must not be null.");
+
+        double analysisResult = sentimentAnalysisService.analyzeSentiment(content);
+
+        recordDoubtRating(identifier, analysisResult);
+
+        return analysisResult;
+    }
+
+    /**
+     * Derives the doubt rating from a document sentiment score and writes it by identifier.
+     *
+     * @param identifier     the parsed identifier of the row to write
+     * @param analysisResult the document sentiment score
+     * @throws NotFoundException when {@code identifier} addresses no row
+     */
+    // Net-new single-statement write — DL-263 — see docs/DECISION_LOG.md
+    private void recordDoubtRating(int identifier, double analysisResult) {
         double doubtRating = sentimentAnalysisService.calculateDoubtRating(analysisResult);
-        tweet.setDoubtRating(doubtRating);
-        tweetRepository.save(tweet);
+
+        if (tweetRepository.updateDoubtRating(identifier, doubtRating) == 0) {
+            log.debug("Reporting tweet identifier {} as a row that is not present.", identifier);
+            throw NotFoundException.tweetNotFound();
+        }
 
         log.info("Recorded doubt rating {} on tweet row {}.", doubtRating, identifier);
     }
@@ -277,8 +375,10 @@ public class TwitterService {
      * against the default threshold of {@code 100}, a count of {@code 99} does not reach it while
      * {@code 100} and {@code 101} do. The like count is the only quantity compared.
      *
-     * <p>The threshold is resolved on every call. The {@code settings} row named
-     * {@value #POPULARITY_THRESHOLD_SETTING_KEY} takes precedence when it is present and holds an
+     * <p>This overload resolves the threshold, which reads the {@code settings} table. A caller that
+     * evaluates the gate repeatedly resolves it once with {@link #popularityThresholdInForce()} and
+     * calls {@link #meetsPopularityThreshold(Integer, int)} instead — DL-255. The {@code settings} row
+     * named {@value #POPULARITY_THRESHOLD_SETTING_KEY} takes precedence when it is present and holds an
      * integer; otherwise {@code scanner.popularity-threshold} applies, whose default is declared at
      * {@code backend/app/core/config.py:L10} — DL-040. A row that does not hold an integer is logged at
      * {@code WARN} and the configured value applies.
@@ -297,7 +397,33 @@ public class TwitterService {
             return false;
         }
 
-        int popularityThreshold = resolvePopularityThreshold();
+        return meetsPopularityThreshold(likeCount, resolvePopularityThreshold());
+    }
+
+    // Net-new: the comparison alone, for a caller holding a resolved threshold — DL-255 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Reports whether a like count reaches an already resolved popularity threshold.
+     *
+     * <p>The comparison is the one of {@code backend/app/services/twitter_service.py:L46} and is
+     * identical to the one {@link #meetsPopularityThreshold(Integer)} performs. This overload reads no
+     * table and opens no transaction, so a caller that evaluates the gate once per delivered record
+     * pays for one threshold resolution per cycle rather than one per record — DL-255.
+     *
+     * <p>A {@code null} like count reports {@code false}.
+     *
+     * @param likeCount          the value of the {@code like_count} column, or of the equivalent
+     *                           field of an ingested payload; may be {@code null}
+     * @param popularityThreshold the threshold to compare against, as returned by
+     *                           {@link #popularityThresholdInForce()}
+     * @return {@code true} when the like count is at least {@code popularityThreshold},
+     *         {@code false} when it is below it or {@code null}
+     */
+    public boolean meetsPopularityThreshold(Integer likeCount, int popularityThreshold) {
+        if (likeCount == null) {
+            log.debug("Popularity gate reports false for an absent like count.");
+            return false;
+        }
 
         // backend/app/services/twitter_service.py:L46 — inclusive comparison
         boolean meetsThreshold = likeCount >= popularityThreshold;
@@ -305,6 +431,24 @@ public class TwitterService {
         log.debug("Popularity gate reports {} for like count {} against threshold {}.",
                 meetsThreshold, likeCount, popularityThreshold);
         return meetsThreshold;
+    }
+
+    // Net-new: one threshold resolution per ingestion cycle — DL-255 — see docs/DECISION_LOG.md
+    /**
+     * Resolves the popularity threshold in force and returns it.
+     *
+     * <p>The precedence is the one of {@link #meetsPopularityThreshold(Integer)}: the
+     * {@value #POPULARITY_THRESHOLD_SETTING_KEY} {@code settings} row when it holds an integer, and
+     * {@code scanner.popularity-threshold} otherwise.
+     *
+     * <p>The value is not retained: each call reads the table once, so a caller decides how often the
+     * threshold is re-resolved — DL-255.
+     *
+     * @return the threshold a like count is compared against
+     */
+    @Transactional(readOnly = true)
+    public int popularityThresholdInForce() {
+        return resolvePopularityThreshold();
     }
 
     // Shared by getTweet and updateTweetAnalysis, both of which receive the path value of a route
@@ -347,7 +491,12 @@ public class TwitterService {
      * its value, once surrounding whitespace is discarded, is used when it parses as an
      * {@code int}. The configured {@code scanner.popularity-threshold} is read only when that row is
      * absent, holds {@code null}, or holds a value that does not parse; the last of those cases is
-     * logged once at {@code WARN} and names the key without recording the stored value.
+     * logged at {@code WARN} and names the key without recording the stored value.
+     *
+     * <p>The warning is recorded once per distinct unparseable value: a value identical to the one the
+     * last warning was recorded for is recorded at {@code DEBUG} instead, so a row that stays
+     * malformed cannot fill the log — DL-255. A value that parses clears that memory, so the same
+     * malformed value is reported again if it returns.
      *
      * <p>A negative stored threshold is honoured as stored — DL-040.
      *
@@ -360,14 +509,39 @@ public class TwitterService {
 
         if (storedThreshold != null) {
             try {
-                return Integer.parseInt(storedThreshold.trim());
+                int parsed = Integer.parseInt(storedThreshold.trim());
+                lastUnparseableThreshold.set(null);
+                return parsed;
             } catch (NumberFormatException ex) {
-                log.warn("Setting '{}' does not hold an integer; applying "
-                        + "scanner.popularity-threshold instead.", POPULARITY_THRESHOLD_SETTING_KEY);
+                reportUnparseableThreshold(storedThreshold);
             }
+        } else {
+            lastUnparseableThreshold.set(null);
         }
 
         // backend/app/services/twitter_service.py:L43 — the configured threshold
         return properties.popularityThreshold();
+    }
+
+    // Net-new: one warning per distinct unparseable value — DL-255 — see docs/DECISION_LOG.md
+    /**
+     * Records that the {@value #POPULARITY_THRESHOLD_SETTING_KEY} row does not hold an integer.
+     *
+     * <p>The record is emitted at {@code WARN} when the offending value differs from the one the last
+     * warning was recorded for, and at {@code DEBUG} otherwise. Neither record carries the stored
+     * value; the value is held only to compare against the next one — DL-052.
+     *
+     * @param storedThreshold the value that failed to parse, never {@code null}
+     */
+    private void reportUnparseableThreshold(String storedThreshold) {
+        String previous = lastUnparseableThreshold.getAndSet(storedThreshold);
+        if (storedThreshold.equals(previous)) {
+            log.debug("Setting '{}' still does not hold an integer; applying "
+                    + "scanner.popularity-threshold instead.", POPULARITY_THRESHOLD_SETTING_KEY);
+            return;
+        }
+
+        log.warn("Setting '{}' does not hold an integer; applying "
+                + "scanner.popularity-threshold instead.", POPULARITY_THRESHOLD_SETTING_KEY);
     }
 }

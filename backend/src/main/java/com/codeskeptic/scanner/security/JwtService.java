@@ -57,11 +57,11 @@ import io.jsonwebtoken.security.Keys;
  * {@code scanner.jwt.expiration-minutes} lies outside
  * {@value #MINIMUM_EXPIRATION_MINUTES}..{@value #MAXIMUM_EXPIRATION_MINUTES} — DL-110. Every one of
  * those messages names the property at fault together with the environment variable that supplies
- * it, and none reproduces the configured value — DL-111, DL-186.
+ * it, and none reproduces the configured value — DL-186.
  *
  * <p>A presented token is accepted only when its signature verifies, its {@code alg} header names
  * HS256, and it carries a non-blank {@code sub}, an {@code iat} and an {@code exp} that is later
- * than that {@code iat} — DL-083. Any other token is rejected.
+ * than that {@code iat} — DL-109. Any other token is rejected.
  *
  * <p>No jjwt type appears in any signature here and no jjwt exception leaves this class: both
  * extraction methods answer {@link Optional#empty()} for every token they cannot accept. Neither the
@@ -69,7 +69,8 @@ import io.jsonwebtoken.security.Keys;
  * written to the log — DL-111.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-014 … DL-018 and
- * DL-108 … DL-111; construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * DL-108 … DL-111; construct-level provenance is recorded in
+ * {@code docs/TRACEABILITY_MATRIX.md}.
  *
  * <p>This is a singleton bean and is thread-safe. All three fields are {@code final} and hold
  * immutable or thread-safe state.
@@ -298,7 +299,7 @@ public class JwtService {
      * <p>{@code null}, a blank value and an unresolved {@code ${SECRET_KEY}} placeholder are all read
      * as an unsupplied secret and raise the same message — DL-186. A value shorter than
      * {@value #MINIMUM_SECRET_BYTES} bytes is rejected before it reaches
-     * {@link Keys#hmacShaKeyFor(byte[])} — DL-141. Neither failure message reproduces any part of the
+     * {@link Keys#hmacShaKeyFor(byte[])} — DL-186. Neither failure message reproduces any part of the
      * configured value — DL-111.
      *
      * @param configuredSecret value of {@code scanner.jwt.secret}, which may be {@code null}

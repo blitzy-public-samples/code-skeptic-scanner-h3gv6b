@@ -4,6 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -18,6 +22,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
@@ -25,6 +30,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -36,6 +42,7 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.slf4j.LoggerFactory;
 
+import org.springframework.data.domain.Pageable;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
 import org.springframework.http.HttpHeaders;
@@ -49,7 +56,6 @@ import org.springframework.web.reactive.function.client.ExchangeFunction;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
-import com.codeskeptic.scanner.entity.AiTool;
 import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.repository.AiToolRepository;
 import com.codeskeptic.scanner.repository.SettingRepository;
@@ -82,6 +88,12 @@ import reactor.core.scheduler.Schedulers;
 @MockitoSettings(strictness = Strictness.LENIENT)
 @DisplayName("TweetStreamClient")
 class TweetStreamClientTest {
+
+    /** Rule cap {@code application.yml} configures — DL-254. */
+    private static final int MAX_STREAM_RULES = 25;
+
+    /** Signal-idle bound {@code application.yml} configures, in seconds — DL-256. */
+    private static final long STREAM_IDLE_TIMEOUT_SECONDS = 60L;
 
     /** Host root the transport is rooted at, matching {@code config.WebClientConfig}. */
     private static final String BASE_URL = "https://api.x.com";
@@ -149,9 +161,9 @@ class TweetStreamClientTest {
 
     @BeforeEach
     void stubTheDefaultRuleSources() {
-        when(aiToolRepository.findAll()).thenReturn(List.of());
+        when(aiToolRepository.findNames(any(Pageable.class))).thenReturn(List.of());
         when(settingRepository.findById(STREAM_KEYWORDS_KEY)).thenReturn(Optional.empty());
-        when(tweetStreamListener.onStatus(any())).thenReturn(true);
+        when(tweetStreamListener.onStatus(any(), anyInt())).thenReturn(true);
     }
 
     @AfterEach
@@ -209,7 +221,7 @@ class TweetStreamClientTest {
             client.start();
 
             verify(settingRepository, never()).findById(any());
-            verify(aiToolRepository, never()).findAll();
+            verify(aiToolRepository, never()).findNames(any(Pageable.class));
         }
 
         @Test
@@ -410,8 +422,8 @@ class TweetStreamClientTest {
         @Test
         @DisplayName("unions the configured base terms with every ai_tools name")
         void unionsTheConfiguredBaseTermsWithEveryAiToolsName() {
-            when(aiToolRepository.findAll())
-                    .thenReturn(List.of(aiTool("Copilot"), aiTool("Cursor")));
+            when(aiToolRepository.findNames(any(Pageable.class)))
+                    .thenReturn(List.of("Copilot", "Cursor"));
             client = startedAgainst(streamOf(""));
 
             assertThat(registeredValues()).containsExactly("\"AI coding tool\"",
@@ -429,13 +441,13 @@ class TweetStreamClientTest {
         @Test
         @DisplayName("replaces the whole set with the stream_keywords row when it carries a value")
         void replacesTheWholeSetWithTheStreamKeywordsRowWhenItCarriesAValue() {
-            when(aiToolRepository.findAll()).thenReturn(List.of(aiTool("Copilot")));
+            when(aiToolRepository.findNames(any(Pageable.class))).thenReturn(List.of("Copilot"));
             when(settingRepository.findById(STREAM_KEYWORDS_KEY))
                     .thenReturn(Optional.of(setting(" vibe coding , GPT-4 ,, ")));
             client = startedAgainst(streamOf(""));
 
             assertThat(registeredValues()).containsExactly("\"vibe coding\"", "GPT-4");
-            verify(aiToolRepository, never()).findAll();
+            verify(aiToolRepository, never()).findNames(any(Pageable.class));
         }
 
         @ParameterizedTest(name = "row value [{0}]")
@@ -453,12 +465,11 @@ class TweetStreamClientTest {
         @Test
         @DisplayName("drops an ai_tools row carrying no usable name")
         void dropsAnAiToolsRowCarryingNoUsableName() {
-            List<AiTool> tools = new ArrayList<>();
-            tools.add(aiTool("Copilot"));
-            tools.add(aiTool(null));
-            tools.add(aiTool("   "));
-            tools.add(null);
-            when(aiToolRepository.findAll()).thenReturn(tools);
+            List<String> names = new ArrayList<>();
+            names.add("Copilot");
+            names.add(null);
+            names.add("   ");
+            when(aiToolRepository.findNames(any(Pageable.class))).thenReturn(names);
             client = startedAgainst(streamOf(""));
 
             assertThat(registeredTags()).containsExactlyElementsOf(
@@ -468,8 +479,8 @@ class TweetStreamClientTest {
         @Test
         @DisplayName("de-duplicates terms without regard to case, keeping the first spelling")
         void deDuplicatesTermsWithoutRegardToCaseKeepingTheFirstSpelling() {
-            when(aiToolRepository.findAll())
-                    .thenReturn(List.of(aiTool("gpt-4"), aiTool("GPT-4"), aiTool("Copilot")));
+            when(aiToolRepository.findNames(any(Pageable.class)))
+                    .thenReturn(List.of("gpt-4", "GPT-4", "Copilot"));
             client = startedAgainst(streamOf(""));
 
             assertThat(registeredTags()).containsExactlyElementsOf(
@@ -493,7 +504,7 @@ class TweetStreamClientTest {
         @Test
         @DisplayName("tolerates an absent scanner.ingestion group")
         void toleratesAnAbsentScannerIngestionGroup() {
-            when(aiToolRepository.findAll()).thenReturn(List.of(aiTool("Copilot")));
+            when(aiToolRepository.findNames(any(Pageable.class))).thenReturn(List.of("Copilot"));
             client = new TweetStreamClient(
                     webClient(routes(streamOf(""))),
                     properties(twitter(CONSUMER_KEY, CONSUMER_SECRET), null),
@@ -501,6 +512,403 @@ class TweetStreamClientTest {
             client.start();
 
             assertThat(registeredTags()).containsExactly("Copilot");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Bounded queueing, lifecycle drain, idle detection and log suppression
+    // — DL-256, DL-258, DL-259, DL-260
+    // -----------------------------------------------------------------------
+
+    @Nested
+    @DisplayName("bounded queueing, drain, idle detection and log suppression")
+    class BoundsAndLifecycle {
+
+        @Test
+        @DisplayName("requests one record and one chunk at a time, so a blocked handler bounds the "
+                + "queue")
+        void requestsOneRecordAndOneChunkAtATime() throws Exception {
+            int records = 50;
+            AtomicInteger emittedChunks = new AtomicInteger();
+            CountDownLatch handlerEntered = new CountDownLatch(1);
+            CountDownLatch releaseHandler = new CountDownLatch(1);
+            AtomicInteger handled = new AtomicInteger();
+            when(tweetStreamListener.onStatus(any(), anyInt())).thenAnswer(invocation -> {
+                if (handled.getAndIncrement() == 0) {
+                    handlerEntered.countDown();
+                    assertThat(releaseHandler.await(20, TimeUnit.SECONDS)).isTrue();
+                }
+                return true;
+            });
+
+            client = startedAgainst(countedChunks(records, emittedChunks));
+
+            assertThat(handlerEntered.await(20, TimeUnit.SECONDS)).isTrue();
+            // A default prefetch of 256 would pull every chunk while the handler blocks
+            assertThat(emittedChunks.get()).isLessThanOrEqualTo(5);
+
+            releaseHandler.countDown();
+            awaitCondition(() -> handled.get() >= records);
+            assertThat(emittedChunks.get()).isGreaterThanOrEqualTo(records);
+        }
+
+        @Test
+        @DisplayName("waits for a record the handler is still holding before reporting the stop")
+        void waitsForARecordTheHandlerIsStillHoldingBeforeReportingTheStop() throws Exception {
+            CountDownLatch handlerEntered = new CountDownLatch(1);
+            CountDownLatch releaseHandler = new CountDownLatch(1);
+            when(tweetStreamListener.onStatus(any(), anyInt())).thenAnswer(invocation -> {
+                handlerEntered.countDown();
+                assertThat(releaseHandler.await(20, TimeUnit.SECONDS)).isTrue();
+                return true;
+            });
+
+            client = startedAgainst(streamOf("{\"data\":{\"text\":\"held\"}}\n"));
+            assertThat(handlerEntered.await(20, TimeUnit.SECONDS)).isTrue();
+
+            CountDownLatch reported = new CountDownLatch(1);
+            Thread stopping = new Thread(() -> client.stop(reported::countDown), "stop-caller");
+            stopping.start();
+            try {
+                assertThat(reported.await(500, TimeUnit.MILLISECONDS))
+                        .as("the stop is reported while a record is still held")
+                        .isFalse();
+
+                releaseHandler.countDown();
+                assertThat(reported.await(20, TimeUnit.SECONDS))
+                        .as("the stop is reported once the record is released")
+                        .isTrue();
+            } finally {
+                releaseHandler.countDown();
+                stopping.join(TimeUnit.SECONDS.toMillis(20));
+            }
+
+            assertThat(client.isRunning()).isFalse();
+        }
+
+        @Test
+        @DisplayName("reports the stop at once when no record is being handled")
+        void reportsTheStopAtOnceWhenNoRecordIsBeingHandled() {
+            client = startedAgainst(streamOf(""));
+            awaitExchange(STREAM_PATH);
+
+            AtomicInteger reported = new AtomicInteger();
+            client.stop(reported::incrementAndGet);
+
+            assertThat(reported.get()).isEqualTo(1);
+            assertThat(client.isRunning()).isFalse();
+        }
+
+        @Test
+        @DisplayName("leaves nothing subscribed after repeated starts and stops")
+        void leavesNothingSubscribedAfterRepeatedStartsAndStops() {
+            client = clientWith(CONSUMER_KEY, CONSUMER_SECRET, routes(streamOf("")));
+
+            for (int attempt = 0; attempt < 20; attempt++) {
+                client.start();
+                client.stop();
+            }
+
+            assertThat(client.isRunning()).isFalse();
+        }
+
+        @Test
+        @DisplayName("reconnects when the connection delivers no byte for the idle bound")
+        void reconnectsWhenTheConnectionDeliversNoByteForTheIdleBound() {
+            AtomicInteger streamAttempts = new AtomicInteger();
+            ExchangeFunction exchange = request -> {
+                String path = request.url().getPath();
+                if (path.equals(TOKEN_PATH)) {
+                    return Mono.just(json("{\"token_type\":\"bearer\",\"access_token\":\""
+                            + TOKEN + "\"}"));
+                }
+                if (path.equals(RULES_PATH)) {
+                    return Mono.just(json(request.method() == HttpMethod.GET
+                            ? "{\"data\":[]}"
+                            : "{\"meta\":{\"summary\":{\"created\":1}}}"));
+                }
+                streamAttempts.incrementAndGet();
+                return Mono.just(silentStream());
+            };
+            client = clientWith(CONSUMER_KEY, CONSUMER_SECRET, exchange,
+                    ingestion(BASE_TERMS, MAX_STREAM_RULES, 1L));
+            client.start();
+
+            awaitCondition(() -> streamAttempts.get() >= 2);
+            assertThat(streamAttempts.get()).isGreaterThanOrEqualTo(2);
+        }
+
+        @Test
+        @DisplayName("keeps a connection that keeps delivering keep-alive bytes")
+        void keepsAConnectionThatKeepsDeliveringKeepAliveBytes() {
+            AtomicInteger streamAttempts = new AtomicInteger();
+            ExchangeFunction exchange = request -> {
+                String path = request.url().getPath();
+                if (path.equals(TOKEN_PATH)) {
+                    return Mono.just(json("{\"token_type\":\"bearer\",\"access_token\":\""
+                            + TOKEN + "\"}"));
+                }
+                if (path.equals(RULES_PATH)) {
+                    return Mono.just(json(request.method() == HttpMethod.GET
+                            ? "{\"data\":[]}"
+                            : "{\"meta\":{\"summary\":{\"created\":1}}}"));
+                }
+                streamAttempts.incrementAndGet();
+                return Mono.just(keepAliveStream());
+            };
+            client = clientWith(CONSUMER_KEY, CONSUMER_SECRET, exchange,
+                    ingestion(BASE_TERMS, MAX_STREAM_RULES, 2L));
+            client.start();
+
+            awaitExchange(STREAM_PATH);
+            sleep(Duration.ofSeconds(4));
+            assertThat(streamAttempts.get())
+                    .as("a keep-alive resets the idle bound, so no reconnection happens")
+                    .isEqualTo(1);
+        }
+
+        @Test
+        @DisplayName("reports several unreadable records without one record per warning")
+        void reportsSeveralUnreadableRecordsWithoutOneRecordPerWarning() {
+            ListAppender<ILoggingEvent> recorded = attachClientAppender();
+            try {
+                client = startedAgainst(chunks("not json\n", "still not json\n",
+                        "nor this\n", "{\"data\":{\"text\":\"a post\"}}\n"));
+
+                assertThat(awaitDelivery(1))
+                        .extracting(node -> node.path("data").path("text").asText())
+                        .containsExactly("a post");
+
+                List<String> warnings = recorded.list.stream()
+                        .filter(event -> event.getLevel() == Level.WARN)
+                        .map(ILoggingEvent::getFormattedMessage)
+                        .filter(message -> message.contains("could not be read as JSON"))
+                        .toList();
+                assertThat(warnings).hasSize(1);
+                assertThat(warnings.get(0))
+                        .contains("in the last 60s")
+                        .doesNotContain("not json")
+                        .doesNotContain("nor this");
+            } finally {
+                detachClientAppender(recorded);
+            }
+        }
+
+        @Test
+        @DisplayName("resolves the popularity threshold once per cycle and hands it to every record")
+        void resolvesThePopularityThresholdOncePerCycleAndHandsItToEveryRecord() {
+            when(tweetStreamListener.popularityThresholdInForce()).thenReturn(250);
+
+            client = startedAgainst(chunks("{\"data\":{\"text\":\"one\"}}\n",
+                    "{\"data\":{\"text\":\"two\"}}\n",
+                    "{\"data\":{\"text\":\"three\"}}\n"));
+
+            awaitDelivery(3);
+            verify(tweetStreamListener, times(1)).popularityThresholdInForce();
+            verify(tweetStreamListener, times(3)).onStatus(any(JsonNode.class), eq(250));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Term validation and rule bounds — DL-254, DL-257
+    // -----------------------------------------------------------------------
+
+    @Nested
+    @DisplayName("term validation and rule bounds")
+    class TermValidationAndBounds {
+
+        @ParameterizedTest(name = "[{index}] a term holding {0} is dropped")
+        @ValueSource(strings = {
+            "quote\" OR spam",
+            "back\\slash",
+            "group (a)",
+            "operator:value",
+            "-negated",
+            "#hashtag",
+            "@handle",
+            "brace{a}",
+            "star*",
+            "tilde~a",
+            "trailing hyphen -",
+        })
+        @DisplayName("drops a term holding a character the rule syntax reserves")
+        void dropsATermHoldingAReservedCharacter(String rejected) {
+            when(aiToolRepository.findNames(any(Pageable.class))).thenReturn(List.of(rejected));
+            client = startedAgainst(streamOf(""));
+
+            assertThat(registeredTags()).containsExactlyElementsOf(BASE_TERMS);
+            assertThat(mutationBodyContaining("add")).doesNotContain("OR spam");
+        }
+
+        @Test
+        @DisplayName("drops a term longer than the accepted bound")
+        void dropsATermLongerThanTheAcceptedBound() {
+            when(aiToolRepository.findNames(any(Pageable.class)))
+                    .thenReturn(List.of("a".repeat(129)));
+            client = startedAgainst(streamOf(""));
+
+            assertThat(registeredTags()).containsExactlyElementsOf(BASE_TERMS);
+        }
+
+        @ParameterizedTest(name = "[{index}] a term of {0} is registered")
+        @ValueSource(strings = {"AI-generated code", "GPT 4.5", "snake_case tool", "Cody"})
+        @DisplayName("registers a term holding only accepted characters")
+        void registersATermHoldingOnlyAcceptedCharacters(String accepted) {
+            when(aiToolRepository.findNames(any(Pageable.class))).thenReturn(List.of(accepted));
+            client = startedAgainst(streamOf(""));
+
+            assertThat(registeredTags()).contains(accepted);
+        }
+
+        @Test
+        @DisplayName("records no term value when a term is dropped")
+        void recordsNoTermValueWhenATermIsDropped() {
+            ListAppender<ILoggingEvent> recorded = attachClientAppender();
+            try {
+                when(aiToolRepository.findNames(any(Pageable.class)))
+                        .thenReturn(List.of("secret\" OR spam"));
+                client = startedAgainst(streamOf(""));
+                registeredTags();
+
+                List<String> warnings = recorded.list.stream()
+                        .filter(event -> event.getLevel() == Level.WARN)
+                        .map(ILoggingEvent::getFormattedMessage)
+                        .filter(message -> message.contains("rule syntax"))
+                        .toList();
+                assertThat(warnings).hasSize(1);
+                assertThat(warnings.get(0))
+                        .doesNotContain("secret")
+                        .doesNotContain("OR spam")
+                        .contains("is 15 character(s) long");
+            } finally {
+                detachClientAppender(recorded);
+            }
+        }
+
+        @Test
+        @DisplayName("bounds the composed collection to the configured rule cap")
+        void boundsTheComposedCollectionToTheConfiguredRuleCap() {
+            ListAppender<ILoggingEvent> recorded = attachClientAppender();
+            try {
+                client = startedAgainst(streamOf(""), ingestion(BASE_TERMS, 2,
+                        STREAM_IDLE_TIMEOUT_SECONDS));
+
+                assertThat(registeredTags()).containsExactly("AI coding tool", "AI code assistant");
+                List<String> warnings = recorded.list.stream()
+                        .filter(event -> event.getLevel() == Level.WARN)
+                        .map(ILoggingEvent::getFormattedMessage)
+                        .filter(message -> message.contains("against a cap of"))
+                        .toList();
+                assertThat(warnings).hasSize(1);
+                assertThat(warnings.get(0))
+                        .contains("Composed 4 stream rule term(s) against a cap of 2")
+                        .doesNotContain("AI coding tool");
+            } finally {
+                detachClientAppender(recorded);
+            }
+        }
+
+        @Test
+        @DisplayName("reads the ai_tools names bounded by the rule cap, ordered and projected")
+        void readsTheAiToolsNamesBoundedByTheRuleCap() {
+            when(aiToolRepository.findNames(any(Pageable.class))).thenReturn(List.of());
+            client = startedAgainst(streamOf(""), ingestion(BASE_TERMS, 7,
+                    STREAM_IDLE_TIMEOUT_SECONDS));
+            registeredTags();
+
+            ArgumentCaptor<Pageable> bound = ArgumentCaptor.forClass(Pageable.class);
+            verify(aiToolRepository, atLeastOnce()).findNames(bound.capture());
+            assertThat(bound.getAllValues()).allSatisfy(page -> {
+                assertThat(page.getPageNumber()).isZero();
+                assertThat(page.getPageSize()).isEqualTo(7);
+            });
+            verify(aiToolRepository, never()).findAll();
+        }
+
+        @Test
+        @DisplayName("bounds the number of segments the stream_keywords row is split into")
+        void boundsTheNumberOfSegmentsTheStreamKeywordsRowIsSplitInto() {
+            String stored = java.util.stream.IntStream.rangeClosed(1, 600)
+                    .mapToObj(index -> "term" + index)
+                    .collect(Collectors.joining(","));
+            when(settingRepository.findById(STREAM_KEYWORDS_KEY))
+                    .thenReturn(Optional.of(setting(stored)));
+            client = startedAgainst(streamOf(""), ingestion(BASE_TERMS, 1_000,
+                    STREAM_IDLE_TIMEOUT_SECONDS));
+
+            awaitCondition(() -> allRegisteredValues().size() >= 511);
+            assertThat(allRegisteredValues()).hasSizeLessThanOrEqualTo(512);
+            assertThat(allRegisteredValues()).contains("term1", "term511");
+        }
+
+        @Test
+        @DisplayName("sends the additions as consecutive requests of at most twenty-five rules")
+        void sendsTheAdditionsAsConsecutiveRequestsOfAtMostTwentyFiveRules() {
+            List<String> names = java.util.stream.IntStream.rangeClosed(1, 60)
+                    .mapToObj(index -> "Tool" + index)
+                    .toList();
+            when(aiToolRepository.findNames(any(Pageable.class))).thenReturn(names);
+            client = startedAgainst(streamOf(""), ingestion(List.of(), 60,
+                    STREAM_IDLE_TIMEOUT_SECONDS));
+
+            awaitCondition(() -> allRegisteredValues().size() >= 60);
+            assertThat(allRegisteredValues()).hasSize(60);
+            assertThat(mutationRequestsCarrying("add")).isEqualTo(3);
+        }
+
+        @Test
+        @DisplayName("sends the deletions as consecutive requests of at most twenty-five identifiers")
+        void sendsTheDeletionsAsConsecutiveRequestsOfAtMostTwentyFiveIdentifiers() {
+            String registered = java.util.stream.IntStream.rangeClosed(1, 30)
+                    .mapToObj(index -> "{\"id\":\"" + index + "\",\"value\":\"stale" + index
+                            + "\",\"tag\":\"stale" + index + "\"}")
+                    .collect(Collectors.joining(","));
+            client = clientWith(CONSUMER_KEY, CONSUMER_SECRET,
+                    routesWithRegisteredRules("{\"data\":[" + registered + "]}", streamOf("")));
+            client.start();
+
+            awaitCondition(() -> deletedRuleIds().size() >= 30);
+            assertThat(deletedRuleIds()).hasSize(30);
+            assertThat(mutationRequestsCarrying("delete")).isEqualTo(2);
+        }
+
+        @Test
+        @DisplayName("replaces a registered rule whose tag no longer matches the wanted one")
+        void replacesARegisteredRuleWhoseTagNoLongerMatches() {
+            client = clientWith(CONSUMER_KEY, CONSUMER_SECRET, routesWithRegisteredRules(
+                    "{\"data\":[{\"id\":\"77\",\"value\":\"GPT-4\",\"tag\":\"outdated\"}]}",
+                    streamOf("")));
+            client.start();
+
+            awaitCondition(() -> !mutationBodyContaining("add").isEmpty());
+            assertThat(deletedRuleIds()).containsExactly("77");
+            assertThat(registeredTags()).contains("GPT-4");
+            assertThat(allRegisteredValues()).contains("GPT-4");
+        }
+
+        @Test
+        @DisplayName("reports the number of rules it replaced for a changed tag")
+        void reportsTheNumberOfRulesItReplacedForAChangedTag() {
+            ListAppender<ILoggingEvent> recorded = attachClientAppender();
+            try {
+                client = clientWith(CONSUMER_KEY, CONSUMER_SECRET, routesWithRegisteredRules(
+                        "{\"data\":[{\"id\":\"77\",\"value\":\"GPT-4\","
+                                + "\"tag\":\"outdated\"}]}",
+                        streamOf("")));
+                client.start();
+                awaitCondition(() -> recorded.list.stream()
+                        .anyMatch(event -> event.getFormattedMessage()
+                                .startsWith("Stream rules reconciled")));
+
+                assertThat(recorded.list.stream()
+                        .map(ILoggingEvent::getFormattedMessage)
+                        .filter(message -> message.startsWith("Stream rules reconciled"))
+                        .findFirst()
+                        .orElseThrow())
+                        .contains("1 replaced for a changed tag");
+            } finally {
+                detachClientAppender(recorded);
+            }
         }
     }
 
@@ -595,9 +1003,10 @@ class TweetStreamClientTest {
     @DisplayName("stream consumption")
     class StreamConsumption {
 
+        // Only the fields the listener maps are requested; no expansion is — DL-262
         @Test
-        @DisplayName("requests the fields and expansions the listener reads")
-        void requestsTheFieldsAndExpansionsTheListenerReads() {
+        @DisplayName("requests the fields the listener reads and no expansion it ignores")
+        void requestsTheFieldsTheListenerReadsAndNoExpansion() {
             client = startedAgainst(streamOf("{\"data\":{\"text\":\"a post\"}}\n"));
 
             RecordedExchange stream = awaitExchange(STREAM_PATH);
@@ -605,7 +1014,7 @@ class TweetStreamClientTest {
             assertThat(stream.query())
                     .contains("tweet.fields=created_at,public_metrics,referenced_tweets,"
                             + "attachments,author_id")
-                    .contains("expansions=author_id,attachments.media_keys");
+                    .doesNotContain("expansions");
         }
 
         @Test
@@ -668,7 +1077,7 @@ class TweetStreamClientTest {
         @DisplayName("keeps consuming after the listener raises")
         void keepsConsumingAfterTheListenerRaises() {
             AtomicInteger seen = new AtomicInteger();
-            when(tweetStreamListener.onStatus(any())).thenAnswer(invocation -> {
+            when(tweetStreamListener.onStatus(any(), anyInt())).thenAnswer(invocation -> {
                 if (seen.incrementAndGet() == 1) {
                     throw new IllegalStateException("listener failure");
                 }
@@ -685,7 +1094,7 @@ class TweetStreamClientTest {
         @DisplayName("stops when the listener answers false")
         void stopsWhenTheListenerAnswersFalse() {
             AtomicInteger seen = new AtomicInteger();
-            when(tweetStreamListener.onStatus(any())).thenAnswer(invocation -> {
+            when(tweetStreamListener.onStatus(any(), anyInt())).thenAnswer(invocation -> {
                 seen.incrementAndGet();
                 return false;
             });
@@ -712,7 +1121,7 @@ class TweetStreamClientTest {
             List<String> emittingThreads = new CopyOnWriteArrayList<>();
             List<String> listenerThreads = new CopyOnWriteArrayList<>();
             List<Boolean> listenerOnNonBlockingThread = new CopyOnWriteArrayList<>();
-            when(tweetStreamListener.onStatus(any())).thenAnswer(invocation -> {
+            when(tweetStreamListener.onStatus(any(), anyInt())).thenAnswer(invocation -> {
                 listenerThreads.add(Thread.currentThread().getName());
                 listenerOnNonBlockingThread.add(Schedulers.isInNonBlockingThread());
                 return true;
@@ -752,7 +1161,9 @@ class TweetStreamClientTest {
                         .toList();
                 assertThat(warnings).hasSize(1);
                 assertThat(warnings.get(0))
-                        .contains("1048576 byte(s)")
+                        // Counts and the bound only — DL-260
+                        .contains("Skipped 1 X filtered stream record(s)")
+                        .contains("1048576 byte bound")
                         .doesNotContain("yyy");
             } finally {
                 detachClientAppender(recorded);
@@ -1132,9 +1543,102 @@ class TweetStreamClientTest {
      */
     private TweetStreamClient clientWith(String consumerKey, String consumerSecret,
             ExchangeFunction exchange) {
+        return clientWith(consumerKey, consumerSecret, exchange, ingestion(BASE_TERMS));
+    }
+
+    /**
+     * Assembles a client with the supplied credentials, exchange function and ingestion group.
+     *
+     * @param consumerKey    value bound to {@code scanner.twitter.consumer-key}
+     * @param consumerSecret value bound to {@code scanner.twitter.consumer-secret}
+     * @param exchange       the controlled exchange function
+     * @param ingestion      the {@code scanner.ingestion} group, possibly {@code null}
+     * @return the assembled client
+     */
+    private TweetStreamClient clientWith(String consumerKey, String consumerSecret,
+            ExchangeFunction exchange, ScannerProperties.Ingestion ingestion) {
         return new TweetStreamClient(webClient(exchange),
-                properties(twitter(consumerKey, consumerSecret), ingestion(BASE_TERMS)),
+                properties(twitter(consumerKey, consumerSecret), ingestion),
                 aiToolRepository, settingRepository, tweetStreamListener);
+    }
+
+    /**
+     * Builds a {@code scanner.ingestion} group carrying the supplied base terms and bounds — DL-254,
+     * DL-256.
+     *
+     * @param terms        value of {@code stream-base-keywords}
+     * @param maxRules     value of {@code max-stream-rules}
+     * @param idleSeconds  value of {@code stream-idle-timeout-seconds}
+     * @return the group
+     */
+    private static ScannerProperties.Ingestion ingestion(List<String> terms, int maxRules,
+            long idleSeconds) {
+        return new ScannerProperties.Ingestion(terms, maxRules, idleSeconds);
+    }
+
+    /**
+     * Starts a client against the supplied stream response and ingestion group.
+     *
+     * @param stream    the canned stream response
+     * @param ingestion the {@code scanner.ingestion} group
+     * @return the started client
+     */
+    private TweetStreamClient startedAgainst(ClientResponse stream,
+            ScannerProperties.Ingestion ingestion) {
+        TweetStreamClient started =
+                clientWith(CONSUMER_KEY, CONSUMER_SECRET, routes(stream), ingestion);
+        started.start();
+        return started;
+    }
+
+    /**
+     * Reads the {@code value} of every rule the client registered, across every add batch — DL-254.
+     *
+     * @return the rule expressions, in the order the batches were sent
+     */
+    private List<String> allRegisteredValues() {
+        return mutationBodies().stream()
+                .filter(body -> body.contains("\"add\""))
+                .flatMap(body -> membersOf(body, "\"value\":\"").stream())
+                .toList();
+    }
+
+    /**
+     * Counts the rules-mutation requests carrying {@code member}.
+     *
+     * @param member the member the body must carry
+     * @return the number of such requests
+     */
+    private long mutationRequestsCarrying(String member) {
+        return mutationBodies().stream()
+                .filter(body -> body.contains("\"" + member + "\""))
+                .count();
+    }
+
+    /**
+     * Reads the {@code id} values of every delete mutation the client issued.
+     *
+     * @return the identifiers, in the order the batches were sent
+     */
+    private List<String> deletedRuleIds() {
+        List<String> ids = new ArrayList<>();
+        for (String body : mutationBodies()) {
+            if (!body.contains("\"delete\"")) {
+                continue;
+            }
+            int from = body.indexOf('[');
+            int to = body.indexOf(']', from);
+            if (from < 0 || to < 0) {
+                continue;
+            }
+            for (String raw : body.substring(from + 1, to).split(",")) {
+                String trimmed = raw.trim();
+                if (trimmed.length() >= 2) {
+                    ids.add(trimmed.substring(1, trimmed.length() - 1));
+                }
+            }
+        }
+        return ids;
     }
 
     /**
@@ -1295,6 +1799,52 @@ class TweetStreamClientTest {
     }
 
     /**
+     * Builds a stream response delivering one record per chunk, counting each emitted chunk — DL-258.
+     *
+     * @param records number of records to deliver
+     * @param emitted counter raised once per emitted chunk
+     * @return the canned response
+     */
+    private static ClientResponse countedChunks(int records, AtomicInteger emitted) {
+        List<DataBuffer> buffers = new ArrayList<>(records);
+        for (int index = 1; index <= records; index++) {
+            String record = "{\"data\":{\"text\":\"record " + index + "\"}}\n";
+            buffers.add(DefaultDataBufferFactory.sharedInstance
+                    .wrap(record.getBytes(StandardCharsets.UTF_8)));
+        }
+        return ClientResponse.create(HttpStatus.OK)
+                .header(HttpHeaders.CONTENT_TYPE, "application/json")
+                .body(Flux.fromIterable(buffers).doOnNext(chunk -> emitted.incrementAndGet()))
+                .build();
+    }
+
+    /**
+     * Builds a stream response that opens and then delivers nothing at all — DL-256.
+     *
+     * @return the canned response
+     */
+    private static ClientResponse silentStream() {
+        return ClientResponse.create(HttpStatus.OK)
+                .header(HttpHeaders.CONTENT_TYPE, "application/json")
+                .body(Flux.never())
+                .build();
+    }
+
+    /**
+     * Builds a stream response that delivers a blank keep-alive record twice a second — DL-256.
+     *
+     * @return the canned response
+     */
+    private static ClientResponse keepAliveStream() {
+        return ClientResponse.create(HttpStatus.OK)
+                .header(HttpHeaders.CONTENT_TYPE, "application/json")
+                .body(Flux.interval(Duration.ofMillis(500))
+                        .map(tick -> DefaultDataBufferFactory.sharedInstance
+                                .wrap("\r\n".getBytes(StandardCharsets.UTF_8))))
+                .build();
+    }
+
+    /**
      * Attaches a recording appender to the logger of the class under test.
      *
      * @return the attached appender
@@ -1344,7 +1894,7 @@ class TweetStreamClientTest {
     private static ScannerProperties properties(ScannerProperties.Twitter twitter,
             ScannerProperties.Ingestion ingestion) {
         return new ScannerProperties(null, 100, 60L, twitter, null, null, null, null, null,
-                ingestion);
+                ingestion, null);
     }
 
     /**
@@ -1370,7 +1920,7 @@ class TweetStreamClientTest {
     private static ScannerProperties.Twitter twitter(String consumerKey, String consumerSecret,
             long timeoutSeconds) {
         return new ScannerProperties.Twitter("api-key", "api-secret", "api-secret-key",
-                consumerKey, consumerSecret, "access-token", "access-token-secret", timeoutSeconds);
+                consumerKey, consumerSecret, "access-token", "access-token-secret", timeoutSeconds, STREAM_IDLE_TIMEOUT_SECONDS);
     }
 
     /**
@@ -1380,19 +1930,7 @@ class TweetStreamClientTest {
      * @return the group
      */
     private static ScannerProperties.Ingestion ingestion(List<String> terms) {
-        return new ScannerProperties.Ingestion(terms);
-    }
-
-    /**
-     * Builds an {@code ai_tools} row carrying the supplied name.
-     *
-     * @param name value of {@code ai_tools.name}, possibly {@code null}
-     * @return the row
-     */
-    private static AiTool aiTool(String name) {
-        AiTool tool = new AiTool();
-        tool.setName(name);
-        return tool;
+        return new ScannerProperties.Ingestion(terms, MAX_STREAM_RULES, STREAM_IDLE_TIMEOUT_SECONDS);
     }
 
     /**
@@ -1457,7 +1995,7 @@ class TweetStreamClientTest {
         org.mockito.ArgumentCaptor<JsonNode> captor =
                 org.mockito.ArgumentCaptor.forClass(JsonNode.class);
         org.mockito.Mockito.verify(tweetStreamListener, org.mockito.Mockito.atLeast(0))
-                .onStatus(captor.capture());
+                .onStatus(captor.capture(), anyInt());
         return List.copyOf(captor.getAllValues());
     }
 
@@ -1487,7 +2025,17 @@ class TweetStreamClientTest {
      */
     private List<String> ruleMembers(String marker) {
         awaitCondition(() -> !mutationBodyContaining("add").isEmpty());
-        String body = mutationBodyContaining("add");
+        return membersOf(mutationBodyContaining("add"), marker);
+    }
+
+    /**
+     * Reads one member of every rule a mutation body carries.
+     *
+     * @param body   the mutation body
+     * @param marker the member prefix to read after
+     * @return the member values, in order
+     */
+    private static List<String> membersOf(String body, String marker) {
         List<String> values = new ArrayList<>();
         int index = body.indexOf(marker);
         while (index >= 0) {

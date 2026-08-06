@@ -57,17 +57,14 @@ import jakarta.servlet.http.HttpServletResponse;
  * status, writes no body and clears no context; a request reaching the authorization stage with no
  * authentication is answered by the entry point {@code SecurityConfig} configures.
  * {@link JwtService#extractUsername(String)} absorbs every verification failure; no exception leaves
- * this filter. Neither a header value, nor a token value, nor the token's subject is written to the
- * log — DL-111. One fixed sentence is written at {@code DEBUG} when a request authenticates, and
- * nothing at all when a presented token does not verify: no request method, no request URI and no
- * principal reaches a record, and {@link JwtService} records the refusal as a fixed reason code —
- * DL-144, DL-203.
- *
- * <p>Log records carry the request method and URI only; neither a header value, a token value, nor
- * the authenticated principal name is written — DL-052, DL-094.
+ * this filter. Two fixed sentences are written at {@code DEBUG} — one when a request authenticates,
+ * one when a presented token names a principal the credential store does not hold — and nothing is
+ * written when a presented token does not verify, which {@link JwtService} records itself as one of
+ * five fixed sentences. No record written on this path carries a header value, a token value, the
+ * token's subject, the request method or the request URI — DL-052, DL-094, DL-111.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-014, DL-021,
- * DL-111, DL-112, DL-113, DL-144 and DL-203; construct-level provenance is recorded in
+ * DL-052, DL-094, DL-111, DL-112 and DL-113; construct-level provenance is recorded in
  * {@code docs/TRACEABILITY_MATRIX.md}.
  *
  * <p>All three fields are {@code final} and hold stateless collaborators; every member declared here
@@ -141,7 +138,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 UserDetails principal = resolvePrincipal(username.get());
                 if (principal == null) {
                     // A fixed sentence: no request method, no request URI and no principal —
-                    // DL-144, DL-203 — see docs/DECISION_LOG.md
+                    // DL-111 — see docs/DECISION_LOG.md
                     log.debug("A presented bearer token named a principal the credential store "
                             + "does not hold; the request continues unauthenticated");
                 } else {
@@ -149,8 +146,8 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     context.setAuthentication(authenticationFor(principal.getUsername(), request));
                     securityContextHolderStrategy.setContext(context);
                     securityContextRepository.saveContext(context, request, response);
-                    // A fixed sentence: no request method, no request URI and no principal — DL-144,
-                    // DL-203 — see docs/DECISION_LOG.md
+                    // A fixed sentence: no request method, no request URI and no principal —
+                    // DL-111 — see docs/DECISION_LOG.md
                     log.debug("Authenticated a request through a bearer token");
                 }
             }

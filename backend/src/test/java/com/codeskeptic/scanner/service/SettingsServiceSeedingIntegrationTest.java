@@ -83,10 +83,11 @@ class SettingsServiceSeedingIntegrationTest {
     private static final String OPERATOR_DESCRIPTION = "Edited through PUT /settings/{key}.";
 
     /**
-     * Generated character capacity of {@code settings.key}. The mapping declares no {@code length},
-     * so the column carries the undeclared-length capacity — DL-069 — see docs/DECISION_LOG.md.
+     * A key length past the capacity an undeclared {@code @Column#length()} would have rendered. The
+     * mapping states the capacity-free character type, so the column admits it — DL-069 — see
+     * docs/DECISION_LOG.md.
      */
-    private static final int SETTINGS_KEY_LENGTH = 255;
+    private static final int BEYOND_UNDECLARED_LENGTH_FACET = 1_000;
 
     /** Value the tracked-terms row is seeded with — DL-044 — see docs/DECISION_LOG.md. */
     private static final String STREAM_KEYWORDS_SEED_VALUE = "";
@@ -284,12 +285,24 @@ class SettingsServiceSeedingIntegrationTest {
     }
 
     @Test
-    @DisplayName("contributes rows only, each carrying a key within the declared column width")
-    void contributesRowsOnlyEachCarryingAKeyWithinTheDeclaredColumnWidth() {
-        assertThat(settingRepository.findAll()).allSatisfy(seeded -> {
-            assertThat(seeded.getKey()).isIn(SEEDED_KEYS);
-            assertThat(seeded.getKey().length()).isLessThanOrEqualTo(SETTINGS_KEY_LENGTH);
-        });
+    @DisplayName("contributes rows only, and the key column states no capacity a seeded or stored "
+            + "key could exceed")
+    void contributesRowsOnlyAndTheKeyColumnStatesNoCapacity() {
+        assertThat(settingRepository.findAll()).allSatisfy(seeded ->
+                assertThat(seeded.getKey()).isIn(SEEDED_KEYS));
+
+        String keyPastTheAnnotationDefault = "k".repeat(BEYOND_UNDECLARED_LENGTH_FACET);
+        settingRepository.save(new Setting(keyPastTheAnnotationDefault, "stored",
+                "A key past the capacity an undeclared length would have rendered."));
+
+        assertThat(settingRepository.findById(keyPastTheAnnotationDefault))
+                .as("row stored under a key past the annotation default")
+                .isPresent()
+                .get()
+                .extracting(Setting::getKey)
+                .isEqualTo(keyPastTheAnnotationDefault);
+
+        settingRepository.deleteById(keyPastTheAnnotationDefault);
     }
 
     /**

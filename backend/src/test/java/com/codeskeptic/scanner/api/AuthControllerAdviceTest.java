@@ -28,18 +28,18 @@ import com.codeskeptic.scanner.security.JwtService;
 import com.codeskeptic.scanner.security.SecurityConfig;
 
 // Net-new (no Python counterpart: the source registered no token route) — see docs/DECISION_LOG.md
-// DL-019, DL-117, DL-257
+// DL-019, DL-117
 /**
  * Proves that a failure of the authentication provider behind {@code POST /auth/token} is rendered
  * by {@link GlobalExceptionHandler} rather than by the controller.
  *
  * <p>This slice replaces the assembled {@link AuthenticationManager} with a mock, and
- * {@code AuthControllerTest} keeps the assembled one — see docs/DECISION_LOG.md DL-257. Only the
- * token route is mapped here, and {@link #theMockReplacesTheAssembledManager()} asserts the
- * replacement took effect, so no case in this class can pass without it.
+ * {@code AuthControllerTest} keeps the assembled one. Only the token route is mapped here, and
+ * {@link #theMockReplacesTheAssembledManager()} asserts the replacement took effect, so no case in
+ * this class can pass without it.
  *
  * <p>{@link AuthenticationServiceException} is the provider-failure type: it is an
- * {@code AuthenticationException} that the controller deliberately does not fold into its 401
+ * {@code AuthenticationException} that the controller does not fold into its 401
  * mapping, so it leaves the handler method and reaches the advice, which answers 500 with the
  * single-key envelope — see docs/DECISION_LOG.md DL-092, DL-117, DL-210.
  */

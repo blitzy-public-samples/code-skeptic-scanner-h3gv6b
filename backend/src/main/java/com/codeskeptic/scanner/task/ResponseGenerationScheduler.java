@@ -113,7 +113,7 @@ public class ResponseGenerationScheduler {
      */
     // Constructor injection replaces the in-function LLMService() at
     // backend/app/tasks/response_generation.py:L19 and NotionService() at :L29; the get_settings()
-    // call at :L37 is replaced by the fixedDelayString placeholder on generatePendingResponses() —
+    // call at :L37 is replaced by the per-pass resolution config/AsyncSchedulingConfig performs —
     // DL-227 — see docs/DECISION_LOG.md
     public ResponseGenerationScheduler(TweetRepository tweetRepository,
             ResponseService responseService,
@@ -142,11 +142,14 @@ public class ResponseGenerationScheduler {
      * <p>A candidate ingested after the pass began is answered by this pass when its identifier lies
      * past the cursor at the time the next batch is read, and by the following pass otherwise.
      *
-     * <p>Every tick runs a pass. When a pass runs is declared by the annotation on this method and
-     * nowhere else: {@code fixedDelay} measures the interval from the completion of the previous pass,
-     * so no pass overlaps its predecessor, and {@code fixedDelayString} reads
-     * {@code scanner.response-generation-delay-seconds} in seconds. The first pass runs one interval
-     * after the scheduler starts — see docs/DECISION_LOG.md DL-047, DL-227, DL-228.
+     * <p>Every tick runs a pass. This method carries no scheduling annotation: when a pass runs is
+     * decided entirely by {@code config.AsyncSchedulingConfig}, which registers this method as a
+     * trigger task and adds the interval in force to the completion of the previous pass, so no pass
+     * overlaps its predecessor. The interval is the {@code response_generation_delay} settings row
+     * when it holds a positive number of seconds and
+     * {@code scanner.response-generation-delay-seconds} otherwise, resolved once per pass. The first
+     * pass runs at the startup instant rather than one interval later — see docs/DECISION_LOG.md
+     * DL-047, DL-227, DL-228, DL-251.
      *
      * <p>The method takes no argument, returns nothing and throws nothing: every {@link
      * RuntimeException} raised inside it is recorded and suppressed.

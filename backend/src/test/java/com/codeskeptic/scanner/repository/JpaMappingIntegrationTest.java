@@ -161,13 +161,36 @@ class JpaMappingIntegrationTest {
     /** Count of fields carrying {@code @JoinColumn} across the four entities. */
     private static final int JOIN_COLUMN_ANNOTATED_FIELD_COUNT = 1;
 
-    /** Value {@code jakarta.persistence.Column#length()} carries when it is not declared. */
-    private static final int DEFAULT_ANNOTATION_LENGTH = 255;
+    /**
+     * Value {@code jakarta.persistence.Column#length()} carries when a mapping declares no length.
+     * Every mapped column leaves the facet undeclared, so every mapping reports this value — DL-068 —
+     * see docs/DECISION_LOG.md.
+     */
+    private static final int UNDECLARED_LENGTH_FACET = 255;
+
+    /**
+     * The capacity-free character type every character column declares as its
+     * {@code jakarta.persistence.Column#columnDefinition()} — DL-068, DL-069 — see
+     * docs/DECISION_LOG.md.
+     */
+    private static final String CHARACTER_COLUMN_DEFINITION = "varchar";
+
+    /**
+     * Capacity H2 2.3 reports for a character column declared without one. It is the vendor's own
+     * unbounded capacity, not a capacity this mapping states — DL-068 — see docs/DECISION_LOG.md.
+     */
+    private static final int H2_UNBOUNDED_CHARACTER_CAPACITY = 1_000_000_000;
+
+    /**
+     * A key length beyond the capacity an undeclared length would have rendered, used to store a
+     * {@code settings} key no invented bound would admit — DL-069 — see docs/DECISION_LOG.md.
+     */
+    private static final int BEYOND_UNDECLARED_LENGTH_FACET = 1_000;
 
     /**
      * Every character column the source declares as a bare {@code Column(String)} —
      * backend/app/db/models.py:L11,L15-18 (tweets), :L24 (responses), :L36-37 (ai_tools) and
-     * :L42-44 (settings). All eleven are mapped by a bare {@code @Column} — DL-068 — see
+     * :L42-44 (settings). All eleven are mapped as capacity-free character columns — DL-068 — see
      * docs/DECISION_LOG.md.
      */
     private static final Map<String, List<String>> SOURCE_CHARACTER_COLUMNS = Map.of(
@@ -273,57 +296,54 @@ class JpaMappingIntegrationTest {
      * backend/app/db/models.py:L10-18, :L23-28, :L35-37 and :L42-44: a 32-bit column for every
      * {@code Column(Integer)} including the {@code responses.tweet_id} foreign key, a zone-free
      * timestamp for every {@code Column(DateTime)}, a 53-bit binary floating-point column for
-     * {@code Column(Float)}, a boolean column for {@code Column(Boolean)}, and the capacity an
-     * undeclared {@code @Column#length()} renders — {@code varchar(}{@link
-     * #DEFAULT_ANNOTATION_LENGTH}{@code )} — for every {@code Column(String)}, the
-     * {@code settings} primary key included.
+     * {@code Column(Float)}, a boolean column for {@code Column(Boolean)}, and the capacity-free
+     * {@value #CHARACTER_COLUMN_DEFINITION} for every {@code Column(String)}, the {@code settings}
+     * primary key included. That character rendering is what SQLAlchemy's own {@code Column(String)}
+     * emits, and it carries no capacity on any of the three dialects.
      *
      * <p>DL-068, DL-166 — see docs/DECISION_LOG.md.
      */
     private static final Map<String, Map<String, List<String>>> EXPECTED_GENERATED_COLUMN_TYPES =
             Map.of(
                     "org.hibernate.dialect.H2Dialect", Map.of(
-                            TWEETS_TABLE, List.of("id integer", "content varchar(255)",
+                            TWEETS_TABLE, List.of("id integer", "content varchar",
                                     "like_count integer", "created_at timestamp(6)",
-                                    "doubt_rating float(53)", "media varchar(255)",
-                                    "quoted_tweet_id varchar(255)", "user_id varchar(255)",
-                                    "ai_tools_mentioned varchar(255)"),
-                            RESPONSES_TABLE, List.of("id integer", "content varchar(255)",
+                                    "doubt_rating float(53)", "media varchar",
+                                    "quoted_tweet_id varchar", "user_id varchar",
+                                    "ai_tools_mentioned varchar"),
+                            RESPONSES_TABLE, List.of("id integer", "content varchar",
                                     "generated_at timestamp(6)", "is_approved boolean",
                                     "tweet_id integer"),
                             AI_TOOLS_TABLE,
-                            List.of("id integer", "name varchar(255)",
-                                    "description varchar(255)"),
-                            SETTINGS_TABLE, List.of("\"key\" varchar(255)",
-                                    "\"value\" varchar(255)", "description varchar(255)")),
+                            List.of("id integer", "name varchar", "description varchar"),
+                            SETTINGS_TABLE, List.of("\"key\" varchar",
+                                    "\"value\" varchar", "description varchar")),
                     "org.hibernate.dialect.PostgreSQLDialect", Map.of(
-                            TWEETS_TABLE, List.of("id integer", "content varchar(255)",
+                            TWEETS_TABLE, List.of("id integer", "content varchar",
                                     "like_count integer", "created_at timestamp(6)",
-                                    "doubt_rating float(53)", "media varchar(255)",
-                                    "quoted_tweet_id varchar(255)", "user_id varchar(255)",
-                                    "ai_tools_mentioned varchar(255)"),
-                            RESPONSES_TABLE, List.of("id integer", "content varchar(255)",
+                                    "doubt_rating float(53)", "media varchar",
+                                    "quoted_tweet_id varchar", "user_id varchar",
+                                    "ai_tools_mentioned varchar"),
+                            RESPONSES_TABLE, List.of("id integer", "content varchar",
                                     "generated_at timestamp(6)", "is_approved boolean",
                                     "tweet_id integer"),
                             AI_TOOLS_TABLE,
-                            List.of("id integer", "name varchar(255)",
-                                    "description varchar(255)"),
-                            SETTINGS_TABLE, List.of("\"key\" varchar(255)",
-                                    "\"value\" varchar(255)", "description varchar(255)")),
+                            List.of("id integer", "name varchar", "description varchar"),
+                            SETTINGS_TABLE, List.of("\"key\" varchar",
+                                    "\"value\" varchar", "description varchar")),
                     "org.hibernate.dialect.MySQLDialect", Map.of(
-                            TWEETS_TABLE, List.of("id integer", "content varchar(255)",
+                            TWEETS_TABLE, List.of("id integer", "content varchar",
                                     "like_count integer", "created_at datetime(6)",
-                                    "doubt_rating float(53)", "media varchar(255)",
-                                    "quoted_tweet_id varchar(255)", "user_id varchar(255)",
-                                    "ai_tools_mentioned varchar(255)"),
-                            RESPONSES_TABLE, List.of("id integer", "content varchar(255)",
+                                    "doubt_rating float(53)", "media varchar",
+                                    "quoted_tweet_id varchar", "user_id varchar",
+                                    "ai_tools_mentioned varchar"),
+                            RESPONSES_TABLE, List.of("id integer", "content varchar",
                                     "generated_at datetime(6)", "is_approved bit",
                                     "tweet_id integer"),
                             AI_TOOLS_TABLE,
-                            List.of("id integer", "name varchar(255)",
-                                    "description varchar(255)"),
-                            SETTINGS_TABLE, List.of("`key` varchar(255)",
-                                    "`value` varchar(255)", "description varchar(255)")));
+                            List.of("id integer", "name varchar", "description varchar"),
+                            SETTINGS_TABLE, List.of("`key` varchar",
+                                    "`value` varchar", "description varchar")));
 
     private static final String DELIMITER = ",";
     private static final double TOLERANCE = 1.0e-9;
@@ -613,14 +633,16 @@ class JpaMappingIntegrationTest {
     // Ported from backend/app/db/models.py:L10-18,L23-28,L35-37,L42-44 (faithful port) — see
     // docs/DECISION_LOG.md
     // backend/app/db/models.py declares each of those columns as a bare Column(<Type>): none
-    // carries nullable=False, unique=True or a length argument, and neither does any mapped field —
+    // carries nullable=False, unique=True or a length argument, and neither does any mapped field.
+    // A character field states the capacity-free type the source rendering carries and nothing else —
     // DL-068 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("every mapped entity field leaves the column defaults for nullability, uniqueness "
-            + "and length in place")
+    @DisplayName("every mapped entity field leaves nullability, uniqueness and length undeclared and "
+            + "states no capacity")
     void everyMappedEntityFieldLeavesTheColumnDefaultsInPlace() {
         int columnFields = 0;
         int joinColumnFields = 0;
+        int characterFields = 0;
 
         for (Class<?> entityType : MAPPED_ENTITIES) {
             for (Field field : mappedFields(entityType, Column.class)) {
@@ -630,9 +652,17 @@ class JpaMappingIntegrationTest {
                 assertThat(column.nullable()).as("@Column#nullable of %s", location).isTrue();
                 assertThat(column.unique()).as("@Column#unique of %s", location).isFalse();
                 assertThat(column.length()).as("@Column#length of %s", location)
-                        .isEqualTo(DEFAULT_ANNOTATION_LENGTH);
-                assertThat(column.columnDefinition()).as("@Column#columnDefinition of %s", location)
-                        .isEmpty();
+                        .isEqualTo(UNDECLARED_LENGTH_FACET);
+                if (isCharacterMapped(field)) {
+                    assertThat(column.columnDefinition())
+                            .as("@Column#columnDefinition of %s", location)
+                            .isEqualTo(CHARACTER_COLUMN_DEFINITION);
+                    characterFields++;
+                } else {
+                    assertThat(column.columnDefinition())
+                            .as("@Column#columnDefinition of %s", location)
+                            .isEmpty();
+                }
                 columnFields++;
             }
 
@@ -653,14 +683,26 @@ class JpaMappingIntegrationTest {
                 .isEqualTo(JOIN_COLUMN_ANNOTATED_FIELD_COUNT);
         assertThat(columnFields + joinColumnFields).as("mapped columns across the four entities")
                 .isEqualTo(MAPPED_COLUMN_COUNT);
+        assertThat(characterFields).as("character columns stating the capacity-free type")
+                .isEqualTo(SOURCE_CHARACTER_COLUMN_COUNT);
+    }
+
+    /**
+     * Reports whether a mapped field carries one of the schema's character columns.
+     *
+     * @param field the mapped field, never {@code null}
+     * @return {@code true} when the field's declared type is {@code String} or {@code List<String>}
+     */
+    private static boolean isCharacterMapped(Field field) {
+        return field.getType() == String.class || field.getType() == List.class;
     }
 
     // Ported from backend/app/db/models.py:L11,L15-18,L24,L36-37,L42-44 (faithful port) — DL-068 —
     // see docs/DECISION_LOG.md
     @Test
     @DisplayName("every character column the source declares is generated in the character type "
-            + "family at the capacity an undeclared length renders")
-    void everySourceCharacterColumnIsGeneratedAtTheUndeclaredLengthCapacity() throws SQLException {
+            + "family with no capacity of its own")
+    void everySourceCharacterColumnIsGeneratedWithNoCapacity() throws SQLException {
         int assertedColumns = 0;
 
         try (Connection connection = dataSource.getConnection()) {
@@ -678,7 +720,8 @@ class JpaMappingIntegrationTest {
                     assertThat((int) attributes.get(COLUMN_SIZE))
                             .as("generated capacity of column %s.%s (reported as %s)",
                                     table.getKey(), columnName, attributes.get(TYPE_NAME))
-                            .isEqualTo(DEFAULT_ANNOTATION_LENGTH);
+                            .isNotEqualTo(UNDECLARED_LENGTH_FACET)
+                            .isEqualTo(H2_UNBOUNDED_CHARACTER_CAPACITY);
                     assertedColumns++;
                 }
             }
@@ -688,20 +731,25 @@ class JpaMappingIntegrationTest {
                 .isEqualTo(SOURCE_CHARACTER_COLUMN_COUNT);
     }
 
-    // The settings primary key carries no declared length — DL-068 — see docs/DECISION_LOG.md
+    // The settings primary key states the capacity-free character type and no bound — DL-069 — see
+    // docs/DECISION_LOG.md
     @Test
-    @DisplayName("the settings primary key stores and reloads a key at the generated capacity")
-    void theSettingsPrimaryKeyStoresAKeyAtTheGeneratedCapacity() {
-        String widestKey = "k".repeat(DEFAULT_ANNOTATION_LENGTH);
+    @DisplayName("the settings primary key stores and reloads a key past the capacity an undeclared "
+            + "length would have rendered")
+    void theSettingsPrimaryKeyStoresAKeyPastTheUndeclaredLengthCapacity() {
+        String longKey = "k".repeat(BEYOND_UNDECLARED_LENGTH_FACET);
+        String longValue = "v".repeat(BEYOND_UNDECLARED_LENGTH_FACET);
 
-        settingRepository.save(new Setting(widestKey, "stored", "A key at the generated capacity"));
+        settingRepository.save(new Setting(longKey, longValue, "A key past the annotation default"));
         entityManager.flush();
         entityManager.clear();
 
-        Optional<Setting> reloaded = settingRepository.findById(widestKey);
-        assertThat(reloaded).as("row stored under a key at the generated capacity").isPresent();
+        Optional<Setting> reloaded = settingRepository.findById(longKey);
+        assertThat(reloaded).as("row stored under a key past the annotation default").isPresent();
         assertThat(reloaded.get().getKey()).as("stored key")
-                .hasSize(DEFAULT_ANNOTATION_LENGTH).isEqualTo(widestKey);
+                .hasSize(BEYOND_UNDECLARED_LENGTH_FACET).isEqualTo(longKey);
+        assertThat(reloaded.get().getValue()).as("stored value")
+                .hasSize(BEYOND_UNDECLARED_LENGTH_FACET).isEqualTo(longValue);
     }
 
     // Ported from backend/app/db/models.py:L7-8,L20-21,L32-33,L39-40 (faithful port) — see
@@ -1742,14 +1790,12 @@ class JpaMappingIntegrationTest {
         }
     }
 
-    // Every character column carries the capacity an undeclared length renders, and no statement
-    // widens one into a long or large-object type — DL-068, DL-166 — see docs/DECISION_LOG.md
+    // No generated character column carries a capacity and none is widened into a long or
+    // large-object type — DL-068, DL-069, DL-166 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("every generated character column carries the capacity an undeclared length "
-            + "renders and no statement declares a long or large-object character type")
-    void everyGeneratedCharacterColumnCarriesTheUndeclaredLengthCapacity() {
-        String defaultBound = "varchar(" + DEFAULT_ANNOTATION_LENGTH + ")";
-
+    @DisplayName("no generated character column carries a capacity and no statement declares a long "
+            + "or large-object character type")
+    void noGeneratedCharacterColumnCarriesACapacity() {
         for (String dialect : EXPECTED_GENERATED_COLUMN_TYPES.keySet()) {
             Map<String, String> statements = generateCreateStatements(dialect);
 
@@ -1758,13 +1804,16 @@ class JpaMappingIntegrationTest {
                         .as("create statement of table %s on %s", table.getKey(), dialect)
                         .doesNotContain("clob")
                         .doesNotContain("longtext")
+                        .doesNotContain("mediumtext")
                         .doesNotContain(" text")
-                        .doesNotContain("varchar(max)");
+                        .doesNotContain("character large object")
+                        .doesNotContain(" oid")
+                        .doesNotContain("varchar(");
             }
             for (String table : MAPPED_TABLES) {
                 assertThat(statements.get(table))
                         .as("create statement of table %s on %s", table, dialect)
-                        .contains(defaultBound);
+                        .contains(CHARACTER_COLUMN_DEFINITION);
             }
         }
     }

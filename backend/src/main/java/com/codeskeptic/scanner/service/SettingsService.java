@@ -221,7 +221,7 @@ public class SettingsService {
      *                             {@code backend/app/api/settings.py:L18}
      * <p>An edit of the {@value #STREAM_KEYWORDS_KEY} row that leaves no term the X rule grammar can
      * carry is stored and reported at {@code WARN} naming the key and the term counts; the wire
-     * outcome is unchanged and ingestion falls back to the configured base terms — DL-249.
+     * outcome is unchanged and ingestion falls back to the configured base terms — DL-257.
      *
      * @throws NotFoundException   when {@code key} names no row, carrying the wire literal of
      *                             {@code backend/app/api/settings.py:L22}
@@ -255,16 +255,20 @@ public class SettingsService {
         return updated;
     }
 
-    // The X rule grammar the stored terms must satisfy — DL-249 — see docs/DECISION_LOG.md
+    // The X rule grammar the stored terms must satisfy — DL-257 — see docs/DECISION_LOG.md
     /**
      * Records a {@value #STREAM_KEYWORDS_KEY} edit that leaves no term the X rule grammar can carry.
+     *
+     * <p>Usability is decided by {@link StreamRuleTerms#isUsable(String)}, the one grammar
+     * {@code task/TweetStreamClient} also holds its terms to, so a term counted usable here is never
+     * dropped when the rule set is composed — DL-257.
      *
      * <p>Nothing is recorded for any other key, and nothing is recorded when the stored value holds at
      * least one usable term or is blank — a blank value is the seeded "no override" state
      * {@code task/TweetStreamClient} reads, not an unusable one — DL-044.
      *
-     * <p>The record names the key and the two counts only. No stored term reaches it — DL-249,
-     * DL-208. The stored value is left exactly as the operator supplied it: ingestion falls back to
+     * <p>The record names the key and the two counts only. No stored term reaches it — DL-052,
+     * DL-197. The stored value is left exactly as the operator supplied it: ingestion falls back to
      * the configured base terms, so an unusable edit withholds nothing that was already working.
      *
      * @param key   the key that was written, possibly {@code null}
@@ -286,9 +290,10 @@ public class SettingsService {
         }
         log.warn("Setting '{}' holds {} term(s) and none can be carried as an X stream rule; "
                 + "ingestion falls back to scanner.ingestion.stream-base-keywords. A term may hold "
-                + "no double quote, no backslash and no control character, and its match expression "
-                + "may not exceed {} characters",
-                STREAM_KEYWORDS_KEY, supplied, StreamRuleTerms.MAX_RULE_EXPRESSION_LENGTH);
+                + "nothing but letters, digits and '{}', must open and close with a letter or a digit, "
+                + "and may not exceed {} character(s)",
+                STREAM_KEYWORDS_KEY, supplied, StreamRuleTerms.ADDITIONAL_TERM_CHARACTERS,
+                StreamRuleTerms.MAX_TERM_CHARS);
     }
 
 
@@ -301,8 +306,8 @@ public class SettingsService {
      * {@code description}. The first two carry a {@code value} rendered from configuration —
      * {@code scanner.popularity-threshold} and {@code scanner.response-generation-delay-seconds} —
      * and each is read back in place of that configuration default on every use, by
-     * {@code service.TwitterService} and {@code task.ResponseGenerationScheduler} respectively —
-     * DL-040. The third carries the blank value {@value #STREAM_KEYWORDS_SEED_VALUE}, which
+     * {@code service.TwitterService} and {@code config.AsyncSchedulingConfig} respectively — DL-040,
+     * DL-227. The third carries the blank value {@value #STREAM_KEYWORDS_SEED_VALUE}, which
      * {@code task.TweetStreamClient} reads as "no override" — DL-044.
      *
      * <p>A key this operation observes as present is left exactly as it stands: its {@code value} and

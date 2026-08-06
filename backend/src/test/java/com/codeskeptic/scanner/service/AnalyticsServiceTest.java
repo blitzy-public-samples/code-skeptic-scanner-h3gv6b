@@ -94,7 +94,7 @@ class AnalyticsServiceTest {
     private static final int SHORTER_TREND_WINDOW_DAYS = 7;
 
     // -----------------------------------------------------------------------
-    // Fixed clock — the UTC basis the window is measured from (DL-241)
+    // Fixed clock — the UTC basis the window is measured from (DL-278)
     // -----------------------------------------------------------------------
 
     /**
@@ -244,7 +244,7 @@ class AnalyticsServiceTest {
         });
     }
 
-    // The clock is the fifth constructor parameter — DL-241 — see docs/DECISION_LOG.md
+    // The clock is the fifth constructor parameter — DL-278 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("takes its three repositories, its configuration and its clock through its only "
             + "constructor")
@@ -259,7 +259,7 @@ class AnalyticsServiceTest {
                 Clock.class);
     }
 
-    // No reader of the current instant bypasses the injected clock — DL-241 — see
+    // No reader of the current instant bypasses the injected clock — DL-278 — see
     // docs/DECISION_LOG.md
     @Test
     @DisplayName("rejects a null clock rather than falling back to the system default zone")
@@ -627,7 +627,7 @@ class AnalyticsServiceTest {
         assertThat(reported.totalLikes()).isNull();
     }
 
-    // The window is a count of UTC calendar dates read from the injected clock — DL-241 — see
+    // The window is a count of UTC calendar dates read from the injected clock — DL-278 — see
     // docs/DECISION_LOG.md
     @Test
     @DisplayName("opens the window at the start of the UTC day the configured number of dates back")
@@ -642,7 +642,7 @@ class AnalyticsServiceTest {
         assertThat(capturedCutoff()).isEqualTo(expectedCutoff(CONFIGURED_TREND_WINDOW_DAYS));
     }
 
-    // DL-241 — see docs/DECISION_LOG.md
+    // DL-278 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("opens the window seven UTC dates back when seven days are configured")
     void opensTheWindowSevenDaysBeforeTheCallWhenSevenDaysAreConfigured() {
@@ -659,7 +659,7 @@ class AnalyticsServiceTest {
         verifyNoMoreInteractions(properties);
     }
 
-    // The cutoff is read in UTC, never in the JVM's default zone — DL-241 — see docs/DECISION_LOG.md
+    // The cutoff is read in UTC, never in the JVM's default zone — DL-278 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("opens the window on the UTC date even when the default JVM zone is on another date")
     void opensTheWindowOnTheUtcDateWhateverTheDefaultJvmZone() {
@@ -679,7 +679,7 @@ class AnalyticsServiceTest {
         }
     }
 
-    // DL-241 — see docs/DECISION_LOG.md
+    // DL-278 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("opens the window on the UTC date even when the default JVM zone is a day ahead")
     void opensTheWindowOnTheUtcDateWhenTheDefaultJvmZoneIsADayAhead() {
@@ -699,7 +699,7 @@ class AnalyticsServiceTest {
         }
     }
 
-    // A window of one UTC date opens at the start of the current UTC day — DL-241 — see
+    // A window of one UTC date opens at the start of the current UTC day — DL-278 — see
     // docs/DECISION_LOG.md
     @Test
     @DisplayName("a one-day window opens at the start of the current UTC day, never mid-day")
@@ -715,7 +715,7 @@ class AnalyticsServiceTest {
     }
 
     // The cutoff is always midnight, so the series spans whole UTC dates and never a partial day —
-    // DL-241 — see docs/DECISION_LOG.md
+    // DL-278 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("the window spans exactly the configured number of whole UTC dates for every width")
     void theWindowSpansExactlyTheConfiguredNumberOfWholeUtcDates() {
@@ -735,7 +735,7 @@ class AnalyticsServiceTest {
         }
     }
 
-    // A non-positive window observes nothing — DL-241 — see docs/DECISION_LOG.md
+    // A non-positive window observes nothing — DL-278 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("refuses a zero or negative observation window when the property binds")
     void refusesANonPositiveObservationWindowWhenThePropertyBinds() {
@@ -758,7 +758,7 @@ class AnalyticsServiceTest {
 
         service.getTrends();
 
-        // Both bounds are read from the injected fixed clock, so both are deterministic — DL-241,
+        // Both bounds are read from the injected fixed clock, so both are deterministic — DL-278,
         // DL-247
         WindowBounds window = capturedWindow();
         assertThat(window.until())

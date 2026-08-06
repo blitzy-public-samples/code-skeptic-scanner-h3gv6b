@@ -33,8 +33,9 @@ import java.util.List;
  * their null and empty semantics — see docs/DECISION_LOG.md DL-024.
  *
  * <p>No column declares a not-null marker, a duplicate-value restriction or a width bound. The five
- * character columns carry a bare {@code @Column}, matching the bare {@code Column(String)} of
- * backend/app/db/models.py:L11,L15-18 — see docs/DECISION_LOG.md DL-068.
+ * character columns declare {@code columnDefinition = "varchar"}, the capacity-free character type
+ * the bare {@code Column(String)} of backend/app/db/models.py:L11,L15-18 renders — see
+ * docs/DECISION_LOG.md DL-068.
  */
 // Ported from backend/app/db/models.py:L7-18 (faithful port) — see docs/DECISION_LOG.md
 // Departures from the literal source declaration, each recorded in the decision log: id declares
@@ -54,8 +55,9 @@ public class Tweet {
     @Column(name = "id")
     private Integer id;
 
-    // backend/app/db/models.py:L11
-    @Column(name = "content")
+    // backend/app/db/models.py:L11 — capacity-free character column — DL-068 — see
+    // docs/DECISION_LOG.md
+    @Column(name = "content", columnDefinition = "varchar")
     private String content;
 
     // backend/app/db/models.py:L12
@@ -72,24 +74,28 @@ public class Tweet {
 
     // backend/app/db/models.py:L15
     // Single delimited column value carried as a list — DL-024 — see docs/DECISION_LOG.md
+    // Capacity-free character column — DL-068 — see docs/DECISION_LOG.md
     @Convert(converter = DelimitedStringListConverter.class)
-    @Column(name = "media")
+    @Column(name = "media", columnDefinition = "varchar")
     private List<String> media;
 
     // backend/app/db/models.py:L16
     // Sole Optional[str] field in the source (backend/app/schema/tweet.py:L12); may be null.
-    @Column(name = "quoted_tweet_id")
+    // Capacity-free character column — DL-068 — see docs/DECISION_LOG.md
+    @Column(name = "quoted_tweet_id", columnDefinition = "varchar")
     private String quotedTweetId;
 
     // backend/app/db/models.py:L17
     // Identifier of the post author, held as a plain column value; there is no user table.
-    @Column(name = "user_id")
+    // Capacity-free character column — DL-068 — see docs/DECISION_LOG.md
+    @Column(name = "user_id", columnDefinition = "varchar")
     private String userId;
 
     // backend/app/db/models.py:L18
     // Single delimited column value carried as a list — DL-024 — see docs/DECISION_LOG.md
+    // Capacity-free character column — DL-068 — see docs/DECISION_LOG.md
     @Convert(converter = DelimitedStringListConverter.class)
-    @Column(name = "ai_tools_mentioned")
+    @Column(name = "ai_tools_mentioned", columnDefinition = "varchar")
     private List<String> aiToolsMentioned;
 
     // Ported from backend/app/db/models.py:L30 (faithful port) — see docs/DECISION_LOG.md

@@ -19,7 +19,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 // Net-new (no source construct: the retired tree carried no traceability matrix) — see
-// docs/DECISION_LOG.md DL-260
+// docs/DECISION_LOG.md DL-058, DL-216
 /**
  * Holds {@code docs/TRACEABILITY_MATRIX.md} to the delivered tree.
  *

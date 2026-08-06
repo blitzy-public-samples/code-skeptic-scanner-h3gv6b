@@ -230,7 +230,7 @@ class AuthControllerTest {
                 .andExpect(jsonPath("$." + EXPIRES_IN).value(EXPECTED_EXPIRES_IN_SECONDS));
     }
 
-    // The success record carries no principal text — DL-242 — see docs/DECISION_LOG.md
+    // The success record carries no principal text — DL-197 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("records a successful issuance without writing the principal's own text")
     void recordsASuccessfulIssuanceWithoutWritingThePrincipalsOwnText() throws Exception {
@@ -1030,8 +1030,9 @@ class AuthControllerTest {
         }
 
         @Test
-        @DisplayName("records the first rejection of a window at WARN and every later one at DEBUG")
-        void recordsTheFirstRejectionOfAWindowAtWarnAndEveryLaterOneAtDebug() {
+        @DisplayName("records the first rejection of a reporting interval at WARN and every later one "
+                + "at DEBUG")
+        void recordsTheFirstRejectionOfAnIntervalAtWarnAndEveryLaterOneAtDebug() {
             AuthController controller = new AuthController(
                     RecordingAuthenticationManager.rejecting(
                             new BadCredentialsException("rejected")),
@@ -1048,6 +1049,27 @@ class AuthControllerTest {
                         .contains("BadCredentialsException")
                         .doesNotContain(UNKNOWN_USERNAME)
                         .doesNotContain(WRONG_PASSWORD);
+            } finally {
+                detachRecorder(records);
+            }
+        }
+
+        // The record that falls due carries how many rejections it stands for — DL-272
+        @Test
+        @DisplayName("counts the rejections the record it writes stands for")
+        void countsTheRejectionsTheRecordItWritesStandsFor() {
+            AuthController controller = new AuthController(
+                    RecordingAuthenticationManager.rejecting(
+                            new BadCredentialsException("rejected")),
+                    jwtService);
+            ListAppender<ILoggingEvent> records = attachRecorder();
+            try {
+                controller.issueToken(new LoginRequest(UNKNOWN_USERNAME, WRONG_PASSWORD));
+
+                assertThat(levels(records, Level.WARN)).hasSize(1);
+                assertThat(levels(records, Level.WARN).getFirst())
+                        .contains("1 credential(s) submitted to POST /auth/token in the last 60s")
+                        .contains("did not authenticate");
             } finally {
                 detachRecorder(records);
             }

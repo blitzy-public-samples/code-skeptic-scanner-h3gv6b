@@ -128,25 +128,15 @@ class DatabaseUrlTranslatorTest {
                 .hasMessageContaining("mariadb");
     }
 
+    // The scheme set holds one entry per runtime-scope driver; H2 is test-scope — DL-071, DL-242 —
+    // see docs/DECISION_LOG.md
     @Test
-    @DisplayName("maps the h2 scheme onto the h2 jdbc vendor in its tcp connection mode")
-    void mapsTheH2SchemeOntoH2() {
-        TranslatedDatabaseUrl translated = DatabaseUrlTranslator.translate("h2://localhost/scanner");
-
-        // The vendor prefix for the h2 scheme is `jdbc:h2:tcp://` — DL-071 — see docs/DECISION_LOG.md
-        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:h2:tcp://localhost/scanner");
-        assertThat(translated.username()).isNull();
-        assertThat(translated.password()).isNull();
-    }
-
-    @Test
-    @DisplayName("carries the h2 host port and database into the tcp url")
-    void carriesTheH2HostPortAndDatabaseIntoTheTcpUrl() {
-        TranslatedDatabaseUrl translated =
-                DatabaseUrlTranslator.translate("h2://db.internal:9092/codeskeptic");
-
-        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:h2:tcp://db.internal:9092/codeskeptic");
-        assertThat(translated.jdbcUrl()).doesNotContain("jdbc:h2://");
+    @DisplayName("refuses an h2 scheme and names the supported schemes")
+    void refusesAnH2Scheme() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("h2://db.internal:9092/codeskeptic"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("unsupported scheme 'h2'")
+                .hasMessageContaining("supported schemes are postgresql, postgres, mysql, mariadb");
     }
 
     @Test
@@ -415,7 +405,7 @@ class DatabaseUrlTranslatorTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("declares no scheme")
                 .hasMessageContaining("postgresql")
-                .hasMessageContaining("h2");
+                .hasMessageContaining("mysql");
     }
 
     @Test
@@ -498,7 +488,7 @@ class DatabaseUrlTranslatorTest {
         "postgresql://host/db?sslmode=require;PASSWD=s3cret     | jdbc:postgresql://host/db?sslmode=require        |       | s3cret",
         "postgresql://host/db?user=admin;password=s3cret        | jdbc:postgresql://host/db                       | admin | s3cret",
         "mysql://host/db?useSSL=true;user=root                  | jdbc:mysql://host/db?useSSL=true                | root  | ",
-        "h2://host:9092/db?MODE=PostgreSQL;pwd=s3cret           | jdbc:h2:tcp://host:9092/db?MODE=PostgreSQL       |       | s3cret",
+        "mysql://host:3306/db?useUnicode=true;pwd=s3cret        | jdbc:mysql://host:3306/db?useUnicode=true        |       | s3cret",
         "postgresql://host/db?user=admin&password=s3cret        | jdbc:postgresql://host/db                       | admin | s3cret",
         "postgresql://host/db?sslmode=require&user=admin;pwd=x  | jdbc:postgresql://host/db?sslmode=require        | admin | x",
     })
@@ -515,15 +505,16 @@ class DatabaseUrlTranslatorTest {
                 .isEqualTo(expectedPassword == null ? null : expectedPassword.strip());
     }
 
-    // A retained property keeps the separator that preceded it, so an H2 property list is not
-    // rewritten — DL-072 — see docs/DECISION_LOG.md
+    // A retained property keeps the separator that preceded it, so a semicolon-separated property
+    // list is not rewritten — DL-072 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("retains semicolon-separated properties that name no credential with their own "
             + "separators")
     void retainsSemicolonSeparatedPropertiesThatNameNoCredential() {
         assertThat(DatabaseUrlTranslator
-                        .translate("h2://host:9092/db?MODE=PostgreSQL;DB_CLOSE_DELAY=-1").jdbcUrl())
-                .isEqualTo("jdbc:h2:tcp://host:9092/db?MODE=PostgreSQL;DB_CLOSE_DELAY=-1");
+                        .translate("mysql://host:3306/db?useUnicode=true;connectTimeout=5000")
+                        .jdbcUrl())
+                .isEqualTo("jdbc:mysql://host:3306/db?useUnicode=true;connectTimeout=5000");
         assertThat(DatabaseUrlTranslator
                         .translate("postgresql://host/db?a=1&b=2;c=3&d=4").jdbcUrl())
                 .isEqualTo("jdbc:postgresql://host/db?a=1&b=2;c=3&d=4");
@@ -535,9 +526,9 @@ class DatabaseUrlTranslatorTest {
     @DisplayName("opens the retained query with no separator when the first property was a credential")
     void opensTheRetainedQueryWithNoSeparatorWhenTheFirstPropertyWasACredential() {
         assertThat(DatabaseUrlTranslator
-                        .translate("h2://host:9092/db?user=sa;MODE=PostgreSQL;DB_CLOSE_DELAY=-1")
+                        .translate("mysql://host:3306/db?user=sa;useUnicode=true;connectTimeout=5000")
                         .jdbcUrl())
-                .isEqualTo("jdbc:h2:tcp://host:9092/db?MODE=PostgreSQL;DB_CLOSE_DELAY=-1");
+                .isEqualTo("jdbc:mysql://host:3306/db?useUnicode=true;connectTimeout=5000");
         assertThat(DatabaseUrlTranslator
                         .translate("postgresql://host/db?password=s3cret&sslmode=require").jdbcUrl())
                 .isEqualTo("jdbc:postgresql://host/db?sslmode=require");

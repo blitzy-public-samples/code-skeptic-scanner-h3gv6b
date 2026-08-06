@@ -3,7 +3,7 @@
 # Ported from backend/app/main.py:L53 (faithful port) — DL-029 — see docs/DECISION_LOG.md
 server:
   port: ${PORT:5000}
-  # Net-new (no Python counterpart) — DL-241 — see docs/DECISION_LOG.md
+  # Net-new (no Python counterpart) — DL-277 — see docs/DECISION_LOG.md
   # With this strategy HttpServletRequest.isSecure() reports the forwarded X-Forwarded-Proto scheme,
   # which is what Spring Security's Strict-Transport-Security writer reads.
   forward-headers-strategy: ${FORWARD_HEADERS_STRATEGY:framework}
@@ -112,11 +112,6 @@ scanner:
     # Bounds the app-only token exchange and the stream-rules calls. The filtered-stream
     # subscription is not bounded by it. A value below 1 is read as 1 second.
     request-timeout-seconds: ${TWITTER_REQUEST_TIMEOUT_SECONDS:10}
-    # Net-new (no Python counterpart) — DL-243 — see docs/DECISION_LOG.md
-    # Bounds the wait between two records the filtered stream delivers, keep-alive records
-    # included. Accepted range: 1 second or greater, and it must exceed the 20 second keep-alive
-    # cadence X documents. Exceeding it reconnects.
-    stream-idle-timeout-seconds: ${TWITTER_STREAM_IDLE_TIMEOUT_SECONDS:30}
 
   notion:
     # Ported from backend/app/core/config.py:L7 and backend/app/services/notion_service.py:L8 (faithful port) — see docs/DECISION_LOG.md

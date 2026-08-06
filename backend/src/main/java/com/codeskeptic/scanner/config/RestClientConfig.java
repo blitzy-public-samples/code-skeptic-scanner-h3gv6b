@@ -265,17 +265,15 @@ public class RestClientConfig {
     /**
      * Publishes the JDK HTTP client the Notion transport uses.
      *
-     * <p>The client is retained by this configuration so that
-     * {@link #shutdownNotionHttpClient()} can release its selector thread and connection pool at
-     * context shutdown. Without a retained reference Spring would build one beneath the request
-     * factory and leave it to the garbage collector.
+     * <p>The client is a bean of this configuration, and {@link #shutdownNotionHttpClient()} releases
+     * its selector thread and connection pool at context shutdown — DL-264.
      *
      * <p>The connect bound is {@code scanner.notion.connect-timeout-seconds}; the read bound is applied
      * per request by {@link #boundedRequestFactory(HttpClient)} — DL-150.
      *
-     * <p>{@code destroyMethod} is cleared deliberately: the inferred {@code close()} of
-     * {@link HttpClient} blocks for as long as any request is in flight, with no bound. The bounded
-     * sequence of {@link #shutdownNotionHttpClient()} is used instead.
+     * <p>{@code destroyMethod} is empty, so the container calls no {@code close()} on this bean; the
+     * bounded release sequence of {@link #shutdownNotionHttpClient()} is the one shutdown path —
+     * DL-264.
      *
      * @return the transport the Notion {@link RestClient} issues every request through
      * @throws IllegalStateException when {@code scanner.notion.connect-timeout-seconds} is below one

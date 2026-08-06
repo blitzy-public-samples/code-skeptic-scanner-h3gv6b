@@ -9,7 +9,6 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.regex.Pattern;
@@ -143,13 +142,7 @@ public class LlmService {
                     .collect(Collectors.joining(", "));
 
 
-    /**
-     * Longest run of post body carried into the prompt. A longer body is cut to this length and
-     * marked with {@value #BODY_TRUNCATION_MARK} — DL-203.
-     */
-    private static final int PROMPT_BODY_LIMIT = 1000;
-
-    /** Appended to a post body cut to {@value #PROMPT_BODY_LIMIT}. */
+    /** Appended to the joined AI tool names when they are cut to {@value #PROMPT_CONTEXT_LIMIT}. */
     private static final String BODY_TRUNCATION_MARK = "…";
 
     // Bounds applied to the Context: value — DL-265 — see docs/DECISION_LOG.md
@@ -167,15 +160,6 @@ public class LlmService {
 
     /** Highest accepted value of {@code scanner.openai.temperature}. */
     private static final double MAXIMUM_TEMPERATURE = 2.0d;
-
-    /**
-     * Longest time {@link #closeOpenAiClient()} awaits a generation request already in flight before
-     * closing the client.
-     */
-    private static final Duration ACTIVE_CALL_DRAIN_LIMIT = Duration.ofSeconds(30);
-
-    /** Interval between two reads of {@link #callsInFlight} while a drain is awaited. */
-    private static final Duration DRAIN_POLL_INTERVAL = Duration.ofMillis(25);
 
     /** Reported in place of an absent OpenAI error component. */
     private static final String ABSENT = "absent";
@@ -218,13 +202,6 @@ public class LlmService {
      * so a context close cannot abort live work — DL-266.
      */
     private final ReentrantReadWriteLock activeUseLock = new ReentrantReadWriteLock();
-
-    /**
-     * Number of generation requests issued to the provider and not yet returned.
-     * {@link #closeOpenAiClient()} awaits this reaching zero, bounded by
-     * {@link #ACTIVE_CALL_DRAIN_LIMIT}, before the client is closed — DL-253.
-     */
-    private final AtomicInteger callsInFlight = new AtomicInteger();
 
     /**
      * Creates the service.
@@ -292,10 +269,10 @@ public class LlmService {
         String prompt = buildPrompt(tweet);
         String model = requireConfigured(openai().model(), "scanner.openai.model");
 
-        // Caller-propagated value rendered through the log guard — DL-149 — see
-        // docs/DECISION_LOG.md
+        // Every caller-supplied and configuration-derived value rendered through the log guard —
+        // DL-149 — see docs/DECISION_LOG.md
         log.debug("Requesting a generated reply for tweet {} from model {} with a {} character prompt",
-                LogSafe.logSafe(tweet.id()), model, prompt.length());
+                LogSafe.logSafe(tweet.id()), LogSafe.logSafe(model), prompt.length());
 
         ChatCompletionCreateParams params = buildParams(model, prompt);
 
@@ -304,9 +281,6 @@ public class LlmService {
         Lock activeUse = activeUseLock.readLock();
         activeUse.lock();
         ChatCompletion completion;
-        // The call is counted for the duration of the drain window — DL-253 — see
-        // docs/DECISION_LOG.md
-        callsInFlight.incrementAndGet();
         try {
             if (destroyed) {
                 throw new IllegalStateException(DESTROYED_MESSAGE);
@@ -317,14 +291,14 @@ public class LlmService {
             // — see docs/DECISION_LOG.md
             log.error("Model {} rejected the generation request for tweet {} with HTTP {}: "
                     + "type {}, code {}, param {}",
-                    model, LogSafe.logSafe(tweet.id()), rejected.statusCode(),
+                    LogSafe.logSafe(model), LogSafe.logSafe(tweet.id()), rejected.statusCode(),
                     guarded(rejected.type()),
                     guarded(rejected.code()),
                     guarded(rejected.param()));
             throw rejected;
         } catch (RuntimeException failure) {
             log.error("Requesting a generated reply for tweet {} from model {} failed with {}",
-                    LogSafe.logSafe(tweet.id()), model, LogSafe.type(failure));
+                    LogSafe.logSafe(tweet.id()), LogSafe.logSafe(model), LogSafe.type(failure));
             throw failure;
         } finally {
             activeUse.unlock();
@@ -566,75 +540,19 @@ public class LlmService {
         }
     }
 
-    // Bounded graceful drain — DL-253 — see docs/DECISION_LOG.md
-    /**
-     * Awaits every generation request already issued to the provider, for at most {@code limit}.
-     *
-     * <p>{@link #destroyed} is already set when this runs and no further request is issued: a caller
-     * that reaches {@link #openAiClient()} afterwards is refused. This method returns as soon as
-     * {@link #callsInFlight} reaches zero, and returns once {@code limit} has elapsed whether or not it
-     * has. Overrunning the limit is recorded at {@code WARN} with the number of requests still in
-     * flight.
-     *
-     * <p>Must be called without holding this bean's monitor.
-     *
-     * <p>An interrupt while awaiting restores the interrupt flag and returns immediately.
-     *
-     * @param limit the longest time to await; a limit at or below zero awaits nothing
-     */
-    void awaitActiveCalls(Duration limit) {
-        int outstanding = callsInFlight.get();
-        if (outstanding == 0 || limit == null || limit.isNegative() || limit.isZero()) {
-            return;
-        }
-
-        log.info("Awaiting {} in-flight generation request(s) for at most {}ms before closing the "
-                + "OpenAI API client", outstanding, limit.toMillis());
-
-        long deadline = System.nanoTime() + limit.toNanos();
-        while (callsInFlight.get() > 0 && System.nanoTime() - deadline < 0) {
-            try {
-                Thread.sleep(DRAIN_POLL_INTERVAL.toMillis());
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                log.warn("Interrupted while awaiting in-flight generation request(s); {} remain",
-                        callsInFlight.get());
-                return;
-            }
-        }
-
-        int remaining = callsInFlight.get();
-        if (remaining > 0) {
-            log.warn("Closing the OpenAI API client after {}ms with {} generation request(s) still "
-                    + "in flight", limit.toMillis(), remaining);
-        } else {
-            log.info("Every in-flight generation request completed before the client was closed");
-        }
-    }
-
-    /**
-     * Reports the number of generation requests issued to the provider and not yet returned.
-     *
-     * @return the count, never negative
-     */
-    int callsInFlight() {
-        return callsInFlight.get();
-    }
-
     /**
      * Assembles the prompt, reproducing the source f-string segment for segment.
      *
-     * <p>The template around the interpolated values is the source's, character for character. The
-     * post body itself is not carried verbatim: {@link #boundedBody(String)} folds its line breaks
-     * and cuts it at {@value #PROMPT_BODY_LIMIT} characters before it is interpolated — see
-     * docs/DECISION_LOG.md DL-035 and DL-203. The {@code Context:} value comes from
-     * {@link #buildContext(TweetDto)}.
+     * <p>The template around the interpolated values is the source's, character for character, and the
+     * post body is interpolated into it verbatim: no character is folded, escaped or cut, and a
+     * {@code null} body interpolates as the empty string — see docs/DECISION_LOG.md DL-035. The
+     * {@code Context:} value comes from {@link #buildContext(TweetDto)}, which is bounded — DL-265.
      *
      * @param tweet the post to reply to; must not be {@code null}
      * @return the prompt carried as the single user message, never {@code null}
      */
-    // Ported from backend/app/services/llm_service.py:L16 (faithful port of the template; the
-    // interpolated body is bounded) — see docs/DECISION_LOG.md DL-035 and DL-203
+    // Ported from backend/app/services/llm_service.py:L16 (faithful port: the template and the
+    // verbatim interpolation of the post body) — see docs/DECISION_LOG.md DL-035
     private String buildPrompt(TweetDto tweet) {
         String content = tweet.content();
         return PROMPT_PREFIX
@@ -686,7 +604,7 @@ public class LlmService {
      * list order. Every line break within a name is folded to a space so no name can introduce a line
      * of its own into the prompt structure. The joined value is cut to
      * {@value #PROMPT_CONTEXT_LIMIT} characters and marked with {@value #BODY_TRUNCATION_MARK} when it
-     * is longer, so the prompt cost of this segment is bounded whatever the row carries.
+     * is longer; this segment therefore carries at most that many characters whatever the row holds.
      *
      * <p>{@link TweetDto} drops a {@code null} element from its list components, so every name here is
      * present.
@@ -725,11 +643,11 @@ public class LlmService {
      * {@code choices[0].text.strip()}. A finish reason other than
      * {@code stop} accompanying accepted content is recorded once at {@code WARN} under
      * {@value #INCOMPLETE_PREFIX} followed by that reason, which is an enumerated provider token
-     * rendered through {@link LogSafe#logSafe(String)} — DL-243.
+     * rendered through {@link LogSafe#logSafe(String)} — DL-197, DL-202.
      *
      * <p>Three outcomes carry no usable content. Each is reported at {@code WARN} under a fixed
      * unusable-output code and raised as an {@link IllegalStateException} whose message is that code
-     * — see docs/DECISION_LOG.md DL-083, DL-145 and DL-243:
+     * — see docs/DECISION_LOG.md DL-083 and DL-202:
      *
      * <ul>
      *   <li>{@value #NO_CHOICE} — the response carries no choice.</li>
@@ -746,7 +664,7 @@ public class LlmService {
      */
     // Ported from backend/app/services/llm_service.py:L29 (faithful port); the refusal and
     // finish-reason states are net-new, the source's completions response carried neither field —
-    // see docs/DECISION_LOG.md DL-032, DL-083, DL-145 and DL-243
+    // see docs/DECISION_LOG.md DL-032, DL-083 and DL-202
     private String firstChoiceContent(ChatCompletion completion) {
         List<ChatCompletion.Choice> choices = completion.choices();
         if (choices == null || choices.isEmpty()) {
@@ -777,7 +695,7 @@ public class LlmService {
      * Records a finish reason other than {@code stop} that accompanied accepted content.
      *
      * <p>Nothing is recorded for {@code stop} and nothing is recorded for an absent reason. The reply
-     * text is never logged — DL-243.
+     * text is never logged — DL-197, DL-202.
      *
      * @param finishReason the reason the first choice reported, possibly {@code null}
      */

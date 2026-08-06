@@ -24,7 +24,7 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  * JDBC URL together with the username and the password as separate values.
  *
  * <p>Existing lower-case {@code jdbc:} values pass through after credential checks. SQLAlchemy-style
- * PostgreSQL, MySQL, MariaDB and H2 URLs are parsed into vendor JDBC URLs; user-info and recognised
+ * PostgreSQL, MySQL and MariaDB URLs are parsed into vendor JDBC URLs; user-info and recognised
  * credential query properties are returned separately. Unsupported, malformed, unresolved or
  * credential-bearing JDBC values fail with {@link IllegalStateException} — DL-072 — see
  * docs/DECISION_LOG.md.
@@ -83,12 +83,14 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  *
  * <p>Supported schemes and the JDBC authority prefix each maps to: {@code postgresql} and
  * {@code postgres} map to {@code jdbc:postgresql://}; {@code mysql} and {@code mariadb} map to
- * {@code jdbc:mysql://} — DL-187 — see docs/DECISION_LOG.md; {@code h2} maps to
- * {@code jdbc:h2:tcp://} — DL-071 — see docs/DECISION_LOG.md. The set matches the runtime-scope JDBC
- * drivers declared in backend/pom.xml: {@code org.postgresql:postgresql},
- * {@code com.mysql:mysql-connector-j} and {@code com.h2database:h2}.
+ * {@code jdbc:mysql://} — DL-187 — see docs/DECISION_LOG.md. The set matches the runtime-scope JDBC
+ * drivers declared in backend/pom.xml, which are exactly {@code org.postgresql:postgresql} and
+ * {@code com.mysql:mysql-connector-j}. There is no {@code h2} scheme: {@code com.h2database:h2} is a
+ * {@code test}-scope coordinate and is absent from the executable jar, so H2 is reachable only as a
+ * literal {@code jdbc:h2:} value on the pass-through path, which is what
+ * src/test/resources/application-test.yml supplies — DL-071, DL-242 — see docs/DECISION_LOG.md.
  *
- * <p>Server products this service is verified against: PostgreSQL 16, MySQL 8.4 and H2 2.3. A
+ * <p>Server products this service is verified against: PostgreSQL 16 and MySQL 8.4. A
  * {@code mariadb} value translates onto the MySQL vendor and a warning naming that unverified
  * combination is recorded whenever the scheme is declared — DL-187 — see docs/DECISION_LOG.md.
  *
@@ -103,8 +105,8 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  * DatabaseUrlTranslator.translate("mariadb://db.internal:3306/codeskeptic")
  *         .jdbcUrl();     // jdbc:mysql://db.internal:3306/codeskeptic
  *
- * DatabaseUrlTranslator.translate("h2://db.internal:9092/codeskeptic")
- *         .jdbcUrl();     // jdbc:h2:tcp://db.internal:9092/codeskeptic
+ * DatabaseUrlTranslator.translate("jdbc:h2:mem:scanner_test")
+ *         .jdbcUrl();     // jdbc:h2:mem:scanner_test, passed through unchanged
  * }</pre>
  */
 public final class DatabaseUrlTranslator {
@@ -139,13 +141,14 @@ public final class DatabaseUrlTranslator {
 
     // Scheme-to-vendor map of AAP 0.6.5.1; mariadb resolves onto the MySQL vendor — DL-187 — see
     // docs/DECISION_LOG.md
+    // The map holds one entry per runtime-scope driver; H2 is test-scope and has no scheme — DL-071,
+    // DL-242 — see docs/DECISION_LOG.md
     static {
         final Map<String, Vendor> vendors = new LinkedHashMap<>();
         vendors.put("postgresql", Vendor.POSTGRESQL);
         vendors.put("postgres", Vendor.POSTGRESQL);
         vendors.put("mysql", Vendor.MYSQL);
         vendors.put("mariadb", Vendor.MYSQL);
-        vendors.put("h2", Vendor.H2);
         VENDOR_BY_SCHEME = Collections.unmodifiableMap(vendors);
     }
 
@@ -179,14 +182,13 @@ public final class DatabaseUrlTranslator {
     /**
      * A supported JDBC vendor and the exact URL prefix its driver requires ahead of the authority.
      *
-     * <p>{@code H2} carries the {@code tcp:} connection mode — DL-071 — see
+     * <p>One constant per driver the executable jar carries — DL-028, DL-071 — see
      * docs/DECISION_LOG.md.
      */
     private enum Vendor {
 
         POSTGRESQL("postgresql", "jdbc:postgresql://"),
-        MYSQL("mysql", "jdbc:mysql://"),
-        H2("h2", "jdbc:h2:tcp://");
+        MYSQL("mysql", "jdbc:mysql://");
 
         private final String token;
         private final String jdbcAuthorityPrefix;

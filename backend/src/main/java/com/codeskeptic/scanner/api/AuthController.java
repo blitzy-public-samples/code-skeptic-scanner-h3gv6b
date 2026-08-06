@@ -1,6 +1,5 @@
 package com.codeskeptic.scanner.api;
 
-import java.time.Instant;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -87,39 +86,33 @@ import com.codeskeptic.scanner.util.LogSafe;
  *
  * <p>No submitted password, no submitted principal name and no minted token is written to the log at
  * any level — DL-052. The resolved principal of a successful issuance reaches the log as the
- * correlation token {@code util/LogSafe} derives from it, never as its own text — DL-242.
+ * correlation token {@code util/LogSafe} derives from it, never as its own text — DL-197.
  *
  * <h2>Deployment obligation: ingress quotas for this route</h2>
  *
- * <p>This application performs no rate limiting, by design: a rate limiter is a new capability the
- * refactor does not carry — DL-272. This route therefore relies on the ingress in front of it, and a
- * deployment that exposes it MUST configure the following.
+ * <p>This application performs no rate limiting. A deployment that exposes this route MUST configure
+ * three ingress controls, and each submitted credential of accepted length costs one bcrypt
+ * verification — DL-272:
  *
  * <ul>
- *   <li>A per-client request quota on {@code POST /auth/token}. Each submitted credential of accepted
- *       length costs one bcrypt verification, which is deliberately expensive, so an unmetered caller
- *       converts request volume directly into CPU on this service.</li>
- *   <li>A concurrency limit on the same route, so the number of bcrypt verifications running at once
- *       is bounded independently of the request rate. On Cloud Run this is the service's maximum
- *       concurrent-request setting; the Terraform module's {@code scaling_parameters} govern how many
- *       instances that limit is multiplied across.</li>
- *   <li>A total request-rate ceiling for the service, so the quota above cannot be evaded by
- *       distributing the attempts across many clients.</li>
+ *   <li>a per-client request quota on {@code POST /auth/token};</li>
+ *   <li>a concurrency limit on the same route — on Cloud Run the service's maximum
+ *       concurrent-request setting, multiplied across instances by the Terraform module's
+ *       {@code scaling_parameters};</li>
+ *   <li>a total request-rate ceiling for the service.</li>
  * </ul>
  *
- * <p>Absent those controls, repeated rejected credentials are answered correctly but consume CPU in
- * proportion to the attempt rate. This class bounds only what it owns: a rejection is reported at
- * {@code WARN} at most once per {@value #REJECTION_REPORT_INTERVAL_SECONDS} seconds per reason,
- * carrying the number suppressed since the previous record, so an attempt flood cannot amplify into
- * an unbounded stream of log records — DL-272.
+ * <p>What this class bounds is its own log volume: a rejection is reported at {@code WARN} at most
+ * once per {@value #REJECTION_REPORT_INTERVAL_SECONDS} seconds per reason, carrying the number
+ * suppressed since the previous record, and every suppressed rejection at {@code DEBUG} — DL-272.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-017, DL-018,
  * DL-019, DL-020, DL-021, DL-052, DL-079, DL-117, DL-118 and DL-272; construct-level provenance is
  * recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  *
- * <p>This class is a singleton bean and is thread-safe. Its only mutable state is the rejection
- * sampler, which is held in two {@code java.util.concurrent.atomic} fields and never read by a
- * response path.
+ * <p>This class is a singleton bean and is thread-safe. Its only mutable state is the four
+ * {@link java.util.concurrent.atomic.AtomicLong} fields the rejection reporter carries; no response
+ * status, header or body is derived from any of them.
  */
 @RestController
 public class AuthController {
@@ -185,24 +178,6 @@ public class AuthController {
      * @param jwtService mints the token and reports its lifetime, must not be {@code null}
      * @throws NullPointerException when either argument is {@code null}
      */
-    /**
-     * Seconds one rejection-reporting window spans — DL-242.
-     *
-     * <p>Within one window the first rejection is recorded at {@code WARN} and every later rejection
-     * at {@code DEBUG}; the first rejection after the window has elapsed closes the previous window
-     * with one {@code WARN} carrying its suppressed count.
-     */
-    private static final long REJECTION_SAMPLE_WINDOW_SECONDS = 60L;
-
-    /**
-     * Start of the rejection sampling window in force, as an epoch-second value; {@code 0} before the
-     * first rejection — DL-242.
-     */
-    private final AtomicLong rejectionWindowStartedAt = new AtomicLong();
-
-    /** Rejections observed in the window {@link #rejectionWindowStartedAt} names — DL-242. */
-    private final AtomicLong rejectionsInWindow = new AtomicLong();
-
     public AuthController(AuthenticationManager authenticationManager, JwtService jwtService) {
         this.authenticationManager = Objects.requireNonNull(authenticationManager,
                 "authenticationManager must not be null.");
@@ -284,7 +259,7 @@ public class AuthController {
         TokenResponse body = new TokenResponse(token, TOKEN_TYPE, jwtService.getExpirationSeconds());
 
         // The principal reaches the log as a correlation token only, never as its own text — see
-        // docs/DECISION_LOG.md DL-242
+        // docs/DECISION_LOG.md DL-197
         log.info("Issued a bearer token to principal {}, valid for {} second(s)",
                 LogSafe.correlation(authentication.getName()), body.expiresIn());
 
@@ -340,39 +315,6 @@ public class AuthController {
         long rejected = unreported.getAndSet(0L);
         log.warn("{} credential(s) submitted to POST /auth/token in the last {}s " + reason,
                 rejected, REJECTION_REPORT_INTERVAL_SECONDS, detail);
-    }
-
-    /**
-     * Records one rejected credential under the sampling window — DL-242.
-     *
-     * <p>The first rejection of a window is recorded at {@code WARN} naming {@code cause}. Every later
-     * rejection in the same window is recorded at {@code DEBUG}, so the number of {@code WARN} records
-     * this route writes is bounded by elapsed time and not by the number of submitted credentials. The
-     * first rejection after a window has elapsed closes that window with one {@code WARN} carrying the
-     * count it saw, then opens the next window.
-     *
-     * <p>{@code cause} is either the simple type name of the rejection or fixed text this class
-     * supplies; no submitted value reaches it.
-     *
-     * @param cause fixed text naming why the credential was rejected; not {@code null}
-     */
-    private void recordRejection(String cause) {
-        long now = Instant.now().getEpochSecond();
-        long windowStart = rejectionWindowStartedAt.get();
-
-        if (windowStart == 0L || now - windowStart >= REJECTION_SAMPLE_WINDOW_SECONDS) {
-            long suppressed = rejectionsInWindow.getAndSet(1L);
-            rejectionWindowStartedAt.set(now);
-            if (suppressed > 1L) {
-                log.warn("POST /auth/token rejected {} further credential(s) in the preceding "
-                        + "{} second(s)", suppressed - 1L, REJECTION_SAMPLE_WINDOW_SECONDS);
-            }
-            log.warn("A credential submitted to POST /auth/token did not authenticate: {}", cause);
-            return;
-        }
-
-        rejectionsInWindow.incrementAndGet();
-        log.debug("A credential submitted to POST /auth/token did not authenticate: {}", cause);
     }
 
     /**

@@ -23,7 +23,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 // Net-new (no source construct: the retired tree carried no decision log) — see
-// docs/DECISION_LOG.md DL-058, DL-099, DL-258
+// docs/DECISION_LOG.md DL-058, DL-099, DL-216
 /**
  * Holds every decision pointer in the delivered tree to a row that exists in
  * {@code docs/DECISION_LOG.md}.

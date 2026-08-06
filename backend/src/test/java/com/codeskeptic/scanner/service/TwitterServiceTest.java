@@ -399,9 +399,11 @@ class TwitterServiceTest {
     @Test
     @DisplayName("warns again when the stored threshold holds a different unparseable value")
     void warnsAgainWhenTheStoredThresholdHoldsADifferentUnparseableValue() {
+        // Consecutive answers are chained rather than passed as varargs: a generic varargs array of
+        // Optional<Setting> cannot be created without an unchecked warning.
         when(settingRepository.findById(POPULARITY_THRESHOLD_KEY))
-                .thenReturn(Optional.of(thresholdRow("first")),
-                        Optional.of(thresholdRow("second")));
+                .thenReturn(Optional.of(thresholdRow("first")))
+                .thenReturn(Optional.of(thresholdRow("second")));
         TwitterService service = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD);
 
         ListAppender<ILoggingEvent> recorded = attachServiceAppender();
@@ -418,10 +420,12 @@ class TwitterServiceTest {
     @Test
     @DisplayName("warns again when a value that parses is stored between two unparseable ones")
     void warnsAgainWhenAValueThatParsesIsStoredBetweenTwoUnparseableOnes() {
+        // Consecutive answers are chained rather than passed as varargs: a generic varargs array of
+        // Optional<Setting> cannot be created without an unchecked warning.
         when(settingRepository.findById(POPULARITY_THRESHOLD_KEY))
-                .thenReturn(Optional.of(thresholdRow("bad")),
-                        Optional.of(thresholdRow("50")),
-                        Optional.of(thresholdRow("bad")));
+                .thenReturn(Optional.of(thresholdRow("bad")))
+                .thenReturn(Optional.of(thresholdRow("50")))
+                .thenReturn(Optional.of(thresholdRow("bad")));
         TwitterService service = serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD);
 
         ListAppender<ILoggingEvent> recorded = attachServiceAppender();

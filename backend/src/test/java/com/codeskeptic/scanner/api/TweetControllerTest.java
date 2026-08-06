@@ -115,7 +115,7 @@ class TweetControllerTest {
     /** Wire literal of {@code backend/app/api/tweets.py:L32,L43}. */
     private static final String TWEET_NOT_FOUND = "{\"error\":\"Tweet not found\"}";
 
-    /** The sanctioned envelope of an unmatched path — backend/app/main.py:L31-33, DL-243. */
+    /** The sanctioned envelope of an unmatched path — backend/app/main.py:L31-33, DL-183. */
     private static final String NOT_FOUND_BODY = "{\"error\":\"Not found\"}";
 
     /** Wire literal of {@code backend/app/main.py:L37}. */
@@ -489,7 +489,7 @@ class TweetControllerTest {
     }
 
     // The eleven routes are served unprefixed; frontend/src/services/api.ts:L25 calls /api/tweets —
-    // DL-059, DL-243 — see docs/DECISION_LOG.md
+    // DL-059, DL-183 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("GET /api/tweets does not reach the listing handler")
     void prefixedListRouteDoesNotReachTheListingHandler() throws Exception {

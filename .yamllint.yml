@@ -1,17 +1,14 @@
-# Yamllint policy for this repository - see backend/docs/DECISION_LOG.md DL-259
+# Yamllint policy for this repository - see backend/docs/DECISION_LOG.md DL-276
 #
-# Every rule that can detect a defect is kept at error. The relaxations below name conventions the
-# delivered YAML follows deliberately and consistently:
+# Every rule that can detect a defect is kept at error. Bracket spacing, sequence indentation and
+# trailing-comment spacing are all held at the default preset's own setting, so the delivered YAML
+# reads the way yamllint's default reads it. Three relaxations remain, each naming a convention every
+# delivered YAML file holds to:
 #
 #   document-start   GitHub Actions workflows, Dependabot config and Spring profiles are single
 #                    documents and none carries a "---" marker.
 #   truthy           A workflow's trigger key is spelled "on", which the YAML 1.1 resolver reads as
 #                    a boolean. Values are still checked; keys are not.
-#   brackets         Branch filters are written "[ main ]", the spelling GitHub's own documentation
-#                    uses.
-#   indentation      Step sequences are indented level with their "steps:" key, the prevailing
-#                    GitHub Actions style.
-#   comments         A trailing comment is separated from content by one space throughout.
 #   line-length      Comment blocks carry provenance paths and decision pointers; 170 characters
 #                    bounds them while still catching a runaway line.
 
@@ -24,23 +21,26 @@ rules:
     check-keys: false
     level: error
 
+  # Default spacing: a flow sequence carries no space inside its brackets.
   brackets:
     min-spaces-inside: 0
-    max-spaces-inside: 1
+    max-spaces-inside: 0
     min-spaces-inside-empty: 0
     max-spaces-inside-empty: 0
     level: error
 
+  # Default indentation: a block sequence is indented one level below its key.
   indentation:
     spaces: consistent
-    indent-sequences: whatever
+    indent-sequences: true
     check-multi-line-strings: false
     level: error
 
+  # Default comment spacing: a trailing comment is separated from content by two spaces.
   comments:
     require-starting-space: true
     ignore-shebangs: true
-    min-spaces-from-content: 1
+    min-spaces-from-content: 2
     level: error
 
   comments-indentation: disable

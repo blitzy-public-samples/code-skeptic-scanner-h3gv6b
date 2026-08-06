@@ -60,9 +60,11 @@ import java.util.stream.Collectors;
  * consisting only of those reads back empty; leading and trailing whitespace is discarded; and an
  * element containing a comma is read back as several elements.</p>
  *
- * <p>{@link #encode(List)} and {@link #decode(String)} expose this representation to its other
- * producer and consumer: {@code service.NotionService} mirrors the same two values into rich text and
- * calls both members, so one implementation serves the column and the mirror — DL-164.</p>
+ * <p>{@link #encode(List)} and {@link #decode(String)} are the static form of the same two
+ * conversions, so the representation can be exercised and asserted without an entity: the two
+ * instance methods delegate to them, and {@code repository/JpaMappingIntegrationTest} calls them
+ * directly. No other production class calls either member — the Notion mirror carries neither of the
+ * two delimited values, so it performs no delimited conversion — DL-164, DL-088.</p>
  *
  * <p>No method throws for any input. Instances hold no mutable state and are thread-safe.</p>
  */

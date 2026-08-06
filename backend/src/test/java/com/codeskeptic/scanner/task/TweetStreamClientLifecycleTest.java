@@ -992,7 +992,7 @@ class TweetStreamClientLifecycleTest {
 
         ScannerProperties bound = new ScannerProperties(null, 100, 60L,
                 new ScannerProperties.Twitter("api-key", "api-secret", "api-secret-key",
-                        CONSUMER_KEY, CONSUMER_SECRET, "access-token", "access-token-secret", 30L, 30L),
+                        CONSUMER_KEY, CONSUMER_SECRET, "access-token", "access-token-secret", 30L),
                 null, null, null, null, null,
                 new ScannerProperties.Ingestion(BASE_KEYWORDS, MAX_STREAM_RULES, STREAM_IDLE_TIMEOUT_SECONDS),
                 new ScannerProperties.Background(enabled, streamEnabled, true));
@@ -1014,7 +1014,7 @@ class TweetStreamClientLifecycleTest {
 
         return new ScannerProperties(null, 100, 60L,
                 new ScannerProperties.Twitter("api-key", "api-secret", "api-secret-key",
-                        consumerKey, consumerSecret, "access-token", "access-token-secret", 30L, 30L),
+                        consumerKey, consumerSecret, "access-token", "access-token-secret", 30L),
                 null, null, null, null, null,
                 new ScannerProperties.Ingestion(baseKeywords, MAX_STREAM_RULES, STREAM_IDLE_TIMEOUT_SECONDS),
                 null);

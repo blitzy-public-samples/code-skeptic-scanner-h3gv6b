@@ -66,6 +66,7 @@ import com.codeskeptic.scanner.exception.BadRequestException;
 import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.service.mapper.SettingMapper;
+import com.codeskeptic.scanner.util.StreamRuleTerms;
 
 // Net-new (no Python counterpart; backend/app/api/settings.py:L3 imports a service that exists nowhere in the repository) — see docs/DECISION_LOG.md
 // Call sites backend/app/api/settings.py:L10,L20 — see docs/DECISION_LOG.md DL-039, DL-040, DL-043
@@ -1412,6 +1413,106 @@ class SettingsServiceTest {
         ArgumentCaptor<Setting> written = ArgumentCaptor.forClass(Setting.class);
         verify(settingRepository).save(written.capture());
         return written.getValue();
+    }
+
+
+    // -----------------------------------------------------------------------
+    // The one shared stream-rule grammar — DL-257 — see docs/DECISION_LOG.md
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("reports a stream_keywords edit holding no term the rule grammar admits")
+    void reportsAStreamKeywordsEditHoldingNoTermTheRuleGrammarAdmits() {
+        stubStoredRow(STREAM_KEYWORDS_KEY);
+
+        List<String> warnings = warningsFrom(() ->
+                service.updateSetting(STREAM_KEYWORDS_KEY, "\"quoted\",-negated, "));
+
+        assertThat(warnings).hasSize(1);
+        assertThat(warnings.getFirst())
+                .contains("holds 3 term(s) and none can be carried")
+                .contains("may not exceed 128 character(s)")
+                .contains("letters, digits and ' -_.''")
+                .doesNotContain("quoted")
+                .doesNotContain("negated");
+    }
+
+    @Test
+    @DisplayName("reports how many terms of a stream_keywords edit the rule grammar drops")
+    void reportsHowManyTermsOfAStreamKeywordsEditTheRuleGrammarDrops() {
+        stubStoredRow(STREAM_KEYWORDS_KEY);
+
+        List<String> warnings = warningsFrom(() ->
+                service.updateSetting(STREAM_KEYWORDS_KEY, "GPT-4,from:someone,AI coding tool"));
+
+        assertThat(warnings).hasSize(1);
+        assertThat(warnings.getFirst())
+                .contains("holds 3 term(s) of which 1 cannot be carried")
+                .doesNotContain("someone");
+    }
+
+    @Test
+    @DisplayName("counts a term the shared grammar refuses as unusable, whatever its length")
+    void countsATermTheSharedGrammarRefusesAsUnusableWhateverItsLength() {
+        stubStoredRow(STREAM_KEYWORDS_KEY);
+        String pastTheTermBound = "a".repeat(StreamRuleTerms.MAX_TERM_CHARS + 1);
+
+        List<String> warnings = warningsFrom(() ->
+                service.updateSetting(STREAM_KEYWORDS_KEY, pastTheTermBound));
+
+        assertThat(StreamRuleTerms.isUsable(pastTheTermBound)).isFalse();
+        assertThat(warnings).hasSize(1);
+        assertThat(warnings.getFirst()).contains("holds 1 term(s) and none can be carried");
+    }
+
+    @Test
+    @DisplayName("reports nothing for an edit every term of which the rule grammar admits")
+    void reportsNothingForAnEditEveryTermOfWhichTheRuleGrammarAdmits() {
+        stubStoredRow(STREAM_KEYWORDS_KEY);
+
+        assertThat(warningsFrom(() ->
+                service.updateSetting(STREAM_KEYWORDS_KEY, "GPT-4, AI coding tool ,Copilot")))
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("reports nothing for the blank value the seeding writes")
+    void reportsNothingForTheBlankValueTheSeedingWrites() {
+        stubStoredRow(STREAM_KEYWORDS_KEY);
+
+        assertThat(warningsFrom(() -> service.updateSetting(STREAM_KEYWORDS_KEY, "   "))).isEmpty();
+    }
+
+    @Test
+    @DisplayName("reports nothing for a key other than stream_keywords")
+    void reportsNothingForAKeyOtherThanStreamKeywords() {
+        stubStoredRow(TWEET_POPULARITY_THRESHOLD_KEY);
+
+        assertThat(warningsFrom(() ->
+                service.updateSetting(TWEET_POPULARITY_THRESHOLD_KEY, "\"quoted\",-negated")))
+                .isEmpty();
+    }
+
+    /**
+     * Runs {@code work} with an appender attached to this service's logger.
+     *
+     * @param work the call to record
+     * @return every {@code WARN} message the call emitted, in the order recorded
+     */
+    private static List<String> warningsFrom(Runnable work) {
+        Logger logger = (Logger) LoggerFactory.getLogger(SettingsService.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        logger.addAppender(captured);
+        try {
+            work.run();
+        } finally {
+            logger.detachAppender(captured);
+        }
+        return captured.list.stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .toList();
     }
 
 

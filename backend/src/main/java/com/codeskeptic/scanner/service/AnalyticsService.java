@@ -86,7 +86,7 @@ public class AnalyticsService {
     /** Source of the {@code scanner.analytics.trend-window-days} observation window. */
     private final ScannerProperties properties;
 
-    /** UTC time source the trend window is measured from — DL-241. */
+    /** UTC time source the trend window is measured from — DL-278. */
     private final Clock clock;
 
     /**
@@ -146,14 +146,14 @@ public class AnalyticsService {
      * <p>Six of the seven are read by three aggregate statements, one per table, and
      * {@code pending_responses} is arithmetic over two of them. All three read one repeatable-read
      * snapshot, so {@code approved_responses} never exceeds {@code total_responses} and
-     * {@code pending_responses} is never negative — see docs/DECISION_LOG.md DL-091 and DL-180.
+     * {@code pending_responses} is never negative — see docs/DECISION_LOG.md DL-180.
      *
      * <p>An empty database yields {@code 0} for all five counts and {@code null} for both means.
      *
      * @return the seven metrics, never {@code null}; the two means are {@code null} when no row
      *         carries the averaged column
      */
-    // One repeatable-read snapshot spans the three aggregate statements — DL-091, DL-180 — see
+    // One repeatable-read snapshot spans the three aggregate statements — DL-180 — see
     // docs/DECISION_LOG.md
     @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public SummaryDto getSummary() {
@@ -206,7 +206,7 @@ public class AnalyticsService {
      * {@link ScannerProperties} — DL-042. The cutoff is the start of the UTC day that is
      * {@code windowDays - 1} days before the current UTC day, so a window of {@code n} days observes
      * the current UTC date and the {@code n - 1} UTC dates before it and the series therefore holds
-     * <em>at most</em> {@code n} elements, never {@code n + 1} — DL-241. The current UTC day is read
+     * <em>at most</em> {@code n} elements, never {@code n + 1} — DL-278. The current UTC day is read
      * from the injected {@link Clock}, which is {@code Clock.systemUTC()}, so the cutoff does not move
      * with the JVM's default time zone.
      *
@@ -239,7 +239,7 @@ public class AnalyticsService {
     public TrendsDto getTrends() {
         int windowDays = properties.analytics().trendWindowDays();
         // The window closes at the instant of the call, read from the same UTC clock as the cutoff; a
-        // row stamped later falls outside it — DL-247, DL-241 — see docs/DECISION_LOG.md
+        // row stamped later falls outside it — DL-247, DL-278 — see docs/DECISION_LOG.md
         LocalDateTime until = LocalDateTime.now(clock);
         LocalDateTime since = windowCutoff(windowDays);
 
@@ -261,7 +261,7 @@ public class AnalyticsService {
         return new TrendsDto(trends);
     }
 
-    // The trend window is a count of UTC calendar dates read from the UTC clock — DL-241 — see
+    // The trend window is a count of UTC calendar dates read from the UTC clock — DL-278 — see
     // docs/DECISION_LOG.md
     /**
      * Returns the inclusive lower bound on {@code tweets.created_at} for a window of the given width.

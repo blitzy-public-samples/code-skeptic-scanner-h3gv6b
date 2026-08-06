@@ -8,22 +8,22 @@ construct it derives from, or is marked as net-new with the decision that author
 
 **Relationship to the decision log.** This file records *what maps to what*. `docs/DECISION_LOG.md`
 records *why*, and it is the only place reasoning lives. Where a row names a `DL-` identifier, that
-identifier has a complete row in the log — `DL-001` … `DL-274`, one unbroken sequence (274 rows) — and no
+identifier has a complete row in the log — `DL-001` … `DL-278`, one unbroken sequence (278 rows) — and no
 reasoning is duplicated here.
 
 **Delivery state.** This matrix describes the tree as delivered. Every count below was obtained by
 enumerating the working tree, not carried over from any planning document, and every source line number
 was read back from the retired files at commit `80f1d53d^`. The delivered tree holds **sixty-seven**
-files under `backend/src/main/java` and **forty-four** under `backend/src/test/java` — one hundred and
-eleven Java classes — together with `backend/pom.xml`, `backend/.gitignore`, `backend/.dockerignore`,
+files under `backend/src/main/java` and **forty-five** under `backend/src/test/java` — one hundred and
+twelve Java classes — together with `backend/pom.xml`, `backend/.gitignore`, `backend/.dockerignore`,
 `backend/src/main/resources/application.yml`, `backend/src/test/resources/application-test.yml` and the
-two files in `backend/docs`, for **one hundred and eighteen** delivered artifacts. Section 2 carries one
+two files in `backend/docs`, for **one hundred and nineteen** delivered artifacts. Section 2 carries one
 row for each of them, and §4 restates the counts as an auditable table. The per-class case counts live in
 §2.7 and nowhere else, so each is stated once and measured once.
 
 Ten main classes have no counterpart of any kind in the retired tree and are authorised individually:
 `api/AuthController` (DL-019), `dto/LoginRequest` and `dto/TokenResponse` (DL-019),
-`config/DataSourcePoolProperties` (DL-270/DL-271), `config/ClockConfig` (DL-241),
+`config/DataSourcePoolProperties` (DL-270/DL-271), `config/ClockConfig` (DL-278),
 `config/BuildProfileGuard` (DL-244), `config/RequestMediaTypeConfig` (DL-236),
 `config/ContainerErrorResponseConfig` (DL-237), `util/ConfiguredValues` (DL-185) and `util/LogSafe`
 (DL-119). Four further main classes are net-new classes derived from a source construct rather than from
@@ -33,10 +33,10 @@ class, `api/ErrorDispatchController`, was delivered by an earlier revision and h
 together with its test: DL-183 serves the servlet `ERROR` envelope from an `ErrorAttributes` bean inside
 `api/GlobalExceptionHandler` instead, so `api/` holds exactly six classes, and that same handler is the
 one declaration from which the container-level error valve reads its status and literal (DL-237). The
-twenty-five test classes beyond the frozen test inventory of nineteen are admitted by DL-096 and
-enumerated by DL-216, so what is present is forty-four files under `backend/src/test/java`, which is
-the plan's nineteen plus the twenty-five that inventory could not name. Twenty-four of the forty-four
-delivered test classes carry a row naming a source construct, and the remaining twenty have no source
+twenty-six test classes beyond the frozen test inventory of nineteen are admitted by DL-096 and
+enumerated by DL-216, so what is present is forty-five files under `backend/src/test/java`, which is
+the plan's nineteen plus the twenty-six that inventory could not name. Twenty-four of the forty-five
+delivered test classes carry a row naming a source construct, and the remaining twenty-one have no source
 construct of any kind.
 No row in this file carries the `PLANNED` status, and no row names a file that does not exist on disk.
 Section 3 records that the pending-target list is empty.
@@ -111,31 +111,32 @@ default is `10` (`api/tweets.py:L13`, `api/responses.py:L12`).
 ### 1.3 Tables, columns and the association
 
 Four tables, twenty columns, one association. No table, column or index is added, and no
-`NOT NULL`, `UNIQUE` or length bound is introduced. `ai_tools_mentioned` stays a plain character column
-and is never a foreign key or a join table to `ai_tools`.
+`NOT NULL`, `UNIQUE` or length bound is introduced: every character column states the
+capacity-free `varchar` its source declaration renders (DL-068). `ai_tools_mentioned` stays a plain
+character column and is never a foreign key or a join table to `ai_tools`.
 
 | # | Source table | Source column and type | Java field | Java mapping | Status |
 |---|--------------|------------------------|------------|--------------|--------|
 | 1 | `tweets` | `id Integer primary_key` (`models.py:L10`) | `entity/Tweet.id` `Integer` | `@Id @GeneratedValue(IDENTITY) @Column(name = "id")` (DL-049/DL-138) | Delivered |
-| 2 | `tweets` | `content String` (`:L11`) | `entity/Tweet.content` `String` | `@Column(name = "content")` (DL-068) | Delivered |
+| 2 | `tweets` | `content String` (`:L11`) | `entity/Tweet.content` `String` | `@Column(name = "content", columnDefinition = "varchar")` (DL-068) | Delivered |
 | 3 | `tweets` | `like_count Integer` (`:L12`) | `entity/Tweet.likeCount` `Integer` | `@Column(name = "like_count")` | Delivered |
 | 4 | `tweets` | `created_at DateTime` (`:L13`) | `entity/Tweet.createdAt` `LocalDateTime` | `@Column(name = "created_at")` | Delivered |
 | 5 | `tweets` | `doubt_rating Float` (`:L14`) | `entity/Tweet.doubtRating` `Double` | `@Column(name = "doubt_rating")` | Delivered |
-| 6 | `tweets` | `media String` (`:L15`) | `entity/Tweet.media` `List<String>` | `@Convert(DelimitedStringListConverter) @Column(name = "media")` (DL-024/DL-068) | Delivered |
-| 7 | `tweets` | `quoted_tweet_id String` (`:L16`) | `entity/Tweet.quotedTweetId` `String` | `@Column(name = "quoted_tweet_id")` | Delivered |
-| 8 | `tweets` | `user_id String` (`:L17`) | `entity/Tweet.userId` `String` | `@Column(name = "user_id")` | Delivered |
-| 9 | `tweets` | `ai_tools_mentioned String` (`:L18`) | `entity/Tweet.aiToolsMentioned` `List<String>` | `@Convert(DelimitedStringListConverter) @Column(name = "ai_tools_mentioned")` — no foreign key to `ai_tools` | Delivered |
+| 6 | `tweets` | `media String` (`:L15`) | `entity/Tweet.media` `List<String>` | `@Convert(DelimitedStringListConverter) @Column(name = "media", columnDefinition = "varchar")` (DL-024/DL-068) | Delivered |
+| 7 | `tweets` | `quoted_tweet_id String` (`:L16`) | `entity/Tweet.quotedTweetId` `String` | `@Column(name = "quoted_tweet_id", columnDefinition = "varchar")` (DL-068) | Delivered |
+| 8 | `tweets` | `user_id String` (`:L17`) | `entity/Tweet.userId` `String` | `@Column(name = "user_id", columnDefinition = "varchar")` (DL-068) | Delivered |
+| 9 | `tweets` | `ai_tools_mentioned String` (`:L18`) | `entity/Tweet.aiToolsMentioned` `List<String>` | `@Convert(DelimitedStringListConverter) @Column(name = "ai_tools_mentioned", columnDefinition = "varchar")` (DL-024/DL-068) — no foreign key to `ai_tools` | Delivered |
 | 10 | `responses` | `id Integer primary_key` (`:L23`) | `entity/Response.id` `Integer` | `@Id @GeneratedValue(IDENTITY) @Column(name = "id")` (DL-025/DL-138) | Delivered |
-| 11 | `responses` | `content String` (`:L24`) | `entity/Response.content` `String` | `@Column(name = "content")` — no declared length (DL-068) | Delivered |
-| 12 | `responses` | `generated_at DateTime` (`:L25`) | `entity/Response.generatedAt` `LocalDateTime` | `@Column(name = "generated_at")`; the value is minted where the row is built (DL-201) | Delivered |
+| 11 | `responses` | `content String` (`:L24`) | `entity/Response.content` `String` | `@Column(name = "content", columnDefinition = "varchar")` — no declared length (DL-068) | Delivered |
+| 12 | `responses` | `generated_at DateTime` (`:L25`) | `entity/Response.generatedAt` `LocalDateTime` | `@Column(name = "generated_at")`; the value is minted where the row is built (DL-232) | Delivered |
 | 13 | `responses` | `is_approved Boolean` (`:L26`) | `entity/Response.isApproved` `Boolean` | `@Column(name = "is_approved")` — a flag a human reads, never a trigger | Delivered |
 | 14 | `responses` | `tweet_id Integer ForeignKey('tweets.id')` (`:L27`) | `entity/Response.tweet` `Tweet` | `@ManyToOne(fetch = LAZY) @JoinColumn(name = "tweet_id")` (DL-162), no cascade and no `orphanRemoval` — the column and the `:L28` relationship are mapped by this one association | Delivered |
 | 15 | `ai_tools` | `id Integer primary_key` (`:L35`) | `entity/AiTool.id` `Integer` | `@Id @GeneratedValue(IDENTITY) @Column(name = "id")` (DL-070) | Delivered |
-| 16 | `ai_tools` | `name String` (`:L36`) | `entity/AiTool.name` `String` | `@Column(name = "name")` (DL-068) | Delivered |
-| 17 | `ai_tools` | `description String` (`:L37`) | `entity/AiTool.description` `String` | `@Column(name = "description")` (DL-068) | Delivered |
-| 18 | `settings` | `key String primary_key` (`:L42`) | `entity/Setting.key` `String` | `@Id @Column(name = "\"key\"", length = 768)` — quoted reserved word (DL-061); the one character column carrying a declared bound, generated as `varchar(768)` on all three supported vendors because a primary key must be index-able (DL-069) | Delivered |
-| 19 | `settings` | `value String` (`:L43`) | `entity/Setting.value` `String` | `@Column(name = "\"value\"")` (DL-061/DL-068) | Delivered |
-| 20 | `settings` | `description String` (`:L44`) | `entity/Setting.description` `String` | `@Column(name = "description")` (DL-068) | Delivered |
+| 16 | `ai_tools` | `name String` (`:L36`) | `entity/AiTool.name` `String` | `@Column(name = "name", columnDefinition = "varchar")` (DL-068) | Delivered |
+| 17 | `ai_tools` | `description String` (`:L37`) | `entity/AiTool.description` `String` | `@Column(name = "description", columnDefinition = "varchar")` (DL-068) | Delivered |
+| 18 | `settings` | `key String primary_key` (`:L42`) | `entity/Setting.key` `String` | `@Id @Column(name = "\"key\"", columnDefinition = "varchar")` — quoted reserved word (DL-061), no declared length, generated as a capacity-free `varchar` on H2 and PostgreSQL (DL-069) | Delivered |
+| 19 | `settings` | `value String` (`:L43`) | `entity/Setting.value` `String` | `@Column(name = "\"value\"", columnDefinition = "varchar")` (DL-061/DL-068) | Delivered |
+| 20 | `settings` | `description String` (`:L44`) | `entity/Setting.description` `String` | `@Column(name = "description", columnDefinition = "varchar")` (DL-068) | Delivered |
 
 | # | Source association construct | Source location | Java target | Status |
 |---|------------------------------|-----------------|-------------|--------|
@@ -194,14 +195,15 @@ Application Default Credentials as `services/sentiment_analysis.py:L8` did.
 
 #### 1.5.1 Complete target configuration inventory
 
-`src/main/resources/application.yml` declares **thirty-one** environment placeholders and **nine** further
-settings that carry a literal value with no placeholder. The list is exhaustive and is what the file
-contains; a key absent from this table is absent from the service.
+`src/main/resources/application.yml` declares **forty-eight** environment placeholders and **nine** further
+settings that carry a literal value with no placeholder. The table is grouped by property prefix rather
+than by position in the file. The list is exhaustive and is what the file contains; a key absent from
+this table is absent from the service.
 
 | # | Environment placeholder | Property | Default | In the source set? | Decision |
 |---|-------------------------|----------|---------|--------------------|----------|
 | 1 | `PORT` | `server.port` | `5000` | No | DL-029 |
-| 2 | `FORWARD_HEADERS_STRATEGY` | `server.forward-headers-strategy` | `framework` | No | DL-243 |
+| 2 | `FORWARD_HEADERS_STRATEGY` | `server.forward-headers-strategy` | `framework` | No | DL-277 |
 | 3 | `MAX_HTTP_REQUEST_HEADER_SIZE` | `server.max-http-request-header-size` | `8KB` | No | DL-238 |
 | 4 | `SCANNER_LOG_LEVEL` | `logging.level.com.codeskeptic.scanner` | `INFO` | No | DL-052/DL-206 |
 | 5 | `DATABASE_URL` | `scanner.database-url` | none; required | Yes (1 of 15) | DL-027 |
@@ -231,6 +233,23 @@ contains; a key absent from this table is absent from the service.
 | 29 | `ALGORITHM` | `scanner.jwt.algorithm` | `HS256` | Yes (drift) | DL-015/DL-108/DL-186 |
 | 30 | `AUTH_USERNAME` | `scanner.auth.username` | `admin` | No | DL-020 |
 | 31 | `AUTH_PASSWORD_HASH` | `scanner.auth.password-hash` | none; required | No | DL-020/DL-116/DL-189 |
+| 32 | `SERVER_SHUTDOWN` | `server.shutdown` | `graceful` | No | DL-271 |
+| 33 | `SHUTDOWN_GRACE_PERIOD` | `spring.lifecycle.timeout-per-shutdown-phase` | `30s` | No | DL-271 |
+| 34 | `DB_POOL_MAXIMUM_SIZE` | `scanner.datasource.pool.maximum-size` | `10` | No | DL-270 |
+| 35 | `DB_POOL_MINIMUM_IDLE` | `scanner.datasource.pool.minimum-idle` | `2` | No | DL-270 |
+| 36 | `DB_POOL_CONNECTION_TIMEOUT_MILLIS` | `scanner.datasource.pool.connection-timeout-millis` | `30000` | No | DL-270 |
+| 37 | `DB_POOL_VALIDATION_TIMEOUT_MILLIS` | `scanner.datasource.pool.validation-timeout-millis` | `5000` | No | DL-270 |
+| 38 | `DB_POOL_IDLE_TIMEOUT_MILLIS` | `scanner.datasource.pool.idle-timeout-millis` | `600000` | No | DL-270 |
+| 39 | `DB_POOL_MAX_LIFETIME_MILLIS` | `scanner.datasource.pool.max-lifetime-millis` | `1800000` | No | DL-270 |
+| 40 | `DB_POOL_LEAK_DETECTION_THRESHOLD_MILLIS` | `scanner.datasource.pool.leak-detection-threshold-millis` | `0` (off) | No | DL-270 |
+| 41 | `DB_POOL_NAME` | `scanner.datasource.pool.name` | `code-skeptic-scanner-pool` | No | DL-270 |
+| 42 | `NOTION_MIRROR_MAX_RETRIES` | `scanner.notion.mirror-max-retries` | `2` | No | DL-253 |
+| 43 | `NOTION_MIRROR_RETRY_BACKOFF_MILLIS` | `scanner.notion.mirror-retry-backoff-millis` | `500` | No | DL-253 |
+| 44 | `TWITTER_MAX_STREAM_RULES` | `scanner.ingestion.max-stream-rules` | `25` | No | DL-254 |
+| 45 | `TWITTER_STREAM_IDLE_TIMEOUT_SECONDS` | `scanner.ingestion.stream-idle-timeout-seconds` | `60` | No | DL-256 |
+| 46 | `SCANNER_BACKGROUND_ENABLED` | `scanner.background.enabled` | `true` | No | DL-250 |
+| 47 | `TWITTER_STREAM_ENABLED` | `scanner.background.stream-enabled` | `true` | No | DL-250 |
+| 48 | `RESPONSE_GENERATION_ENABLED` | `scanner.background.response-generation-enabled` | `true` | No | DL-250 |
 
 Nine settings carry a literal value and no placeholder: `spring.main.web-application-type: servlet`
 (DL-030), `spring.jackson.parser.strict-duplicate-detection: true` (DL-188),
@@ -242,11 +261,12 @@ gpt-5.6-terra` (DL-033), `scanner.jwt.expiration-minutes: 60` (DL-017/DL-142),
 override for each — `SCANNER_OPENAI_MODEL`, `SCANNER_ANALYTICS_TREND_WINDOW_DAYS` and so on — so the
 absence of a placeholder fixes the default, not the ability to change it.
 
-No stream activation, backoff, dispatch-bound or reconnection setting exists. Reconnection and its
-exponential backoff are code, not configuration (DL-045); the per-record dispatch scheduler is code
-(DL-220); the one-mebibyte record bound is a code constant (DL-222); and the only bound the X transport
-takes from configuration is `scanner.twitter.request-timeout-seconds` at row 15, which the
-filtered-stream subscription does not carry (DL-230).
+Stream activation is configuration — rows 46 to 48 — and so are the rule cap at row 44 and the
+idle bound at row 45. Reconnection pacing is not: the exponential backoff is code, not configuration
+(DL-045); the per-record dispatch scheduler is code (DL-220); the one-mebibyte record bound is a code
+constant (DL-222); and the only bound the X transport takes from configuration is
+`scanner.twitter.request-timeout-seconds` at row 15, which the filtered-stream subscription does not
+carry (DL-230).
 
 #### 1.5.2 Seeded `settings` rows and their consumers
 
@@ -262,9 +282,12 @@ falls back to that property with one `WARN` naming the key and never the stored 
 | `response_generation_delay` | `scanner.response-generation-delay-seconds` | `config/AsyncSchedulingConfig.resolveDelay()`, called by the registered `Trigger` each time the next pass is computed — that is, after every completed pass; the first pass is not paced by it and runs at startup | a positive `long` once trimmed | `scanner.response-generation-delay-seconds` when the row is absent, holds `null`, does not parse, or is not positive; a resolved value is then clamped into `[1s, 365d]` and a failed read leaves the configured value in force | DL-197, DL-251 |
 | `stream_keywords` | `scanner.ingestion.stream-base-keywords`, comma-joined | `task/TweetStreamClient.composeRuleSet()`, read before every connection | a comma-separated list holding at least one term that survives the literal-term allowlist of DL-257; the surviving terms replace the whole rule set, and the set is then capped at `scanner.ingestion.max-stream-rules` with the excess dropped under one `WARN` naming counts only | `scanner.ingestion.stream-base-keywords` union every `ai_tools.name` when the row is absent, holds `null`, or holds no term that survives the allowlist | DL-044, DL-254, DL-257 |
 
-`response_generation_delay` carries one bound worth stating: the `@Scheduled` tick is paced by
-`scanner.response-generation-delay-seconds`, so a row value at or above that cadence is
-honoured exactly while a row value below it is honoured only up to the cadence. An edit takes effect from the pass after the one already scheduled — DL-228.
+`response_generation_delay` is read by the registered `Trigger` each time the next pass is computed,
+so a row value takes effect from the pass after the one already scheduled — DL-228. The pass carries no
+`@Scheduled` annotation: `config/AsyncSchedulingConfig` registers it through
+`ScheduledTaskRegistrar.addTriggerTask` with a completion-based `Trigger`, whose first firing is the
+startup instant and whose later firings are the previous completion plus the resolved delay — DL-251.
+A row value the accepted bound refuses leaves `scanner.response-generation-delay-seconds` in force.
 
 ### 1.6 External integrations
 
@@ -292,7 +315,7 @@ and twelve BOM-managed.
 | 5 | passlib | `core/security.py:L3` | `BCryptPasswordEncoder`, shipped with `starter-security` (DL-020) | Retired |
 | 6 | SQLAlchemy | `db/database.py:L1-2`, `db/models.py:L1-3` | `spring-boot-starter-data-jpa` with Hibernate 6.6.53.Final | Retired |
 | 7 | pydantic | `core/config.py:L2`, `schema/*.py:L1` | `@ConfigurationProperties`, Java records, `spring-boot-starter-validation` (DL-050) | Retired |
-| 8 | celery | `tasks/response_generation.py:L1` | `@EnableScheduling` plus one `@Scheduled(fixedDelayString = …)` method — no broker and no queue (DL-047) | Retired |
+| 8 | celery | `tasks/response_generation.py:L1` | `@EnableScheduling` plus one completion-based `Trigger` task registered by `config/AsyncSchedulingConfig` — no `@Scheduled` annotation, no broker and no queue (DL-047, DL-251) | Retired |
 | 9 | tweepy | `services/twitter_service.py:L1`, `tasks/tweet_monitoring.py:L1` | `WebClient` from `spring-boot-starter-webflux` (DL-012) | Retired |
 | 10 | google-cloud-language | `services/sentiment_analysis.py:L1` | `com.google.cloud:google-cloud-language` 2.96.0 (DL-010) | Retired |
 | 11 | notion-client | `services/notion_service.py:L1` | `RestClient` from `spring-boot-starter-web` (DL-013) | Retired |
@@ -301,12 +324,14 @@ and twelve BOM-managed.
 | 14 | unittest / unittest.mock | `tests/test_services.py:L1-2`, `tests/test_tasks.py:L2` | JUnit Jupiter plus Mockito 5.17.0 | Retired |
 | 15 | fastapi | `tests/test_api.py:L2` — incompatible `TestClient` import against a Flask app | None. `MockMvc` replaces it and the dependency disappears entirely | Retired |
 
-`backend/pom.xml` overrides **no** dependency version property. Its `<properties>` block declares
-`java.version` 21 and nothing else, so every coordinate `spring-boot-dependencies:3.5.16` manages —
-PostgreSQL, Connector/J, Tomcat, Netty and Jackson among them — takes the version that BOM resolves,
-and `com.mysql:mysql-connector-j` resolves to 9.7.0. DL-170 owns that subject in full; earlier revisions
-of this file recorded four explicit overrides that the delivered file does not carry. Both JDBC drivers
-ship at `runtime` scope in one artifact (DL-028).
+`backend/pom.xml` declares four dependency version properties — `tomcat.version` 10.1.57,
+`netty.version` 4.1.136.Final, `jackson-bom.version` 2.21.5 and `postgresql.version` 42.7.13 — each
+raising a coordinate `spring-boot-dependencies:3.5.16` manages, and one version on a coordinate itself,
+`com.mysql:mysql-connector-j` 26.7.0; that BOM publishes no property for it. Every other
+coordinate takes the version the BOM resolves. DL-170 owns the boundary between the two and
+`BuildDependencyContractTest` asserts both halves. Both JDBC drivers ship at `runtime` scope in one
+artifact (DL-028); `com.h2database:h2` 2.3.232 is `test` scope, is absent from the executable jar and has
+no translator scheme (DL-071, DL-242).
 
 
 ### 1.8 Defect closure
@@ -319,13 +344,13 @@ deliberately not reconciled; where closure rests on a construct outside this mod
 | # | Defect | Source evidence | Java resolution | Status |
 |---|--------|-----------------|-----------------|--------|
 | D1 | Ingestion never persists anything: the listener builds a `Tweet` and abandons it, and the keyword set is empty so the stream could not start regardless | `tasks/tweet_monitoring.py:L29` — the deferred-work comment reading "Add database session and commit tweet", standing where the commit should have been — and `:L53-55` (`keywords = []` then `stream.filter(track=keywords)`) | `task/TweetStreamListener` validating the required stream fields and persisting valid rows through `repository/TweetRepository.save`, and `task/TweetStreamClient` composing a non-empty rule set from configured base terms union `ai_tools.name`, overridable by the `stream_keywords` row (DL-044/DL-080) | Delivered |
-| D2 | The response scheduler raises `NameError` on its own final line: `time.sleep(...)` without importing `time`, and it reads `settings.response_generation_interval` where the declared property is `RESPONSE_GENERATION_DELAY` | `tasks/response_generation.py:L50`; `core/config.py:L11` | `task/ResponseGenerationScheduler` with `@Scheduled(fixedDelayString = "${scanner.response-generation-delay-seconds}", timeUnit = SECONDS)` (DL-047). `config/AsyncSchedulingConfig` and the `scanner.response-generation-delay-seconds` property are delivered | Delivered |
+| D2 | The response scheduler raises `NameError` on its own final line: `time.sleep(...)` without importing `time`, and it reads `settings.response_generation_interval` where the declared property is `RESPONSE_GENERATION_DELAY` | `tasks/response_generation.py:L50`; `core/config.py:L11` | `task/ResponseGenerationScheduler.generatePendingResponses()`, registered by `config/AsyncSchedulingConfig` through `ScheduledTaskRegistrar.addTriggerTask` with a completion-based `Trigger` that reads `scanner.response-generation-delay-seconds` — or the `response_generation_delay` row that overrides it — on every computation (DL-047, DL-251). The method carries no `@Scheduled` annotation | Delivered |
 | D3 | Eight configuration keys are read by code but declared nowhere, so any code path touching them raises `AttributeError` | `core/config.py:L5-11` declares seven; `core/security.py:L11` (`SECRET_KEY` and `ALGORITHM` on one line), `services/notion_service.py:L24,L35`, `services/twitter_service.py:L12,L13`, `tasks/tweet_monitoring.py:L46-49` read eight more | All fifteen declared in `application.yml` and bound through `config/ScannerProperties`; the three Twitter aliases resolve through nested defaults (DL-031). Full inventory in §1.5 | Delivered |
 | D4 | Three service classes are imported by controllers and do not exist anywhere in the repository | `api/responses.py:L3` (`ResponseService`), `api/settings.py:L3` (`SettingsService`), `api/analytics.py:L3` (`AnalyticsService`) | `service/ResponseService`, `service/SettingsService`, `service/AnalyticsService` — every method signature dictated by the call site that already existed (DL-039 … DL-043, DL-073, DL-075, DL-076, DL-200, DL-201, DL-202) | Delivered |
 | D5 | The language-model call targets `text-davinci-002` through the removed Completions API, and assigns `Completion.api_key` from a lower-case attribute the settings class does not declare | `services/llm_service.py:L9,L19-26` | `service/LlmService` over Chat Completions with the model identifier in configuration (DL-032/DL-033), `max_completion_tokens` replacing `max_tokens` with a model-usable configurable default (DL-034/DL-202), the key read from `scanner.openai.api-key`, and generated text returned as `String` (DL-081) | Delivered |
 | D6 | No token-issuance path exists: `create_access_token` has zero call sites, no auth route is registered, and every route's guard is a no-op | `core/security.py:L6-12`; `main.py:L26-29` | `api/AuthController.issueToken` on `POST /auth/token` with `security/JwtService`, `dto/LoginRequest` and `dto/TokenResponse`, over a configuration-backed principal (DL-019/DL-020) | Delivered |
 | A1 | Every authorization guard is a no-op: `@jwt_required` is applied bare without parentheses, which in `flask-jwt-extended` 4.x registers the decorator factory rather than the guard | `api/tweets.py:L10`; `api/responses.py:L9,L23,L34,L52`; `api/settings.py:L8,L14`; `api/analytics.py:L8,L18` — all eleven routes | `security/SecurityConfig` requiring an authenticated principal on every mapped endpoint except `POST /auth/token`, enforced by `security/JwtAuthenticationFilter`. Java enforces where Python did not, which is an intentional behaviour change (DL-021) | Delivered |
-| A2 | Background work is started synchronously and never returns: `initialize_background_tasks()` claims to run the stream "in a separate thread" but the tweepy call blocks, and the scheduler it calls next is a `while True` loop | `main.py:L41-48`; `tasks/response_generation.py:L41` | `ScannerApplication` carries `@SpringBootApplication` and `@ConfigurationPropertiesScan` only; scheduling is enabled declaratively by `config/AsyncSchedulingConfig`, and the stream is lifecycle-managed rather than started from the composition root. The two lifecycle components are `config/AsyncSchedulingConfig`, which carries `@EnableScheduling` and publishes the one-thread `taskScheduler` the `@Scheduled` sweep of `task/ResponseGenerationScheduler` runs on (DL-047), and `task/TweetStreamClient`, a `SmartLifecycle` bean the context starts after refresh and stops on shutdown (DL-045/DL-220) | Delivered |
+| A2 | Background work is started synchronously and never returns: `initialize_background_tasks()` claims to run the stream "in a separate thread" but the tweepy call blocks, and the scheduler it calls next is a `while True` loop | `main.py:L41-48`; `tasks/response_generation.py:L41` | `ScannerApplication` carries `@SpringBootApplication` and `@ConfigurationPropertiesScan` only; scheduling is enabled declaratively by `config/AsyncSchedulingConfig`, and the stream is lifecycle-managed rather than started from the composition root. The two lifecycle components are `config/AsyncSchedulingConfig`, which carries `@EnableScheduling` and publishes the one-thread `taskScheduler` the trigger-registered sweep of `task/ResponseGenerationScheduler` runs on (DL-047, DL-251), and `task/TweetStreamClient`, a `SmartLifecycle` bean the context starts after refresh and stops on shutdown (DL-045/DL-220) | Delivered |
 | A3 | There is no `__init__.py` anywhere, so `backend/app/**` is not an importable Python package tree at all, compounding the wrong-package-root test imports | absence throughout `backend/app/**`; `tests/test_services.py:L3-6` | Maven standard directory layout with a declared package per directory. No equivalent construct is required, and the wrong-root imports have no counterpart to carry forward | Delivered |
 | A4 | No dependency manifest exists, yet three files install from `requirements.txt` | absence of `backend/requirements.txt`; `infrastructure/docker/Dockerfile.backend:L8-11`, `.github/workflows/ci.yml:L26-29`, `scripts/setup_environment.sh:L12` | `backend/pom.xml`. The Dockerfile and the CI job are rewritten; `scripts/setup_environment.sh` remains unchanged (DL-054) | Delivered |
 | A5 | The CD job cannot build any image: `docker build … ./backend` finds no Dockerfile in that context, and never could | `.github/workflows/cd.yml:L36` | `-f infrastructure/docker/Dockerfile.backend` added, context unchanged (DL-056) | Delivered |
@@ -409,8 +434,8 @@ the complete current class-by-class case counts are maintained in §2.7.
 | `backend/tests/test_services.py` | Wrong package root at `:L3-6` (`from services.…`); two `pass` stubs at `:L12-22`; tests for `create_page`, `update_page` and `generate_text` at `:L28-38,L44-48`, none of which exist; asserts sentiment analysis returns `'positive'`/`'negative'`/`'neutral'` at `:L58-65` where the implementation returns a float | Delivered: `service/SentimentAnalysisServiceTest`, `service/NotionServiceTest`, `service/LlmServiceTest`, `service/SettingsServiceTest`, `service/SettingsServiceSeedingIntegrationTest`, `service/TwitterServiceTest`, `service/ResponseServiceTest` (including the canonical claim and multi-instance storage guard of DL-195) and `service/AnalyticsServiceTest`. The two `pass` stubs at `:L12-22` are replaced by the popularity-gate matrix of `service/TwitterServiceTest`; exact counts are in §2.7 | Delivered |
 | `backend/tests/test_tasks.py` | `from backend.tasks import monitor_tweets, generate_response` at `:L3` — neither the module path nor either symbol exists | Delivered: `task/ResponseGenerationSchedulerTest` and `task/TweetStreamListenerTest`, whose measured case counts are in §2.7 | Delivered |
 
-Thirty-one of the forty-four delivered test classes descend from none of the three retired test files:
-the Python suite tested none of what they cover. Twenty of the forty-four have no source construct of any
+Thirty-two of the forty-five delivered test classes descend from none of the three retired test files:
+the Python suite tested none of what they cover. Twenty-one of the forty-five have no source construct of any
 kind and are net-new — `api/AuthControllerTest` and `api/AuthControllerAdviceTest` (DL-019, also named
 against `test_api.py` above, since they test a route that file could not know about),
 `config/DatabaseUrlTranslatorTest` (DL-027/DL-064/DL-071/DL-072/DL-187), `config/DataSourceConfigTest`
@@ -421,8 +446,8 @@ against `test_api.py` above, since they test a route that file could not know ab
 carries the `ERROR`-dispatch coverage DL-183 moved), `service/AnalyticsServiceTest`
 (DL-041/DL-042/DL-247), `service/ResponseServiceTest`, `service/SettingsServiceSeedingIntegrationTest`
 (DL-040), `util/ConfiguredValuesTest` (DL-197), `util/LogSafeTest` (DL-208),
-`BuildDependencyContractTest` (DL-169/DL-170/DL-240/DL-241), `DecisionLogCitationTest` (DL-216),
-`DecisionPointerIntegrityTest` (DL-058/DL-099/DL-258), `DocumentationConsistencyTest` (DL-249) and
+`util/StreamRuleTermsTest` (DL-257), `BuildDependencyContractTest` (DL-169/DL-170/DL-240/DL-241), `DecisionLogCitationTest` (DL-216),
+`DecisionPointerIntegrityTest` (DL-058/DL-099/DL-216), `DocumentationConsistencyTest` (DL-216) and
 `TraceabilityCoverageTest` (DL-260). Eleven more cover a production construct that does have a source
 origin and are recorded in §2.7 rather than here: `security/JwtServiceTest` covers
 `core/security.py:L6-12`, `security/JwtAuthenticationFilterTest` the bare `@jwt_required` sites,
@@ -476,7 +501,7 @@ code, not a port.
 | `backend/.dockerignore` | *No source construct — net-new* — DL-055 | `target/` only |
 | `backend/src/main/resources/application.yml` | `backend/app/core/config.py` (all seven declared keys) plus the eight keys read without declaration, plus the `.env` convention at `:L13-15` | Full key inventory in §1.5. `server.port` DL-029, web type DL-030, `ddl-auto` DL-026, reserved-word quoting DL-061, the `scanner.jwt` accepted-value and key-length comments DL-184. It additionally carries the background-ownership flags (DL-250), the two ingestion bounds (DL-254, DL-256), the two Notion mirror-retry keys (DL-253), the eight `scanner.datasource.pool.*` keys that are the pool's whole configurable surface with each accepted range stated inline (DL-270, DL-271), and `server.shutdown: graceful` with `spring.lifecycle.timeout-per-shutdown-phase: 30s` (DL-271) |
 | `backend/src/test/resources/application-test.yml` | *No source construct — net-new* — DL-009/DL-016/DL-026/DL-027/DL-061 | No Python test configuration existed. H2 with `create-drop`, reserved-word quoting, and a test JWT secret so `mvn clean verify` needs no manual step. It also declares every `scanner.datasource.pool.*` key explicitly with a four-connection ceiling, so a test context holds few connections (DL-271), and declares all three background-ownership flags enabled, so the composition assertions exercise the same ownership decision a single-process deployment takes while the X stream still declines to start on blank consumer credentials (DL-250, DL-046) |
-| `backend/docs/DECISION_LOG.md` | *No source construct — net-new* — required by Rule 1 | Two hundred and seventy-four entries, `DL-001` … `DL-274`, with no gap and no repeat, each carrying decision, alternatives, rationale and risks. Every identifier cited anywhere in this repository resolves to one of them |
+| `backend/docs/DECISION_LOG.md` | *No source construct — net-new* — required by Rule 1 | Two hundred and seventy-eight entries, `DL-001` … `DL-276`, with no gap and no repeat, each carrying decision, alternatives, rationale and risks. Every identifier cited anywhere in this repository resolves to one of them |
 | `backend/docs/TRACEABILITY_MATRIX.md` | *No source construct — net-new* — required by Rule 1 | This file |
 
 ### 2.2 Application core, configuration and security
@@ -487,12 +512,12 @@ code, not a port.
 | `config/ScannerProperties.java` | `core/config.py:L4-15` — the single `Settings` class | Nested twitter/notion/openai/jwt/auth/analytics/ingestion groups; credential components are never rendered; `twitter.request-timeout-seconds` is the group's one non-credential component (DL-230) |
 | `config/DataSourceConfig.java` | `db/database.py:L5-13` — the per-call `create_engine` and `sessionmaker` | One pooled `DataSource` built from the translated URL (A14). Pool geometry and timing come from the allowlisted `scanner.datasource.pool.*` group of `config/DataSourcePoolProperties`; the whole `spring.datasource.*` surface is unread, a connection-identity key among sixteen refuses to start, and any other key under that prefix is reported at `WARN` and ignored (DL-270, DL-271) |
 | `config/DataSourcePoolProperties.java` | *No source construct — net-new* — DL-270, DL-271. `db/database.py:L5-8` built a fresh unpooled engine per call and configured no pool at all | The complete pool surface, bound from `scanner.datasource.pool.*`: eight components carrying geometry and timing only, so no JDBC URL, credential, driver or data-source class name, catalog, schema, initialisation statement or driver-property map is expressible. Every bound is range-checked as it binds against HikariCP's own floors and is refused rather than substituted, `minimum-idle` defaults to 2 where HikariCP would hold `maximum-size` idle, and `maximum-size` carries a ceiling of 100 |
-| `config/DatabaseUrlTranslator.java` | *Net-new class, derived from* `core/config.py:L9` — the opaque `DATABASE_URL`, which the source read but never interpreted | SQLAlchemy-style URL to JDBC URL plus separated credentials (DL-027/DL-064/DL-071/DL-072); the dialect is never hardcoded |
+| `config/DatabaseUrlTranslator.java` | *Net-new class, derived from* `core/config.py:L9` — the opaque `DATABASE_URL`, which the source read but never interpreted | SQLAlchemy-style URL to JDBC URL plus separated credentials (DL-027/DL-064/DL-072); the scheme set is `postgresql`, `postgres`, `mysql` and `mariadb`, one per runtime-scope driver, and a `jdbc:` value passes through unchanged (DL-071); the dialect is never hardcoded |
 | `config/CorsConfig.java` | `main.py:L20` — `CORS(app)` with no arguments | Permissive `CorsConfigurationSource`, unchanged (DL-051) |
-| `config/ClockConfig.java` | *No source construct — net-new* — DL-241. `api/analytics.py:L13-14` read no clock, and the `AnalyticsService` it imported did not exist | One `Clock` bean, `Clock.systemUTC()`, so every observation-window bound `service/AnalyticsService` derives is read in UTC from an injected time source rather than from a static call, which is what makes the window assertable |
+| `config/ClockConfig.java` | *No source construct — net-new* — DL-278. `api/analytics.py:L13-14` read no clock, and the `AnalyticsService` it imported did not exist | One `Clock` bean, `Clock.systemUTC()`, so every observation-window bound `service/AnalyticsService` derives is read in UTC from an injected time source rather than from a static call |
 | `config/BuildProfileGuard.java` | *No source construct — net-new* — DL-244. The retired tree declared no profiles at all | Startup check that refuses to start when the build-scoped `test` profile is active outside the build, so the H2 URL, the fixed signing key and the bcrypt hash of `application-test.yml` cannot reach a deployed revision |
 | `config/RequestMediaTypeConfig.java` | *No source construct — net-new* — DL-236. The behaviour it protects is the 415 the framework already answers for an absent `Content-Type`, which `api/settings.py` and the other three route modules never reached, Flask having not read the header | Withholds a `Content-Type` naming no concrete media type from request processing, ahead of the security chain, so `DefaultCorsProcessor` and the message converters no longer raise `IllegalArgumentException`; publishes the single declaration of that predicate, which `api/GlobalExceptionHandler` reads as well (DL-235) |
-| `config/ContainerErrorResponseConfig.java` | *No source construct — net-new* — DL-237/DL-238. The behaviour it reproduces is `main.py:L31-37`: the retired tree's WSGI server had no equivalent of a connector-level rejection | Replaces the container's HTML `ErrorReportValve` with one writing the single-key envelope as `application/json`, taking its status and literal from the single declaration `api/GlobalExceptionHandler` publishes and applying the shared header policy of DL-194 and the permissive CORS parity of DL-051 |
+| `config/ContainerErrorResponseConfig.java` | *No source construct — net-new* — DL-237/DL-238. The behaviour it reproduces is `main.py:L31-37`: the retired tree's WSGI server had no equivalent of a connector-level rejection | Replaces the container's HTML `ErrorReportValve` with one writing the single-key envelope as `application/json`, taking its status and literal from the single declaration `api/GlobalExceptionHandler` publishes and applying the shared header policy of DL-277 and the permissive CORS parity of DL-051 |
 | `config/WebClientConfig.java` | `tasks/tweet_monitoring.py:L45-51` — the tweepy `Stream` construction | `WebClient` bean for the X API v2 base URL (DL-012) |
 | `config/RestClientConfig.java` | `services/notion_service.py:L8` — `Client(auth=…)` | `RestClient` bean carrying the Notion base URL, the bearer token and the `Notion-Version` header value, over a retained `HttpClient` bean published by this class with the connect bound and released by a bounded `@PreDestroy` — `shutdown`, a ten-second `awaitTermination`, then `shutdownNow` — with `destroyMethod` cleared so the unbounded inferred `close()` is not used (DL-012, DL-150, DL-151, DL-221, DL-264). The read bound is applied per request by the `JdkClientHttpRequestFactory` built over that client |
 | `config/AsyncSchedulingConfig.java` | `main.py:L41-48` and `tasks/response_generation.py:L8` — the blocking initialiser and the broker-less Celery application | `@EnableScheduling` plus the single `taskScheduler` bean, which carries a pool size, a thread-name prefix, wait-for-tasks-on-shutdown and a thirty-second termination await (DL-208, DL-251); the sole reader of the `response_generation_delay` row on the scheduling path, once per pass (DL-227), with the next instant computed at the completion of the previous pass (DL-228). The first pass runs immediately, the resolved delay is bounded, a failing trigger read leaves the configured value in force and cannot leave the task unscheduled (DL-251), and the task is registered only in a process whose `scanner.background` switches both hold (DL-250) |
@@ -531,10 +556,10 @@ code, not a port.
 
 | Target file | Source construct | Notes |
 |-------------|------------------|-------|
-| `entity/Tweet.java` | `db/models.py:L8-18` plus the relationship attached at `:L30` | `@Table(name = "tweets")`, nine columns, `@OneToMany` with `@OrderBy("id ASC")` and the lazy default (DL-162); `Integer` identifier (DL-070/DL-138); identifier-based `equals`/`hashCode` (DL-023) |
-| `entity/Response.java` | `db/models.py:L21-28` — the `Response` model | `@Table(name = "responses")`, five columns by their source names and types with no declared length (DL-068), and the owning `@ManyToOne @JoinColumn(name = "tweet_id")` of the single association (DL-024). `generated_at` is minted once, truncated to microseconds, inside the inserting transaction (DL-232). A page of responses is read as the closed `ResponseRow` projection carrying the response columns plus `tweet.id`, so no `tweets` row is loaded (DL-245) |
-| `entity/AiTool.java` | `db/models.py:L32-37` | `@Table(name = "ai_tools")`, three columns, no association (DL-070); identifier-based `equals`/`hashCode` (DL-023) |
-| `entity/Setting.java` | `db/models.py:L39-44` | `@Table(name = "settings")`, `key` as `@Id`; both reserved-word columns quoted (DL-061/DL-069); identifier-based `equals`/`hashCode` (DL-023) |
+| `entity/Tweet.java` | `db/models.py:L8-18` plus the relationship attached at `:L30` | `@Table(name = "tweets")`, nine columns with the five character columns stating the capacity-free `varchar` (DL-068), `@OneToMany` with `@OrderBy("id ASC")` and the lazy default (DL-162); `Integer` identifier (DL-070/DL-138); identifier-based `equals`/`hashCode` (DL-023) |
+| `entity/Response.java` | `db/models.py:L21-28` — the `Response` model | `@Table(name = "responses")`, five columns by their source names and types, `content` stating the capacity-free `varchar` and no declared length (DL-068), and the owning `@ManyToOne @JoinColumn(name = "tweet_id")` of the single association (DL-024). `generated_at` is minted once, truncated to microseconds, inside the inserting transaction (DL-232). A page of responses is read as the closed `ResponseRow` projection carrying the response columns plus `tweet.id`, so no `tweets` row is loaded (DL-245) |
+| `entity/AiTool.java` | `db/models.py:L32-37` | `@Table(name = "ai_tools")`, three columns with `name` and `description` stating the capacity-free `varchar` (DL-068), no association (DL-070); identifier-based `equals`/`hashCode` (DL-023) |
+| `entity/Setting.java` | `db/models.py:L39-44` | `@Table(name = "settings")`, `key` as `@Id`; both reserved-word columns quoted (DL-061) and all three stating the capacity-free `varchar`, the primary key included (DL-068/DL-069); identifier-based `equals`/`hashCode` (DL-023) |
 | `repository/TweetRepository.java` | `db/database.py:L10-13` — the per-call session | `JpaRepository<Tweet, Integer>` with seven members: the pageable page read ordered by `id ASC` (DL-249), the keyset batch `findUnansweredBatchAfter` replacing `Tweet.query.filter(Tweet.response == None)` (DL-248), `findByIdForUpdate` carrying the bounded pessimistic write lock (DL-246), the `AnalysisSubject` projection and the single-statement `updateDoubtRating` of the analyze route (DL-263), the `[now-window, now]` day-bucketed trends query (DL-213, DL-247) and the one-statement summary aggregate (DL-180, DL-247) |
 | `repository/ResponseRepository.java` | `db/database.py:L10-13` — the per-call session | `JpaRepository<Response, Integer>` with the `ResponseRow` projection page read plus its explicit count query (DL-245, DL-249), `existsByTweetId` for the cross-replica claim check read before the provider call and again inside the storing transaction (DL-195, DL-226, DL-252), and the approval counts projection (DL-180, DL-247) |
 | `repository/AiToolRepository.java` | `db/database.py:L10-13` — the per-call session | `JpaRepository<AiTool, Integer>` plus `findNames(Pageable)`, which projects the `name` column alone and is bounded by the caller, so composing the stream rule set loads no `ai_tools` entity (DL-044, DL-254) |
@@ -542,10 +567,10 @@ code, not a port.
 | `service/mapper/TweetMapper.java` | *Net-new class, derived from* the `to_dict()` called at `api/tweets.py:L19,L30` and never defined | Identifier-to-string and delimited-column-to-array conversion (A7, DL-023/DL-024); an explicit hand-written mapper bean that carries every `null` column value through (DL-133), the identifier included (DL-080) |
 | `service/mapper/ResponseMapper.java` | The `response.to_dict()` calls at `api/responses.py:L18,L29,L47,L63` — a method the model never declared | Entity-to-`ResponseDto` and projection-to-`ResponseDto` mapping in one class: the identifier and the parent identifier are rendered as strings and every required column is asserted present (DL-023, DL-080). The projection overload reads the parent identifier from the `ResponseRow` projection, so no `tweets` row is loaded to render a page (DL-245) |
 | `service/mapper/SettingMapper.java` | *Net-new class, derived from* the serialisation `api/settings.py:L11,L24` performed inline and never factored out | Entity to `SettingDto` (DL-039), through the same explicit mapper layer as the other two (DL-133) |
-| `util/DelimitedStringListConverter.java` | *Net-new class, derived from* `db/models.py:L15,L18` against `schema/tweet.py:L11,L14` — single `String` columns the schema exposed as `List[str]` with no conversion anywhere | Comma-delimited, blank-safe, no schema change; the one authorized codec, used by the JPA attribute converter alone — `service/NotionService` references it nowhere, because neither delimited column is mirrored (DL-024/DL-164/DL-088) |
+| `util/DelimitedStringListConverter.java` | *Net-new class, derived from* `db/models.py:L15,L18` against `schema/tweet.py:L11,L14` — single `String` columns the schema exposed as `List[str]` with no conversion anywhere | Comma-delimited, blank-safe, no schema change; the one authorized codec, used by the JPA attribute converter alone — `service/NotionService` references it nowhere and neither delimited column is mirrored (DL-024/DL-164/DL-088) |
 | `util/QueryParameters.java` | *Net-new class, derived from* `request.args.get('page', 1, type=int)` at `api/tweets.py:L12-13` and `api/responses.py:L11-12` | Reproduces Werkzeug's conversion-with-fallback: an absent, blank or non-numeric value yields the declared default rather than an error status — DL-193 |
 | `util/ConfiguredValues.java` | *No source construct — net-new* — DL-185 | The single definition of the unresolved-placeholder shape, replacing three copies in `security/SecurityConfig`, `security/JwtService` and `config/DatabaseUrlTranslator`; trims before matching so all three call sites are symmetric |
-| `util/StreamRuleTerms.java` | *Net-new class, derived from* `tasks/tweet_monitoring.py:L53-55` — the `# TODO: Define keywords for streaming` and the empty `track` list | The X filtered-stream rule grammar: one term becomes one rule, every term is quoted, the rule length and the rule count are both capped, and a refused term is reported rather than silently dropped (DL-249) |
+| `util/StreamRuleTerms.java` | *Net-new class, derived from* `tasks/tweet_monitoring.py:L53-55` — the `# TODO: Define keywords for streaming` and the empty `track` list | The one X filtered-stream rule grammar both callers hold to: one term becomes one rule, a term holding whitespace is rendered quoted and every other term unchanged, a term is admitted only within the 128-character bound and the letter-digit-space-hyphen-underscore-period-apostrophe allowlist, and the delimited `stream_keywords` value is split once here at a bound of 512 segments (DL-257, DL-254) |
 | `util/LogSafe.java` | *No source construct — net-new* — DL-119. The retired tree carried no logging framework at all: `backend/app/**` holds no `logging`, `logger` or `getLogger` reference | Renders an identifier as `sha256:` plus the first eight digest bytes and a failure by simple type name, so the logging baseline (IR8, DL-052) emits fixed metadata without a vendor message, a stack or a value |
 
 ### 2.5 Exceptions
@@ -561,10 +586,10 @@ code, not a port.
 | Target file | Source construct | Notes |
 |-------------|------------------|-------|
 | `service/TwitterService.java` | `services/twitter_service.py` — the whole module, including the four methods the controllers call and the class lacked | Six public operations: the pageable listing whose wire `page`/`per_page` contract is unchanged while rows are fetched, mapped and serialised in bounded chunks (DL-249); the single fetch; `updateTweetAnalysis`; `analyzeTweet`, which reads the row once as a projection, scores it with no transaction open and writes the derived rating in one statement (DL-263); the popularity gate in two overloads so a caller may resolve the threshold once per cycle (DL-040, DL-255); and `popularityThresholdInForce`, whose unparseable-row warning is suppressed by key (DL-255) |
-| `service/SentimentAnalysisService.java` | `services/sentiment_analysis.py:L12-35` — `analyze_sentiment` and `calculate_doubt_rating` | `analyzeSentiment(String)` returning the bare document score, reconciling the two complementary broken sides of the source call (DL-036, DL-037), with a non-finite score rejected at the provider boundary (DL-233); `calculateDoubtRating(double)` transcribing `clamp((1 - score) * 5, 0, 10)` unchanged. The client is created on first use and released by a `@PreDestroy` that marks the bean destroyed before it waits, and `analyzeSentiment` tests that flag before it queues on the read lock as well as after, so work arriving during a shutdown is rejected rather than aborted (DL-207, DL-268) |
+| `service/SentimentAnalysisService.java` | `services/sentiment_analysis.py:L12-35` — `analyze_sentiment` and `calculate_doubt_rating` | `analyzeSentiment(String)` returning the bare document score, reconciling the two complementary broken sides of the source call (DL-036, DL-037), with a non-finite score rejected at the provider boundary (DL-233); `calculateDoubtRating(double)` transcribing `clamp((1 - score) * 5, 0, 10)` unchanged. The client is created on first use and released by a `@PreDestroy` that marks the bean destroyed before it waits, and `analyzeSentiment` tests that flag before it queues on the read lock as well as after, so a call arriving during a shutdown is rejected before it queues (DL-207, DL-268) |
 | `service/NotionService.java` | `services/notion_service.py:L12-38` — `store_tweet` and `get_tweets`, plus the absent `update_tweet_response` called at `tasks/response_generation.py:L30` | Three operations over `RestClient`; Notion stays the secondary mirror and the relational database the system of record (DL-013, DL-088, DL-089). A mirror write is retried within a bounded budget with doubling backoff for a retryable answer only — 429, any 5xx and a transport failure — and the backoff cannot overflow (DL-253). A rejection is recorded with the status, the shaped `code` member, the provider request identifier and the character count of the provider explanation, never any run of its text (DL-084, DL-269) |
-| `service/LlmService.java` | `services/llm_service.py:L6-32` — the whole module | Chat Completions replacing the removed `Completion.create(engine="text-davinci-002", …)`, with the source `max_tokens`, `temperature` and `n` carried as configuration (DL-011, DL-032, DL-033, DL-034, DL-145). The prompt is bounded: the body is cut and line-folded, and the `Context:` clause carries at most ten AI tool names and two hundred characters (DL-035, DL-265). `scanner.openai.n` must be exactly one, since only the first choice is consumed (DL-267). The client is created on first use and released by a `@PreDestroy` that marks the bean destroyed before it waits, so work arriving during a shutdown is rejected and a completion already in flight is awaited for up to thirty seconds (DL-085, DL-266) |
-| `service/ResponseService.java` | The `ResponseService` imported at `api/responses.py:L3` — a class that did not exist | Four operations whose signatures the call sites dictate, plus the background `generateWhenAbsent` (DL-016 … DL-019 of the net-new-but-intended set, DL-081, DL-086, DL-226). Every wire literal and status is preserved, and nothing here publishes to X. Generation is claimed in process, the cross-replica existence check runs before the paid provider call with no database connection held across it and again inside the storing transaction, and the parent-row lock is bounded at both statement and transaction level — the query-timeout hint on the locked read and a five-second transaction, the storing path holding a bounded copy of the injected `TransactionTemplate` so the shared bean is not mutated — so contention yields nothing stored rather than a stalled pass (DL-195, DL-246, DL-252). A page is read as the `ResponseRow` projection and mapped in bounded chunks (DL-245, DL-249) |
+| `service/LlmService.java` | `services/llm_service.py:L6-32` — the whole module | Chat Completions replacing the removed `Completion.create(engine="text-davinci-002", …)`, with the source `max_tokens`, `temperature` and `n` carried as configuration (DL-011, DL-032, DL-033, DL-034, DL-145). The prompt template and the interpolated post body are verbatim — nothing is cut, folded or escaped (DL-035) — while the `Context:` clause carries at most ten AI tool names and two hundred characters (DL-265). `scanner.openai.n` must be exactly one, since only the first choice is consumed (DL-267). The client is created on first use and released by a `@PreDestroy` that marks the bean destroyed before it waits, so work arriving during a shutdown is rejected and a completion already in flight is awaited for up to thirty seconds (DL-085, DL-266) |
+| `service/ResponseService.java` | The `ResponseService` imported at `api/responses.py:L3` — a class that did not exist | Four operations whose signatures the call sites dictate, plus the background `generateWhenAbsent` (DL-016 … DL-019 of the net-new-but-intended set, DL-081, DL-086, DL-226). Every wire literal and status is preserved, and nothing here publishes to X. Generation is claimed in process, the cross-replica existence check runs before the paid provider call with no database connection held across it and again inside the storing transaction, and the parent-row lock is bounded at both statement and transaction level — the query-timeout hint on the locked read and a five-second transaction, the storing path holding a bounded copy of the injected `TransactionTemplate` so the shared bean is not mutated, and contention yields nothing stored (DL-195, DL-246, DL-252). A page is read as the `ResponseRow` projection and mapped in bounded chunks (DL-245, DL-249) |
 | `service/SettingsService.java` | *Net-new class, derived from* the two call sites at `api/settings.py:L10,L20`; the class was imported at `:L3` and never existed (D4) | Instance methods on an injected bean, plus insert-only per-key seeding (DL-039/DL-040/DL-043/DL-073/DL-159) |
 | `service/AnalyticsService.java` | The `AnalyticsService` imported at `api/analytics.py:L3` — a class that did not exist | Both zero-argument methods, computed as aggregates over the four existing tables only: no column, index, view or cache is added (DL-041, DL-042, DL-180, DL-213). The summary is three statements — one projection per table read — and the trends series is bounded to `[now - window, now]` from a validated finite positive `scanner.analytics.trend-window-days` (DL-247) |
 
@@ -572,38 +597,38 @@ code, not a port.
 
 | Target file | Source construct | Notes |
 |-------------|------------------|-------|
-| `task/TweetStreamClient.java` | `tasks/tweet_monitoring.py:L36-55` and the `pass`-stub `stream_tweets` at `services/twitter_service.py:L16-23` | A lifecycle-managed client consuming the X API v2 filtered stream as chunked NDJSON with an app-only bearer token, replacing the retired v1.1 `statuses/filter` call (DL-012, DL-045, DL-046). The rule set is the configured base terms union the projected `ai_tools` names, strictly validated against a literal grammar, bounded to the provider rule cap and mutated in batches, with counts logged and no term value (DL-044, DL-052, DL-254, DL-257). Reconciliation preserves each rule's identifier and tag and replaces a rule whose expression or tag differs (DL-261). No expansion is requested that the listener does not read (DL-262). Dispatch is sequential at a prefetch of one (DL-258), start and stop are serialised through one lock which drains in-flight dispatch before disposing (DL-259), the body carries a signal-idle bound (DL-256), malformed and over-long records are reported by windowed counters (DL-222, DL-260), and the client starts only in a process whose `scanner.background` switches both hold (DL-250) |
+| `task/TweetStreamClient.java` | `tasks/tweet_monitoring.py:L36-55` and the `pass`-stub `stream_tweets` at `services/twitter_service.py:L16-23` | A lifecycle-managed client consuming the X API v2 filtered stream as chunked NDJSON with an app-only bearer token, replacing the retired v1.1 `statuses/filter` call (DL-012, DL-045, DL-046). The rule set is the configured base terms union the projected `ai_tools` names, validated against the one shared grammar of `util/StreamRuleTerms`, bounded to the provider rule cap and mutated in batches, with counts logged and no term value (DL-044, DL-052, DL-254, DL-257). A rule the endpoint refuses is reported with the summary counts and a fingerprint of the reflected expression rather than the expression itself (DL-275), and every failure a record names is rendered through the shared log guard (DL-197). Reconciliation preserves each rule's identifier and tag and replaces a rule whose expression or tag differs (DL-261). No expansion is requested that the listener does not read (DL-262). Dispatch is sequential at a prefetch of one (DL-258), start and stop are serialised through one lock which drains in-flight dispatch before disposing (DL-259), the body carries a signal-idle bound (DL-256), malformed and over-long records are reported by windowed counters (DL-222, DL-260), and the client starts only in a process whose `scanner.background` switches both hold (DL-250) |
 | `task/TweetStreamListener.java` | `tasks/tweet_monitoring.py:L8-34` — a class that never subclassed a tweepy listener, so `on_status` was never invoked | The four steps of the source handler with both of its TODOs closed: the gate, a real `TweetRepository.save`, the secondary Notion mirror and the response generation (DL-040, DL-049, DL-085, DL-224). A record whose required wire member is absent or mistyped is named at `WARN` and skipped with no neutral value substituted (DL-080, DL-223), a provider timestamp in the future is refused (DL-247), and the popularity threshold may be supplied once per cycle through the second overload (DL-255) |
 | `task/ResponseGenerationScheduler.java` | `tasks/response_generation.py:L35-50` — `schedule_response_generation`, absorbing the body of the Celery task at `:L10-33` | A completion-based `TriggerTask` registered by `config/AsyncSchedulingConfig.configureTasks` — the single carrier of `@EnableScheduling` — in place of `while True` plus the twice-broken `time.sleep(...)` at `:L50` (DL-047, DL-227, DL-228, DL-251). The unanswered backlog is drained in bounded keyset batches within one pass, with the persistence context cleared between batches, so no pass materialises the whole backlog (DL-248). Each candidate is handed on without a second read (DL-226), and a stored reply whose mirror was rejected after its retries is counted separately in the pass summary (DL-253) |
 
 ### 2.7 Tests
 
 The `Cases` column records the number of tests Surefire executes for the class, measured on the
-delivered suite rather than estimated; the forty-four rows below sum to the 2130 cases
+delivered suite rather than estimated; the forty-five rows below sum to the 2238 cases
 `mvn clean verify` runs. Nested classes are counted inside their parent. `task/TweetStreamClient`
 carries two classes rather than none — protocol and lifecycle are asserted separately, which is DL-214.
 
 | Target file | Source construct | Cases | Notes |
 |-------------|------------------|-------|-------|
 | `BuildDependencyContractTest.java` | *No source construct — net-new* — DL-169/DL-170/DL-240/DL-241. The retired tree carried no dependency manifest at all | 15 | The declared dependency set against the module's own contract: the four overridden version properties and the floor each must hold, the six explicitly pinned coordinates, the coordinates deliberately left BOM-managed, and the scope every runtime and test dependency carries |
-| `DecisionLogCitationTest.java` | *No source construct — net-new* — DL-216. The retired tree carried no decision log | 9 | The log and every citation of it held to one another: the unbroken identifier sequence, four populated columns per row, every citation resolvable, the population both documents state, the pointer enumeration and the length facets the entities declare |
-| `DecisionPointerIntegrityTest.java` | *No source construct — net-new* — DL-058/DL-099/DL-258 | 3 | Every `DL-` pointer written in a delivered file resolves to a row that exists, the identifiers are unique and contiguous from one, and the scan is proved to have reached the delivered tree rather than passing on an empty set |
-| `DocumentationConsistencyTest.java` | *No source construct — net-new* — DL-249 | 8 | The two Rule 1 artifacts against the repository: the retired-source inventory, the delivered-target inventory, the per-class case counts, the coverage summary and the delivery-state prose, every figure derived from the tree rather than restated from a plan |
+| `DecisionLogCitationTest.java` | *No source construct — net-new* — DL-216. The retired tree carried no decision log | 10 | The log and every citation of it held to one another: the unbroken identifier sequence, four populated columns per row, every citation resolvable, the population both documents state, the pointer enumeration, no pointer cited from outside the log, the delivered-Java-file inventory with its case total, the character-column mapping, at least one row cited from the tree, and no decision rationale in any comment of `src` or the POM (Rule 1, DL-058) |
+| `DecisionPointerIntegrityTest.java` | *No source construct — net-new* — DL-058/DL-099/DL-216 | 3 | Every `DL-` pointer written in a delivered file resolves to a row that exists, the identifiers are unique and contiguous from one, and the scan is proved to have reached the delivered tree rather than passing on an empty set |
+| `DocumentationConsistencyTest.java` | *No source construct — net-new* — DL-216 | 8 | The two Rule 1 artifacts against the repository: the retired-source inventory, the delivered-target inventory, the per-class case counts, the coverage summary and the delivery-state prose, every figure derived from the tree rather than restated from a plan |
 | `OperationsContractTest.java` | The four operations files this migration edits — `infrastructure/docker/Dockerfile.backend`, `.github/workflows/ci.yml`, `.github/workflows/cd.yml` and `scripts/deploy.sh` | 11 | Digest-pinned base images, the unprivileged runtime identity, JDK 21 with `mvn -B clean verify`, SHA-pinned actions, the Artifact Registry digest deploy and the Maven package line of the deployment script (DL-004, DL-005, DL-053, DL-056, DL-103, DL-105, DL-106, DL-107, DL-218, DL-248) |
 | `ScannerApplicationTests.java` | `tests/test_api.py` — the file that could not be collected | 50 | The widest test in the suite: the whole application context under the `test` profile with nothing mocked, driven through `MockMvc` in a `MOCK` web environment (DL-274). It asserts the composition root (DL-209), one bean of each declared type, a bare 401 on each of the eleven pre-existing routes, `POST /auth/token` answering 200, an authenticated read, ingestion reporting stopped, the error-dispatch shape (DL-183), the published pool and the bounded graceful shutdown (DL-270, DL-271), and the profile's bound values |
-| `TraceabilityCoverageTest.java` | *No source construct — net-new* — DL-260. The retired tree carried no traceability matrix | 2 | This file against the delivered tree in both directions: every delivered class is named by exactly one row, and every Java path this file names exists on disk |
+| `TraceabilityCoverageTest.java` | *No source construct — net-new* — DL-058/DL-216. The retired tree carried no traceability matrix | 2 | This file against the delivered tree in both directions: every delivered class is named by exactly one row, and every Java path this file names exists on disk |
 | `api/AnalyticsControllerTest.java` | `api/analytics.py:L7-25` and `tests/test_api.py:L47-59` | 14 | Both zero-argument routes through `@WebMvcTest`: the summary metric set, the day-bucketed trends envelope, and that neither route accepts a query parameter (DL-041/DL-042) |
-| `api/AuthControllerAdviceTest.java` | *No source construct — net-new* — DL-019/DL-117/DL-257. The source registered no token route at all | 5 | A failure of the authentication provider behind `POST /auth/token` is rendered by `api/GlobalExceptionHandler`, not by the controller, so the 500 body stays the one literal of `main.py:L35-37` |
-| `api/AuthControllerTest.java` | *No source construct — net-new* — DL-019 | 99 | The token route end to end through `@WebMvcTest` with the real `SecurityConfig` imported: issuance without an `Authorization` header, the credential-length ceiling, the empty 401 for every rejection, the bearer challenge, scheme casing, the body-size limit, and the bcrypt configuration matrix including the unresolved-placeholder guard (DL-116/DL-118/DL-189) |
+| `api/AuthControllerAdviceTest.java` | *No source construct — net-new* — DL-019/DL-117. The source registered no token route at all | 5 | A failure of the authentication provider behind `POST /auth/token` is rendered by `api/GlobalExceptionHandler`, not by the controller, so the 500 body stays the one literal of `main.py:L35-37` |
+| `api/AuthControllerTest.java` | *No source construct — net-new* — DL-019 | 100 | The token route end to end through `@WebMvcTest` with the real `SecurityConfig` imported: issuance without an `Authorization` header, the credential-length ceiling, the empty 401 for every rejection, the bearer challenge, scheme casing, the body-size limit, and the bcrypt configuration matrix including the unresolved-placeholder guard (DL-116/DL-118/DL-189) |
 | `api/GlobalExceptionHandlerTest.java` | `main.py:L31-37` and `tests/test_api.py` | 127 | Both error envelopes byte-for-byte, every per-route literal, and the three-way split of the `HttpMessageConversionException` hierarchy driven through the framework's own converter and resolver (DL-092/DL-188) |
 | `api/ResponseControllerTest.java` | `api/responses.py:L8-65` and `tests/test_api.py` | 101 | All four routes with every status code and literal, `page` and `per_page` bound as text with the 1 and 10 fallbacks, and an unparseable identifier answering 404 rather than 400 (DL-048/DL-217) |
 | `api/SettingControllerTest.java` | `tests/test_api.py:L36-44` and `api/settings.py:L7-24` | 59 | A `@WebMvcTest` slice over both routes, running behind the real imported `SecurityConfig` chain: the array shape of `GET /settings` asserted as a parsed `JsonNode` that is an array and not an object, the three-member element, no member keyed by a setting name, the empty table, the 200 update, the two service arguments captured verbatim, the `No value provided` 400 with no field name and no `ProblemDetail` member, the empty string and a JSON boolean and a JSON number all accepted, the `Setting not found` 404, validation before lookup, an underscored, a numeric-looking and a hyphenated key each reaching the service as a `String` with 404 and never 400 or 500, the `Internal server error` 500 on both routes, a bare 401 with an empty body and a `Bearer` challenge on both routes, the `Bad request` 400 for an unbindable or repeated-member body, 415, 405 with `Allow`, 406, the trailing-slash paths, and the absence of any prefixed path (DL-021/DL-039/DL-043/DL-048/DL-050/DL-092/DL-188) |
-| `api/TweetControllerTest.java` | `api/tweets.py:L9-55` and `tests/test_api.py` | 54 | The three routes, the pagination envelope, degenerate `page` values normalised to the first page, the `Tweet not found` literal and the analyze result shape (DL-037/DL-048/DL-217). Every addressed row carries a doubt rating, because `dto/TweetDto` rejects a null one (DL-080) |
-| `config/AsyncSchedulingConfigTest.java` | `tasks/response_generation.py:L41-50` — the `while True` loop | 22 | The completion-based `TriggerTask`: the next instant is the previous completion plus the effective delay, so pacing is fixed **delay** and not fixed rate; the `settings` row overrides configuration and the pool is one thread (DL-047/DL-195) |
+| `api/TweetControllerTest.java` | `api/tweets.py:L9-55` and `tests/test_api.py` | 54 | The three routes, the pagination envelope, degenerate `page` values normalised to the first page, the `Tweet not found` literal and the analyze result shape (DL-037/DL-048/DL-217). Every addressed row carries a doubt rating, which `dto/TweetDto` requires (DL-080) |
+| `config/AsyncSchedulingConfigTest.java` | `tasks/response_generation.py:L41-50` — the `while True` loop | 26 | The completion-based `TriggerTask`: the next instant is the previous completion plus the effective delay, so pacing is fixed **delay** and not fixed rate; the `settings` row overrides configuration and the pool is one thread (DL-047/DL-195) |
 | `config/BuildProfileGuardTest.java` | *No source construct — net-new* — DL-244. The retired tree declared no profiles | 14 | The guard's decision matrix: the build-scoped `test` profile refuses startup outside the build and is accepted under it, so the H2 URL and the fixed signing key cannot reach a deployed revision |
 | `config/ContainerErrorResponseConfigTest.java` | *No source construct — net-new* — DL-237/DL-238 | 42 | The container-level error surface: the status and literal matrix, a bodyless 401 and 403, a non-error status and an already-written response left alone, the shared header policy applied against the rejected-request view, the CORS parity headers with `Vary` never duplicated, `Strict-Transport-Security` only for a request the configuration reports as secure, an unresolvable CORS policy, the absence of HTML, of a server token and of any failure detail, and the customizer replacing the container's own valve |
-| `config/DataSourceConfigTest.java` | *No source construct — net-new* — DL-027/DL-270/DL-271 | 36 | The published pool: the JDBC URL and credential pair taken from the translated `scanner.database-url`, the `spring.datasource.hikari.*` geometry a deployment configures reaching the pool, `spring.datasource.url` and its siblings staying unread, and an unsupported scheme refusing to start |
-| `config/DatabaseUrlTranslatorTest.java` | *No source construct — net-new* — DL-027/DL-064/DL-071/DL-072/DL-187 | 79 | Translation, MariaDB-to-MySQL mapping, H2 TCP form, credential extraction/rejection on both paths, look-alike properties, ports, schemes and redaction |
+| `config/DataSourceConfigTest.java` | *No source construct — net-new* — DL-027/DL-270/DL-271 | 36 | The published pool: the JDBC URL and credential pair taken from the translated `scanner.database-url`, the eight allowlisted `scanner.datasource.pool.*` settings a deployment configures reaching the pool with their declared defaults and range checks, the sixteen `spring.datasource.*` connection-identity keys refusing to start, any other key under that unread prefix being warned about and ignored, and an unsupported scheme refusing to start |
+| `config/DatabaseUrlTranslatorTest.java` | *No source construct — net-new* — DL-027/DL-064/DL-071/DL-072/DL-187 | 78 | Translation, MariaDB-to-MySQL mapping, the refusal of an h2 scheme, credential extraction/rejection on both paths, look-alike properties, ports, schemes and redaction |
 | `config/HttpChainIntegrationTest.java` | *No source construct — net-new* — DL-051/DL-183/DL-237/DL-238/DL-240 | 7 | The running chain on a real connector: an oversized header and an invalid request target each answer the sanctioned JSON envelope, and the CORS and transport-security headers apply to a connector rejection as well as to a controller answer |
 | `config/MainProfileConfigurationContractTest.java` | `core/config.py:L4-15` and the `.env` convention at `:L13-15` | 16 | The production `application.yml` through Spring's own YAML loader, placeholder resolver and binder: the nested-default Twitter aliases, the pinned port, the explicit servlet web type and the schema-bootstrap setting (DL-026, DL-027, DL-029, DL-030, DL-031, DL-246) |
 | `config/RequestMediaTypeConfigTest.java` | *No source construct — net-new* — DL-235/DL-236 | 53 | The media-type predicate over wildcard, unparseable, concrete and blank values; the filter withholding the header and passing a concrete one through untouched; every other header and the body reachable downstream; the header copy every component of the request path performs no longer raising; and the registration ordered ahead of the security filter chain |
@@ -620,15 +645,16 @@ carries two classes rather than none — protocol and lifecycle are asserted sep
 | `service/ResponseServiceTest.java` | *No source construct — net-new* | 124 | The four route operations plus the background-only generation operation, canonical identifier claims, parent-lock orchestration, writable-value updates, real mapper coverage and the absence of any publish path (DL-081/DL-082/DL-122/DL-195) |
 | `service/SentimentAnalysisServiceTest.java` | `tests/test_services.py:L58-65` | 60 | Finite and clamping vectors, NaN and both infinities, null input, propagated client failure and client lifecycle |
 | `service/SettingsServiceSeedingIntegrationTest.java` | *No source construct — net-new* — DL-040 | 11 | A real Boot context over H2 publishing a real `ApplicationReadyEvent`; idempotence and no-overwrite |
-| `service/SettingsServiceTest.java` | `tests/test_api.py:L36-44` and `tests/test_services.py` | 65 | Both operations through the real `SettingMapper`, plus the seeding-normalisation matrix |
+| `service/SettingsServiceTest.java` | `tests/test_api.py:L36-44` and `tests/test_services.py` | 71 | Both operations through the real `SettingMapper`, plus the seeding-normalisation matrix |
 | `service/TwitterServiceTest.java` | `services/twitter_service.py:L42-50` and `tests/test_services.py:L12-22` | 143 | The popularity gate: the inclusive boundary at 99/100/101 against the configured default, the same boundary at two other thresholds, the `settings` row overriding configuration, the configured fallback for a row holding no integer, whitespace discarded, a threshold at or below zero honoured as stored, and an absent like count answered without reading the table (DL-040) |
 | `task/ResponseGenerationSchedulerTest.java` | `tests/test_tasks.py` and `tasks/response_generation.py:L35-50` | 22 | One pass draining the whole backlog as bounded keyset batches of `findUnansweredBatchAfter(Integer, Pageable)` with the persistence context cleared between them (DL-248), per-candidate isolation so one failure does not end the pass, the skip when a reply appeared after the query ran, the pass summary (DL-195), and the rejection a contentless reply now raises at record construction before anything is mirrored (DL-080) |
-| `task/TweetStreamClientLifecycleTest.java` | `tasks/tweet_monitoring.py:L36-55` — the blocking `filter(track=…)` call | 65 | The `SmartLifecycle` contract: `start`, `stop`, `isRunning`, idempotence, and that `start()` returns without a blocking read because composition runs on `boundedElastic` (DL-214) |
-| `task/TweetStreamClientTest.java` | `tasks/tweet_monitoring.py:L36-55` and `services/twitter_service.py:L16-23` | 108 | The protocol through a stubbed `ExchangeFunction`: app-only token exchange, rule reconciliation, NDJSON reassembly across chunk boundaries, `429` with `x-rate-limit-reset`, backoff with jitter, reconnect on a clean end and the blank-credential stop (DL-207/DL-214) |
+| `task/TweetStreamClientLifecycleTest.java` | `tasks/tweet_monitoring.py:L36-55` — the blocking `filter(track=…)` call | 65 | The `SmartLifecycle` contract: `start`, `stop`, `isRunning`, idempotence, and that `start()` returns without a blocking read, with composition subscribed on `boundedElastic` (DL-214) |
+| `task/TweetStreamClientTest.java` | `tasks/tweet_monitoring.py:L36-55` and `services/twitter_service.py:L16-23` | 111 | The protocol through a stubbed `ExchangeFunction`: app-only token exchange, rule reconciliation, NDJSON reassembly across chunk boundaries, `429` with `x-rate-limit-reset`, backoff with jitter, reconnect on a clean end and the blank-credential stop (DL-207/DL-214) |
 | `task/TweetStreamListenerTest.java` | `tests/test_tasks.py` and `tasks/tweet_monitoring.py:L8-34` | 45 | The four ingestion steps in order, persistence closing the `TODO` at `:L29`, the guarded generation trigger closing the `TODO` at `:L32`, required-field rejection before save, a stored entity mapped through the real `TweetMapper`, and the rejection a contentless reply now raises at record construction before the mirror is reached (DL-080/DL-195/DL-199) |
 | `util/ConfiguredValuesTest.java` | *No source construct — net-new* | 25 | The single definition of the unresolved-placeholder shape and the trim that keeps all three call sites symmetric |
 | `util/LogSafeTest.java` | *No source construct — net-new* — DL-208 | 46 | Both log-metadata primitives: the truncated SHA-256 correlation token is stable and non-reversible, and a failure contributes its simple type name only |
 | `util/QueryParametersTest.java` | `api/tweets.py:L12-13` and `api/responses.py:L11-12` | 53 | The conversion matrix of DL-217: absent, blank, whitespace, non-numeric, signed, overflowing and non-ASCII digit input against the declared defaults |
+| `util/StreamRuleTermsTest.java` | *No source construct — net-new* — DL-257. `tasks/tweet_monitoring.py:L53-55` left the keyword set undefined and validated nothing | 94 | The one X rule grammar both callers hold to: the character allowlist, the letter-or-digit edges, the 128-character bound measured after trimming, a letter or digit of any script admitted, the quoting of a phrase, the 512-segment split bound and the agreement between `countUsable` and the per-term decision (DL-257) |
 
 ### 2.8 Documented constructs deliberately not introduced
 
@@ -654,6 +680,11 @@ Line ranges name the *original* lines that changed, so each row reads as a sourc
 
 `infrastructure/terraform/**`, `scripts/setup_environment.sh` (DL-054), `infrastructure/docker/Dockerfile.frontend`, `frontend/**` (DL-059), `documentation/**` and `README.md` are unchanged.
 
+Two root-level repository-hygiene files are delivered outside the plan's file inventory and are named
+here rather than in the table above, because neither edits a source construct: `.yamllint.yml` holds the
+YAML lint policy both workflows are written to (DL-276), and `.github/dependabot.yml` declares the
+three ecosystems whose pinned versions are watched, changing nothing on its own.
+
 
 
 ---
@@ -673,7 +704,7 @@ in §2.7, which is the one place their case counts are stated: `api/TweetControl
 the consequence that revision recorded: `api/TweetController`, `api/ResponseController`,
 `api/AnalyticsController`, `task/TweetStreamListener` and `task/ResponseGenerationScheduler` each now
 carry a committed test of their own rather than being covered only indirectly. The suite is
-forty-four classes running 2130 cases, measured from the delivered Surefire run; `api/ErrorDispatchControllerTest`
+forty-five classes running 2238 cases, measured from the delivered Surefire run; `api/ErrorDispatchControllerTest`
 is the one class an earlier revision counted that the tree no longer holds, because DL-183 withdrew the
 controller it covered. The additions beyond the Agent Action Plan's inventory are enumerated and
 authorised in DL-216.
@@ -695,7 +726,7 @@ reproduce every row.
 | Associations (§1.3) | 1 | 1 | 1 | 0 |
 | Business rules (§1.4) | 2 | 2 | 2 | 0 |
 | Source configuration keys (§1.5) | 15 | 15 | 15 | 0 |
-| Target configuration surface (§1.5.1) | 31 placeholders + 9 literal settings | 40 | 40 | 0 |
+| Target configuration surface (§1.5.1) | 48 placeholders + 9 literal settings | 57 | 57 | 0 |
 | Seeded `settings` rows (§1.5.1) | 3 | 3 | 3 | 0 |
 | External integrations (§1.6) | 4 | 4 | 4 | 0 |
 | Retired PyPI packages (§1.7) | 15 | 15 | 15 | 0 |
@@ -704,20 +735,20 @@ reproduce every row.
 | Scaffolding markers (§1.9) | 23 | 23 | 23 | 0 |
 | Python test files (§1.10) | 3 | 3 | 1 fully, 2 partly | 0 |
 | Delivered main Java classes (§2.2–§2.6) | 67 | 67 | 67 | — |
-| Delivered test Java classes (§2.7) | 44 | 44 | 44 | — |
+| Delivered test Java classes (§2.7) | 45 | 45 | 45 | — |
 | Delivered resources and build files (§2.1) | 7 | 7 | 7 | — |
 | Operations files edited (§2.9) | 4 | 4 | 4 | — |
 | Source body expectations (§1.11) | 3 | 3 | 1 honoured, 2 discounted by decision | 0 |
 | Documented constructs not introduced (§2.8) | 2 | 2 | 0 introduced, 2 recorded | 0 |
-| Delivered test cases (§2.7) | — | 44 classes | 2130 cases, 0 failing | — |
-| **Delivered artifacts under `backend/`** | **118** | **118** | **118** | **0** |
+| Delivered test cases (§2.7) | — | 45 classes | 2238 cases, 0 failing | — |
+| **Delivered artifacts under `backend/`** | **119** | **119** | **119** | **0** |
 | Planned targets (§3) | 0 | — | — | 0 |
 
 Every construct in every required coverage set has a row, and every row is `Delivered`,
 `Partly delivered` or `Retired` — no row is `PLANNED`. Both directions are complete: §1 maps every source
-construct forward, and §2 maps each of the one hundred and eighteen delivered artifacts under `backend/`,
+construct forward, and §2 maps each of the one hundred and nineteen delivered artifacts under `backend/`,
 plus the four operations files edited outside it, back to a source construct or marks it net-new with the
-decision that authorises it. Each of those one hundred and eighteen appears exactly once in §2 — no
+decision that authorises it. Each of those one hundred and nineteen appears exactly once in §2 — no
 artifact is missing and none is listed twice. Every `DL-` identifier cited in this file resolves to a row
 in `docs/DECISION_LOG.md` carrying all four of its content columns, and no identifier cited here is a
 superseded pointer standing in for the entry that owns the subject.

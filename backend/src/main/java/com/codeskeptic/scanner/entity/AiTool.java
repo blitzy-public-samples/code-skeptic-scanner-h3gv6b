@@ -19,8 +19,9 @@ import jakarta.persistence.Table;
  * docs/DECISION_LOG.md.
  *
  * <p>No column declares a not-null marker, a duplicate-value restriction or a width bound.
- * {@code name} and {@code description} carry a bare {@code @Column}, matching the bare
- * {@code Column(String)} at backend/app/db/models.py:L36-37 — DL-068 — see docs/DECISION_LOG.md.
+ * {@code name} and {@code description} declare {@code columnDefinition = "varchar"}, the
+ * capacity-free character type the bare {@code Column(String)} at
+ * backend/app/db/models.py:L36-37 renders — DL-068 — see docs/DECISION_LOG.md.
  */
 // Ported from backend/app/db/models.py:L32-37 (faithful port) — see docs/DECISION_LOG.md
 // equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see
@@ -36,12 +37,14 @@ public class AiTool {
     @Column(name = "id")
     private Integer id;
 
-    // backend/app/db/models.py:L36
-    @Column(name = "name")
+    // backend/app/db/models.py:L36 — capacity-free character column — DL-068 — see
+    // docs/DECISION_LOG.md
+    @Column(name = "name", columnDefinition = "varchar")
     private String name;
 
-    // backend/app/db/models.py:L37
-    @Column(name = "description")
+    // backend/app/db/models.py:L37 — capacity-free character column — DL-068 — see
+    // docs/DECISION_LOG.md
+    @Column(name = "description", columnDefinition = "varchar")
     private String description;
 
     /**

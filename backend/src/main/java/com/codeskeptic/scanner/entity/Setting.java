@@ -15,8 +15,9 @@ import jakarta.persistence.Table;
  * {@code spring.jpa.hibernate.ddl-auto} — see docs/DECISION_LOG.md DL-026.
  *
  * <p>No column declares a not-null marker, a duplicate-value restriction or a width bound. All three
- * carry a bare {@code @Column}, matching the bare {@code Column(String)} at
- * backend/app/db/models.py:L42-44 — DL-068 — see docs/DECISION_LOG.md.
+ * declare {@code columnDefinition = "varchar"}, the capacity-free character type the bare
+ * {@code Column(String)} at backend/app/db/models.py:L42-44 renders; the primary key takes the same
+ * capacity-free type — DL-068, DL-069 — see docs/DECISION_LOG.md.
  */
 // Ported from backend/app/db/models.py:L39-44 (faithful port) — see docs/DECISION_LOG.md
 // Departures from the literal source declaration, each recorded in the decision log: key and value
@@ -28,17 +29,20 @@ import jakarta.persistence.Table;
 @Table(name = "settings")
 public class Setting {
 
-    // backend/app/db/models.py:L42 — quoted identifier — DL-061 — see docs/DECISION_LOG.md
+    // backend/app/db/models.py:L42 — quoted identifier — DL-061; capacity-free character column —
+    // DL-069 — see docs/DECISION_LOG.md
     @Id
-    @Column(name = "\"key\"")
+    @Column(name = "\"key\"", columnDefinition = "varchar")
     private String key;
 
-    // backend/app/db/models.py:L43 — quoted identifier — DL-061 — see docs/DECISION_LOG.md
-    @Column(name = "\"value\"")
+    // backend/app/db/models.py:L43 — quoted identifier — DL-061; capacity-free character column —
+    // DL-068 — see docs/DECISION_LOG.md
+    @Column(name = "\"value\"", columnDefinition = "varchar")
     private String value;
 
-    // backend/app/db/models.py:L44
-    @Column(name = "description")
+    // backend/app/db/models.py:L44 — capacity-free character column — DL-068 — see
+    // docs/DECISION_LOG.md
+    @Column(name = "description", columnDefinition = "varchar")
     private String description;
 
     /**

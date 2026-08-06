@@ -39,7 +39,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 /**
  * Executable consistency contract for the two Rule 1 explainability artifacts.
  *
- * <p>Net-new (no source construct) — DL-249 — see docs/DECISION_LOG.md.
+ * <p>Net-new (no source construct) — DL-216 — see docs/DECISION_LOG.md.
  */
 @DisplayName("Documentation consistency")
 final class DocumentationConsistencyTest {

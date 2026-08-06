@@ -135,6 +135,26 @@ class TweetStreamClientTest {
     /** Shortest reconnection delay the client applies. */
     private static final Duration MINIMUM_BACKOFF = Duration.ofSeconds(5);
 
+    /** Characters {@code util.LogSafe.logSafe(String)} carries before it truncates — DL-197. */
+    private static final int GUARDED_VALUE_LIMIT = 64;
+
+    /**
+     * A failure message carrying a record boundary, a forged level and an unbounded tail — the shape
+     * a remote peer, a proxy or a TLS stack can contribute to a transport failure.
+     */
+    private static final String HOSTILE_FAILURE_MESSAGE =
+            "connection reset\r\nWARN forged record " + "x".repeat(200);
+
+    /**
+     * A rules-mutation answer refusing one rule, whose reflected {@code value} carries a record
+     * boundary and a forged level.
+     */
+    private static final String REFUSAL_BODY =
+            "{\"errors\":[{\"value\":\"smuggled term\\r\\nWARN forged record\","
+                    + "\"title\":\"DuplicateRule\"}],"
+                    + "\"meta\":{\"summary\":{\"created\":0,\"not_created\":1,\"valid\":0,"
+                    + "\"invalid\":1}}}";
+
     /**
      * Bound every test but the two of {@code the control-plane bound} gives the token exchange and the
      * rules calls, long enough not to interfere — DL-230.
@@ -386,7 +406,7 @@ class TweetStreamClientTest {
                     .containsOnly(TOKEN_PATH, RULES_PATH);
         }
 
-        // The stream body is deliberately unbounded — DL-193, DL-230 — see docs/DECISION_LOG.md
+        // The stream body carries no total-response bound — DL-193, DL-230 — see docs/DECISION_LOG.md
         @Test
         @DisplayName("does not bound the filtered stream: a connection quieter than the bound keeps "
                 + "delivering")
@@ -773,12 +793,13 @@ class TweetStreamClientTest {
                 List<String> warnings = recorded.list.stream()
                         .filter(event -> event.getLevel() == Level.WARN)
                         .map(ILoggingEvent::getFormattedMessage)
-                        .filter(message -> message.contains("rule syntax"))
+                        .filter(message -> message.contains("Dropping a stream rule term"))
                         .toList();
                 assertThat(warnings).hasSize(1);
-                assertThat(warnings.get(0))
+                assertThat(warnings.getFirst())
                         .doesNotContain("secret")
                         .doesNotContain("OR spam")
+                        .contains("exceeds 128 character(s)")
                         .contains("is 15 character(s) long");
             } finally {
                 detachClientAppender(recorded);
@@ -982,6 +1003,58 @@ class TweetStreamClientTest {
                 assertThat(exchange.body()).doesNotContain("dry_run");
                 assertThat(exchange.query()).doesNotContain("dry_run");
             });
+        }
+
+        // A provider-reflected expression reaches the record as a fingerprint only — DL-275 — see
+        // docs/DECISION_LOG.md
+        @Test
+        @DisplayName("records a refused rule as a fingerprint, never as the expression X reflected")
+        void recordsARefusedRuleAsAFingerprintNeverAsTheExpressionXReflected() {
+            ListAppender<ILoggingEvent> recorded = attachClientAppender();
+            try {
+                client = clientWith(CONSUMER_KEY, CONSUMER_SECRET, request -> {
+                    String path = request.url().getPath();
+                    if (path.equals(TOKEN_PATH)) {
+                        return Mono.just(json("{\"token_type\":\"bearer\",\"access_token\":\""
+                                + TOKEN + "\"}"));
+                    }
+                    if (path.equals(RULES_PATH)) {
+                        return Mono.just(json(request.method() == HttpMethod.GET
+                                ? "{\"data\":[]}"
+                                : REFUSAL_BODY));
+                    }
+                    return Mono.just(streamOf(""));
+                });
+                client.start();
+                awaitExchange(STREAM_PATH);
+
+                List<String> warnings = awaitWarningsContaining(recorded, "X refused");
+                assertThat(warnings).hasSize(1);
+                assertThat(warnings.getFirst())
+                        .doesNotContain("forged")
+                        .doesNotContain("smuggled term")
+                        .doesNotContain("\n")
+                        .doesNotContain("\r")
+                        .contains("(1 not created, 1 invalid)")
+                        .contains("sha256:");
+            } finally {
+                detachClientAppender(recorded);
+            }
+        }
+
+        @Test
+        @DisplayName("records nothing when the mutation answer refuses no rule")
+        void recordsNothingWhenTheMutationAnswerRefusesNoRule() {
+            ListAppender<ILoggingEvent> recorded = attachClientAppender();
+            try {
+                client = startedAgainst(streamOf(""));
+                awaitExchange(STREAM_PATH);
+
+                assertThat(recorded.list).noneSatisfy(event ->
+                        assertThat(event.getFormattedMessage()).contains("X refused"));
+            } finally {
+                detachClientAppender(recorded);
+            }
         }
 
         @Test
@@ -1242,6 +1315,41 @@ class TweetStreamClientTest {
 
             awaitCondition(() -> streamAttempts.get() >= 2);
             assertThat(awaitDelivery(1)).hasSize(1);
+        }
+
+        // Every failure rendering passes the shared log guard — DL-197 — see docs/DECISION_LOG.md
+        @Test
+        @DisplayName("guards a failure message before it reaches a reconnection record")
+        void guardsAFailureMessageBeforeItReachesAReconnectionRecord() {
+            ListAppender<ILoggingEvent> recorded = attachClientAppender();
+            try {
+                AtomicInteger streamAttempts = new AtomicInteger();
+                client = clientWith(CONSUMER_KEY, CONSUMER_SECRET, request -> {
+                    String path = request.url().getPath();
+                    if (path.equals(TOKEN_PATH)) {
+                        return Mono.just(json("{\"token_type\":\"bearer\",\"access_token\":\""
+                                + TOKEN + "\"}"));
+                    }
+                    if (path.equals(RULES_PATH)) {
+                        return Mono.just(json("{\"data\":[]}"));
+                    }
+                    streamAttempts.incrementAndGet();
+                    return Mono.error(new java.io.IOException(HOSTILE_FAILURE_MESSAGE));
+                });
+                client.start();
+                awaitCondition(() -> streamAttempts.get() >= 1);
+
+                List<String> warnings = awaitWarningsContaining(recorded, "Reconnecting to the X");
+                assertThat(warnings).isNotEmpty();
+                assertThat(warnings.getFirst())
+                        .contains("IOException")
+                        .doesNotContain("\n")
+                        .doesNotContain("\r")
+                        .doesNotContain("x".repeat(GUARDED_VALUE_LIMIT))
+                        .contains("connection reset??");
+            } finally {
+                detachClientAppender(recorded);
+            }
         }
 
         @Test
@@ -1849,6 +1957,25 @@ class TweetStreamClientTest {
      *
      * @return the attached appender
      */
+    /**
+     * Waits for at least one {@code WARN} record whose formatted message carries {@code fragment}.
+     *
+     * @param recorded  the attached appender
+     * @param fragment  the fragment to wait for
+     * @return every matching formatted message, in the order recorded
+     */
+    private static List<String> awaitWarningsContaining(ListAppender<ILoggingEvent> recorded,
+            String fragment) {
+        awaitCondition(() -> recorded.list.stream()
+                .anyMatch(event -> event.getLevel() == Level.WARN
+                        && event.getFormattedMessage().contains(fragment)));
+        return recorded.list.stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.contains(fragment))
+                .toList();
+    }
+
     private static ListAppender<ILoggingEvent> attachClientAppender() {
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
@@ -1920,7 +2047,8 @@ class TweetStreamClientTest {
     private static ScannerProperties.Twitter twitter(String consumerKey, String consumerSecret,
             long timeoutSeconds) {
         return new ScannerProperties.Twitter("api-key", "api-secret", "api-secret-key",
-                consumerKey, consumerSecret, "access-token", "access-token-secret", timeoutSeconds, STREAM_IDLE_TIMEOUT_SECONDS);
+                consumerKey, consumerSecret, "access-token", "access-token-secret",
+                timeoutSeconds);
     }
 
     /**

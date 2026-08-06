@@ -11,8 +11,10 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -33,7 +35,7 @@ import org.junit.jupiter.api.Test;
  * with the delivered one are each a broken route, and each is decidable by reading the files — which
  * is what this class does.
  *
- * <p>Seven properties are asserted:
+ * <p>Ten properties are asserted:
  *
  * <ol>
  *   <li>the identifiers form the unbroken sequence {@code DL-001} … {@code DL-<n>}, with no gap and no
@@ -52,7 +54,11 @@ import org.junit.jupiter.api.Test;
  *       is absent, and its stated case total agrees with its own per-class rows;</li>
  *   <li>the entry that owns the character-column mapping names every column the entities actually
  *       declare a length facet on, and the entry that owns the primary-key bound states its value —
- *       so a facet cannot be added, removed or retuned without the log saying so.</li>
+ *       so a facet cannot be added, removed or retuned without the log saying so;</li>
+ *   <li>at least one row is cited from outside the log itself, so the routes above are exercised
+ *       rather than merely well-formed;</li>
+ *   <li>no comment under {@code src} or in the POM carries decision rationale — the reasoning,
+ *       alternatives and risks behind a choice live in the log and nowhere else (Rule 1, DL-058).</li>
  * </ol>
  *
  * <p>The fifth property is the one that decays silently. Redirecting a row is how a superseded subject
@@ -87,6 +93,27 @@ class DecisionLogCitationTest {
     /** Shape of a citation, wherever it appears. */
     private static final Pattern CITATION = Pattern.compile("DL-\\d{3}");
 
+    /** Roots whose comments must carry no rationale: the delivered sources and the POM. */
+    private static final List<Path> RATIONALE_SCANNED_ROOTS =
+            List.of(Path.of("src"), Path.of("pom.xml"));
+
+    /**
+     * Wordings that mark a comment as arguing for a choice rather than stating what the code does.
+     *
+     * <p>Each names either an author's preference, a rejected option, a cost or a risk — the four
+     * things the log's own columns carry. A comment may name the source construct, the delivered
+     * contract and the decision identifier; it may not carry any of these.
+     */
+    private static final List<String> RATIONALE_MARKERS = List.of(
+            "by design", "deliberately", "deliberate", "intentionally", "on purpose",
+            "trade-off", "tradeoff", "at the cost of", "we chose", "chosen over",
+            "in preference to", "for readability", "would have been", "the alternative",
+            "no reason to", "is cheaper", "is safer", "arguably", "preferable");
+
+    /** Openers of a comment line in the scanned file kinds. */
+    private static final List<String> COMMENT_OPENERS =
+            List.of("//", "*", "/*", "#", "<!--");
+
     /** Number of content columns every row must populate. */
     private static final int CONTENT_COLUMNS = 4;
 
@@ -95,6 +122,14 @@ class DecisionLogCitationTest {
 
     /** Shape of the {@code Cases} column a per-test-class matrix row carries. */
     private static final Pattern MATRIX_CASES = Pattern.compile("\\| (\\d+) \\| ");
+
+    /**
+     * A column mapping that states the capacity-free character type, capturing the column name and
+     * the mapped Java type — DL-068, DL-069.
+     */
+    private static final Pattern CAPACITY_FREE_COLUMN = Pattern.compile(
+            "@Column\\(name = \"((?:[^\"\\\\]|\\\\.)*)\", columnDefinition = \"varchar\"\\)"
+                    + "\\s*private (\\S+)");
 
     /** A column mapping that declares nothing but its name, capturing the name and the mapped type. */
     private static final Pattern BARE_COLUMN = Pattern.compile(
@@ -296,20 +331,27 @@ class DecisionLogCitationTest {
     }
 
     @Test
-    @DisplayName("states the length facets the entities declare, column by column")
-    void statesTheLengthFacetsTheEntitiesDeclare() {
+    @DisplayName("states the character-column mapping the entities declare, column by column")
+    void statesTheCharacterColumnMappingTheEntitiesDeclare() {
         Map<String, List<String>> rows = rows();
         String mappingRule = rows.get("DL-068").get(0);
-        String primaryKeyBound = rows.get("DL-069").get(0);
+        String primaryKeyMapping = rows.get("DL-069").get(0);
 
         List<String> characterColumns = new ArrayList<>();
+        List<String> bareCharacterColumns = new ArrayList<>();
         List<String> faceted = new ArrayList<>();
         for (Path entity : entitySources()) {
             String source = read(entity);
+            Matcher capacityFree = CAPACITY_FREE_COLUMN.matcher(source);
+            while (capacityFree.find()) {
+                if (CHARACTER_TYPES.contains(capacityFree.group(2))) {
+                    characterColumns.add(capacityFree.group(1).replace("\\\"", ""));
+                }
+            }
             Matcher bare = BARE_COLUMN.matcher(source);
             while (bare.find()) {
                 if (CHARACTER_TYPES.contains(bare.group(2))) {
-                    characterColumns.add(bare.group(1).replace("\\\"", ""));
+                    bareCharacterColumns.add(entity.getFileName() + ": " + bare.group(1));
                 }
             }
             Matcher declared = LENGTH_FACET.matcher(source);
@@ -321,6 +363,9 @@ class DecisionLogCitationTest {
         assertThat(faceted)
                 .as("column mappings declaring a width bound, which the data-model boundary forbids")
                 .isEmpty();
+        assertThat(bareCharacterColumns)
+                .as("character columns left on the provider's invented capacity")
+                .isEmpty();
         assertThat(characterColumns)
                 .as("character columns the entities map")
                 .isNotEmpty();
@@ -331,18 +376,17 @@ class DecisionLogCitationTest {
                         .contains(column));
         assertThat(mappingRule)
                 .as("mapping DL-068 states")
-                .contains("bare `@Column`")
-                .contains("varchar(255)")
+                .contains("`columnDefinition = \"varchar\"`")
                 .contains("no `length`");
         Matcher stated = CHARACTER_COLUMN_COUNT.matcher(mappingRule);
         assertThat(stated.find()).as("count DL-068 states for the character columns").isTrue();
         assertThat(NUMBER_WORDS.get(stated.group(1)))
                 .as("count DL-068 states, against the character columns the entities map")
                 .isEqualTo(characterColumns.size());
-        assertThat(primaryKeyBound)
-                .as("bound DL-069 states, against the capacity an undeclared length renders")
+        assertThat(primaryKeyMapping)
+                .as("mapping DL-069 states for the settings primary key")
                 .contains("declares no `length`")
-                .contains("varchar(255)");
+                .contains("`columnDefinition = \"varchar\"`");
     }
 
     @Test
@@ -357,6 +401,70 @@ class DecisionLogCitationTest {
 
         assertThat(cited).as("identifiers cited outside the log itself").isNotEmpty();
         assertThat(rows().keySet()).as("declared rows").containsAll(cited);
+    }
+
+    @Test
+    @DisplayName("carries no decision rationale in any comment of the delivered sources or the POM")
+    void carriesNoDecisionRationaleInAnyCommentOfTheDeliveredSourcesOrThePom() {
+        Map<String, String> offending = new TreeMap<>();
+        for (Path file : rationaleScannedFiles()) {
+            List<String> lines = read(file).lines().toList();
+            for (int index = 0; index < lines.size(); index++) {
+                String line = lines.get(index).strip();
+                if (!isComment(line)) {
+                    continue;
+                }
+                String lowered = line.toLowerCase(Locale.ROOT);
+                String marker = RATIONALE_MARKERS.stream()
+                        .filter(lowered::contains)
+                        .findFirst()
+                        .orElse(null);
+                if (marker != null) {
+                    offending.put(file + ":" + (index + 1) + " [" + marker + "]", line);
+                }
+            }
+        }
+
+        assertThat(offending)
+                .as("comments carrying rationale, which docs/DECISION_LOG.md owns (Rule 1, DL-058)")
+                .isEmpty();
+    }
+
+    /**
+     * Lists every file whose comments are held to the no-rationale rule.
+     *
+     * @return the delivered sources and the POM, in a stable order
+     */
+    private static List<Path> rationaleScannedFiles() {
+        List<Path> files = new ArrayList<>();
+        for (Path root : RATIONALE_SCANNED_ROOTS) {
+            if (!Files.exists(root)) {
+                continue;
+            }
+            if (Files.isRegularFile(root)) {
+                files.add(root);
+                continue;
+            }
+            try (Stream<Path> walked = Files.walk(root)) {
+                walked.filter(Files::isRegularFile)
+                        .filter(DecisionLogCitationTest::isScanned)
+                        .sorted()
+                        .forEach(files::add);
+            } catch (IOException ex) {
+                throw new UncheckedIOException("Could not walk " + root, ex);
+            }
+        }
+        return files;
+    }
+
+    /**
+     * Reports whether a stripped line opens a comment in any of the scanned file kinds.
+     *
+     * @param strippedLine the line with leading and trailing whitespace removed
+     * @return {@code true} when the line is a comment line
+     */
+    private static boolean isComment(String strippedLine) {
+        return COMMENT_OPENERS.stream().anyMatch(strippedLine::startsWith);
     }
 
     /**

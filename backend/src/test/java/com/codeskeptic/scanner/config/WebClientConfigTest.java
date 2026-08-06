@@ -20,7 +20,7 @@ import org.springframework.web.reactive.function.client.WebClient;
 
 import reactor.core.publisher.Mono;
 
-// Net-new (no Python counterpart) — DL-012, DL-045, DL-046, DL-247 — see docs/DECISION_LOG.md
+// Net-new (no Python counterpart) — DL-012, DL-045, DL-046, DL-230 — see docs/DECISION_LOG.md
 /**
  * Verifies the production X API {@link WebClient} bean through a recording exchange function.
  */

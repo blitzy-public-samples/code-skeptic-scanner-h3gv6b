@@ -6,7 +6,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 // Net-new (no Python counterpart: backend/app/api/analytics.py:L13-14 read no clock and the
-// AnalyticsService it imported did not exist) — DL-241 — see docs/DECISION_LOG.md
+// AnalyticsService it imported did not exist) — DL-278 — see docs/DECISION_LOG.md
 /**
  * Publishes the application's time source.
  *
@@ -14,7 +14,7 @@ import org.springframework.context.annotation.Configuration;
  * depends on the JVM's default time zone. {@code task.TweetStreamListener.readCreatedAt} and
  * {@code service.NotionService.parseOffsetDateTime} both normalise a delivered timestamp to UTC
  * before it is stored in {@code tweets.created_at} — DL-192 — so a query bound to that column is
- * bound against UTC values, and this clock is the same basis — DL-241.
+ * bound against UTC values, and this clock is the same basis — DL-278.
  *
  * <p>{@code service.AnalyticsService} is the consumer: it derives the {@code GET /analytics/trends}
  * observation window from this clock. Scheduling reads its own clock from the
@@ -32,7 +32,7 @@ public class ClockConfig {
      * @return the single {@link Clock} bean in the application context, resolvable by type and by the
      *     name {@code utcClock}; never {@code null}
      */
-    // Net-new (no source construct) — DL-241 — see docs/DECISION_LOG.md
+    // Net-new (no source construct) — DL-278 — see docs/DECISION_LOG.md
     @Bean
     public Clock utcClock() {
         return Clock.systemUTC();

@@ -48,7 +48,8 @@ public interface AiToolRepository extends JpaRepository<AiTool, Integer> {
      * Selects the {@code name} column of the {@code ai_tools} rows that hold one.
      *
      * <p>Only the {@code name} column is selected, so no other column of the table is transferred. A
-     * row whose {@code name} is {@code null} or blank is excluded by the query, and the results are
+     * row whose {@code name} is {@code null} or empty is excluded by the query; a name of whitespace
+     * alone is returned and is dropped downstream by {@code util.StreamRuleTerms}. The results are
      * ordered by {@code id} ascending so a bounded page is stable across calls.
      *
      * @param bound the page bounding the number of names returned, must not be {@code null}

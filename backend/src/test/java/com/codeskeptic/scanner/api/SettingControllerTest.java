@@ -131,7 +131,7 @@ class SettingControllerTest {
     /** Message served with 400 for a body the converter cannot bind — DL-092, DL-188. */
     private static final String BAD_REQUEST = "Bad request";
 
-    /** The sanctioned envelope of an unmatched path — backend/app/main.py:L31-33, DL-243. */
+    /** The sanctioned envelope of an unmatched path — backend/app/main.py:L31-33, DL-183. */
     private static final String NOT_FOUND_BODY = "{\"error\":\"Not found\"}";
 
     /** Members {@code ProblemDetail} would carry; none of them reaches the wire. */

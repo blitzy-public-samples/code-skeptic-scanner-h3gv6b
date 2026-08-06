@@ -56,14 +56,10 @@ import com.codeskeptic.scanner.util.LogSafe;
  *
  * <p>The first pass runs immediately rather than one interval after startup, matching the
  * work-then-sleep order of {@code backend/app/tasks/response_generation.py:L41-50}. A resolved interval
- * is read within one second and one year, a settings read that fails leaves the configured value in
- * force, and no failure of the trigger can leave the task unscheduled — see docs/DECISION_LOG.md
- * DL-251.
- *
- * <p>The scheduler carries a pool size, and at shutdown it stops accepting work and awaits a pass that
- * is already running for up to thirty seconds — DL-251. No cancellation policy is set;
- * {@code @EnableAsync} is not declared. No message broker, queue, distributed scheduler lock,
- * {@code ApplicationRunner} or {@code CommandLineRunner} is declared here.
+ * is read within {@value #MINIMUM_DELAY_SECONDS} second and {@value #MAXIMUM_DELAY_SECONDS} seconds, a
+ * settings read that fails leaves the configured value in force, and no failure of the trigger can
+ * leave the task unscheduled. Each of those three conditions is a standing one, so each is recorded at
+ * {@code WARN} once per process and not once per pass — see docs/DECISION_LOG.md DL-251.
  *
  * <p>This is a singleton configuration class holding its two collaborators in {@code final} fields;
  * every member declared here is safe for concurrent use.
@@ -71,7 +67,7 @@ import com.codeskeptic.scanner.util.LogSafe;
 // The scheduling capability is ported from backend/app/main.py:L43-48 and
 // backend/app/tasks/response_generation.py:L8 (faithful port) — see docs/DECISION_LOG.md DL-047.
 // The thread pool and the settings-backed interval are net-new: neither source construct configured
-// one — DL-227, DL-228, DL-243 — see docs/DECISION_LOG.md.
+// one — DL-227, DL-228, DL-251 — see docs/DECISION_LOG.md.
 @Configuration
 @EnableScheduling
 public class AsyncSchedulingConfig implements SchedulingConfigurer {
@@ -106,15 +102,6 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
      */
     private static final String RESPONSE_GENERATION_DELAY_SETTING_KEY = "response_generation_delay";
 
-    /** Days a resolved interval is held within, so the instant arithmetic stays in range — DL-242. */
-    private static final int MAXIMUM_DELAY_DAYS = 365;
-
-    /** Longest interval the trigger schedules — DL-242. */
-    private static final Duration MAXIMUM_DELAY = Duration.ofDays(MAXIMUM_DELAY_DAYS);
-
-    /** Seconds the next pass is scheduled from now when the computation itself failed — DL-242. */
-    private static final long RECOVERY_DELAY_SECONDS = 60L;
-
     /** The pass that runs on the registered fixed-delay task. */
     private final ResponseGenerationScheduler responseGenerationScheduler;
 
@@ -124,13 +111,13 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
     /** Supplies {@code scanner.response-generation-delay-seconds}. */
     private final ScannerProperties properties;
 
-    /** Guards the record raised when the {@code settings} row cannot be read — DL-244. */
+    /** Guards the record raised when the {@code settings} row cannot be read — DL-251. */
     private final AtomicBoolean settingReadFailureReported = new AtomicBoolean();
 
-    /** Guards the record raised when the stored interval does not parse — DL-244. */
+    /** Guards the record raised when the stored interval does not parse — DL-251. */
     private final AtomicBoolean settingValueRejectedReported = new AtomicBoolean();
 
-    /** Guards the record raised when the resolved interval is replaced by a bound — DL-244. */
+    /** Guards the record raised when the resolved interval is replaced by a bound — DL-251. */
     private final AtomicBoolean delayBoundedReported = new AtomicBoolean();
 
     /**
@@ -181,7 +168,7 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
     public ThreadPoolTaskScheduler taskScheduler() {
         ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
         scheduler.setThreadNamePrefix(THREAD_NAME_PREFIX);
-        // Pool size stated explicitly — see docs/DECISION_LOG.md DL-243
+        // Pool size stated explicitly — see docs/DECISION_LOG.md DL-251
         scheduler.setPoolSize(POOL_SIZE);
         // A pass already running is awaited for a bounded time at shutdown — DL-251 — see
         // docs/DECISION_LOG.md
@@ -247,14 +234,13 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
      *
      * <p>Before the first pass the current instant is returned unchanged, so the pass runs and only
      * then waits — the work-then-sleep order of
-     * {@code backend/app/tasks/response_generation.py:L41-50} — DL-241. Afterwards the interval in
+     * {@code backend/app/tasks/response_generation.py:L41-50} — DL-251. Afterwards the interval in
      * force is added to the completion of the previous pass.
      *
      * <p>The instant is computed once per pass, from the interval in force at that moment. It is not
      * revised while the scheduler waits for it — see docs/DECISION_LOG.md DL-228.
      *
-     * <p>Before the first pass the instant returned is the current one, so that pass runs immediately.
-     * A failure raised while the interval is resolved is recorded and answered with
+     * <p>A failure raised while the interval is resolved is recorded and answered with
      * {@value #MINIMUM_DELAY_SECONDS} second after the previous pass's completion, so the task always
      * stays scheduled — DL-251.
      *
@@ -262,10 +248,9 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
      * @return the current instant before the first pass, and otherwise the interval in force added to
      *     the previous pass's completion
      */
-    // The first pass runs at once — DL-241 — and a failed computation never ends the recurrence —
-    // DL-242 — see docs/DECISION_LOG.md
+    // The first pass runs at once and a failed computation never ends the recurrence — DL-251 — see
+    // docs/DECISION_LOG.md
     private Instant nextResponseGenerationPass(TriggerContext context) {
-        // The first pass runs at once; the source loop worked before it slept — DL-245, DL-251.
         Instant reference = context.lastCompletion();
         if (reference == null) {
             // The first pass runs at once, as the source ran its work before its first sleep at
@@ -329,10 +314,11 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
                     .map(Setting::getValue)
                     .orElse(null);
         } catch (RuntimeException unreadable) {
-            // A settings read that fails leaves the configured value in force — DL-251 — see
-            // docs/DECISION_LOG.md
-            log.warn("Setting '{}' could not be read ({}); applying "
-                    + "scanner.response-generation-delay-seconds instead",
+            // A settings read that fails leaves the configured value in force, and a standing failure
+            // is recorded once — DL-251 — see docs/DECISION_LOG.md
+            reportOnce(settingReadFailureReported,
+                    "Setting '{}' could not be read ({}); applying "
+                            + "scanner.response-generation-delay-seconds instead",
                     RESPONSE_GENERATION_DELAY_SETTING_KEY, LogSafe.type(unreadable));
             stored = null;
         }
@@ -365,15 +351,16 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
      *
      * @param seconds the resolved value, already known to be positive
      * @return {@code seconds} when it is at most {@value #MAXIMUM_DELAY_SECONDS}, and
-     *     {@value #MAXIMUM_DELAY_SECONDS} otherwise, which is recorded at {@code WARN}
+     *     {@value #MAXIMUM_DELAY_SECONDS} otherwise, which is recorded once at {@code WARN}
      */
-    // Net-new bound on a resolved interval — DL-251 — see docs/DECISION_LOG.md
-    private static long bounded(long seconds) {
+    // Net-new bound on a resolved interval, reported once — DL-251 — see docs/DECISION_LOG.md
+    private long bounded(long seconds) {
         if (seconds <= MAXIMUM_DELAY_SECONDS) {
             return seconds;
         }
-        log.warn("A response-generation interval of {}s exceeds the {}s bound; pacing at the bound "
-                + "instead", seconds, MAXIMUM_DELAY_SECONDS);
+        reportOnce(delayBoundedReported,
+                "A response-generation interval of {}s exceeds the {}s bound; pacing at the bound "
+                        + "instead", seconds, MAXIMUM_DELAY_SECONDS);
         return MAXIMUM_DELAY_SECONDS;
     }
 }

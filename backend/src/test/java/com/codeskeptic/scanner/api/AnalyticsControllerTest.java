@@ -323,7 +323,7 @@ class AnalyticsControllerTest {
         verifyNoMoreInteractions(analyticsService);
     }
 
-    // An unmapped path answers the envelope of backend/app/main.py:L31-33 — DL-059, DL-243 —
+    // An unmapped path answers the envelope of backend/app/main.py:L31-33 — DL-059, DL-183 —
     // see docs/DECISION_LOG.md
     @Test
     void rejectsUndeclaredAnalyticsRoutes() throws Exception {

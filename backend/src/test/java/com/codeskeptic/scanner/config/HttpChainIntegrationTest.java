@@ -46,7 +46,7 @@ import org.springframework.web.cors.CorsConfigurationSource;
 
 import com.codeskeptic.scanner.security.JwtService;
 
-// Net-new (no Python counterpart) — DL-051, DL-183, DL-237, DL-238, DL-240 — see
+// Net-new (no Python counterpart) — DL-051, DL-183, DL-237, DL-238 — see
 // docs/DECISION_LOG.md
 /**
  * Exercises the running HTTP chain at its connector, filter, security, CORS, dispatcher and

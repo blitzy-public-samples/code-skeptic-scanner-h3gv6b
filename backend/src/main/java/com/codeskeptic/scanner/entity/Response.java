@@ -29,8 +29,9 @@ import java.time.LocalDateTime;
  * ({@code backend/app/db/models.py:L26}).
  *
  * <p>None of the five columns declares a not-null marker, a duplicate-value restriction or a width
- * bound, matching the source declarations. {@code content} carries a bare {@code @Column}, matching
- * the bare {@code Column(String)} of backend/app/db/models.py:L24 — see docs/DECISION_LOG.md
+ * bound, matching the source declarations. {@code content} declares
+ * {@code columnDefinition = "varchar"}, the capacity-free character type the bare
+ * {@code Column(String)} of backend/app/db/models.py:L24 renders — see docs/DECISION_LOG.md
  * DL-068.
  */
 // Ported from backend/app/db/models.py:L20-28 (faithful port) — see docs/DECISION_LOG.md
@@ -52,8 +53,9 @@ public class Response {
     @Column(name = "id")
     private Integer id;
 
-    // backend/app/db/models.py:L24
-    @Column(name = "content")
+    // backend/app/db/models.py:L24 — capacity-free character column — DL-068 — see
+    // docs/DECISION_LOG.md
+    @Column(name = "content", columnDefinition = "varchar")
     private String content;
 
     // backend/app/db/models.py:L25

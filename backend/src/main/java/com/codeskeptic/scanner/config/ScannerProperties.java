@@ -125,12 +125,11 @@ public record ScannerProperties(
      * and no production code reads them — DL-031.
      *
      * <p>Seven components of this group are credentials and every one of those is redacted by
-     * {@link #toString()}. The remaining two are not credentials.
-     * {@code requestTimeoutSeconds} bounds the two short request/response calls
-     * {@code task/TweetStreamClient} makes on the X API — the app-only token exchange and the
-     * stream-rules calls — DL-230. {@code streamIdleTimeoutSeconds} bounds the wait between two
-     * records the filtered-stream subscription delivers: a connection that delivers nothing within it
-     * fails the subscription, which reaches the reconnection path — DL-243.
+     * {@link #toString()}. The eighth is not: {@code requestTimeoutSeconds} bounds the two short
+     * request/response calls {@code task/TweetStreamClient} makes on the X API — the app-only token
+     * exchange and the stream-rules calls — DL-230. The bound on the wait between two delivered
+     * stream records is {@code scanner.ingestion.stream-idle-timeout-seconds} on {@link Ingestion},
+     * which is the one property that binds {@code TWITTER_STREAM_IDLE_TIMEOUT_SECONDS} — DL-256.
      *
      * @param apiKey value of {@code scanner.twitter.api-key}
      * @param apiSecret value of {@code scanner.twitter.api-secret}
@@ -141,9 +140,6 @@ public record ScannerProperties(
      * @param accessTokenSecret value of {@code scanner.twitter.access-token-secret}
      * @param requestTimeoutSeconds value of {@code scanner.twitter.request-timeout-seconds},
      *     default {@code 10}; bounds the token exchange and the stream-rules calls only
-     * @param streamIdleTimeoutSeconds value of
-     *     {@code scanner.twitter.stream-idle-timeout-seconds}, default {@code 30}; bounds the wait
-     *     between two delivered stream records
      */
     public record Twitter(
 
@@ -181,17 +177,10 @@ public record ScannerProperties(
             // Bounds the app-only token exchange and the stream-rules calls only; the filtered
             // stream itself is not bounded. A value below one second is read as one second —
             // DL-230
-            @DefaultValue("10") long requestTimeoutSeconds,
-
-            // scanner.twitter.stream-idle-timeout-seconds — net-new: the source set no timeout and
-            // the filtered-stream subscription carried none, so a silent half-open connection was
-            // never detected. Bounds the wait between two delivered records, including the
-            // keep-alive records X sends periodically. A value below one second is read as one
-            // second — DL-243
-            @DefaultValue("30") long streamIdleTimeoutSeconds) {
+            @DefaultValue("10") long requestTimeoutSeconds) {
 
         /**
-         * Renders this group with all seven credentials redacted and the two bounds in the clear —
+         * Renders this group with all seven credentials redacted and the one bound in the clear —
          * DL-052.
          *
          * @return the group's components, every credential value redacted
@@ -206,7 +195,6 @@ public record ScannerProperties(
                     + ", accessToken=" + REDACTED
                     + ", accessTokenSecret=" + REDACTED
                     + ", requestTimeoutSeconds=" + requestTimeoutSeconds
-                    + ", streamIdleTimeoutSeconds=" + streamIdleTimeoutSeconds
                     + "]";
         }
     }
@@ -478,7 +466,7 @@ public record ScannerProperties(
      *
      * @param trendWindowDays value of {@code scanner.analytics.trend-window-days}, default
      *     {@code 30}. It counts UTC calendar dates, not a rolling duration: a value of {@code n}
-     *     observes the current UTC date and the {@code n - 1} UTC dates before it — DL-241
+     *     observes the current UTC date and the {@code n - 1} UTC dates before it — DL-278
      */
     public record Analytics(
 

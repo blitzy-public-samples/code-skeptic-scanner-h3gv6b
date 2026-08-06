@@ -147,7 +147,7 @@ class ResponseControllerTest {
     /** The single member name of every error envelope — {@code backend/app/main.py:L31-37}. */
     private static final String ERROR_KEY = "error";
 
-    /** The sanctioned envelope of an unmatched path — backend/app/main.py:L31-33, DL-243. */
+    /** The sanctioned envelope of an unmatched path — backend/app/main.py:L31-33, DL-183. */
     private static final String NOT_FOUND_BODY = "{\"error\":\"Not found\"}";
 
     @Autowired

@@ -16,6 +16,7 @@ import org.springframework.core.env.EnumerablePropertySource;
 import org.springframework.core.env.Environment;
 import org.springframework.core.env.PropertySource;
 
+import com.codeskeptic.scanner.util.LogSafe;
 import com.zaxxer.hikari.HikariDataSource;
 
 // Ported from backend/app/db/database.py:L5-13 (faithful port) — see docs/DECISION_LOG.md DL-027,
@@ -65,7 +66,7 @@ public class DataSourceConfig {
     /** Stands in for a credential the configured value carried, in the log records below. */
     private static final String SUPPLIED = "supplied";
 
-    /** Prefix of the framework pool surface this class deliberately does not read — DL-270. */
+    /** Prefix of the framework pool surface this class does not read — DL-270. */
     private static final String SPRING_DATASOURCE_PREFIX = "spring.datasource.";
 
     /** Prefix of the allowlisted pool surface this class does read — DL-270. */
@@ -190,10 +191,12 @@ public class DataSourceConfig {
         dataSource.setMaxLifetime(this.pool.maxLifetimeMillis());
         dataSource.setLeakDetectionThreshold(this.pool.leakDetectionThresholdMillis());
 
+        // The configured pool name reaches the record through the log guard — DL-149 — see
+        // docs/DECISION_LOG.md
         log.info("Connection pool {} bounded to at most {} connection(s), {} kept idle, "
                         + "{}ms to obtain one, idle retirement after {}ms and a maximum lifetime "
                         + "of {}ms.",
-                this.pool.name(), this.pool.maximumSize(), this.pool.minimumIdle(),
+                LogSafe.logSafe(this.pool.name()), this.pool.maximumSize(), this.pool.minimumIdle(),
                 this.pool.connectionTimeoutMillis(), this.pool.idleTimeoutMillis(),
                 this.pool.maxLifetimeMillis());
     }

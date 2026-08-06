@@ -408,7 +408,7 @@ class LlmServiceTest {
     }
 
     // Content decides; a choice carrying none reports BLANK_TEXT whatever its finish reason —
-    // DL-243 — see docs/DECISION_LOG.md
+    // DL-083, DL-202 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("reports blank text when the first choice carries no content, whatever its finish "
             + "reason")
@@ -421,7 +421,7 @@ class LlmServiceTest {
                 .withMessage("BLANK_TEXT");
     }
 
-    // DL-243 — see docs/DECISION_LOG.md
+    // DL-083, DL-202 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("reports blank text when the first choice carries blank content, whatever its "
             + "finish reason")
@@ -434,8 +434,8 @@ class LlmServiceTest {
                 .withMessage("BLANK_TEXT");
     }
 
-    // A truncated but usable reply is consumed and its finish reason is recorded — DL-243 — see
-    // docs/DECISION_LOG.md
+    // A truncated but usable reply is consumed and its finish reason is recorded — DL-083,
+    // DL-202 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("accepts content cut short at the token cap and records the finish reason once")
     void acceptsContentCutShortAtTheTokenCapAndRecordsTheFinishReason() {
@@ -1074,7 +1074,7 @@ class LlmServiceTest {
                 "   ", "AI tools mentioned: GitHub Copilot, Cursor; doubt rating: 7.5"));
     }
 
-    // The post body is interpolated untruncated — DL-242 — see docs/DECISION_LOG.md
+    // The post body is interpolated untruncated — DL-035 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("carries a five thousand character post body into the prompt untruncated")
     void carriesAFiveThousandCharacterPostBodyIntoThePromptUntruncated() {
@@ -1091,7 +1091,7 @@ class LlmServiceTest {
                 "AI tools mentioned: GitHub Copilot, Cursor; doubt rating: 7.5"));
     }
 
-    // The post body is interpolated unfolded — DL-242 — see docs/DECISION_LOG.md
+    // The post body is interpolated unfolded — DL-035 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("carries a line break inside the post body into the prompt unfolded")
     void carriesALineBreakInsideThePostBodyIntoThePromptUnfolded() {
@@ -1283,7 +1283,7 @@ class LlmServiceTest {
         assertThat(thrown).hasMessage("BLANK_TEXT");
     }
 
-    // A refusal is reported only when no usable content accompanies it — DL-243 — see
+    // A refusal is reported only when no usable content accompanies it — DL-083 — see
     // docs/DECISION_LOG.md
     @ParameterizedTest(name = "refusal {0} is reported as REFUSAL")
     @MethodSource("nonBlankRefusals")
@@ -1299,7 +1299,7 @@ class LlmServiceTest {
         assertThat(thrown).hasMessage("REFUSAL");
     }
 
-    // Usable content is consumed even beside a refusal — DL-243 — see docs/DECISION_LOG.md
+    // Usable content is consumed even beside a refusal — DL-083 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "refusal {0} beside usable content is consumed")
     @MethodSource("nonBlankRefusals")
     @DisplayName("accepts the reply when a non-blank refusal accompanies usable content")
@@ -1322,7 +1322,7 @@ class LlmServiceTest {
         assertThat(service.generateResponse(tweet())).isEqualTo(TRIMMED_GENERATED_TEXT);
     }
 
-    // A finish reason other than stop never discards usable content — DL-243 — see
+    // A finish reason other than stop never discards usable content — DL-083, DL-202 — see
     // docs/DECISION_LOG.md
     @ParameterizedTest(name = "finish reason {0} is recorded and the reply consumed")
     @MethodSource("incompleteFinishReasons")
@@ -1341,7 +1341,7 @@ class LlmServiceTest {
         detachLogRecorder(records);
     }
 
-    // DL-243, DL-208 — see docs/DECISION_LOG.md
+    // DL-197, DL-208 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("guards a finish reason carrying a record separator before it reaches the log")
     void guardsAFinishReasonCarryingARecordSeparatorBeforeItReachesTheLog() {
@@ -1359,7 +1359,7 @@ class LlmServiceTest {
     }
 
     // A refusal with no usable content is reported as REFUSAL, not as an incomplete finish —
-    // DL-243 — see docs/DECISION_LOG.md
+    // DL-083, DL-202 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("reports a refusal rather than a finish reason when neither yields content")
     void reportsARefusalRatherThanAFinishReasonWhenNeitherYieldsContent() {

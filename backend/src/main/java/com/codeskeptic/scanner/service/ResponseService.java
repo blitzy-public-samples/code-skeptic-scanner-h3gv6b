@@ -163,7 +163,7 @@ public class ResponseService {
      * Demarcates the short transactional unit that stores a generated row — DL-086. Its timeout is
      * {@value #LOCK_WAIT_SECONDS} seconds, matching the statement bound of
      * {@link ResponseRepository#LOCK_WAIT_MILLIS} — DL-246. It is a bounded copy of the injected
-     * template rather than the injected instance, so the shared bean keeps its own definition.
+     * template; the injected instance itself carries no timeout of this class's setting.
      */
     private final TransactionTemplate transactionTemplate;
 
@@ -488,12 +488,13 @@ public class ResponseService {
      * Generates and stores a reply for a {@code tweets} row the caller already holds, unless that row
      * already carries one, and reports what was stored.
      *
-     * <p>Named distinctly from {@link #generateResponseIfAbsent(String)} rather than overloading it, so
-     * no call site can be ambiguous about which subject form it passes — DL-226.
+     * <p>This method and {@link #generateResponseIfAbsent(String)} carry distinct names; the two are
+     * not overloads of one name — DL-226.
      *
      * <p>Behaves exactly as {@link #generateResponseIfAbsent(String)} in every respect except one: the
-     * subject row is read from the supplied entity and this method selects nothing from the
-     * {@code tweets} table — see docs/DECISION_LOG.md DL-226. The in-process claim on the
+     * subject's column values are taken from the supplied entity rather than selected, so the only
+     * {@code tweets} statement this path issues is the presence test of the preflight — see
+     * docs/DECISION_LOG.md DL-226. The in-process claim on the
      * row's identifier, the transaction-scoped
      * {@link ResponseRepository#existsByTweetId(Integer)} guard, the stored column values and every
      * client-visible message are the same ones {@link #generateResponseIfAbsent(String)} produces —
@@ -547,8 +548,9 @@ public class ResponseService {
         }
 
         try {
-            // The stored state is read before the provider call, in its own short transaction, so a
-            // row another process already answered costs no generation — DL-252 — see
+            // The one pre-call reply check, taken before the subject is read so a row another process
+            // already answered costs neither a read nor a generation. The definitive check is the one
+            // the storing transaction takes under the parent lock — DL-195, DL-252 — see
             // docs/DECISION_LOG.md
             if (responseRepository.existsByTweetId(identifier)) {
                 log.debug("Tweet '{}' already carries a response; no generation was requested.",
@@ -556,18 +558,16 @@ public class ResponseService {
                 return Optional.empty();
             }
 
-
             // The supplied row is the subject; only a caller that holds none reads one — DL-226 —
             // see docs/DECISION_LOG.md
             TweetDto subject = (loaded == null) ? readSubject(identifier) : tweetMapper.toDto(loaded);
 
-            // Current preflight ahead of the paid provider call. Each read is its own short
-            // transaction, so no connection is held across the provider call — DL-247, DL-252 — see
-            // docs/DECISION_LOG.md
-            if (!tweetRepository.existsById(identifier)
-                    || responseRepository.existsByTweetId(identifier)) {
-                log.debug("Tweet '{}' is gone or already answered at the moment of generation; no "
-                        + "provider call is made and nothing is stored.", identifier);
+            // Presence is tested immediately ahead of the paid provider call, so a row deleted since
+            // it was selected costs no generation. Each read is its own short transaction, so no
+            // connection is held across the provider call — DL-252 — see docs/DECISION_LOG.md
+            if (!tweetRepository.existsById(identifier)) {
+                log.debug("Tweet '{}' is gone at the moment of generation; no provider call is made "
+                        + "and nothing is stored.", identifier);
                 return Optional.empty();
             }
 
@@ -634,8 +634,10 @@ public class ResponseService {
     /**
      * Reads the {@code tweets} row a generation request names and returns its wire form.
      *
-     * <p>The row is converted inside the transaction the repository operation demarcates; the
-     * {@code responses} association is not read.
+     * <p>The row is read in the transaction the repository operation demarcates and is converted
+     * after that transaction closes; the conversion touches only the columns
+     * {@code dto/TweetDto} carries, so the lazy {@code responses} association is never traversed and
+     * no lazy load is attempted outside a transaction.
      *
      * @param identifier the parsed identifier, or {@code null} when the request carried no number
      * @return the subject row in its wire form, never {@code null}

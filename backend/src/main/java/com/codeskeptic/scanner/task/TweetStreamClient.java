@@ -5,6 +5,7 @@ import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.repository.AiToolRepository;
 import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.util.LogSafe;
+import com.codeskeptic.scanner.util.StreamRuleTerms;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -78,8 +79,9 @@ import reactor.util.retry.Retry;
  * nothing the cycle records the condition at {@code ERROR}, opens no connection and leaves
  * {@link #isRunning()} reporting {@code false}.
  *
- * <p>Every term is strictly validated before it is rendered as a rule expression: a term holding a
- * character the rule syntax reserves is dropped, and no term value is written to the log — DL-257. The
+ * <p>Every term is held to the one shared grammar of {@link StreamRuleTerms} before it is rendered as
+ * a rule expression: a term outside that allowlist is dropped, and no term value is written to the
+ * log — DL-257. The
  * collection is bounded by {@code scanner.ingestion.max-stream-rules}, only {@code ai_tools.name} is
  * selected, and each mutation is sent as consecutive requests of at most
  * {@value #MAX_RULES_PER_REQUEST} rules — DL-254. A registered rule whose tag differs from the wanted
@@ -208,8 +210,6 @@ public class TweetStreamClient implements SmartLifecycle {
     /** {@code settings} row whose value replaces the whole composed term collection. */
     private static final String STREAM_KEYWORDS_SETTING_KEY = "stream_keywords";
 
-    /** Separator of the terms held in the {@value #STREAM_KEYWORDS_SETTING_KEY} row. */
-    private static final String TERM_DELIMITER = ",";
 
     /** Property naming the base terms, reported when the composed collection resolves to nothing. */
     private static final String STREAM_BASE_KEYWORDS_PROPERTY =
@@ -248,7 +248,7 @@ public class TweetStreamClient implements SmartLifecycle {
     /** Deletion member carrying the identifiers to remove. */
     private static final String RULES_KEY_IDS = "ids";
 
-    // Rules-mutation outcome members read to surface a refused rule — DL-243 — see
+    // Rules-mutation outcome members read to surface a refused rule — DL-275 — see
     // docs/DECISION_LOG.md
     /** Rules-response member carrying one entry per refused rule. */
     private static final String RULES_KEY_ERRORS = "errors";
@@ -267,17 +267,6 @@ public class TweetStreamClient implements SmartLifecycle {
 
     /** Most rules one mutation request carries; a larger set is sent as consecutive requests. */
     private static final int MAX_RULES_PER_REQUEST = 25;
-
-    // Bounds applied to every literal term before it reaches the rule DSL — DL-254, DL-257 — see
-    // docs/DECISION_LOG.md
-    /** Most characters an accepted term holds. A longer term is rejected. */
-    private static final int MAX_TERM_CHARS = 128;
-
-    /** Most segments the {@value #STREAM_KEYWORDS_SETTING_KEY} row is split into. */
-    private static final int MAX_OVERRIDE_SEGMENTS = 512;
-
-    /** Characters an accepted term may hold in addition to letters and digits — DL-257. */
-    private static final String ADDITIONAL_TERM_CHARACTERS = " -_.'";
 
     // Bounded queueing between the connection and the dispatch worker — DL-258 — see
     // docs/DECISION_LOG.md
@@ -644,16 +633,18 @@ public class TweetStreamClient implements SmartLifecycle {
      *
      * <ol>
      *   <li>The {@value #STREAM_KEYWORDS_SETTING_KEY} {@code settings} row, when it is present and
-     *       holds a non-blank value, is split on {@value #TERM_DELIMITER} and replaces the whole
-     *       collection. An absent row and a blank value both fall through to the next step.</li>
+     *       holds a non-blank value, is split on {@value StreamRuleTerms#TERM_DELIMITER} and
+     *       replaces the whole collection. An absent row and a blank value both fall through to the
+     *       next step.</li>
      *   <li>Otherwise the configured {@value #STREAM_BASE_KEYWORDS_PROPERTY} terms are joined with
      *       the {@code name} of every {@code ai_tools} row.</li>
      *   <li>A collection that still resolves to nothing yields the configured base terms.</li>
      * </ol>
      *
-     * <p>Every step trims each term, drops a {@code null} or blank term, drops a term that fails
-     * {@link #isAcceptableTerm(String)}, and removes a repeat without regard to letter case while
-     * keeping the order in which terms were first seen and the letter case of the first occurrence.
+     * <p>Every step trims each term, drops a {@code null} or blank term, drops a term that
+     * {@link StreamRuleTerms#isUsable(String)} refuses, and removes a repeat without regard to letter
+     * case while keeping the order in which terms were first seen and the letter case of the first
+     * occurrence.
      *
      * <p>The result holds at most {@code scanner.ingestion.max-stream-rules} terms. A composition that
      * yields more is truncated to the first that many and the two counts are recorded at {@code WARN},
@@ -750,10 +741,9 @@ public class TweetStreamClient implements SmartLifecycle {
             return List.of();
         }
 
-        // The stored value is split into at most this many segments, so an over-long row cannot
-        // produce an unbounded collection — DL-254 — see docs/DECISION_LOG.md
-        String[] segments = stored.split(TERM_DELIMITER, MAX_OVERRIDE_SEGMENTS);
-        return distinctTerms(List.of(segments));
+        // The one shared split, bounded at StreamRuleTerms.MAX_SEGMENTS so an over-long row cannot
+        // produce an unbounded collection — DL-254, DL-257 — see docs/DECISION_LOG.md
+        return distinctTerms(StreamRuleTerms.split(stored));
     }
 
     // Only ai_tools.name is selected, bounded by the rule cap — DL-254 — see docs/DECISION_LOG.md
@@ -805,7 +795,7 @@ public class TweetStreamClient implements SmartLifecycle {
     private Mono<Void> reconcileStreamRules(String token, List<String> terms) {
         Map<String, String> desired = new LinkedHashMap<>();
         for (String term : terms) {
-            desired.put(ruleExpression(term), term);
+            desired.put(StreamRuleTerms.expressionOf(term), term);
         }
 
         return listStreamRules(token)
@@ -944,13 +934,13 @@ public class TweetStreamClient implements SmartLifecycle {
                 .bodyToMono(JsonNode.class)
                 // Bounded control-plane call — DL-230 — see docs/DECISION_LOG.md
                 .timeout(controlPlaneTimeout())
-                // A rule the endpoint refused is surfaced rather than discarded — DL-243 — see
+                // A rule the endpoint refused is surfaced rather than discarded — DL-275 — see
                 // docs/DECISION_LOG.md
                 .doOnNext(TweetStreamClient::reportRefusedRules)
                 .then();
     }
 
-    // Net-new: the rules-mutation answer is read so a partial refusal is observable — DL-243 — see
+    // Net-new: the rules-mutation answer is read so a partial refusal is observable — DL-275 — see
     // docs/DECISION_LOG.md
     /**
      * Records the rules the mutation endpoint refused.
@@ -960,8 +950,14 @@ public class TweetStreamClient implements SmartLifecycle {
      * zero. A refusal does not fail the mutation: the stream still connects with the rules the
      * endpoint did accept.
      *
-     * <p>The record names the refused match expressions, which this application composed, and never
-     * any free text the provider returned — DL-052, DL-084.
+     * <p>The record names the two summary counts and a fingerprint of each refused expression, and
+     * never the expression the provider reflected or any free text it returned — DL-275, DL-197. A
+     * fingerprint is {@link LogSafe#correlation(Object)} of the reflected value, so it is fixed in
+     * shape and length however long that value is, and it matches
+     * {@code LogSafe.correlation(StreamRuleTerms.expressionOf(term))} for the term this application
+     * composed. At most {@value #MAX_RULES_PER_REQUEST} fingerprints are listed — one request's
+     * worth, which is every rule the answered request could refuse — while the count is reported in
+     * full.
      *
      * @param payload the mutation answer, may be {@code null}
      */
@@ -975,22 +971,30 @@ public class TweetStreamClient implements SmartLifecycle {
         int invalid = summary.path(RULES_KEY_INVALID).asInt(0);
 
         JsonNode errors = payload.path(RULES_KEY_ERRORS);
-        List<String> refused = new ArrayList<>();
+        int refused = 0;
+        List<String> fingerprints = new ArrayList<>();
         if (errors.isArray()) {
             for (JsonNode error : errors) {
                 String expression = error.path(RULES_KEY_VALUE).asText("");
-                if (!expression.isBlank()) {
-                    refused.add(expression);
+                if (expression.isBlank()) {
+                    continue;
+                }
+                refused++;
+                // A provider-reflected expression reaches the record as a fingerprint only — DL-275 —
+                // see docs/DECISION_LOG.md
+                if (fingerprints.size() < MAX_RULES_PER_REQUEST) {
+                    fingerprints.add(LogSafe.correlation(expression));
                 }
             }
         }
 
-        if (refused.isEmpty() && notCreated == 0 && invalid == 0) {
+        if (refused == 0 && notCreated == 0 && invalid == 0) {
             return;
         }
 
-        log.warn("X refused {} stream rule(s) ({} not created, {} invalid); refused expression(s): {}",
-                Math.max(refused.size(), notCreated + invalid), notCreated, invalid, refused);
+        log.warn("X refused {} stream rule(s) ({} not created, {} invalid); refused expression "
+                + "fingerprint(s): {}",
+                Math.max(refused, notCreated + invalid), notCreated, invalid, fingerprints);
     }
 
     /**
@@ -1053,22 +1057,6 @@ public class TweetStreamClient implements SmartLifecycle {
     private Duration controlPlaneTimeout() {
         long configured = properties.twitter().requestTimeoutSeconds();
         return Duration.ofSeconds(Math.max(configured, MINIMUM_REQUEST_TIMEOUT_SECONDS));
-    }
-
-    /**
-     * Renders one term as an X rule match expression.
-     *
-     * <p>{@link #isAcceptableTerm(String)} has already rejected every character the rule syntax
-     * reserves, the double quote and the backslash included, so wrapping a multi-word term in double
-     * quotes cannot be escaped and no character needs replacing — DL-257.
-     *
-     * @param term a trimmed, non-blank term that {@link #isAcceptableTerm(String)} accepted, must not
-     *     be {@code null}
-     * @return the term wrapped in double quotes when it holds whitespace, and the term unchanged
-     *     otherwise
-     */
-    private static String ruleExpression(String term) {
-        return holdsWhitespace(term) ? '"' + term + '"' : term;
     }
 
     // App-only bearer token — see docs/DECISION_LOG.md DL-046
@@ -1214,7 +1202,7 @@ public class TweetStreamClient implements SmartLifecycle {
      * record is delivered normally.
      *
      * <p>The request carries no response timeout, no read timeout and no reduced codec buffer limit: a
-     * filtered-stream connection is long-lived by design and the bound of
+     * filtered-stream connection is long-lived and the bound of
      * {@code scanner.twitter.request-timeout-seconds} applies only to the token exchange and the
      * stream-rules calls — DL-230.
      *
@@ -1547,9 +1535,9 @@ public class TweetStreamClient implements SmartLifecycle {
     /**
      * Adds every usable term of {@code terms} to {@code target}.
      *
-     * <p>A {@code null} term, a term that is blank once trimmed, and a term that fails
-     * {@link #isAcceptableTerm(String)} are all dropped. A dropped term is recorded at {@code WARN}
-     * with its length and a correlation token only, never with its characters — DL-257.
+     * <p>A {@code null} term, a term that is blank once trimmed, and a term that
+     * {@link StreamRuleTerms#isUsable(String)} refuses are all dropped. A dropped term is recorded at
+     * {@code WARN} with its length and a correlation token only, never with its characters — DL-257.
      *
      * @param target accumulator keyed by the lower-cased term with the trimmed term as value, must
      *     not be {@code null}
@@ -1565,62 +1553,18 @@ public class TweetStreamClient implements SmartLifecycle {
             if (trimmed.isEmpty()) {
                 continue;
             }
-            // Only a strictly validated term reaches the rule DSL — DL-257 — see
+            // The one shared grammar decides which terms reach the rule DSL — DL-257 — see
             // docs/DECISION_LOG.md
-            if (!isAcceptableTerm(trimmed)) {
-                log.warn("Dropping a stream rule term that holds a character the rule syntax "
-                        + "reserves, or that exceeds {} character(s); term {} is {} character(s) long",
-                        MAX_TERM_CHARS, LogSafe.correlation(trimmed), trimmed.length());
+            if (!StreamRuleTerms.isUsable(trimmed)) {
+                log.warn("Dropping a stream rule term that holds a character outside letters, digits "
+                        + "and '{}', that opens or closes with one of those, or that exceeds {} "
+                        + "character(s); term {} is {} character(s) long",
+                        StreamRuleTerms.ADDITIONAL_TERM_CHARACTERS, StreamRuleTerms.MAX_TERM_CHARS,
+                        LogSafe.correlation(trimmed), trimmed.length());
                 continue;
             }
             target.putIfAbsent(trimmed.toLowerCase(Locale.ROOT), trimmed);
         }
-    }
-
-    // Net-new strict term validation — DL-257 — see docs/DECISION_LOG.md
-    /**
-     * Reports whether a term may be rendered as an X rule match expression.
-     *
-     * <p>A term is accepted when it holds at most {@value #MAX_TERM_CHARS} characters and every
-     * character is a letter, a digit, or one of {@value #ADDITIONAL_TERM_CHARACTERS}. Every character
-     * the rule syntax reserves — the double quote, the backslash, the parentheses, the colon, the
-     * leading negation, the hashtag, the mention sign and every control character — is therefore
-     * rejected, so no term can close a quoted expression, introduce an operator or forge a log line.
-     *
-     * <p>A term is also rejected when it begins or ends with a character of
-     * {@value #ADDITIONAL_TERM_CHARACTERS}, so a leading hyphen cannot negate the expression.
-     *
-     * @param term the trimmed, non-blank term to inspect, must not be {@code null}
-     * @return {@code true} when the term may be rendered
-     */
-    private static boolean isAcceptableTerm(String term) {
-        if (term.length() > MAX_TERM_CHARS) {
-            return false;
-        }
-        if (!Character.isLetterOrDigit(term.charAt(0))
-                || !Character.isLetterOrDigit(term.charAt(term.length() - 1))) {
-            return false;
-        }
-        for (int index = 0; index < term.length(); index++) {
-            char character = term.charAt(index);
-            if (Character.isLetterOrDigit(character)) {
-                continue;
-            }
-            if (ADDITIONAL_TERM_CHARACTERS.indexOf(character) < 0) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * Reports whether a term holds a whitespace character.
-     *
-     * @param term the term to inspect, must not be {@code null}
-     * @return {@code true} when at least one character is whitespace
-     */
-    private static boolean holdsWhitespace(String term) {
-        return term.chars().anyMatch(Character::isWhitespace);
     }
 
     /**
@@ -1634,12 +1578,19 @@ public class TweetStreamClient implements SmartLifecycle {
     }
 
 
+    // Every failure rendering passes the shared log guard — DL-197 — see docs/DECISION_LOG.md
     /**
      * Renders a failure for a log event.
      *
+     * <p>The runtime type comes from {@link LogSafe#type(Throwable)} and is carried literally. A
+     * message is carried only through {@link LogSafe#logSafe(String)}, so every character outside
+     * printable ASCII — the carriage return and the line feed included — becomes {@code ?} and the
+     * rendering is bounded. A message a remote peer, a proxy, a TLS stack or a URL contributed can
+     * therefore neither forge a record boundary nor flood a record — DL-197.
+     *
      * @param failure the failure to render, may be {@code null}
-     * @return the simple type name of {@code failure} followed by its message when it carries one,
-     *     the simple type name alone otherwise, and {@code an unreported failure} when
+     * @return the simple type name of {@code failure} followed by its guarded message when it carries
+     *     one, the simple type name alone otherwise, and {@code an unreported failure} when
      *     {@code failure} is {@code null}
      */
     private static String describe(Throwable failure) {
@@ -1648,7 +1599,7 @@ public class TweetStreamClient implements SmartLifecycle {
         }
         String message = failure.getMessage();
         return isBlank(message)
-                ? failure.getClass().getSimpleName()
-                : failure.getClass().getSimpleName() + ": " + message;
+                ? LogSafe.type(failure)
+                : LogSafe.type(failure) + ": " + LogSafe.logSafe(message);
     }
 }

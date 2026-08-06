@@ -86,9 +86,6 @@ scanner:
     # Declared explicitly. The build reaches no X host: this bound applies to no call made by the
     # test profile.
     request-timeout-seconds: 10
-    # Net-new (no Python counterpart) — DL-243 — see docs/DECISION_LOG.md
-    # Declared explicitly for the same reason as request-timeout-seconds above.
-    stream-idle-timeout-seconds: 30
 
   notion:
     # Ported from backend/app/core/config.py:L7 and backend/app/services/notion_service.py:L8 (faithful port) — see docs/DECISION_LOG.md
@@ -142,7 +139,7 @@ scanner:
     password-hash: '$2a$10$Lt3iVHWKlZC2hu2Nyh/NtekAa.gCoG3qZM.xoMT7w1b/zk3o7SBJS'
 
   analytics:
-    # Net-new (no Python counterpart) — DL-042, DL-241 — see docs/DECISION_LOG.md
+    # Net-new (no Python counterpart) — DL-042, DL-278 — see docs/DECISION_LOG.md
     trend-window-days: 30
 
   ingestion:

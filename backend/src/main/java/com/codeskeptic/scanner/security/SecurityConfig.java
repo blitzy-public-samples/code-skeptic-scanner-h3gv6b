@@ -84,7 +84,7 @@ import jakarta.servlet.http.HttpServletResponse;
  *   <li>{@link #transportSecurityHeaderWriter()} — the composed transport-security header policy,
  *       injected into {@code com.codeskeptic.scanner.config.ContainerErrorResponseConfig} so a
  *       rejection the container answers before any filter runs carries the same headers the chain
- *       writes — DL-194, DL-237.
+ *       writes — DL-277, DL-237.
  *   <li>{@link #securityContextRepository()} — the request-scoped context store the chain reads and
  *       {@link JwtAuthenticationFilter} writes — DL-112.
  *   <li>{@link #passwordEncoder()} — successor of the passlib bcrypt helpers at
@@ -350,7 +350,7 @@ public class SecurityConfig {
         return http.build();
     }
 
-    // Net-new (no Python counterpart) — DL-241 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-277 — see docs/DECISION_LOG.md
     /**
      * Publishes the transport-security header policy of this application, as one writer.
      *
@@ -359,14 +359,14 @@ public class SecurityConfig {
      * the cache directives {@code Cache-Control}, {@code Pragma} and {@code Expires},
      * {@code Strict-Transport-Security} on a secure request only, and {@code X-Frame-Options}. This
      * class customises none of them, and the chain's {@code HeaderWriterFilter} and this bean apply the
-     * same policy from the same declaration — see docs/DECISION_LOG.md DL-194.
+     * same policy from the same declaration — see docs/DECISION_LOG.md DL-277.
      *
      * <p>Each composed writer either skips a name the response already carries or replaces its value
      * through {@code setHeader}, so applying this bean to a response the chain has already written
      * leaves each header with exactly one value.
      * {@code com.codeskeptic.scanner.config.ContainerErrorResponseConfig} applies it to a rejection the
      * container answers before any filter runs, which {@code HeaderWriterFilter} never sees — DL-237,
-     * DL-241.
+     * DL-277.
      *
      * @return the composed policy; never {@code null}
      */
@@ -379,7 +379,7 @@ public class SecurityConfig {
      * Builds the policy {@link #transportSecurityHeaderWriter()} publishes.
      *
      * <p>This is the one declaration site of the policy: the bean above returns it, and a caller
-     * outside the container obtains the same composition — see docs/DECISION_LOG.md DL-194.
+     * outside the container obtains the same composition — see docs/DECISION_LOG.md DL-277.
      *
      * @return a writer composing Spring Security's default header writers; never {@code null}
      */

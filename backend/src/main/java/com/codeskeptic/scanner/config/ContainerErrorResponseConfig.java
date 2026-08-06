@@ -50,7 +50,7 @@ import jakarta.servlet.http.HttpServletResponse;
  * error surfaces — that advice for a {@code REQUEST} dispatch, its nested error-path controller for an
  * {@code ERROR} dispatch, and this valve for a container-level rejection — put the same literals on
  * the wire. The header policy is the {@code HeaderWriter} bean {@code security/SecurityConfig}
- * publishes, the same policy {@code HeaderWriterFilter} applies inside the chain — DL-241. The CORS
+ * publishes, the same policy {@code HeaderWriterFilter} applies inside the chain — DL-277. The CORS
  * headers mirror the permissive policy {@code config/CorsConfig} declares, read from that same bean —
  * DL-051.
  *
@@ -60,7 +60,7 @@ import jakarta.servlet.http.HttpServletResponse;
  * <p>This class holds no mutable state and its valve is safe to share across concurrent requests.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-237, DL-238 and
- * DL-241; construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * DL-277; construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  */
 @Configuration
 public class ContainerErrorResponseConfig {
@@ -68,7 +68,7 @@ public class ContainerErrorResponseConfig {
     // Logging baseline — DL-052 — see docs/DECISION_LOG.md
     private static final Logger log = LoggerFactory.getLogger(ContainerErrorResponseConfig.class);
 
-    /** The application's transport-security header policy — DL-241. */
+    /** The application's transport-security header policy — DL-277. */
     private final HeaderWriter transportSecurityHeaderWriter;
 
     /** The application's permissive CORS policy — DL-051. */
@@ -336,7 +336,7 @@ public class ContainerErrorResponseConfig {
          * registers for every path covers. No filter has run, so the forwarded scheme has not been
          * applied; when {@code server.forward-headers-strategy} declares that scheme authoritative,
          * the view reports the request as secure for a forwarded {@code https}, which is what
-         * {@code HstsHeaderWriter} reads — DL-237, DL-241.
+         * {@code HstsHeaderWriter} reads — DL-237, DL-277.
          */
         static final class RejectedRequestView extends HttpServletRequestWrapper {
 

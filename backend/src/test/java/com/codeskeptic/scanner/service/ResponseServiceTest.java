@@ -542,9 +542,9 @@ class ResponseServiceTest {
 
         assertThat(stored).isPresent();
         assertThat(stored.get().id()).isEqualTo(RESPONSE_ID);
-        // Once before the subject read, once in the current preflight — DL-247, DL-252 — and once
-        // inside the storing transaction — DL-195
-        verify(responseRepository, times(3)).existsByTweetId(TWEET_KEY);
+        // Once before the subject read — DL-252 — and once inside the storing transaction under the
+        // parent lock — DL-195
+        verify(responseRepository, times(2)).existsByTweetId(TWEET_KEY);
         verify(responseRepository).save(any(Response.class));
     }
 
@@ -560,7 +560,7 @@ class ResponseServiceTest {
         when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetMapper.toDto(subject)).thenReturn(subjectDto);
         when(llmService.generateResponse(subjectDto)).thenReturn(GENERATED_TEXT);
-        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false, false, true);
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false, true);
 
         service.generateResponseIfAbsent(TWEET_ID);
 
@@ -568,14 +568,13 @@ class ResponseServiceTest {
         ordering.verify(responseRepository).existsByTweetId(TWEET_KEY);
         ordering.verify(tweetRepository).findById(TWEET_KEY);
         ordering.verify(tweetRepository).existsById(TWEET_KEY);
-        ordering.verify(responseRepository).existsByTweetId(TWEET_KEY);
         ordering.verify(llmService).generateResponse(subjectDto);
         ordering.verify(tweetRepository).findByIdForUpdate(TWEET_KEY);
         ordering.verify(responseRepository).existsByTweetId(TWEET_KEY);
         ordering.verifyNoMoreInteractions();
     }
 
-    // The preflight of DL-247 answers before the paid call for a row that vanished
+    // The presence test of DL-252 answers before the paid call for a row that vanished
     @Test
     @DisplayName("makes no provider call for a background pass whose tweets row is gone")
     void makesNoProviderCallForABackgroundPassWhoseTweetsRowIsGone() {
@@ -588,7 +587,8 @@ class ResponseServiceTest {
 
         verifyNoInteractions(llmService, responseMapper);
         verify(responseRepository, never()).save(any(Response.class));
-        // The guard is read before the subject; the row being gone is what stops the provider call
+        // The reply check is read before the subject; the row being gone is what stops the provider
+        // call — DL-252
         verify(responseRepository).existsByTweetId(TWEET_KEY);
     }
 
@@ -660,18 +660,18 @@ class ResponseServiceTest {
 
         assertThat(stored).as("row the background pass stored").isPresent();
         verify(tweetMapper).toDto(subject);
-        // The supplied row is never selected again; the preflight of DL-247 tests presence without
-        // loading it and the storing transaction takes the locking read — DL-226
+        // The supplied row is never selected again; the presence test of DL-252 reads no row and the
+        // storing transaction takes the locking read — DL-226
         verify(tweetRepository, never()).findById(TWEET_KEY);
         verify(tweetRepository, times(1)).existsById(TWEET_KEY);
         verify(tweetRepository, times(1)).findByIdForUpdate(TWEET_KEY);
-        // Once before the subject read, once in the current preflight — DL-247, DL-252 — and once
-        // inside the storing transaction — DL-195
-        verify(responseRepository, times(3)).existsByTweetId(TWEET_KEY);
+        // Once before the subject read — DL-252 — and once inside the storing transaction under the
+        // parent lock — DL-195
+        verify(responseRepository, times(2)).existsByTweetId(TWEET_KEY);
         verify(responseRepository).save(any(Response.class));
     }
 
-    // The preflight covers the supplied row too, so no paid call is made — DL-195, DL-226, DL-247
+    // The reply check covers the supplied row too, so no paid call is made — DL-195, DL-226, DL-252
     @Test
     @DisplayName("stores nothing and makes no provider call for a supplied row that already carries "
             + "a reply")
@@ -681,9 +681,9 @@ class ResponseServiceTest {
         lenient().when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
         lenient().when(tweetRepository.findByIdForUpdate(TWEET_KEY))
                 .thenReturn(Optional.of(subject));
-        // Absent when the pass starts and at the preflight, present by the time the storing
-        // transaction reads it — DL-247, DL-252
-        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false, false, true);
+        // Absent when the pass starts, present by the time the storing transaction reads it under the
+        // parent lock — DL-195, DL-252
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false, true);
 
         Optional<ResponseDto> stored = service.generateResponseIfAbsentFor(subject);
 
@@ -774,9 +774,9 @@ class ResponseServiceTest {
     @DisplayName("stores nothing when the row is taken between the model request and the insert")
     void storesNothingWhenTheRowIsTakenDuringGeneration() {
         Tweet subject = tweetCarryingTheKey();
-        // Absent when the pass starts and at the preflight, present by the time the storing
-        // transaction reads it — DL-247, DL-252
-        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false, false, true);
+        // Absent when the pass starts, present by the time the storing transaction reads it under the
+        // parent lock — DL-195, DL-252
+        when(responseRepository.existsByTweetId(TWEET_KEY)).thenReturn(false, true);
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
         when(tweetRepository.existsById(TWEET_KEY)).thenReturn(true);
         when(tweetRepository.findByIdForUpdate(TWEET_KEY)).thenReturn(Optional.of(subject));
@@ -810,9 +810,9 @@ class ResponseServiceTest {
                 .extracting(ResponseDto::id)
                 .isEqualTo(RESPONSE_ID);
 
-        // Once before the subject read, once in the current preflight — DL-247, DL-252 — and once
-        // inside the storing transaction — DL-195
-        verify(responseRepository, times(3)).existsByTweetId(TWEET_KEY);
+        // Once before the subject read — DL-252 — and once inside the storing transaction under the
+        // parent lock — DL-195
+        verify(responseRepository, times(2)).existsByTweetId(TWEET_KEY);
         verify(responseRepository).save(any(Response.class));
     }
 
@@ -2172,12 +2172,12 @@ class ResponseServiceTest {
 
             @Override
             public void commit(TransactionStatus status) {
-                // Intentionally empty.
+                // No body.
             }
 
             @Override
             public void rollback(TransactionStatus status) {
-                // Intentionally empty.
+                // No body.
             }
         });
     }

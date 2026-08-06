@@ -33,8 +33,10 @@ import org.springframework.transaction.annotation.Transactional;
  *       {@link java.util.Optional} denotes a row that is not present. The caller parses the path
  *       value before calling, so this operation only ever receives an {@link Integer} — see
  *       docs/DECISION_LOG.md DL-048.
- *   <li>{@code save(Tweet)} inserts an ingested row and writes back an updated
- *       {@code doubt_rating} — see docs/DECISION_LOG.md DL-049.
+ *   <li>{@code save(Tweet)} inserts an ingested row, and {@code task.TweetStreamListener} is its one
+ *       caller — see docs/DECISION_LOG.md DL-049. The analysis write-back is not a {@code save}: the
+ *       analyze route writes the one column it changes through
+ *       {@link #updateDoubtRating(Integer, Double)} — see docs/DECISION_LOG.md DL-263.
  *   <li>{@code count()} returns the number of rows, which {@code TwitterService} reports as the
  *       {@code total} of a chunked page read — see docs/DECISION_LOG.md DL-249.
  * </ul>

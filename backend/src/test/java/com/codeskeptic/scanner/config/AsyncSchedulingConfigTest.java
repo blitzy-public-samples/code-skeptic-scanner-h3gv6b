@@ -3,6 +3,7 @@ package com.codeskeptic.scanner.config;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -23,6 +24,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.scheduling.Trigger;
 import org.springframework.scheduling.TriggerContext;
@@ -35,8 +37,13 @@ import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.task.ResponseGenerationScheduler;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+
 // Net-new (no Python counterpart: backend/app/tasks/response_generation.py:L41-50 paced its own
-// `while True` loop) — DL-192 — see docs/DECISION_LOG.md
+// `while True` loop) — DL-047, DL-250, DL-251 — see docs/DECISION_LOG.md
 /**
  * Exercises the pacing {@link AsyncSchedulingConfig} declares for the response-generation pass.
  *
@@ -261,6 +268,95 @@ class AsyncSchedulingConfigTest {
 
         assertThat(next).isAfter(LAST_COMPLETION);
         assertThat(Duration.between(LAST_COMPLETION, next)).isEqualTo(Duration.ofSeconds(1L));
+    }
+
+    // -----------------------------------------------------------------------
+    // A standing misconfiguration is recorded once per process — DL-251 — see docs/DECISION_LOG.md
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("records an unreadable settings row once however many passes are paced")
+    void recordsAnUnreadableSettingsRowOnceHoweverManyPassesArePaced() {
+        when(settingRepository.findById(DELAY_KEY))
+                .thenThrow(new DataAccessResourceFailureException("no connection"));
+        Trigger trigger = registeredTrigger();
+
+        List<String> warnings = warningsFrom(() -> {
+            for (int pass = 0; pass < 4; pass++) {
+                trigger.nextExecution(triggerContextCompletedAt(LAST_COMPLETION));
+            }
+        });
+
+        assertThat(warnings).hasSize(1);
+        assertThat(warnings.getFirst()).contains("could not be read").contains(DELAY_KEY);
+        verify(settingRepository, times(4)).findById(DELAY_KEY);
+    }
+
+    @Test
+    @DisplayName("records a stored value that does not parse once however many passes are paced")
+    void recordsAStoredValueThatDoesNotParseOnceHoweverManyPassesArePaced() {
+        when(settingRepository.findById(DELAY_KEY))
+                .thenReturn(Optional.of(new Setting(DELAY_KEY, "not-a-number", "d")));
+        Trigger trigger = registeredTrigger();
+
+        List<String> warnings = warningsFrom(() -> {
+            for (int pass = 0; pass < 4; pass++) {
+                trigger.nextExecution(triggerContextCompletedAt(LAST_COMPLETION));
+            }
+        });
+
+        assertThat(warnings).hasSize(1);
+        assertThat(warnings.getFirst()).contains("does not hold an integer");
+    }
+
+    @Test
+    @DisplayName("records a bounded interval once however many passes are paced")
+    void recordsABoundedIntervalOnceHoweverManyPassesArePaced() {
+        when(settingRepository.findById(DELAY_KEY)).thenReturn(Optional.of(
+                new Setting(DELAY_KEY, String.valueOf(Long.MAX_VALUE), "d")));
+        Trigger trigger = registeredTrigger();
+
+        List<String> warnings = warningsFrom(() -> {
+            for (int pass = 0; pass < 4; pass++) {
+                trigger.nextExecution(triggerContextCompletedAt(LAST_COMPLETION));
+            }
+        });
+
+        assertThat(warnings).hasSize(1);
+        assertThat(warnings.getFirst()).contains("exceeds the").contains("bound");
+    }
+
+    @Test
+    @DisplayName("records nothing when the stored row paces the pass")
+    void recordsNothingWhenTheStoredRowPacesThePass() {
+        when(settingRepository.findById(DELAY_KEY)).thenReturn(Optional.of(
+                new Setting(DELAY_KEY, String.valueOf(STORED_DELAY_SECONDS), "d")));
+        Trigger trigger = registeredTrigger();
+
+        assertThat(warningsFrom(() ->
+                trigger.nextExecution(triggerContextCompletedAt(LAST_COMPLETION)))).isEmpty();
+    }
+
+    /**
+     * Runs {@code work} with an appender attached to this class's logger.
+     *
+     * @param work the call to record
+     * @return every {@code WARN} message the call emitted, in the order recorded
+     */
+    private static List<String> warningsFrom(Runnable work) {
+        Logger logger = (Logger) LoggerFactory.getLogger(AsyncSchedulingConfig.class);
+        ListAppender<ILoggingEvent> captured = new ListAppender<>();
+        captured.start();
+        logger.addAppender(captured);
+        try {
+            work.run();
+        } finally {
+            logger.detachAppender(captured);
+        }
+        return captured.list.stream()
+                .filter(event -> event.getLevel() == Level.WARN)
+                .map(ILoggingEvent::getFormattedMessage)
+                .toList();
     }
 
     private Instant nextExecution(TriggerContext context) {

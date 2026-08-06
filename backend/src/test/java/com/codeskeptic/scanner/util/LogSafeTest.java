@@ -28,8 +28,8 @@ class LogSafeTest {
     /** Marker rendered for an empty value. */
     private static final String EMPTY = "empty";
 
-    /** Prefix every correlation token carries. */
-    private static final String CORRELATION_PREFIX = "sha256:";
+    /** Prefix every correlation token carries, naming the keyed primitive — DL-119. */
+    private static final String CORRELATION_PREFIX = "hmac256:";
 
     /** Longest value {@link LogSafe#logSafe(String)} renders in full. */
     private static final int LOG_VALUE_LIMIT = 64;
@@ -88,6 +88,32 @@ class LogSafeTest {
             assertThat(LogSafe.correlation("88")).isNotEqualTo(LogSafe.correlation("89"));
             assertThat(LogSafe.correlation(null)).isEqualTo(ABSENT);
             assertThat(LogSafe.correlation("")).isEqualTo(EMPTY);
+        }
+
+        // The token is keyed with a per-process secret, so it is not the plain digest — DL-119 —
+        // see docs/DECISION_LOG.md
+        @ParameterizedTest(name = "the token for \"{0}\" is not its unkeyed digest")
+        @ValueSource(strings = {"1", "42", "4711", "admin", "true", "tweet_popularity_threshold"})
+        @DisplayName("renders a token no unkeyed digest of the value can be compared against")
+        void rendersATokenNoUnkeyedDigestOfTheValueCanBeComparedAgainst(String value)
+                throws Exception {
+
+            String unkeyed = java.util.HexFormat.of().formatHex(
+                    java.security.MessageDigest.getInstance("SHA-256")
+                            .digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                    0, 8);
+
+            assertThat(LogSafe.correlation(value)).isNotEqualTo("sha256:" + unkeyed)
+                    .doesNotContain(unkeyed);
+        }
+
+        @Test
+        @DisplayName("keys every token with one secret, so the whole set moves together")
+        void keysEveryTokenWithOneSecretSoTheWholeSetMovesTogether() {
+            // Within one process a token is stable, so two records naming one value join up.
+            assertThat(LogSafe.correlation("4711")).isEqualTo(LogSafe.correlation("4711"));
+            assertThat(LogSafe.correlation("4711")).isNotEqualTo(LogSafe.correlation("4712"));
+            assertThat(LogSafe.correlation("4711")).matches(CORRELATION_PREFIX + "[0-9a-f]{16}");
         }
 
         @Test
@@ -184,13 +210,157 @@ class LogSafeTest {
         }
     }
 
+    // Bounded failure metadata — DL-197 — see docs/DECISION_LOG.md
+    @Nested
+    @DisplayName("typeChain")
+    class TypeChainRendering {
+
+        @Test
+        @DisplayName("names each type of a cause chain and no message of any of them")
+        void namesEachTypeOfACauseChainAndNoMessageOfAnyOfThem() {
+            Throwable failure = new IllegalStateException("outer password=hunter2",
+                    new RuntimeException("middle jdbc:postgresql://db/x",
+                            new IllegalArgumentException("inner HUNTER2")));
+
+            assertThat(LogSafe.typeChain(failure))
+                    .isEqualTo("IllegalStateException <- RuntimeException <- IllegalArgumentException")
+                    .doesNotContain("hunter2")
+                    .doesNotContain("jdbc")
+                    .doesNotContain("HUNTER2");
+        }
+
+        @Test
+        @DisplayName("bounds a chain at five links and marks that it continues")
+        void boundsAChainAtFiveLinksAndMarksThatItContinues() {
+            Throwable failure = new IllegalStateException("l1", new IllegalStateException("l2",
+                    new IllegalStateException("l3", new IllegalStateException("l4",
+                            new IllegalStateException("l5", new IllegalStateException("l6"))))));
+
+            String rendered = LogSafe.typeChain(failure);
+
+            assertThat(rendered.split(" <- ")).hasSize(6);
+            assertThat(rendered).endsWith(" <- ...");
+        }
+
+        @Test
+        @DisplayName("stops at a cause that refers back into the chain")
+        void stopsAtACauseThatRefersBackIntoTheChain() {
+            IllegalStateException outer = new IllegalStateException("outer");
+            RuntimeException inner = new RuntimeException("inner", outer);
+            outer.initCause(inner);
+
+            assertThat(LogSafe.typeChain(outer)).endsWith("...").hasSizeLessThan(120);
+        }
+
+        @Test
+        @DisplayName("reports an absent failure chain by name")
+        void reportsAnAbsentFailureChainByName() {
+            assertThat(LogSafe.typeChain(null)).isEqualTo(ABSENT);
+        }
+    }
+
+    // Bounded failure metadata — DL-197 — see docs/DECISION_LOG.md
+    @Nested
+    @DisplayName("originFrame")
+    class OriginFrameRendering {
+
+        @Test
+        @DisplayName("names this application's own frame, its method and its line")
+        void namesThisApplicationsOwnFrameItsMethodAndItsLine() {
+            assertThat(LogSafe.originFrame(new IllegalStateException("raised here")))
+                    .startsWith("LogSafeTest")
+                    .contains(".namesThisApplicationsOwnFrameItsMethodAndItsLine:")
+                    .matches("[A-Za-z0-9$.]+:[0-9]+");
+        }
+
+        @Test
+        @DisplayName("names the topmost frame when the stack holds none of this application's")
+        void namesTheTopmostFrameWhenTheStackHoldsNoneOfThisApplications() {
+            IllegalStateException failure = new IllegalStateException("no application frame");
+            failure.setStackTrace(new StackTraceElement[] {
+                new StackTraceElement("org.example.provider.Driver", "connect", "Driver.java", 42)});
+
+            assertThat(LogSafe.originFrame(failure)).isEqualTo("Driver.connect:42");
+        }
+
+        @Test
+        @DisplayName("reports an absent failure and an empty stack by name")
+        void reportsAnAbsentFailureAndAnEmptyStackByName() {
+            IllegalStateException empty = new IllegalStateException("no frames");
+            empty.setStackTrace(new StackTraceElement[0]);
+
+            assertThat(LogSafe.originFrame(null)).isEqualTo(ABSENT);
+            assertThat(LogSafe.originFrame(empty)).isEqualTo(ABSENT);
+        }
+    }
+
+    // Sanitized diagnostic detail — DL-197 — see docs/DECISION_LOG.md
+    @Nested
+    @DisplayName("failureDetail")
+    class FailureDetailRendering {
+
+        @Test
+        @DisplayName("guards every message it carries and forges no record boundary")
+        void guardsEveryMessageItCarriesAndForgesNoRecordBoundary() {
+            Throwable failure = new IllegalStateException("first\r\nforged",
+                    new RuntimeException("second\u0000line"));
+
+            String rendered = LogSafe.failureDetail(failure);
+
+            assertThat(rendered).contains("IllegalStateException[first??forged]")
+                    .contains("RuntimeException[second?line]")
+                    .doesNotContain("\r")
+                    .doesNotContain("\n");
+            assertThat(rendered.chars())
+                    .allMatch(character -> character >= ' ' && character <= '~');
+        }
+
+        @Test
+        @DisplayName("bounds a long message at the detail bound")
+        void boundsALongMessageAtTheDetailBound() {
+            String longMessage = "x".repeat(300) + "SECRET";
+
+            assertThat(LogSafe.failureDetail(new IllegalStateException(longMessage)))
+                    .doesNotContain("SECRET")
+                    .contains("x".repeat(256));
+        }
+
+        @Test
+        @DisplayName("bounds the frames it renders and marks that they continue")
+        void boundsTheFramesItRendersAndMarksThatTheyContinue() {
+            IllegalStateException failure = new IllegalStateException("deep stack");
+            StackTraceElement[] frames = new StackTraceElement[25];
+            for (int index = 0; index < frames.length; index++) {
+                frames[index] = new StackTraceElement("org.example.Deep", "call" + index,
+                        "Deep.java", index + 1);
+            }
+            failure.setStackTrace(frames);
+
+            String rendered = LogSafe.failureDetail(failure);
+
+            assertThat(rendered).contains("Deep.call0:1").contains("Deep.call9:10")
+                    .doesNotContain("Deep.call10:11")
+                    .endsWith(", ...");
+        }
+
+        @Test
+        @DisplayName("reports an absent failure by name and an absent message as absent")
+        void reportsAnAbsentFailureByNameAndAnAbsentMessageAsAbsent() {
+            assertThat(LogSafe.failureDetail(null)).isEqualTo(ABSENT);
+            assertThat(LogSafe.failureDetail(new IllegalStateException()))
+                    .startsWith("IllegalStateException[absent]");
+        }
+    }
+
     @Test
     @DisplayName("renders no control character and no line break for any unsafe value")
     void rendersNoControlCharacterForAnyUnsafeValue() {
         String unsafe = "a\r\nb\tc\u0000d\u001b[31m";
 
+        Throwable hostile = new IllegalStateException(unsafe, new RuntimeException(unsafe));
         for (String rendered : List.of(LogSafe.logSafe(unsafe), LogSafe.correlation(unsafe),
-                LogSafe.token(unsafe))) {
+                LogSafe.token(unsafe), LogSafe.typeChain(hostile), LogSafe.originFrame(hostile),
+                LogSafe.failureDetail(hostile))) {
             assertThat(rendered.chars()).allMatch(character -> character >= ' ' && character <= '~');
         }
     }

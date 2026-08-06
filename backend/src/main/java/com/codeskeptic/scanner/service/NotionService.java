@@ -87,14 +87,14 @@ import com.fasterxml.jackson.databind.JsonNode;
  * text, {@link TweetDto#id()} falls back to the Notion page identifier, so a mirrored page is never
  * dropped for want of that one property. A structurally invalid successful response — an empty body,
  * an absent {@code results} array, or a created page carrying no identifier — is reported as a
- * failure rather than read as an empty result — DL-089. The source indexed {@code [0]} directly at
+ * failure and is not read as an empty result — DL-089. The source indexed {@code [0]} directly at
  * {@code backend/app/services/notion_service.py:L45-49}.
  *
  * <p>This adapter carries no request pacing and no cache. Exactly one operation retries: the mirror
  * write of {@link #updateTweetResponse}, which re-attempts an HTTP 429, any 5xx and a transport
  * failure up to {@code scanner.notion.mirror-max-retries} times, waiting
  * {@code scanner.notion.mirror-retry-backoff-millis} before the first retry and doubling that wait
- * once per earlier retry up to a ten-second ceiling — DL-253. Every other operation issues exactly
+ * once per earlier retry up to a thirty-second ceiling — DL-253. Every other operation issues
  * one HTTP request. A request Notion rejects — including HTTP 429 {@code rate_limited} against
  * Notion's published request ceiling — is logged with the provider status, error {@code code},
  * request id and the length of the provider explanation, never its text — DL-269 — then raised to the
@@ -559,7 +559,7 @@ public class NotionService {
      * not. A failure carrying no status is a transport failure and is retryable.
      *
      * @param failure the failure to classify; never {@code null}
-     * @return {@code true} when another attempt is worth making
+     * @return {@code true} when the answer admits another attempt
      */
     // Net-new bounded mirror retry — DL-253 — see docs/DECISION_LOG.md
     private static boolean isRetryable(RuntimeException failure) {
@@ -696,7 +696,7 @@ public class NotionService {
      * them.
      *
      * <p>The {@code message} member is provider-controlled free text. It can carry any character,
-     * including the control characters that would let it forge a line of its own in a log record, and
+     * including the control characters a forged log-record boundary needs, and
      * it can echo submitted content back. A count carries neither hazard, and the shaped {@code code}
      * member and the provider request identifier the same record already carries are what identify the
      * rejection and locate the provider's own copy of the explanation — DL-269.
@@ -954,8 +954,8 @@ public class NotionService {
      *
      * <p>{@link TweetDto} rejects a {@code null} value for the six components
      * {@code backend/app/schema/tweet.py:L6-14} declares required, so a page that does not carry all
-     * five mirrored required properties has no wire form and is skipped rather than substituted or
-     * raised — see docs/DECISION_LOG.md DL-219.
+     * five mirrored required properties has no wire form and is skipped: no value is substituted for it
+     * and no failure is raised — see docs/DECISION_LOG.md DL-219.
      *
      * @param page one element of a query response's {@code results} array; not {@code null}
      * @return the mapped post, or {@code null} when the page carries no identifier at all or carries
@@ -1100,7 +1100,7 @@ public class NotionService {
      * Narrows a mirrored engagement count to the component type {@link TweetDto} declares.
      *
      * <p>A value outside the range of an {@code int}, and a value that is not a whole number, are
-     * reported at {@code WARN} and yield {@code null} rather than a silently truncated count.
+     * reported at {@code WARN} and yield {@code null}; no truncated count is returned.
      *
      * @param engagement the mirrored value, possibly {@code null}
      * @return the count to carry, or {@code null} when the value is absent or unusable

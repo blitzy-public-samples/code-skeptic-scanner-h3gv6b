@@ -5,6 +5,8 @@
     <modelVersion>4.0.0</modelVersion>
 
     <!-- Net-new (no source construct) - see docs/DECISION_LOG.md -->
+    <!-- 3.5.16 is the final open-source release of the 3.5.x line. The support horizon and the
+         upgrade plan are recorded in docs/DECISION_LOG.md DL-003. -->
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
@@ -18,8 +20,9 @@
     <!-- Net-new (no source construct: the retired Python tree carried no
          dependency manifest and no version). No operational file names this
          value - infrastructure/docker/Dockerfile.backend copies
-         target/*.jar by wildcard and .github/workflows/cd.yml tags the image by
-         git sha - see docs/DECISION_LOG.md. -->
+         target/*.jar by wildcard and .github/workflows/cd.yml builds and pushes
+         the image under a name carrying no tag - see docs/DECISION_LOG.md
+         DL-102. -->
     <version>0.0.1-SNAPSHOT</version>
     <packaging>jar</packaging>
 

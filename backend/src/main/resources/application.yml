@@ -4,8 +4,8 @@
 server:
   port: ${PORT:5000}
   # Net-new (no Python counterpart) — DL-277 — see docs/DECISION_LOG.md
-  # With this strategy HttpServletRequest.isSecure() reports the forwarded X-Forwarded-Proto scheme,
-  # which is what Spring Security's Strict-Transport-Security writer reads.
+  # Under this strategy HttpServletRequest.isSecure() reports the forwarded X-Forwarded-Proto scheme.
+  # Spring Security's Strict-Transport-Security writer reads that value.
   forward-headers-strategy: ${FORWARD_HEADERS_STRATEGY:framework}
   # Net-new (no Python counterpart) — DL-238 — see docs/DECISION_LOG.md
   # The embedded container's own default, declared explicitly. Request headers above this size are
@@ -13,10 +13,9 @@ server:
   # config/ContainerErrorResponseConfig installs — DL-237.
   max-http-request-header-size: ${MAX_HTTP_REQUEST_HEADER_SIZE:8KB}
   # Net-new (no Python counterpart) — DL-271 — see docs/DECISION_LOG.md
-  # The connector stops accepting requests and drains the requests already in flight before the
-  # context closes, so the connection pool config/DataSourceConfig publishes is closed only after the
-  # last request that could still borrow a connection has returned. The drain is bounded by
-  # spring.lifecycle.timeout-per-shutdown-phase below.
+  # The connector stops accepting requests and drains those already in flight before the context
+  # closes; the connection pool config/DataSourceConfig publishes closes after that drain completes.
+  # The drain is bounded by spring.lifecycle.timeout-per-shutdown-phase below.
   shutdown: ${SERVER_SHUTDOWN:graceful}
 
 # Net-new (the retired tree configured no logging framework) — DL-052, DL-206 — see
@@ -161,7 +160,10 @@ scanner:
 
   jwt:
     # Ported from backend/app/core/security.py:L11 (faithful port) — DL-016, DL-184, DL-185, DL-186 — see docs/DECISION_LOG.md
-    # Minimum length: 32 bytes. Startup fails below it.
+    # Carries a Base64 or Base64URL encoding of the HS256 key material, never the key material as
+    # text: the value is decoded at startup and the decoded material must reach 32 bytes. Startup
+    # fails for a value in neither alphabet and for material below that floor. Generate one with
+    # `openssl rand -base64 32`.
     # Declared with no default: SECRET_KEY must be supplied. Startup fails when it is unset, blank or
     # still the unresolved text ${SECRET_KEY}.
     secret: ${SECRET_KEY}
@@ -204,3 +206,21 @@ scanner:
     enabled: ${SCANNER_BACKGROUND_ENABLED:true}
     stream-enabled: ${TWITTER_STREAM_ENABLED:true}
     response-generation-enabled: ${RESPONSE_GENERATION_ENABLED:true}
+    # Net-new (no Python counterpart) — DL-281 — see docs/DECISION_LOG.md
+    # Term of the ownership lease held in the `background_owner` settings row, and the interval it is
+    # renewed at. Accepted: 10..3600 seconds for the term; 1 second up to half the term for the
+    # renewal, so a renewal always precedes an expiry. A process that holds no lease runs no
+    # background path, whatever the three switches above say.
+    lease-ttl-seconds: ${BACKGROUND_LEASE_TTL_SECONDS:120}
+    lease-renew-seconds: ${BACKGROUND_LEASE_RENEW_SECONDS:30}
+    # Net-new (no Python counterpart) — DL-282 — see docs/DECISION_LOG.md
+    # Candidates one generation pass attempts, whatever the backlog holds. Accepted: 1 or more.
+    max-candidates-per-pass: ${RESPONSE_GENERATION_MAX_CANDIDATES_PER_PASS:200}
+    # Net-new (no Python counterpart) — DL-283 — see docs/DECISION_LOG.md
+    # Paid provider work the background paths may do: at most `provider-calls-per-window` units per
+    # `provider-window-seconds` span, and `provider-failure-threshold` consecutive failures suspend
+    # provider work for `provider-circuit-open-seconds`. Accepted: 1 or more for each.
+    provider-calls-per-window: ${PROVIDER_CALLS_PER_WINDOW:500}
+    provider-window-seconds: ${PROVIDER_WINDOW_SECONDS:3600}
+    provider-failure-threshold: ${PROVIDER_FAILURE_THRESHOLD:5}
+    provider-circuit-open-seconds: ${PROVIDER_CIRCUIT_OPEN_SECONDS:300}

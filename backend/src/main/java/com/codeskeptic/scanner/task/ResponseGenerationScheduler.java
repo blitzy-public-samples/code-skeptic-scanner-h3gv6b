@@ -1,5 +1,6 @@
 package com.codeskeptic.scanner.task;
 
+import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.ResponseDto;
 import com.codeskeptic.scanner.entity.Tweet;
 import com.codeskeptic.scanner.repository.TweetRepository;
@@ -45,8 +46,15 @@ import org.springframework.stereotype.Component;
  * <p>Each candidate is handled independently. A failure is recorded against the candidate's
  * identifier and the pass continues with the next candidate; a failure of the pass itself is
  * recorded and the pass returns normally, leaving the task scheduled. The pass re-attempts no
- * candidate, applies no rate limit, caches nothing, and caps neither the candidates it considers nor
- * the candidates it answers.
+ * candidate and caches nothing.
+ *
+ * <p>Two ceilings bound one pass. It attempts at most
+ * {@code scanner.background.max-candidates-per-pass} candidates, whatever the backlog holds, and it
+ * takes one unit of {@code task/ProviderWorkBudget} per candidate, which refuses once the
+ * configured allowance for the current window is spent or the consecutive-failure circuit is open.
+ * A pass that reaches either ceiling ends early, records which one it reached with the counts it
+ * had reached, and leaves the untouched backlog to the following pass — DL-282, DL-283. Neither
+ * ceiling defers, queues or re-attempts anything.
  *
  * <p>This pass does not own ingestion's replies. It reaches
  * {@link ResponseService#generateResponseIfAbsentFor(Tweet)}, the entity-shaped signature of the one
@@ -102,6 +110,12 @@ public class ResponseGenerationScheduler {
 
     private final NotionService notionService;
 
+    /** Supplies the per-pass candidate ceiling — DL-282. */
+    private final ScannerProperties properties;
+
+    /** Grants or refuses one unit of paid provider work per candidate — DL-283. */
+    private final ProviderWorkBudget providerWorkBudget;
+
     /**
      * Binds the three collaborators one pass uses.
      *
@@ -109,6 +123,9 @@ public class ResponseGenerationScheduler {
      *     never {@code null}
      * @param responseService generates and stores one reply per candidate; never {@code null}
      * @param notionService mirrors a stored reply onto its Notion page; never {@code null}
+     * @param properties supplies the per-pass candidate ceiling; never {@code null}
+     * @param providerWorkBudget grants or refuses the provider work of one candidate; never
+     *     {@code null}
      * @throws NullPointerException when any argument is {@code null}
      */
     // Constructor injection replaces the in-function LLMService() at
@@ -117,13 +134,18 @@ public class ResponseGenerationScheduler {
     // DL-227 — see docs/DECISION_LOG.md
     public ResponseGenerationScheduler(TweetRepository tweetRepository,
             ResponseService responseService,
-            NotionService notionService) {
+            NotionService notionService,
+            ScannerProperties properties,
+            ProviderWorkBudget providerWorkBudget) {
         this.tweetRepository = Objects.requireNonNull(tweetRepository,
                 "tweetRepository must not be null.");
         this.responseService = Objects.requireNonNull(responseService,
                 "responseService must not be null.");
         this.notionService = Objects.requireNonNull(notionService,
                 "notionService must not be null.");
+        this.properties = Objects.requireNonNull(properties, "properties must not be null.");
+        this.providerWorkBudget = Objects.requireNonNull(providerWorkBudget,
+                "providerWorkBudget must not be null.");
     }
 
     /**
@@ -148,7 +170,7 @@ public class ResponseGenerationScheduler {
      * overlaps its predecessor. The interval is the {@code response_generation_delay} settings row
      * when it holds a positive number of seconds and
      * {@code scanner.response-generation-delay-seconds} otherwise, resolved once per pass. The first
-     * pass runs at the startup instant rather than one interval later — see docs/DECISION_LOG.md
+     * pass runs at the startup instant, and not one interval later — see docs/DECISION_LOG.md
      * DL-047, DL-227, DL-228, DL-251.
      *
      * <p>The method takes no argument, returns nothing and throws nothing: every {@link
@@ -169,6 +191,9 @@ public class ResponseGenerationScheduler {
             int skipped = 0;
             int failed = 0;
             int batches = 0;
+            int candidateCeiling = maxCandidatesPerPass();
+            boolean ceilingReached = false;
+            boolean budgetRefused = false;
             // Keyset cursor over tweets.id; null opens the sweep — DL-248 — see
             // docs/DECISION_LOG.md
             Integer afterId = null;
@@ -187,6 +212,17 @@ public class ResponseGenerationScheduler {
                 }
 
                 for (Tweet candidate : batch) {
+                    // Per-pass candidate ceiling — DL-282 — see docs/DECISION_LOG.md
+                    if (attempted >= candidateCeiling) {
+                        ceilingReached = true;
+                        break;
+                    }
+                    // Provider allowance and circuit — DL-283 — see docs/DECISION_LOG.md
+                    if (!providerWorkBudget.tryAcquire()) {
+                        budgetRefused = true;
+                        break;
+                    }
+
                     String tweetId = String.valueOf(candidate.getId());
                     // The cursor advances before the candidate is handled; a candidate that fails is
                     // not revisited in this pass — DL-248 — see docs/DECISION_LOG.md
@@ -203,17 +239,31 @@ public class ResponseGenerationScheduler {
                             }
                             case SKIPPED -> skipped++;
                         }
+                        providerWorkBudget.recordSuccess();
 
                     } catch (RuntimeException e) {
                         failed++;
+                        providerWorkBudget.recordFailure();
                         log.error("Scheduled response generation failed for tweet {}: {}",
                                 tweetId, LogSafe.type(e));
                     }
                 }
 
+                if (ceilingReached || budgetRefused) {
+                    break;
+                }
                 if (batch.size() < CANDIDATE_BATCH_ROWS) {
                     break;
                 }
+            }
+
+            if (ceilingReached) {
+                log.warn("Response generation pass stopped at its ceiling of {} candidate(s); the "
+                        + "remaining backlog is left to the following pass", candidateCeiling);
+            }
+            if (budgetRefused) {
+                log.warn("Response generation pass stopped after {} candidate(s): the provider work "
+                        + "budget refused further work", attempted);
             }
 
             if (attempted == 0) {
@@ -229,6 +279,20 @@ public class ResponseGenerationScheduler {
             // docs/DECISION_LOG.md
             log.error("Response generation pass failed: {}", LogSafe.type(e));
         }
+    }
+
+    // Net-new per-pass ceiling — DL-282 — see docs/DECISION_LOG.md
+    /**
+     * Reports the candidate ceiling in force for one pass.
+     *
+     * @return the bound value of {@code scanner.background.max-candidates-per-pass}, or the declared
+     *     default when the group is unbound
+     */
+    private int maxCandidatesPerPass() {
+        ScannerProperties.Background background = properties.background();
+        return background == null
+                ? ScannerProperties.Background.of(true, true, true).maxCandidatesPerPass()
+                : background.maxCandidatesPerPass();
     }
 
     /**

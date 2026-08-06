@@ -212,7 +212,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
      * <p>{@link UserDetailsService#loadUserByUsername(String)} is called on every authenticated
      * request. A subject the store does not hold yields {@code null} and the request proceeds
      * unauthenticated, so a token minted for a principal name that is no longer configured stops
-     * authenticating at that moment rather than at its expiry.
+     * authenticating at that moment, and not at its expiry.
      *
      * @param username the verified {@code sub} claim
      * @return the stored principal, or {@code null} when the store holds none of that name

@@ -18,8 +18,8 @@ import org.junit.jupiter.params.provider.ValueSource;
  * Exercises the {@link DatabaseUrlTranslator#translate(String)} contract: the credential-free
  * {@code jdbc:} pass-through and the rejection of a credential-bearing one, the supported scheme set,
  * driver-suffix stripping, credential extraction from the user-info component and from the query
- * string, percent-escape decoding, query-string preservation, host and port validation, and the
- * rejected values.
+ * string, percent-escape decoding, query-string preservation, host and port validation, the
+ * rejection of a secret-bearing property on either path, and the rejected values.
  *
  * <p>Net-new (no Python counterpart) - see docs/DECISION_LOG.md DL-027, DL-071, DL-072 and DL-187.
  */
@@ -254,13 +254,26 @@ class DatabaseUrlTranslatorTest {
     }
 
     @Test
-    @DisplayName("keeps a jdbc url whose property merely looks like a credential property")
-    void keepsAJdbcUrlWhosePropertyMerelyLooksLikeACredentialProperty() {
+    @DisplayName("keeps a jdbc url whose property name merely opens with an identity name")
+    void keepsAJdbcUrlWhosePropertyNameMerelyOpensWithAnIdentityName() {
         TranslatedDatabaseUrl translated = DatabaseUrlTranslator
-                .translate("jdbc:postgresql://host/db?userTimezone=UTC&passwordAuthentication=true");
+                .translate("jdbc:postgresql://host/db?userTimezone=UTC&currentSchema=scanner");
 
         assertThat(translated.jdbcUrl())
-                .isEqualTo("jdbc:postgresql://host/db?userTimezone=UTC&passwordAuthentication=true");
+                .isEqualTo("jdbc:postgresql://host/db?userTimezone=UTC&currentSchema=scanner");
+    }
+
+    // A property name carrying a secret token is refused whatever its value holds — DL-072 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("refuses a property whose name carries a secret token even when its value is a flag")
+    void refusesAPropertyWhoseNameCarriesASecretTokenEvenWhenItsValueIsAFlag() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator
+                .translate("jdbc:postgresql://host/db?passwordAuthentication=true"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("secret-bearing property passwordAuthentication")
+                .hasMessageContaining("No value is reproduced here.")
+                .hasMessageNotContaining("true");
     }
 
     @Test
@@ -619,6 +632,144 @@ class DatabaseUrlTranslatorTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new TranslatedDatabaseUrl(null, null, null))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    // -----------------------------------------------------------------------
+    // Secondary secrets: a driver secret this service cannot bind — DL-072
+    // -----------------------------------------------------------------------
+
+    @ParameterizedTest(name = "[{index}] {0}")
+    @ValueSource(strings = {
+        "jdbc:postgresql://host/db?sslpassword=s3cret",
+        "jdbc:postgresql://host/db?sslmode=verify-full&sslpassword=s3cret",
+        "jdbc:postgresql://host/db?sslmode=verify-full;sslpassword=s3cret",
+        "jdbc:postgresql://host/db?SSLPassword=s3cret",
+        "jdbc:postgresql://host/db?sslpassphrase=s3cret",
+        "jdbc:mysql://host:3306/db?trustCertificateKeyStorePassword=s3cret",
+        "jdbc:mysql://host:3306/db?clientCertificateKeyStorePassword=s3cret",
+        "jdbc:mysql://host:3306/db?xdevapi.ssl-truststore-password=s3cret",
+        "jdbc:mysql://host:3306/db?useSSL=true&trustCertificateKeyStorePassword=s3cret",
+        "jdbc:postgresql://host/db?oauthToken=abc123",
+        "jdbc:postgresql://host/db?apiSecret=abc123",
+        "jdbc:postgresql://host/db?credentialProvider=com.example.Provider",
+        "jdbc:postgresql://host/db?authTokenFile=/etc/token",
+    })
+    @DisplayName("refuses a secret-bearing property on the jdbc pass-through path")
+    void refusesASecretBearingPropertyOnThePassThroughPath(String databaseUrl) {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate(databaseUrl))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("secret-bearing propert")
+                .hasMessageContaining("Remove")
+                .hasMessageNotContaining("s3cret")
+                .hasMessageNotContaining("abc123");
+    }
+
+    @ParameterizedTest(name = "[{index}] {0}")
+    @ValueSource(strings = {
+        "postgresql://u:p@host/db?sslpassword=s3cret",
+        "postgres://u:p@host/db?sslpassword=s3cret",
+        "postgresql+psycopg2://u:p@host/db?sslmode=require&sslpassword=s3cret",
+        "mysql://u:p@host:3306/db?trustCertificateKeyStorePassword=s3cret",
+        "mysql+pymysql://u:p@host:3306/db?clientCertificateKeyStorePassword=s3cret",
+        "mariadb://u:p@host:3306/db?xdevapi.ssl-truststore-password=s3cret",
+        "postgresql://host/db?user=admin&password=primary&sslpassword=s3cret",
+        "postgresql://host/db?user=admin;sslpassword=s3cret",
+    })
+    @DisplayName("refuses a secret-bearing property on the parse path, whatever the vendor alias")
+    void refusesASecretBearingPropertyOnTheParsePath(String databaseUrl) {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate(databaseUrl))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("secret-bearing propert")
+                .hasMessageNotContaining("s3cret")
+                .hasMessageNotContaining("primary");
+    }
+
+    @Test
+    @DisplayName("names the offending property and reproduces no value")
+    void namesTheOffendingPropertyAndReproducesNoValue() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator
+                .translate("postgresql://u:p@host/db?sslmode=require&sslpassword=s3cret"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("secret-bearing property sslpassword")
+                .hasMessageContaining("Remove it from DATABASE_URL")
+                .hasMessageNotContaining("s3cret")
+                .hasMessageNotContaining("host");
+    }
+
+    @Test
+    @DisplayName("names every offending property when a url carries several")
+    void namesEveryOffendingPropertyWhenAUrlCarriesSeveral() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("jdbc:mysql://host:3306/db"
+                        + "?trustCertificateKeyStorePassword=alpha1"
+                        + "&clientCertificateKeyStorePassword=beta2"
+                        + ";sslpassphrase=gamma3"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("secret-bearing properties trustCertificateKeyStorePassword, "
+                        + "clientCertificateKeyStorePassword, sslpassphrase")
+                .hasMessageContaining("Remove them from DATABASE_URL")
+                .hasMessageNotContaining("alpha1")
+                .hasMessageNotContaining("beta2")
+                .hasMessageNotContaining("gamma3");
+    }
+
+    @ParameterizedTest(name = "[{index}] {0}")
+    @ValueSource(strings = {
+        "jdbc:postgresql://host/db?sslmode=verify-full&sslcert=/etc/client.crt",
+        "jdbc:postgresql://host/db?sslrootcert=/etc/ca.crt&ApplicationName=scanner",
+        "jdbc:mysql://host:3306/db?allowPublicKeyRetrieval=true&useSSL=true",
+        "jdbc:mysql://host:3306/db?trustCertificateKeyStoreUrl=file:/etc/truststore.jks",
+        "jdbc:mysql://host:3306/db?serverTimezone=UTC&useUnicode=true",
+        "jdbc:postgresql://host/db?currentSchema=scanner&connectTimeout=10",
+    })
+    @DisplayName("keeps a property whose name carries no secret token")
+    void keepsAPropertyWhoseNameCarriesNoSecretToken(String databaseUrl) {
+        TranslatedDatabaseUrl translated = DatabaseUrlTranslator.translate(databaseUrl);
+
+        assertThat(translated.jdbcUrl()).isEqualTo(databaseUrl);
+        assertThat(translated.username()).isNull();
+        assertThat(translated.password()).isNull();
+    }
+
+    @Test
+    @DisplayName("retains a benign property of a translated url beside the extracted credentials")
+    void retainsABenignPropertyOfATranslatedUrlBesideTheExtractedCredentials() {
+        TranslatedDatabaseUrl translated = DatabaseUrlTranslator.translate(
+                "mysql://root:s3cret@host:3306/db?allowPublicKeyRetrieval=true&serverTimezone=UTC");
+
+        assertThat(translated.jdbcUrl())
+                .isEqualTo("jdbc:mysql://host:3306/db?allowPublicKeyRetrieval=true&serverTimezone=UTC");
+        assertThat(translated.username()).isEqualTo("root");
+        assertThat(translated.password()).isEqualTo("s3cret");
+    }
+
+    @ParameterizedTest(name = "[{index}] {0} reads as the username")
+    @CsvSource(delimiter = '|', value = {
+        "postgresql://host/db?uid=admin       | admin",
+        "postgresql://host/db?UID=admin       | admin",
+        "postgresql://host/db?user=admin      | admin",
+        "postgresql://host/db?username=admin  | admin",
+    })
+    @DisplayName("reads every identity property name as the username half of the pair")
+    void readsEveryIdentityPropertyNameAsTheUsernameHalfOfThePair(String databaseUrl,
+            String expectedUsername) {
+
+        TranslatedDatabaseUrl translated = DatabaseUrlTranslator.translate(databaseUrl.strip());
+
+        assertThat(translated.username()).isEqualTo(expectedUsername.strip());
+        assertThat(translated.password()).isNull();
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:postgresql://host/db");
+    }
+
+    @ParameterizedTest(name = "[{index}] {0} reads as the password")
+    @ValueSource(strings = {"password", "passwd", "pwd", "password1", "password2", "password3"})
+    @DisplayName("reads every primary password property name as the password half of the pair")
+    void readsEveryPrimaryPasswordPropertyNameAsThePasswordHalfOfThePair(String propertyName) {
+        TranslatedDatabaseUrl translated = DatabaseUrlTranslator
+                .translate("mysql://host:3306/db?" + propertyName + "=s3cret");
+
+        assertThat(translated.password()).isEqualTo("s3cret");
+        assertThat(translated.username()).isNull();
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:mysql://host:3306/db");
     }
 
     @Test

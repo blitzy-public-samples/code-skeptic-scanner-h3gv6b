@@ -73,7 +73,7 @@ public class DataSourceConfig {
     private static final String POOL_PREFIX = "scanner.datasource.pool";
 
     /**
-     * Keys that would redirect the pool away from the connection identity
+     * Keys that redirect the pool away from the connection identity
      * {@link DatabaseUrlTranslator} derived, or inject into the connections it opens. Any one of them
      * refuses to start — DL-270.
      */

@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -94,8 +95,8 @@ import reactor.util.retry.Retry;
  *
  * <p>The body carries a signal-idle bound of
  * {@code scanner.ingestion.stream-idle-timeout-seconds}: any chunk resets it, the keep-alive chunk
- * included, so a silent half-open connection fails and reconnects rather than appearing healthy —
- * DL-256.
+ * included, so a silent half-open connection fails and reconnects; it does not go on appearing
+ * healthy — DL-256.
  *
  * <p>{@link #start()} schedules the cycle on {@link Schedulers#boundedElastic()} and returns without
  * blocking, issuing no request on the calling thread and raising nothing. Every delivered record is
@@ -110,7 +111,11 @@ import reactor.util.retry.Retry;
  * <p>{@link #start()} opens no connection at all, and {@link #isAutoStartup()} reports
  * {@code false}, when {@code scanner.background.enabled} or {@code scanner.background.stream-enabled}
  * is {@code false}: only the process designated as the background worker streams — see
- * docs/DECISION_LOG.md DL-250.
+ * docs/DECISION_LOG.md DL-250. Both switches holding is necessary and not sufficient: the process must
+ * also hold the background-ownership lease {@code task/BackgroundOwnership} claims, so one process
+ * streams at a time however many replicas run and whatever their switches say — see
+ * docs/DECISION_LOG.md DL-281. That component starts the stream when it takes over a lapsed lease and
+ * stops it when a renewal fails.
  *
  * <p>{@link #start()} opens no connection at all when {@code scanner.twitter.consumer-key} or
  * {@code scanner.twitter.consumer-secret} is unset or blank; it records the condition at
@@ -293,7 +298,7 @@ public class TweetStreamClient implements SmartLifecycle {
     // Bound on the bytes held for one record — see docs/DECISION_LOG.md DL-222
     /**
      * Most bytes the accumulator holds for a single record. A record that reaches this size without a
-     * terminating {@value #LINE_FEED} is discarded rather than accumulated further; the connection
+     * terminating {@value #LINE_FEED} is discarded and is not accumulated further; the connection
      * stays open. One post of the X API v2 filtered stream, with the requested fields, is orders of
      * magnitude smaller.
      */
@@ -310,6 +315,13 @@ public class TweetStreamClient implements SmartLifecycle {
 
     /** Fraction of the computed backoff the applied delay varies by, in either direction. */
     private static final double BACKOFF_JITTER_FACTOR = 0.5D;
+
+    /**
+     * Longest delay a provider-reported rate-limit reset can produce. A reported reset further away
+     * than this is applied as this, so the reconnect delay is finite whatever the header carries —
+     * DL-280.
+     */
+    private static final Duration MAX_RATE_LIMIT_DELAY = Duration.ofMinutes(15L);
 
     /**
      * Shortest bound applied to a control-plane call, in seconds. A configured
@@ -331,6 +343,9 @@ public class TweetStreamClient implements SmartLifecycle {
 
     /** Handles one delivered record. */
     private final TweetStreamListener tweetStreamListener;
+
+    /** Reports whether this process holds the background-ownership lease — DL-281. */
+    private final BackgroundOwnership backgroundOwnership;
 
     /** Reports whether {@link #start()} has taken effect and the cycle has not yet terminated. */
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -383,7 +398,8 @@ public class TweetStreamClient implements SmartLifecycle {
             ScannerProperties properties,
             AiToolRepository aiToolRepository,
             SettingRepository settingRepository,
-            TweetStreamListener tweetStreamListener) {
+            TweetStreamListener tweetStreamListener,
+            BackgroundOwnership backgroundOwnership) {
         this.webClient = Objects.requireNonNull(webClient, "webClient must not be null.");
         this.properties = Objects.requireNonNull(properties, "properties must not be null.");
         this.aiToolRepository =
@@ -392,6 +408,8 @@ public class TweetStreamClient implements SmartLifecycle {
                 Objects.requireNonNull(settingRepository, "settingRepository must not be null.");
         this.tweetStreamListener =
                 Objects.requireNonNull(tweetStreamListener, "tweetStreamListener must not be null.");
+        this.backgroundOwnership = Objects.requireNonNull(backgroundOwnership,
+                "backgroundOwnership must not be null.");
     }
 
     /**
@@ -422,7 +440,8 @@ public class TweetStreamClient implements SmartLifecycle {
         // Only the designated background worker streams — DL-250 — see docs/DECISION_LOG.md
         if (!isAutoStartup()) {
             log.info("X filtered stream ingestion not started in this process: {} and {} must both "
-                    + "hold", BACKGROUND_ENABLED_PROPERTY, STREAM_ENABLED_PROPERTY);
+                    + "hold and the background-ownership lease must be held",
+                    BACKGROUND_ENABLED_PROPERTY, STREAM_ENABLED_PROPERTY);
             return;
         }
 
@@ -563,7 +582,8 @@ public class TweetStreamClient implements SmartLifecycle {
     @Override
     public boolean isAutoStartup() {
         ScannerProperties.Background background = properties.background();
-        return background == null || background.runsStream();
+        boolean switchesAllow = background == null || background.runsStream();
+        return switchesAllow && backgroundOwnership.isOwner();
     }
 
     /**
@@ -934,7 +954,7 @@ public class TweetStreamClient implements SmartLifecycle {
                 .bodyToMono(JsonNode.class)
                 // Bounded control-plane call — DL-230 — see docs/DECISION_LOG.md
                 .timeout(controlPlaneTimeout())
-                // A rule the endpoint refused is surfaced rather than discarded — DL-275 — see
+                // A rule the endpoint refused is surfaced and is not discarded — DL-275 — see
                 // docs/DECISION_LOG.md
                 .doOnNext(TweetStreamClient::reportRefusedRules)
                 .then();
@@ -1209,7 +1229,7 @@ public class TweetStreamClient implements SmartLifecycle {
      * <p>The body does carry a signal-idle bound of
      * {@code scanner.ingestion.stream-idle-timeout-seconds}: any chunk resets it, the periodic
      * keep-alive chunk included, and a connection that delivers no byte at all for that span fails with
-     * a timeout and reconnects rather than appearing healthy — DL-256.
+     * a timeout and reconnects; it does not go on appearing healthy — DL-256.
      *
      * <p>At most {@value #STREAM_CHUNK_PREFETCH} chunk is requested ahead of the one being drained, so
      * no unreleased buffer is queued — DL-258.
@@ -1467,10 +1487,16 @@ public class TweetStreamClient implements SmartLifecycle {
     /**
      * Reads the rate-limit reset instant out of an HTTP 429 answer.
      *
+     * <p>The returned delay never exceeds {@link #MAX_RATE_LIMIT_DELAY}: a reported reset further
+     * away than that horizon is applied as the horizon, and a header that cannot be read as UTC
+     * epoch seconds — including one out of the range {@link Instant} represents — leaves the
+     * computed jittered backoff in force. The delay is finite for every header value a provider or
+     * an intermediary can send — DL-280.
+     *
      * @param response the HTTP 429 answer, must not be {@code null}
      * @param backoff the computed backoff, must not be {@code null}
-     * @return the longer of the delay until the reset instant and {@code backoff}; {@code backoff}
-     *     when the header is absent, blank or unreadable as UTC epoch seconds
+     * @return the longer of the bounded delay until the reset instant and {@code backoff};
+     *     {@code backoff} when the header is absent, blank or unreadable as UTC epoch seconds
      */
     private static Duration rateLimitDelay(WebClientResponseException response, Duration backoff) {
         String header = response.getHeaders().getFirst(RATE_LIMIT_RESET_HEADER);
@@ -1484,10 +1510,16 @@ public class TweetStreamClient implements SmartLifecycle {
         try {
             Instant reset = Instant.ofEpochSecond(Long.parseLong(header.trim()));
             untilReset = Duration.between(Instant.now(), reset);
-        } catch (ArithmeticException | NumberFormatException failure) {
+        } catch (ArithmeticException | DateTimeException | NumberFormatException failure) {
             log.warn("The X API {} header could not be read as UTC epoch seconds; the computed "
                     + "backoff delay applies", RATE_LIMIT_RESET_HEADER);
             return backoff;
+        }
+
+        if (untilReset.compareTo(MAX_RATE_LIMIT_DELAY) > 0) {
+            log.warn("The X API {} header reported a reset beyond the {}s reconnect horizon; the "
+                    + "horizon applies", RATE_LIMIT_RESET_HEADER, MAX_RATE_LIMIT_DELAY.toSeconds());
+            untilReset = MAX_RATE_LIMIT_DELAY;
         }
 
         return untilReset.compareTo(backoff) > 0 ? untilReset : backoff;

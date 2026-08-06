@@ -1,6 +1,7 @@
 package com.codeskeptic.scanner.api;
 
 import java.util.Objects;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -88,21 +89,28 @@ import com.codeskeptic.scanner.util.LogSafe;
  * any level — DL-052. The resolved principal of a successful issuance reaches the log as the
  * correlation token {@code util/LogSafe} derives from it, never as its own text — DL-197.
  *
- * <p>This class declares no request quota, no concurrency limit and no request-rate ceiling on
- * {@code POST /auth/token}, and every submitted credential of accepted length reaches one bcrypt
- * verification — DL-272.
+ * <p>The credential-verification work this process performs at one time is bounded: a submitted
+ * credential of accepted length acquires one of {@link #MAXIMUM_CONCURRENT_VERIFICATIONS} permits,
+ * waiting at most {@value #VERIFICATION_WAIT_MILLIS} milliseconds for it, and reaches bcrypt only
+ * while it holds one. A request that acquires none is answered with the same 401 and the same empty
+ * body a rejected credential receives, and no bcrypt computation is performed for it — DL-272.
  *
- * <p>What this class bounds is its own log volume: a rejection is reported at {@code WARN} at most
- * once per {@value #REJECTION_REPORT_INTERVAL_SECONDS} seconds per reason, carrying the number
- * suppressed since the previous record, and every suppressed rejection at {@code DEBUG} — DL-272.
+ * <p>This class declares no per-client request quota and no request-rate ceiling on
+ * {@code POST /auth/token}; those remain ingress controls the deployment supplies — DL-272.
+ *
+ * <p>Rejection reporting is bounded: a rejection is reported at {@code WARN} at most once per
+ * {@value #REJECTION_REPORT_INTERVAL_SECONDS} seconds per reason, carrying the number suppressed
+ * after the previous record, and every suppressed rejection is written at {@code DEBUG} — DL-272.
  *
  * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-017, DL-018,
  * DL-019, DL-020, DL-021, DL-052, DL-079, DL-117, DL-118 and DL-272; construct-level provenance is
  * recorded in {@code docs/TRACEABILITY_MATRIX.md}.
  *
- * <p>This class is a singleton bean and is thread-safe. Its only mutable state is the four
- * {@link java.util.concurrent.atomic.AtomicLong} fields the rejection reporter carries; no response
- * status, header or body is derived from any of them.
+ * <p>This class is a singleton bean and is thread-safe. Its mutable state is the six
+ * {@link java.util.concurrent.atomic.AtomicLong} fields the rejection reporter carries and the
+ * {@link Semaphore} bounding verification work; no response status, header or body is derived from any
+ * of the counters, and the semaphore selects between the 401 this route already returns and the
+ * verification path.
  */
 @RestController
 public class AuthController {
@@ -127,6 +135,26 @@ public class AuthController {
      */
     private static final int MAXIMUM_CREDENTIAL_LENGTH = 256;
 
+    /** Fewest verification permits this process issues, whatever the processor count — DL-272. */
+    private static final int MINIMUM_CONCURRENT_VERIFICATIONS = 2;
+
+    /**
+     * Credential verifications this process performs at one time — DL-272.
+     *
+     * <p>The value is the greater of {@value #MINIMUM_CONCURRENT_VERIFICATIONS} and the processor
+     * count the runtime reports, read once at class initialisation. It is the number of bcrypt
+     * computations this process performs at one time on behalf of this route.
+     */
+    private static final int MAXIMUM_CONCURRENT_VERIFICATIONS = Math.max(
+            MINIMUM_CONCURRENT_VERIFICATIONS, Runtime.getRuntime().availableProcessors());
+
+    /**
+     * Longest a request waits for one of the {@link #MAXIMUM_CONCURRENT_VERIFICATIONS} verification
+     * permits, in milliseconds — DL-272. A request that does not hold a permit by this bound is
+     * answered with the route's 401 and reaches bcrypt in no way.
+     */
+    private static final long VERIFICATION_WAIT_MILLIS = 250L;
+
     /**
      * Shortest span between two {@code WARN} records reporting rejected credentials of the same
      * reason, in seconds. A rejection arriving inside the span is counted and reported by the next
@@ -149,6 +177,24 @@ public class AuthController {
 
     /** Reading of {@link System#nanoTime()} at the last not-authenticated {@code WARN} — DL-272. */
     private final AtomicLong lastNotAuthenticatedReportNanos = new AtomicLong();
+
+    /** Requests turned away for want of a verification permit, not yet reported — DL-272. */
+    private final AtomicLong unreportedUnverified = new AtomicLong();
+
+    /** Reading of {@link System#nanoTime()} at the last permit-exhaustion {@code WARN} — DL-272. */
+    private final AtomicLong lastUnverifiedReportNanos = new AtomicLong();
+
+    /**
+     * Permits bounding the credential verifications in progress at one time — DL-272.
+     *
+     * <p>{@link #MAXIMUM_CONCURRENT_VERIFICATIONS} permits are issued. A request acquires one before
+     * it reaches {@link AuthenticationManager#authenticate}, waits at most
+     * {@value #VERIFICATION_WAIT_MILLIS} milliseconds for it, and releases it as the verification
+     * returns or raises. A request that acquires none is answered with the route's 401 and no bcrypt
+     * computation is performed for it.
+     */
+    private final Semaphore verificationPermits =
+            new Semaphore(MAXIMUM_CONCURRENT_VERIFICATIONS);
 
     /**
      * Performs the credential check behind {@code POST /auth/token} — DL-019.
@@ -230,6 +276,15 @@ public class AuthController {
             return unauthorized();
         }
 
+        // Bounded verification work: at most MAXIMUM_CONCURRENT_VERIFICATIONS bcrypt computations run
+        // at one time in this process — DL-272 — see docs/DECISION_LOG.md
+        if (!acquireVerificationPermit()) {
+            reportRejection(unreportedUnverified, lastUnverifiedReportNanos,
+                    "was not verified: all {} verification permit(s) were held",
+                    MAXIMUM_CONCURRENT_VERIFICATIONS);
+            return unauthorized();
+        }
+
         Authentication authentication;
         try {
             authentication = authenticationManager.authenticate(
@@ -241,6 +296,8 @@ public class AuthController {
             reportRejection(unreportedNotAuthenticated, lastNotAuthenticatedReportNanos,
                     "did not authenticate: {}", LogSafe.type(rejected));
             return unauthorized();
+        } finally {
+            verificationPermits.release();
         }
 
         // DL-018: the claim set is sub, iat and exp, and the subject is the resolved principal name.
@@ -254,6 +311,27 @@ public class AuthController {
                 LogSafe.correlation(authentication.getName()), body.expiresIn());
 
         return ResponseEntity.ok(body);
+    }
+
+    // Net-new bound on the credential-verification work in progress — DL-272 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Acquires one of the {@link #MAXIMUM_CONCURRENT_VERIFICATIONS} verification permits.
+     *
+     * <p>The call waits at most {@value #VERIFICATION_WAIT_MILLIS} milliseconds. An interrupt while
+     * waiting restores the thread's interrupt status and is answered as an unacquired permit, so the
+     * request is reported with the route's 401 and no verification is started for it.
+     *
+     * @return {@code true} when a permit is held, which the caller releases; {@code false} when the
+     *     wait elapsed or the thread was interrupted
+     */
+    private boolean acquireVerificationPermit() {
+        try {
+            return verificationPermits.tryAcquire(VERIFICATION_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     /**

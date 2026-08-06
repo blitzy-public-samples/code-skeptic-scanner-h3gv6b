@@ -24,7 +24,7 @@ import java.util.stream.Collectors;
  * canonical constructor rejects a {@code null} {@code id}, {@code content}, {@code likeCount},
  * {@code createdAt}, {@code doubtRating} and {@code userId} with {@link NullPointerException}, and
  * {@code quotedTweetId} is the one component that may be {@code null}. {@code likeCount} and
- * {@code doubtRating} are boxed, and a {@code null} value for either is rejected rather than read as
+ * {@code doubtRating} are boxed, and a {@code null} value for either is rejected and is not read as
  * {@code 0}. No scalar is trimmed, rounded, defaulted or substituted. The {@code tweets} columns stay
  * nullable — see docs/DECISION_LOG.md DL-080.
  *

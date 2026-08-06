@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -35,6 +36,7 @@ import org.springframework.scheduling.config.TriggerTask;
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.repository.SettingRepository;
+import com.codeskeptic.scanner.task.BackgroundOwnership;
 import com.codeskeptic.scanner.task.ResponseGenerationScheduler;
 
 import ch.qos.logback.classic.Level;
@@ -48,7 +50,7 @@ import ch.qos.logback.core.read.ListAppender;
  * Exercises the pacing {@link AsyncSchedulingConfig} declares for the response-generation pass.
  *
  * <p>Two properties are asserted: the interval is measured from the completion of the previous pass,
- * which is fixed-delay rather than fixed-rate behaviour, and the interval in force is the
+ * which is fixed-delay and not fixed-rate behaviour, and the interval in force is the
  * {@code response_generation_delay} row of the {@code settings} table whenever that row holds a
  * positive number of seconds, falling back to
  * {@code scanner.response-generation-delay-seconds} otherwise.
@@ -83,12 +85,19 @@ class AsyncSchedulingConfigTest {
 
     private AsyncSchedulingConfig config;
 
+    @Mock
+    private BackgroundOwnership backgroundOwnership;
+
     @BeforeEach
     void setUp() {
+        // The lease is held and background work is switched on unless a case says otherwise —
+        // DL-281
+        lenient().when(backgroundOwnership.isOwner()).thenReturn(true);
+        lenient().when(backgroundOwnership.isAutoStartup()).thenReturn(true);
         ScannerProperties properties = new ScannerProperties("jdbc:h2:mem:scheduling", 100,
                 CONFIGURED_DELAY_SECONDS, null, null, null, null, null, null, null, null);
         config = new AsyncSchedulingConfig(responseGenerationScheduler, settingRepository,
-                properties);
+                properties, backgroundOwnership);
     }
 
     @Test
@@ -144,23 +153,130 @@ class AsyncSchedulingConfigTest {
     void registersNoTaskInAProcessThatDoesNotRunThePass(boolean enabled,
             boolean responseGenerationEnabled) {
         AsyncSchedulingConfig nonOwner = configWithBackground(
-                new ScannerProperties.Background(enabled, true, responseGenerationEnabled));
+                ScannerProperties.Background.of(enabled, true, responseGenerationEnabled));
         ScheduledTaskRegistrar registrar = new ScheduledTaskRegistrar();
 
         nonOwner.configureTasks(registrar);
 
         assertThat(registrar.getTriggerTaskList()).as("triggered tasks").isEmpty();
-        assertThat(registrar.getFixedDelayTaskList()).as("fixed-delay tasks").isEmpty();
         assertThat(registrar.getFixedRateTaskList()).as("fixed-rate tasks").isEmpty();
         assertThat(registrar.getCronTaskList()).as("cron tasks").isEmpty();
         verifyNoInteractions(responseGenerationScheduler, settingRepository);
+    }
+
+    // Ownership renewal and the gate on the pass — DL-281 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "enabled={0}, streamEnabled={1}, generationEnabled={2}")
+    @CsvSource({"false,true,true", "false,true,false", "false,false,false"})
+    @DisplayName("registers no task at all in a process that runs no background path")
+    void registersNoTaskAtAllInAProcessThatRunsNoBackgroundPath(boolean enabled,
+            boolean streamEnabled,
+            boolean generationEnabled) {
+        AsyncSchedulingConfig idle = configWithBackground(
+                ScannerProperties.Background.of(enabled, streamEnabled, generationEnabled));
+        ScheduledTaskRegistrar registrar = new ScheduledTaskRegistrar();
+
+        idle.configureTasks(registrar);
+
+        assertThat(registrar.getTriggerTaskList()).as("triggered tasks").isEmpty();
+        assertThat(registrar.getFixedDelayTaskList()).as("fixed-delay tasks").isEmpty();
+    }
+
+    @ParameterizedTest(name = "streamEnabled={0}, generationEnabled={1}")
+    @CsvSource({"true,false", "false,true", "true,true"})
+    @DisplayName("registers the ownership renewal whenever a background path is enabled")
+    void registersTheOwnershipRenewalWheneverABackgroundPathIsEnabled(boolean streamEnabled,
+            boolean generationEnabled) {
+        AsyncSchedulingConfig worker = configWithBackground(
+                ScannerProperties.Background.of(true, streamEnabled, generationEnabled));
+        ScheduledTaskRegistrar registrar = new ScheduledTaskRegistrar();
+
+        worker.configureTasks(registrar);
+
+        assertThat(registrar.getFixedDelayTaskList()).as("fixed-delay tasks").hasSize(1);
+    }
+
+    @Test
+    @DisplayName("renews the lease from the registered fixed-delay task")
+    void renewsTheLeaseFromTheRegisteredFixedDelayTask() {
+        ScheduledTaskRegistrar registrar = new ScheduledTaskRegistrar();
+
+        config.configureTasks(registrar);
+        registrar.getFixedDelayTaskList().get(0).getRunnable().run();
+
+        verify(backgroundOwnership).renewOwnership();
+    }
+
+    @Test
+    @DisplayName("paces the renewal at the configured interval")
+    void pacesTheRenewalAtTheConfiguredInterval() {
+        AsyncSchedulingConfig worker = configWithBackground(
+                new ScannerProperties.Background(true, true, true, 200L, 40L, 200, 500, 3_600L, 5,
+                        300L));
+        ScheduledTaskRegistrar registrar = new ScheduledTaskRegistrar();
+
+        worker.configureTasks(registrar);
+
+        assertThat(registrar.getFixedDelayTaskList().get(0).getIntervalDuration())
+                .isEqualTo(Duration.ofSeconds(40L));
+    }
+
+    @Test
+    @DisplayName("runs no pass while the lease is not held")
+    void runsNoPassWhileTheLeaseIsNotHeld() {
+        when(backgroundOwnership.isOwner()).thenReturn(false);
+        ScheduledTaskRegistrar registrar = new ScheduledTaskRegistrar();
+
+        config.configureTasks(registrar);
+        registrar.getTriggerTaskList().get(0).getRunnable().run();
+
+        verifyNoInteractions(responseGenerationScheduler);
+    }
+
+    @Test
+    @DisplayName("reports a skipped pass once for an uninterrupted run of skipped passes")
+    void reportsASkippedPassOnceForAnUninterruptedRunOfSkippedPasses() {
+        when(backgroundOwnership.isOwner()).thenReturn(false);
+        ScheduledTaskRegistrar registrar = new ScheduledTaskRegistrar();
+        config.configureTasks(registrar);
+        Runnable pass = registrar.getTriggerTaskList().get(0).getRunnable();
+        Logger configLogger = (Logger) LoggerFactory.getLogger(AsyncSchedulingConfig.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        configLogger.addAppender(appender);
+        try {
+            pass.run();
+            pass.run();
+            pass.run();
+        } finally {
+            configLogger.detachAppender(appender);
+            appender.stop();
+        }
+
+        assertThat(appender.list).filteredOn(record ->
+                        record.getFormattedMessage().contains("does not hold the "
+                                + "background-ownership lease"))
+                .hasSize(1);
+    }
+
+    @Test
+    @DisplayName("runs the pass again once the lease is regained")
+    void runsThePassAgainOnceTheLeaseIsRegained() {
+        when(backgroundOwnership.isOwner()).thenReturn(false, true);
+        ScheduledTaskRegistrar registrar = new ScheduledTaskRegistrar();
+
+        config.configureTasks(registrar);
+        Runnable pass = registrar.getTriggerTaskList().get(0).getRunnable();
+        pass.run();
+        pass.run();
+
+        verify(responseGenerationScheduler).generatePendingResponses();
     }
 
     @Test
     @DisplayName("registers the pass in a process that runs it")
     void registersThePassInAProcessThatRunsIt() {
         AsyncSchedulingConfig owner = configWithBackground(
-                new ScannerProperties.Background(true, true, true));
+                ScannerProperties.Background.of(true, true, true));
         ScheduledTaskRegistrar registrar = new ScheduledTaskRegistrar();
 
         owner.configureTasks(registrar);
@@ -259,8 +375,8 @@ class AsyncSchedulingConfigTest {
     void neverSchedulesAPassAtOrBeforeTheCompletionOfThePreviousOne() {
         ScannerProperties zeroDelay = new ScannerProperties("jdbc:h2:mem:scheduling", 100, 0L,
                 null, null, null, null, null, null, null, null);
-        AsyncSchedulingConfig withZeroDelay =
-                new AsyncSchedulingConfig(responseGenerationScheduler, settingRepository, zeroDelay);
+        AsyncSchedulingConfig withZeroDelay = new AsyncSchedulingConfig(
+                responseGenerationScheduler, settingRepository, zeroDelay, backgroundOwnership);
         when(settingRepository.findById(DELAY_KEY)).thenReturn(Optional.empty());
 
         Instant next = registeredTrigger(withZeroDelay)
@@ -384,7 +500,10 @@ class AsyncSchedulingConfigTest {
     private AsyncSchedulingConfig configWithBackground(ScannerProperties.Background background) {
         ScannerProperties properties = new ScannerProperties("jdbc:h2:mem:scheduling", 100,
                 CONFIGURED_DELAY_SECONDS, null, null, null, null, null, null, null, background);
-        return new AsyncSchedulingConfig(responseGenerationScheduler, settingRepository, properties);
+        lenient().when(backgroundOwnership.isAutoStartup()).thenReturn(background == null
+                || background.runsStream() || background.runsResponseGeneration());
+        return new AsyncSchedulingConfig(responseGenerationScheduler, settingRepository, properties,
+                backgroundOwnership);
     }
 
     /**

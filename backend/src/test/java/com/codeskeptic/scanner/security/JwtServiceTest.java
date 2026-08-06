@@ -35,6 +35,7 @@ import com.codeskeptic.scanner.config.ScannerProperties;
 
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtParser;
+import io.jsonwebtoken.io.Decoders;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 import io.jsonwebtoken.security.WeakKeyException;
@@ -51,9 +52,11 @@ import io.jsonwebtoken.security.WeakKeyException;
  *
  * <p>Every test builds a {@link ScannerProperties} value in this class and hands it to the
  * constructor directly: no Spring context is started, no property file is read, and no network,
- * database, filesystem or credential resource is reached. {@link #SIGNING_KEY} is derived from
- * {@link #SECRET}, the value every service under test is configured with; {@link #FOREIGN_KEY} is
- * derived from {@link #FOREIGN_SECRET}, which is never bound to {@code scanner.jwt.secret}.
+ * database, filesystem or credential resource is reached. Every secret constant below is a Base64
+ * encoding of key material, which is the form {@code scanner.jwt.secret} carries — DL-186.
+ * {@link #SIGNING_KEY} is decoded from {@link #SECRET}, the value every service under test is
+ * configured with; {@link #FOREIGN_KEY} is decoded from {@link #FOREIGN_SECRET}, which is never bound
+ * to {@code scanner.jwt.secret}.
  *
  * <p>One test asserts the content of the log record a verification failure produces. It attaches a
  * {@link ListAppender} to the {@link JwtService} logger for the duration of the call under test and
@@ -91,40 +94,55 @@ class JwtServiceTest {
     private static final Duration LIFETIME = Duration.ofMinutes(EXPIRATION_MINUTES);
 
     /**
-     * Value bound to {@code scanner.jwt.secret}; 48 bytes, above the 256-bit floor jjwt 0.13.0
-     * enforces for HS256.
+     * Value bound to {@code scanner.jwt.secret}: the standard-alphabet Base64 encoding of 48 bytes of
+     * key material, above the 256-bit floor jjwt 0.13.0 enforces for HS256 — DL-186.
      */
-    private static final String SECRET = "jwt-service-test-signing-secret-0123456789abcdef";
+    private static final String SECRET =
+            "and0LXNlcnZpY2UtdGVzdC1zaWduaW5nLXNlY3JldC0wMTIzNDU2Nzg5YWJjZGVm";
 
     /**
-     * Exactly 32 bytes of text whose characters appear in no failure message this class asserts on. A
-     * prefix of it serves as a rejected short secret and the whole value as the shortest accepted one.
+     * Base64 encoding of exactly 32 bytes of key material, which is the shortest accepted secret.
+     * None of its characters appears in any failure message this class asserts on.
      */
-    private static final String SHORT_SECRET_ALPHABET = "Zq7Wx2Vy9Uz4Tb6Sc8Rd0Qg1Pf3Oh5NM";
+    private static final String SHORTEST_ACCEPTED_SECRET =
+            "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
 
-    /** A second 56-byte value, never bound to {@code scanner.jwt.secret}. */
+    /**
+     * A URL-safe Base64 encoding of 48 bytes of key material, carrying both {@code -} and {@code _}
+     * — the two characters the standard alphabet does not hold — DL-186.
+     */
+    private static final String URL_SAFE_SECRET =
+            "-Pn6-_z9_gABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fICEiIyQlJico";
+
+    /**
+     * A 32-character passphrase drawn from the Base64 alphabet. It is long enough as text and decodes
+     * to 24 bytes of key material, which is below the floor — DL-186.
+     */
+    private static final String PASSPHRASE_SECRET = "abcdefghijklmnopqrstuvwxyz012345";
+
+    /** Encoding of a second 56 bytes of key material, never bound to {@code scanner.jwt.secret}. */
     private static final String FOREIGN_SECRET =
-            "jwt-service-test-foreign-signing-secret-fedcba9876543210";
+            "and0LXNlcnZpY2UtdGVzdC1mb3JlaWduLXNpZ25pbmctc2VjcmV0LWZlZGNiYTk4NzY1NDMyMTA=";
 
     /**
-     * A 64-byte value bound to {@code scanner.jwt.secret} by the HS512 rejection test only. It meets
-     * the 512-bit floor jjwt 0.13.0 enforces for HS512, and a token signed with HS512 under it carries
-     * the very key the service under test verifies with.
+     * Encoding of 65 bytes of key material, bound to {@code scanner.jwt.secret} by the HS512
+     * rejection test only. It meets the 512-bit floor jjwt 0.13.0 enforces for HS512, and a token
+     * signed with HS512 under it carries the very key the service under test verifies with.
      */
     private static final String LONG_SECRET =
-            "jwt-service-test-signing-secret-that-is-sixty-four-bytes-00000000";
+            "and0LXNlcnZpY2UtdGVzdC1zaWduaW5nLXNlY3JldC10aGF0LWlzLXNpeHR5LWZvdXItYnl0ZXMtMDAwMDAwMDA=";
 
     /** Key derived from {@link #SECRET}, matching the key every service under test derives. */
     private static final SecretKey SIGNING_KEY =
-            Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8));
+            Keys.hmacShaKeyFor(Decoders.BASE64.decode(SECRET));
 
     /** Key derived from {@link #FOREIGN_SECRET}. */
     private static final SecretKey FOREIGN_KEY =
-            Keys.hmacShaKeyFor(FOREIGN_SECRET.getBytes(StandardCharsets.UTF_8));
+            Keys.hmacShaKeyFor(Decoders.BASE64.decode(FOREIGN_SECRET));
 
     /** Key derived from {@link #LONG_SECRET}. */
     private static final SecretKey LONG_SIGNING_KEY =
-            Keys.hmacShaKeyFor(LONG_SECRET.getBytes(StandardCharsets.UTF_8));
+            Keys.hmacShaKeyFor(Decoders.BASE64.decode(LONG_SECRET));
 
     /**
      * Margin applied to both wall-clock bounds of the expiration window assertion. The {@code iat}
@@ -403,41 +421,101 @@ class JwtServiceTest {
                         + "environment variable. It has no default value.");
     }
 
-    @ParameterizedTest(name = "a secret of {0} byte(s) is rejected at construction")
-    @ValueSource(ints = {1, 13, 16, 31})
-    @DisplayName("rejects a secret shorter than 32 bytes and names the key, its variable and the shortfall")
-    void rejectsASecretShorterThanThirtyTwoBytes(int secretBytes) {
-        String shortSecret = SHORT_SECRET_ALPHABET.substring(0, secretBytes);
+    @ParameterizedTest(name = "key material of {0} byte(s) is rejected at construction")
+    @ValueSource(ints = {1, 13, 16, 24, 31})
+    @DisplayName("rejects key material that decodes to fewer than 32 bytes and names the key and its "
+            + "variable")
+    void rejectsKeyMaterialShorterThanThirtyTwoBytes(int materialBytes) {
+        // DL-186 — see docs/DECISION_LOG.md
+        String encoded = base64Of(materialBytes);
         ScannerProperties properties = propertiesWith(
-                new ScannerProperties.Jwt(shortSecret, HS256, EXPIRATION_MINUTES));
+                new ScannerProperties.Jwt(encoded, HS256, EXPIRATION_MINUTES));
 
         assertThatThrownBy(() -> new JwtService(properties))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("scanner.jwt.secret")
                 .hasMessageContaining("SECRET_KEY")
-                .hasMessageContaining(secretBytes * 8 + " bits")
-                .hasMessageContaining("256")
-                .hasMessageNotContaining(shortSecret);
+                .hasMessageContaining("256 bits")
+                .hasMessageNotContaining(encoded);
     }
 
     @Test
-    @DisplayName("accepts a secret of exactly 32 bytes at construction")
-    void acceptsASecretOfExactlyThirtyTwoBytes() {
-        JwtService service = serviceWith(SHORT_SECRET_ALPHABET, HS256, EXPIRATION_MINUTES);
+    @DisplayName("reads an encoding of no key material as an unconfigured secret")
+    void readsAnEncodingOfNoKeyMaterialAsAnUnconfiguredSecret() {
+        // DL-185, DL-186 — see docs/DECISION_LOG.md
+        ScannerProperties properties = propertiesWith(
+                new ScannerProperties.Jwt(base64Of(0), HS256, EXPIRATION_MINUTES));
 
-        assertThat(SHORT_SECRET_ALPHABET.getBytes(StandardCharsets.UTF_8)).hasSize(32);
+        assertThat(base64Of(0)).isEmpty();
+        assertThatThrownBy(() -> new JwtService(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("is not configured");
+    }
+
+    @Test
+    @DisplayName("accepts key material of exactly 32 bytes at construction")
+    void acceptsKeyMaterialOfExactlyThirtyTwoBytes() {
+        JwtService service = serviceWith(SHORTEST_ACCEPTED_SECRET, HS256, EXPIRATION_MINUTES);
+
+        assertThat(Decoders.BASE64.decode(SHORTEST_ACCEPTED_SECRET)).hasSize(32);
         assertThat(service.extractUsername(service.generateToken(USERNAME))).contains(USERNAME);
     }
 
     @Test
-    @DisplayName("accepts a secret of 31 characters whose UTF-8 encoding reaches 32 bytes")
-    void acceptsAMultiByteSecretMeasuredInBytesRatherThanCharacters() {
-        String multiByteSecret = SHORT_SECRET_ALPHABET.substring(0, 30) + "\u00e9";
+    @DisplayName("accepts a URL-safe Base64 secret carrying the two characters the standard alphabet "
+            + "does not hold")
+    void acceptsAUrlSafeBase64Secret() {
+        // DL-186 — see docs/DECISION_LOG.md
+        assertThat(URL_SAFE_SECRET).contains("-").contains("_");
 
-        assertThat(multiByteSecret).hasSize(31);
-        assertThat(multiByteSecret.getBytes(StandardCharsets.UTF_8)).hasSize(32);
-        assertThatCode(() -> serviceWith(multiByteSecret, HS256, EXPIRATION_MINUTES))
-                .doesNotThrowAnyException();
+        JwtService service = serviceWith(URL_SAFE_SECRET, HS256, EXPIRATION_MINUTES);
+
+        assertThat(Decoders.BASE64URL.decode(URL_SAFE_SECRET)).hasSize(48);
+        assertThat(service.extractUsername(service.generateToken(USERNAME))).contains(USERNAME);
+    }
+
+    @Test
+    @DisplayName("rejects a 32-character passphrase, whose decoded key material is 24 bytes")
+    void rejectsAPassphraseWhoseDecodedKeyMaterialIsTooShort() {
+        // DL-186 — see docs/DECISION_LOG.md
+        assertThat(PASSPHRASE_SECRET).hasSize(32);
+        assertThat(Decoders.BASE64.decode(PASSPHRASE_SECRET)).hasSize(24);
+
+        ScannerProperties properties = propertiesWith(
+                new ScannerProperties.Jwt(PASSPHRASE_SECRET, HS256, EXPIRATION_MINUTES));
+
+        assertThatThrownBy(() -> new JwtService(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("256 bits")
+                .hasMessageNotContaining(PASSPHRASE_SECRET);
+    }
+
+    @ParameterizedTest(name = "a secret carrying {0} is rejected as undecodable")
+    @ValueSource(strings = {
+            "not+base64!because+of+the+exclamation+mark+and+long+enough",
+            "spaces are not in either alphabet and this value is long enough",
+            "trailing=pad=in=the=middle=is=not=an=encoding=and=long=enough",
+            "mixed-alphabet+value_with_both/kinds/of/character/and/padding",
+    })
+    @DisplayName("rejects a secret that is not an encoding in either Base64 alphabet")
+    void rejectsASecretThatIsNotAnEncodingInEitherAlphabet(String secret) {
+        // DL-186 — see docs/DECISION_LOG.md
+        ScannerProperties properties =
+                propertiesWith(new ScannerProperties.Jwt(secret, HS256, EXPIRATION_MINUTES));
+
+        assertThatThrownBy(() -> new JwtService(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("scanner.jwt.secret is not Base64-encoded")
+                .hasMessageContaining("SECRET_KEY")
+                .hasMessageNotContaining(secret);
+    }
+
+    @Test
+    @DisplayName("accepts a secret padded with surrounding whitespace")
+    void acceptsASecretPaddedWithSurroundingWhitespace() {
+        JwtService service = serviceWith("  " + SECRET + "  ", HS256, EXPIRATION_MINUTES);
+
+        assertThat(service.extractUsername(service.generateToken(USERNAME))).contains(USERNAME);
     }
 
     @Test
@@ -464,17 +542,24 @@ class JwtServiceTest {
                 .hasMessageContaining("is not configured");
     }
 
-    @ParameterizedTest(name = "a secret of {0} is accepted at construction")
+    @ParameterizedTest(name = "a secret of {0} is reported as undecodable")
     @ValueSource(strings = {
             "${not-closed-so-not-a-placeholder-and-long-enough-for-hs256",
             "not-opened-so-not-a-placeholder-and-long-enough-for-hs256}",
             "a-secret-that-merely-contains-${EMBEDDED}-text-and-is-long-enough",
     })
-    @DisplayName("accepts a secret that only resembles a placeholder in part")
-    void acceptsASecretThatOnlyResemblesAPlaceholderInPart(String secret) {
-        JwtService service = serviceWith(secret, HS256, EXPIRATION_MINUTES);
+    @DisplayName("reports a secret that only resembles a placeholder in part as undecodable and not "
+            + "as unconfigured")
+    void reportsASecretThatOnlyResemblesAPlaceholderInPartAsUndecodable(String secret) {
+        // DL-185, DL-186 — see docs/DECISION_LOG.md
+        ScannerProperties properties =
+                propertiesWith(new ScannerProperties.Jwt(secret, HS256, EXPIRATION_MINUTES));
 
-        assertThat(headerAlgorithmOf(service.generateToken(USERNAME))).isEqualTo(HS256);
+        assertThatThrownBy(() -> new JwtService(properties))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("scanner.jwt.secret is not Base64-encoded")
+                .hasMessageNotContaining("is not configured")
+                .hasMessageNotContaining(secret);
     }
 
     @ParameterizedTest(name = "an algorithm of {0} is rejected at construction")
@@ -805,6 +890,20 @@ class JwtServiceTest {
         JwtService service = serviceWith(SECRET, HS256, EXPIRATION_MINUTES);
 
         assertThat(headerAlgorithmOf(service.generateToken(USERNAME))).isEqualTo(HS256);
+    }
+
+    /**
+     * Encodes a deterministic run of key material of the requested length as standard Base64.
+     *
+     * @param materialBytes number of bytes of key material to encode; never negative
+     * @return the encoding, which is the empty string for a length of {@code 0}
+     */
+    private static String base64Of(int materialBytes) {
+        byte[] material = new byte[materialBytes];
+        for (int index = 0; index < materialBytes; index++) {
+            material[index] = (byte) (index + 1);
+        }
+        return Base64.getEncoder().encodeToString(material);
     }
 
     /**

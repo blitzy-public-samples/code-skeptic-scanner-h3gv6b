@@ -505,7 +505,7 @@ public class GlobalExceptionHandler {
      * {@code InvalidMediaTypeException}, which the converter translates into
      * {@link HttpMediaTypeNotSupportedException} — DL-235.
      *
-     * <p>The status is selected from the request rather than from the exception: 415 when the request
+     * <p>The status is selected from the request, and not from the exception: 415 when the request
      * carries a {@code Content-Type} that parses to a non-concrete media type or that cannot be
      * parsed at all, and otherwise the unchanged 500 of
      * {@link #handleUnexpectedException(Exception)}, stack trace included — DL-235.
@@ -554,15 +554,33 @@ public class GlobalExceptionHandler {
      * {@value #INTERNAL_SERVER_ERROR}.
      *
      * <p>Reproduces {@code backend/app/main.py:L35-37}: every exception no earlier handler matches is
-     * answered here. The exception is written to the log at {@code ERROR} with its stack trace;
-     * neither its type nor its message reaches the response body.
+     * answered here. Neither the exception's type nor its message reaches the response body.
      *
-     * @param ex the raised exception, recorded in the log
+     * <p>The {@code ERROR} record carries three pieces of metadata this application derives and
+     * nothing the failure itself wrote: the bounded type chain of
+     * {@code util.LogSafe.typeChain(Throwable)}, the frame of
+     * {@code util.LogSafe.originFrame(Throwable)}, and a correlation token over those two — so two
+     * occurrences of one defect share a token while no message, no cause text and no stack reaches the
+     * record — DL-197 — see docs/DECISION_LOG.md.
+     *
+     * <p>The sanitized detail of {@code util.LogSafe.failureDetail(Throwable)} — every message in the
+     * chain guarded and bounded, plus a bounded number of frames — is written at {@code DEBUG} only.
+     * It is reachable where {@code logging.level.com.codeskeptic.scanner} is set to {@code DEBUG}, and
+     * is absent at the declared default of {@code INFO} — DL-197.
+     *
+     * @param ex the raised exception, reported as bounded metadata
      * @return HTTP 500 carrying {@code {"error": "Internal server error"}}
      */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpectedException(Exception ex) {
-        log.error("Unhandled exception reached the error-handling advice; responding HTTP 500", ex);
+        String types = LogSafe.typeChain(ex);
+        String origin = LogSafe.originFrame(ex);
+        log.error("Unhandled exception reached the error-handling advice; responding HTTP 500. "
+                + "Failure {}, raised at {}, correlation {}",
+                types, origin, LogSafe.correlation(types + '|' + origin));
+        if (log.isDebugEnabled()) {
+            log.debug("Sanitized detail of the unhandled failure: {}", LogSafe.failureDetail(ex));
+        }
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(new ErrorResponse(INTERNAL_SERVER_ERROR));
     }

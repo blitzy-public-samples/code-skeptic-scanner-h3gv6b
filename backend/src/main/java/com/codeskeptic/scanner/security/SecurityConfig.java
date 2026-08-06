@@ -128,8 +128,8 @@ import jakarta.servlet.http.HttpServletResponse;
  * <p>Response headers are the Spring Security defaults, with {@code Strict-Transport-Security}
  * declared explicitly at the values the framework's own writer carries — a one-year lifetime,
  * subdomains included, no preload. That header is written on a request the container reports as
- * secure, and {@code server.forward-headers-strategy} in {@code application.yml} is what makes a
- * request whose TLS was terminated upstream report itself that way.
+ * secure, and {@code server.forward-headers-strategy} in {@code application.yml} has a request whose
+ * TLS was terminated upstream report itself that way.
  *
  * <p>The credential store holds exactly one principal, built from {@code scanner.auth.username} and
  * {@code scanner.auth.password-hash} and holding no authority. No table backs it, and the schema this
@@ -205,8 +205,8 @@ public class SecurityConfig {
     /**
      * Lifetime declared by {@code Strict-Transport-Security}, in seconds: one year, which is the value
      * Spring Security's own writer carries. The header is written on a request the container reports as
-     * secure; {@code server.forward-headers-strategy} in {@code application.yml} is what makes a
-     * TLS-terminated request report itself that way.
+     * secure; {@code server.forward-headers-strategy} in {@code application.yml} has a TLS-terminated
+     * request report itself that way.
      */
     private static final long HSTS_MAX_AGE_SECONDS = 31_536_000L;
 

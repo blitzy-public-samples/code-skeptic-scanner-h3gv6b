@@ -61,7 +61,7 @@ import jakarta.annotation.PreDestroy;
  *       {@link IllegalStateException}: no client is created and no request is
  *       issued after shutdown. {@link #analyzeSentiment(String)} tests the flag
  *       before it queues on the read lock and again once it holds it, so work
- *       arriving while a shutdown is waiting is rejected rather than
+ *       arriving while a shutdown is waiting is rejected and is never
  *       started — DL-268.</li>
  * </ul>
  */
@@ -118,7 +118,7 @@ public class SentimentAnalysisService {
 
     /**
      * Set once by {@link #closeLanguageClient()}, before it begins waiting for in-flight calls, so
-     * work arriving during the wait is rejected rather than started — DL-268. Written only inside a
+     * work arriving during the wait is rejected and is never started — DL-268. Written only inside a
      * {@code synchronized (this)} block, so no client is created after destruction, and read through
      * a {@code volatile} field access.
      */
@@ -155,8 +155,8 @@ public class SentimentAnalysisService {
      * acquisition-and-call sequence. The client is not released mid-call.
      *
      * <p>The destroyed flag is tested before the read lock is requested and again once it is held, so
-     * a call arriving while {@link #closeLanguageClient()} is waiting is rejected immediately instead
-     * of queueing behind the release — see docs/DECISION_LOG.md DL-268.
+     * a call arriving while {@link #closeLanguageClient()} is waiting is rejected immediately and does
+     * not queue behind the release — see docs/DECISION_LOG.md DL-268.
      *
      * @param text the tweet text to analyse; must not be {@code null}
      * @return the document sentiment score, a finite value conventionally between

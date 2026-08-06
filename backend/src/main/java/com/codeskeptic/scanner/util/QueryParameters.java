@@ -25,6 +25,11 @@ import org.springframework.data.domain.Pageable;
  * <p>{@link #withinQueryableOffset(Pageable)} reports the one limit a converted value can still
  * exceed: the offset a paged query can position its first row at — see docs/DECISION_LOG.md DL-225.
  *
+ * <p>{@link #boundPageSize(int, int)} is the single declaration of the page size a list route
+ * serves: it substitutes the route's default for a size below {@value #MINIMUM_PAGE_SIZE} and
+ * reduces a size above {@value #MAXIMUM_PAGE_SIZE} to that maximum — see docs/DECISION_LOG.md
+ * DL-123.
+ *
  * <p>{@link #mapInChunks(Pageable, int, Function, Function)} reads the rows of one page as consecutive
  * bounded windows, so the rows one statement returns are bounded however large the converted
  * {@code per_page} is — see docs/DECISION_LOG.md DL-249.
@@ -34,7 +39,48 @@ import org.springframework.data.domain.Pageable;
  */
 public final class QueryParameters {
 
+    // The finite page-size bound both list routes serve — DL-123 — see docs/DECISION_LOG.md
+    /**
+     * Smallest {@code per_page} a list route serves. A request naming less than this is served the
+     * route's declared default — DL-123.
+     */
+    public static final int MINIMUM_PAGE_SIZE = 1;
+
+    /**
+     * Largest {@code per_page} a list route serves. A request naming more than this is served this
+     * many rows, and the pagination block restates this size — DL-123.
+     */
+    public static final int MAXIMUM_PAGE_SIZE = 1_000;
+
     private QueryParameters() {
+    }
+
+    // The finite page-size bound both list routes serve — DL-123 — see docs/DECISION_LOG.md
+    /**
+     * Returns the page size a list route serves for a requested size.
+     *
+     * <p>A size below {@value #MINIMUM_PAGE_SIZE} — including {@code 0} and every negative value —
+     * reads as {@code defaultSize}, which is the conversion fallback the retired handlers declared at
+     * {@code backend/app/api/tweets.py:L13} and {@code backend/app/api/responses.py:L12}. A size above
+     * {@value #MAXIMUM_PAGE_SIZE} reads as {@value #MAXIMUM_PAGE_SIZE}. Every size between the two
+     * bounds reads unchanged, {@code defaultSize} included.
+     *
+     * <p>Examples: {@code 0} and {@code -5} read as {@code defaultSize}; {@code 1},
+     * {@code 10} and {@code 1000} read unchanged; {@code 1001} and {@link Integer#MAX_VALUE} read as
+     * {@value #MAXIMUM_PAGE_SIZE}.
+     *
+     * @param requestedSize the size the request named, after conversion by
+     *                      {@link #intOrDefault(String, int)}
+     * @param defaultSize   the route's declared {@code per_page} default, served for a size below
+     *                      {@value #MINIMUM_PAGE_SIZE}
+     * @return a size within {@value #MINIMUM_PAGE_SIZE}..{@value #MAXIMUM_PAGE_SIZE} when
+     *         {@code defaultSize} itself lies within those bounds
+     */
+    public static int boundPageSize(int requestedSize, int defaultSize) {
+        if (requestedSize < MINIMUM_PAGE_SIZE) {
+            return defaultSize;
+        }
+        return Math.min(requestedSize, MAXIMUM_PAGE_SIZE);
     }
 
     /**
@@ -126,7 +172,7 @@ public final class QueryParameters {
      * count.
      *
      * <p>Reading stops when the page's row bound is met, when a window comes back short of the bound it
-     * requested — the table holds no further row — or when the next window's first row would lie beyond
+     * requested — the table holds no further row — or when the next window's first row lies beyond
      * the offset a paged query can express, which is the bound {@link #withinQueryableOffset(Pageable)}
      * reports on.
      *

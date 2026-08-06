@@ -164,13 +164,14 @@ class TweetStreamClientLifecycleTest {
     // -------------------------------------------------------------------------
 
     @Test
-    @DisplayName("is a SmartLifecycle component holding exactly five injected collaborators")
-    void isASmartLifecycleComponentHoldingExactlyFiveInjectedCollaborators() {
+    @DisplayName("is a SmartLifecycle component holding exactly six injected collaborators")
+    void isASmartLifecycleComponentHoldingExactlySixInjectedCollaborators() {
         assertThat(SmartLifecycle.class).isAssignableFrom(TweetStreamClient.class);
         assertThat(TweetStreamClient.class.getConstructors()).hasSize(1);
         assertThat(TweetStreamClient.class.getConstructors()[0].getParameterTypes())
                 .containsExactly(WebClient.class, ScannerProperties.class, AiToolRepository.class,
-                        SettingRepository.class, TweetStreamListener.class);
+                        SettingRepository.class, TweetStreamListener.class,
+                        BackgroundOwnership.class);
     }
 
     @Test
@@ -200,7 +201,7 @@ class TweetStreamClientLifecycleTest {
 
         assertThat(owned.isRunning()).isFalse();
         assertThat(issued).isEmpty();
-        verifyNoInteractions(aiToolRepository, settingRepository, tweetStreamListener);
+        verifyNoInteractions(aiToolRepository, settingRepository, tweetStreamListener, heldLease());
     }
 
     // The ownership switch — DL-250 — see docs/DECISION_LOG.md
@@ -971,7 +972,18 @@ class TweetStreamClientLifecycleTest {
                 .build();
 
         return new TweetStreamClient(webClient, propertiesWith(consumerKey, consumerSecret,
-                baseKeywords), aiToolRepository, settingRepository, tweetStreamListener);
+                baseKeywords), aiToolRepository, settingRepository, tweetStreamListener, heldLease());
+    }
+
+    /**
+     * Builds a lease reporting this process as the background owner — DL-281.
+     *
+     * @return the lease every client of this class is constructed with
+     */
+    private static BackgroundOwnership heldLease() {
+        BackgroundOwnership lease = org.mockito.Mockito.mock(BackgroundOwnership.class);
+        org.mockito.Mockito.when(lease.isOwner()).thenReturn(true);
+        return lease;
     }
 
     /**
@@ -995,10 +1007,10 @@ class TweetStreamClientLifecycleTest {
                         CONSUMER_KEY, CONSUMER_SECRET, "access-token", "access-token-secret", 30L),
                 null, null, null, null, null,
                 new ScannerProperties.Ingestion(BASE_KEYWORDS, MAX_STREAM_RULES, STREAM_IDLE_TIMEOUT_SECONDS),
-                new ScannerProperties.Background(enabled, streamEnabled, true));
+                ScannerProperties.Background.of(enabled, streamEnabled, true));
 
         return new TweetStreamClient(webClient, bound, aiToolRepository, settingRepository,
-                tweetStreamListener);
+                tweetStreamListener, heldLease());
     }
 
     /**

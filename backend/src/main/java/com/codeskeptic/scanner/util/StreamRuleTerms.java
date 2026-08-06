@@ -20,7 +20,7 @@ import java.util.List;
  * the other: {@code task/TweetStreamClient} drops an unusable term before it mutates the registered
  * rule set and renders an accepted one through {@link #expressionOf(String)}, and
  * {@code service/SettingsService} reports an operator edit of the {@code stream_keywords} row that
- * would leave no usable term — DL-257.
+ * leaves no usable term — DL-257.
  *
  * <p>No method here records a log event and no method reproduces a term, so a term never reaches a
  * log record through this class — DL-052, DL-197.

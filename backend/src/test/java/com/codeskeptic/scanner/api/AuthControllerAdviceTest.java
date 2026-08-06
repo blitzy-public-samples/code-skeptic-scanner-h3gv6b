@@ -31,7 +31,7 @@ import com.codeskeptic.scanner.security.SecurityConfig;
 // DL-019, DL-117
 /**
  * Proves that a failure of the authentication provider behind {@code POST /auth/token} is rendered
- * by {@link GlobalExceptionHandler} rather than by the controller.
+ * by {@link GlobalExceptionHandler}, and not by the controller.
  *
  * <p>This slice replaces the assembled {@link AuthenticationManager} with a mock, and
  * {@code AuthControllerTest} keeps the assembled one. Only the token route is mapped here, and

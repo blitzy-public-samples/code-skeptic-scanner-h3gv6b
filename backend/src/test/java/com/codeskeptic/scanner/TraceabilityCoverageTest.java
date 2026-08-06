@@ -31,11 +31,10 @@ import org.junit.jupiter.api.Test;
  * <p>Two properties are asserted: every delivered Java class under {@code src/main/java} and
  * {@code src/test/java} is named by exactly one row, and every path the matrix names as a Java file
  * of this module exists on disk. Together they make the mapping bidirectional in the sense Rule 1
- * requires, so neither direction can drift silently.
+ * requires, and a drift in either direction fails the build.
  *
- * <p>The measured figures in the matrix's test table are checked by reading it, not here: a case
- * count changes with every added test and asserting it would make the count a second thing to
- * maintain rather than a record of one.
+ * <p>The measured figures in the matrix's test table are checked by reading it, not here.
+ * {@code DocumentationConsistencyTest} holds each per-class case count to the executable suite.
  */
 @DisplayName("traceability matrix coverage")
 class TraceabilityCoverageTest {

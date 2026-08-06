@@ -30,8 +30,8 @@ import org.junit.jupiter.api.Test;
  *
  * <p>Rule 1 makes the decision log the single source of truth for rationale and allows a comment to
  * carry a pointer to it. A pointer naming an identifier the log does not define, or naming one whose
- * row was renumbered, silently breaks that contract, and nothing but a reader noticing would catch
- * it. This class turns that into a build failure.
+ * row was renumbered, breaks that contract with no other signal. This class turns that into a build
+ * failure.
  *
  * <p>Three properties are asserted:
  *

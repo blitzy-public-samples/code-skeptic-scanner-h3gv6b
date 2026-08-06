@@ -11,6 +11,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -20,8 +22,8 @@ import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.SafeConstructor;
 
-// Net-new (no Python counterpart) — DL-004, DL-005, DL-053, DL-056, DL-057, DL-106, DL-107,
-// DL-215, DL-218, DL-243 — see docs/DECISION_LOG.md
+// Net-new (no Python counterpart) — DL-004, DL-005, DL-053, DL-056, DL-057, DL-103, DL-106,
+// DL-107, DL-215, DL-218, DL-243, DL-285 — see docs/DECISION_LOG.md
 /**
  * Verifies the repository's backend build, container, CI, CD and deployment-script contracts.
  *
@@ -126,7 +128,8 @@ class OperationsContractTest {
         String workflow = read(CI_WORKFLOW);
 
         assertThat(workflow)
-                .contains("uses: actions/setup-java@v4")
+                .containsPattern("uses: actions/setup-java@[0-9a-f]{40}\\b")
+                .doesNotContain("uses: actions/setup-java@v")
                 .contains("distribution: 'temurin'")
                 .contains("java-version: '21'")
                 .contains("cache: maven");
@@ -155,13 +158,47 @@ class OperationsContractTest {
         assertThat(workflow)
                 .contains("jobs:\n  build-and-test:")
                 .contains("uses: actions/setup-node@v2")
-                .contains("node-version: '14'")
                 .contains("run: npm ci")
                 .contains("npm run lint")
                 .contains("npm run type-check")
                 .contains("run: npm test")
                 .contains("run: npm run build")
                 .contains("- name: Deploy to staging");
+    }
+
+    // Net-new: the mandatory Node.js floor and the pinned toolchain action — DL-103, DL-285 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("provisions a Node.js version at or above the mandatory floor")
+    void provisionsANodeVersionAtOrAboveTheMandatoryFloor() throws IOException {
+        String workflow = read(CI_WORKFLOW);
+
+        Matcher declared = Pattern.compile("node-version: '(\\d+)\\.(\\d+)\\.(\\d+)'")
+                .matcher(workflow);
+
+        assertThat(declared.find()).isTrue();
+        int major = Integer.parseInt(declared.group(1));
+        int minor = Integer.parseInt(declared.group(2));
+
+        assertThat(major).isGreaterThanOrEqualTo(20);
+        if (major == 20) {
+            assertThat(minor).isGreaterThanOrEqualTo(20);
+        } else if (major == 22) {
+            assertThat(minor).isGreaterThanOrEqualTo(12);
+        }
+        assertThat(declared.find()).isFalse();
+    }
+
+    @Test
+    @DisplayName("pins every action revision the migration authored to a full commit SHA")
+    void pinsEveryActionRevisionTheMigrationAuthoredToAFullCommitSha() throws IOException {
+        String workflow = read(CI_WORKFLOW);
+
+        assertThat(workflow)
+                .containsPattern("uses: actions/setup-java@[0-9a-f]{40}  # v\\d+\\.\\d+\\.\\d+");
+
+        assertThat(read(CD_WORKFLOW))
+                .doesNotContain("actions/setup-java");
     }
 
     @Test

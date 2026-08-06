@@ -37,7 +37,7 @@ class MainProfileConfigurationContractTest {
     /** Values required to resolve every no-default placeholder in the production document. */
     private static final Map<String, Object> REQUIRED_ENVIRONMENT = Map.of(
             "DATABASE_URL", "postgresql://scanner:secret@db.internal:5432/codeskeptic",
-            "SECRET_KEY", "0123456789abcdef0123456789abcdef",
+            "SECRET_KEY", "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
             "AUTH_PASSWORD_HASH", "$2a$10$abcdefghijklmnopqrstuuuuuuuuuuuuuuuuuuuuuuuuuuu");
 
     @Test

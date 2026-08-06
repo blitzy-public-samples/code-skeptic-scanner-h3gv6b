@@ -134,7 +134,7 @@ class SettingControllerTest {
     /** The sanctioned envelope of an unmatched path — backend/app/main.py:L31-33, DL-183. */
     private static final String NOT_FOUND_BODY = "{\"error\":\"Not found\"}";
 
-    /** Members {@code ProblemDetail} would carry; none of them reaches the wire. */
+    /** Members a {@code ProblemDetail} body carries; none of them reaches the wire. */
     private static final List<String> PROBLEM_DETAIL_MEMBERS =
             List.of("type", "title", "status", "detail", "instance", "errors");
 

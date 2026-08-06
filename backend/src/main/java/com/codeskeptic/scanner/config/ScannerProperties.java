@@ -254,8 +254,8 @@ public record ScannerProperties(
         /**
          * Normalises the two retry components into usable values — DL-253.
          *
-         * <p>A negative retry count is read as {@code 0} and a negative backoff as {@code 0}, so a
-         * misconfiguration disables the retry rather than failing startup.
+         * <p>A negative retry count is read as {@code 0} and a negative backoff as {@code 0}: such a
+         * value disables the retry and does not fail startup.
          */
         public Notion {
             mirrorMaxRetries = Math.max(mirrorMaxRetries, 0);
@@ -600,7 +600,137 @@ public record ScannerProperties(
             @DefaultValue("true") boolean streamEnabled,
 
             // scanner.background.response-generation-enabled — no Python counterpart — DL-250
-            @DefaultValue("true") boolean responseGenerationEnabled) {
+            @DefaultValue("true") boolean responseGenerationEnabled,
+
+            // scanner.background.lease-ttl-seconds — no Python counterpart — DL-281
+            @DefaultValue("120") long leaseTtlSeconds,
+
+            // scanner.background.lease-renew-seconds — no Python counterpart — DL-281
+            @DefaultValue("30") long leaseRenewSeconds,
+
+            // scanner.background.max-candidates-per-pass — no Python counterpart — DL-282
+            @DefaultValue("200") int maxCandidatesPerPass,
+
+            // scanner.background.provider-calls-per-window — no Python counterpart — DL-283
+            @DefaultValue("500") int providerCallsPerWindow,
+
+            // scanner.background.provider-window-seconds — no Python counterpart — DL-283
+            @DefaultValue("3600") long providerWindowSeconds,
+
+            // scanner.background.provider-failure-threshold — no Python counterpart — DL-283
+            @DefaultValue("5") int providerFailureThreshold,
+
+            // scanner.background.provider-circuit-open-seconds — no Python counterpart — DL-283
+            @DefaultValue("300") long providerCircuitOpenSeconds) {
+
+        /** Declared default of {@code scanner.background.lease-ttl-seconds} — DL-281. */
+        private static final long DEFAULT_LEASE_TTL_SECONDS = 120L;
+
+        /** Declared default of {@code scanner.background.lease-renew-seconds} — DL-281. */
+        private static final long DEFAULT_LEASE_RENEW_SECONDS = 30L;
+
+        /** Declared default of {@code scanner.background.max-candidates-per-pass} — DL-282. */
+        private static final int DEFAULT_MAX_CANDIDATES_PER_PASS = 200;
+
+        /** Declared default of {@code scanner.background.provider-calls-per-window} — DL-283. */
+        private static final int DEFAULT_PROVIDER_CALLS_PER_WINDOW = 500;
+
+        /** Declared default of {@code scanner.background.provider-window-seconds} — DL-283. */
+        private static final long DEFAULT_PROVIDER_WINDOW_SECONDS = 3_600L;
+
+        /** Declared default of {@code scanner.background.provider-failure-threshold} — DL-283. */
+        private static final int DEFAULT_PROVIDER_FAILURE_THRESHOLD = 5;
+
+        /** Declared default of {@code scanner.background.provider-circuit-open-seconds} — DL-283. */
+        private static final long DEFAULT_PROVIDER_CIRCUIT_OPEN_SECONDS = 300L;
+
+        /** Smallest accepted value of {@code scanner.background.lease-ttl-seconds} — DL-281. */
+        private static final long MINIMUM_LEASE_TTL_SECONDS = 10L;
+
+        /** Largest accepted value of {@code scanner.background.lease-ttl-seconds} — DL-281. */
+        private static final long MAXIMUM_LEASE_TTL_SECONDS = 3_600L;
+
+        /** Smallest accepted value of {@code scanner.background.lease-renew-seconds} — DL-281. */
+        private static final long MINIMUM_LEASE_RENEW_SECONDS = 1L;
+
+        /** Divisor fixing the longest renewal interval as a fraction of the lease term — DL-281. */
+        private static final long LEASE_RENEW_DIVISOR = 2L;
+
+        /**
+         * Smallest accepted value of {@code scanner.background.max-candidates-per-pass} — DL-282.
+         */
+        private static final int MINIMUM_MAX_CANDIDATES_PER_PASS = 1;
+
+        /**
+         * Smallest accepted value of {@code scanner.background.provider-calls-per-window} — DL-283.
+         */
+        private static final int MINIMUM_PROVIDER_CALLS_PER_WINDOW = 1;
+
+        /** Smallest accepted value of {@code scanner.background.provider-window-seconds} — DL-283. */
+        private static final long MINIMUM_PROVIDER_WINDOW_SECONDS = 1L;
+
+        /**
+         * Smallest accepted value of {@code scanner.background.provider-failure-threshold} — DL-283.
+         */
+        private static final int MINIMUM_PROVIDER_FAILURE_THRESHOLD = 1;
+
+        /**
+         * Smallest accepted value of {@code scanner.background.provider-circuit-open-seconds} —
+         * DL-283.
+         */
+        private static final long MINIMUM_PROVIDER_CIRCUIT_OPEN_SECONDS = 1L;
+
+        /**
+         * Normalises every bound into a usable value — DL-281, DL-282, DL-283.
+         *
+         * <p>The lease term is held within {@value #MINIMUM_LEASE_TTL_SECONDS} and
+         * {@value #MAXIMUM_LEASE_TTL_SECONDS} seconds. The renewal interval is held at
+         * {@value #MINIMUM_LEASE_RENEW_SECONDS} second or more and at no more than the resulting term
+         * divided by {@value #LEASE_RENEW_DIVISOR}, so a renewal always precedes an expiry and a
+         * misconfiguration cannot let the term lapse between renewals. The per-pass candidate
+         * ceiling, the provider call allowance, the window, the consecutive-failure threshold and the
+         * span the circuit stays open each carry their own floor, so no bound can be configured away.
+         */
+        public Background {
+            leaseTtlSeconds = Math.min(MAXIMUM_LEASE_TTL_SECONDS,
+                    Math.max(leaseTtlSeconds, MINIMUM_LEASE_TTL_SECONDS));
+            leaseRenewSeconds = Math.min(leaseTtlSeconds / LEASE_RENEW_DIVISOR,
+                    Math.max(leaseRenewSeconds, MINIMUM_LEASE_RENEW_SECONDS));
+            maxCandidatesPerPass =
+                    Math.max(maxCandidatesPerPass, MINIMUM_MAX_CANDIDATES_PER_PASS);
+            providerCallsPerWindow =
+                    Math.max(providerCallsPerWindow, MINIMUM_PROVIDER_CALLS_PER_WINDOW);
+            providerWindowSeconds =
+                    Math.max(providerWindowSeconds, MINIMUM_PROVIDER_WINDOW_SECONDS);
+            providerFailureThreshold =
+                    Math.max(providerFailureThreshold, MINIMUM_PROVIDER_FAILURE_THRESHOLD);
+            providerCircuitOpenSeconds =
+                    Math.max(providerCircuitOpenSeconds, MINIMUM_PROVIDER_CIRCUIT_OPEN_SECONDS);
+        }
+
+        /**
+         * Builds a group carrying the three switches and the declared default of every bound.
+         *
+         * <p>The bound values this factory writes are the {@code @DefaultValue} literals of the
+         * components above, so a caller that holds no bound group — a hand-constructed
+         * {@code ScannerProperties} or a null-guarded read — sees the same bounds a deployment sees
+         * when it declares none. {@code config/MainProfileConfigurationContractTest} asserts the
+         * agreement between this factory and the binder.
+         *
+         * @param enabled whether background work runs in this process at all
+         * @param streamEnabled whether the X filtered stream runs in this process
+         * @param responseGenerationEnabled whether the generation pass runs in this process
+         * @return the group, never {@code null}
+         */
+        public static Background of(boolean enabled,
+                boolean streamEnabled,
+                boolean responseGenerationEnabled) {
+            return new Background(enabled, streamEnabled, responseGenerationEnabled,
+                    DEFAULT_LEASE_TTL_SECONDS, DEFAULT_LEASE_RENEW_SECONDS,
+                    DEFAULT_MAX_CANDIDATES_PER_PASS, DEFAULT_PROVIDER_CALLS_PER_WINDOW,
+                    DEFAULT_PROVIDER_WINDOW_SECONDS, DEFAULT_PROVIDER_FAILURE_THRESHOLD,
+                    DEFAULT_PROVIDER_CIRCUIT_OPEN_SECONDS);
+        }
 
         /**
          * Reports whether this process runs the X filtered stream.

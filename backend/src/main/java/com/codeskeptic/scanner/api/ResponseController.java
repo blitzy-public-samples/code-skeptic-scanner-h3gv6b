@@ -184,7 +184,12 @@ public class ResponseController {
      * <p>A value that holds a whole number is passed to the service unchanged, including {@code 0} and
      * a negative value: it is not clamped or bounds-checked here. {@code page} is 1-based on the wire,
      * and {@code service.ResponseService} performs the conversion to the 0-based index Spring Data
-     * takes and reports the 1-based number back — DL-038.
+     * takes and reports the 1-based number back — DL-038. That service is also where the page size is
+     * bounded: a {@code per_page} above
+     * {@value com.codeskeptic.scanner.util.QueryParameters#MAXIMUM_PAGE_SIZE} is served
+     * {@value com.codeskeptic.scanner.util.QueryParameters#MAXIMUM_PAGE_SIZE} rows and the
+     * {@code pagination} block restates that size, while the status stays 200 — see
+     * docs/DECISION_LOG.md DL-123.
      *
      * <p>Example response body for page 1 of 10 per page over a single row:
      *
@@ -310,7 +315,7 @@ public class ResponseController {
      * {@code null}. Reproducing the {@code if not update_data} guard at {@code :L56}, an absent body
      * and a body carrying neither key are both answered with 400 and the literal of {@code :L57}.
      *
-     * <p>A {@code responseId} carrying no number, one naming no row, and a write that would leave
+     * <p>A {@code responseId} carrying no number, one naming no row, and a write that leaves
      * {@code content} or {@code is_approved} empty are all answered with 404 and the literal of
      * {@code :L65}, {@code Response not found or update failed} — a different string from the
      * {@code Response not found} that {@link #getResponse(String)} reports at {@code :L31}. The third

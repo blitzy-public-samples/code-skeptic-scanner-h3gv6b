@@ -15,13 +15,21 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.lang.reflect.Field;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
@@ -157,6 +165,9 @@ class AuthControllerTest {
     /** Rejected attempts issued back to back by the bounded-reporting tests — DL-272. */
     private static final int REJECTION_BURST = 25;
 
+    /** Longest a held-open verification waits for its release signal — DL-272. */
+    private static final long BLOCKED_VERIFICATION_TIMEOUT_SECONDS = 20L;
+
     private static final int LOGIN_BODY_BYTE_CEILING = 4_096;
 
     private static final int BCRYPT_TAIL_LENGTH = 53;
@@ -255,7 +266,7 @@ class AuthControllerTest {
         String written = success.getFormattedMessage();
         assertThat(written).contains("Issued a bearer token to principal ");
         assertThat(written).contains(LogSafe.correlation(configuredUsername()));
-        assertThat(written).startsWith("Issued a bearer token to principal sha256:");
+        assertThat(written).startsWith("Issued a bearer token to principal hmac256:");
         assertThat(written).doesNotContain(configuredUsername());
         assertThat(written).doesNotContain(TEST_PASSWORD);
         assertThat(written).doesNotContain(mintedToken());
@@ -1006,6 +1017,266 @@ class AuthControllerTest {
         assertThat(response.getBody()).isNull();
     }
 
+    // Net-new bound on the credential verifications in progress — DL-272 — see
+    // docs/DECISION_LOG.md
+    @Nested
+    @DisplayName("the bound on credential verification in progress")
+    class VerificationWorkBound {
+
+        /** Attempts the bounded-reporting case makes while every permit is held. */
+        private static final int UNVERIFIED_BURST = 4;
+
+        /** Fewest permits this process issues, whatever the processor count. */
+        private static final int PERMIT_FLOOR = 2;
+
+        /** Callers the concurrency case starts beyond the permit count. */
+        private static final int SURPLUS_CALLERS = 2;
+
+        /** Longest the concurrency case waits for a caller to answer. */
+        private static final long CALLER_TIMEOUT_SECONDS = 20L;
+
+        @Test
+        @DisplayName("issues one permit per processor and never fewer than two")
+        void issuesOnePermitPerProcessorAndNeverFewerThanTwo() {
+            AuthController controller = new AuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()), jwtService);
+
+            Semaphore permits = verificationPermitsOf(controller);
+
+            assertThat(permits.availablePermits())
+                    .isEqualTo(Math.max(PERMIT_FLOOR, Runtime.getRuntime().availableProcessors()));
+            assertThat(permits.availablePermits()).isGreaterThanOrEqualTo(PERMIT_FLOOR);
+        }
+
+        @Test
+        @DisplayName("answers a credential with 401 while every permit is held, starting no "
+                + "verification")
+        void answersACredentialWith401WhileEveryPermitIsHeldStartingNoVerification() {
+            RecordingAuthenticationManager manager =
+                    RecordingAuthenticationManager.accepting(configuredUsername());
+            AuthController controller = new AuthController(manager, jwtService);
+            Semaphore permits = verificationPermitsOf(controller);
+            int held = permits.drainPermits();
+            try {
+                ResponseEntity<TokenResponse> response = controller.issueToken(
+                        new LoginRequest(configuredUsername(), TEST_PASSWORD));
+
+                assertThat(held).isGreaterThanOrEqualTo(PERMIT_FLOOR);
+                assertThat(permits.availablePermits()).isZero();
+                assertThat(manager.invocations()).isZero();
+                assertThat(response.getStatusCode().value())
+                        .isEqualTo(HttpStatus.UNAUTHORIZED.value());
+                assertThat(response.getBody()).isNull();
+            } finally {
+                permits.release(held);
+            }
+        }
+
+        @Test
+        @DisplayName("answers 401 with an empty body over the wire while every permit is held")
+        void answers401WithAnEmptyBodyOverTheWireWhileEveryPermitIsHeld() throws Exception {
+            Semaphore permits =
+                    verificationPermitsOf(applicationContext.getBean(AuthController.class));
+            int held = permits.drainPermits();
+            try {
+                mockMvc.perform(post(TOKEN_ENDPOINT)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(credentialBody(configuredUsername(), TEST_PASSWORD)))
+                        .andExpect(status().isUnauthorized())
+                        .andExpect(content().string(""))
+                        .andExpect(header().doesNotExist(HttpHeaders.WWW_AUTHENTICATE));
+            } finally {
+                permits.release(held);
+            }
+        }
+
+        @Test
+        @DisplayName("names only the permit count in the record an unverified request leaves")
+        void namesOnlyThePermitCountInTheRecordAnUnverifiedRequestLeaves() {
+            AuthController controller = new AuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()), jwtService);
+            Semaphore permits = verificationPermitsOf(controller);
+            int held = permits.drainPermits();
+            ListAppender<ILoggingEvent> recorded = attachAppender();
+            try {
+                controller.issueToken(new LoginRequest(configuredUsername(), TEST_PASSWORD));
+
+                List<String> warnings = warningRecords(recorded);
+                assertThat(warnings).hasSize(1);
+                assertThat(warnings.get(0))
+                        .contains("was not verified: all " + held
+                                + " verification permit(s) were held")
+                        .doesNotContain(configuredUsername())
+                        .doesNotContain(TEST_PASSWORD);
+            } finally {
+                detachAppender(recorded);
+                permits.release(held);
+            }
+        }
+
+        @Test
+        @DisplayName("reports a burst of unverified requests with one warning carrying the count")
+        void reportsABurstOfUnverifiedRequestsWithOneWarningCarryingTheCount() {
+            RecordingAuthenticationManager manager =
+                    RecordingAuthenticationManager.accepting(configuredUsername());
+            AuthController controller = new AuthController(manager, jwtService);
+            Semaphore permits = verificationPermitsOf(controller);
+            int held = permits.drainPermits();
+            ListAppender<ILoggingEvent> recorded = attachAppender();
+            try {
+                for (int attempt = 0; attempt < UNVERIFIED_BURST; attempt++) {
+                    assertThat(controller.issueToken(
+                                    new LoginRequest(configuredUsername(), TEST_PASSWORD))
+                            .getStatusCode().value())
+                            .isEqualTo(HttpStatus.UNAUTHORIZED.value());
+                }
+
+                assertThat(manager.invocations()).isZero();
+                assertThat(warningRecords(recorded))
+                        .as("one warning for the whole burst").hasSize(1);
+            } finally {
+                detachAppender(recorded);
+                permits.release(held);
+            }
+        }
+
+        @Test
+        @DisplayName("returns the permit an issued token held")
+        void returnsThePermitAnIssuedTokenHeld() {
+            AuthController controller = new AuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()), jwtService);
+            Semaphore permits = verificationPermitsOf(controller);
+            int issued = permits.availablePermits();
+
+            ResponseEntity<TokenResponse> response = controller.issueToken(
+                    new LoginRequest(configuredUsername(), TEST_PASSWORD));
+
+            assertThat(response.getStatusCode().value()).isEqualTo(HttpStatus.OK.value());
+            assertThat(permits.availablePermits()).isEqualTo(issued);
+        }
+
+        @Test
+        @DisplayName("returns the permit a rejected credential held")
+        void returnsThePermitARejectedCredentialHeld() {
+            AuthController controller = new AuthController(
+                    RecordingAuthenticationManager.rejecting(
+                            new BadCredentialsException("rejected")),
+                    jwtService);
+            Semaphore permits = verificationPermitsOf(controller);
+            int issued = permits.availablePermits();
+
+            ResponseEntity<TokenResponse> response = controller.issueToken(
+                    new LoginRequest(configuredUsername(), WRONG_PASSWORD));
+
+            assertThat(response.getStatusCode().value())
+                    .isEqualTo(HttpStatus.UNAUTHORIZED.value());
+            assertThat(permits.availablePermits()).isEqualTo(issued);
+        }
+
+        @Test
+        @DisplayName("returns the permit a propagated verifier failure held")
+        void returnsThePermitAPropagatedVerifierFailureHeld() {
+            AuthController controller = new AuthController(
+                    RecordingAuthenticationManager.rejecting(
+                            new AuthenticationServiceException("provider unavailable")),
+                    jwtService);
+            Semaphore permits = verificationPermitsOf(controller);
+            int issued = permits.availablePermits();
+            LoginRequest request = new LoginRequest(configuredUsername(), TEST_PASSWORD);
+
+            assertThatThrownBy(() -> controller.issueToken(request))
+                    .isInstanceOf(AuthenticationServiceException.class);
+
+            assertThat(permits.availablePermits()).isEqualTo(issued);
+        }
+
+        @Test
+        @DisplayName("acquires no permit for a credential above the length ceiling")
+        void acquiresNoPermitForACredentialAboveTheLengthCeiling() {
+            RecordingAuthenticationManager manager =
+                    RecordingAuthenticationManager.accepting(configuredUsername());
+            AuthController controller = new AuthController(manager, jwtService);
+            Semaphore permits = verificationPermitsOf(controller);
+            int held = permits.drainPermits();
+            ListAppender<ILoggingEvent> recorded = attachAppender();
+            try {
+                ResponseEntity<TokenResponse> response = controller.issueToken(new LoginRequest(
+                        "u".repeat(CREDENTIAL_LENGTH_CEILING + 1), TEST_PASSWORD));
+
+                assertThat(response.getStatusCode().value())
+                        .isEqualTo(HttpStatus.UNAUTHORIZED.value());
+                assertThat(manager.invocations()).isZero();
+                assertThat(warningRecords(recorded)).hasSize(1);
+                assertThat(warningRecords(recorded).get(0))
+                        .contains("exceeded the accepted length of " + CREDENTIAL_LENGTH_CEILING)
+                        .doesNotContain("verification permit");
+            } finally {
+                detachAppender(recorded);
+                permits.release(held);
+            }
+        }
+
+        @Test
+        @DisplayName("serves a credential again once a permit is returned")
+        void servesACredentialAgainOnceAPermitIsReturned() {
+            AuthController controller = new AuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()), jwtService);
+            Semaphore permits = verificationPermitsOf(controller);
+            int held = permits.drainPermits();
+
+            ResponseEntity<TokenResponse> whileHeld = controller.issueToken(
+                    new LoginRequest(configuredUsername(), TEST_PASSWORD));
+            permits.release(held);
+            ResponseEntity<TokenResponse> afterRelease = controller.issueToken(
+                    new LoginRequest(configuredUsername(), TEST_PASSWORD));
+
+            assertThat(whileHeld.getStatusCode().value())
+                    .isEqualTo(HttpStatus.UNAUTHORIZED.value());
+            assertThat(afterRelease.getStatusCode().value()).isEqualTo(HttpStatus.OK.value());
+            assertThat(afterRelease.getBody()).isNotNull();
+            assertThat(permits.availablePermits()).isEqualTo(held);
+        }
+
+        // The measured bound: verifications in progress never pass the permit count — DL-272
+        @Test
+        @DisplayName("holds the verifications in progress at the permit count under load")
+        void holdsTheVerificationsInProgressAtThePermitCountUnderLoad() throws Exception {
+            AuthController sizing = new AuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()), jwtService);
+            int permitCount = verificationPermitsOf(sizing).availablePermits();
+            BlockingAuthenticationManager manager =
+                    new BlockingAuthenticationManager(configuredUsername(), permitCount);
+            AuthController controller = new AuthController(manager, jwtService);
+            int callers = permitCount + SURPLUS_CALLERS;
+            ExecutorService callerPool = Executors.newFixedThreadPool(callers);
+            try {
+                List<Future<Integer>> answers = new ArrayList<>();
+                for (int caller = 0; caller < callers; caller++) {
+                    answers.add(callerPool.submit(() -> controller.issueToken(
+                                    new LoginRequest(configuredUsername(), TEST_PASSWORD))
+                            .getStatusCode().value()));
+                }
+                manager.awaitEntries();
+                manager.release();
+
+                List<Integer> statuses = new ArrayList<>();
+                for (Future<Integer> answer : answers) {
+                    statuses.add(answer.get(CALLER_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+                }
+
+                assertThat(manager.peakInProgress()).isEqualTo(permitCount);
+                assertThat(statuses).hasSize(callers);
+                assertThat(statuses).containsAnyOf(HttpStatus.OK.value());
+                assertThat(statuses).allSatisfy(status -> assertThat(status)
+                        .isIn(HttpStatus.OK.value(), HttpStatus.UNAUTHORIZED.value()));
+                assertThat(verificationPermitsOf(controller).availablePermits())
+                        .isEqualTo(permitCount);
+            } finally {
+                callerPool.shutdownNow();
+            }
+        }
+    }
+
     @Nested
     @DisplayName("the record a token request leaves")
     class TokenRequestLogRecords {
@@ -1400,6 +1671,72 @@ class AuthControllerTest {
                 PROTECTED_TWEET_DOUBT_RATING, List.of("media-key-1"), null, "9001",
                 List.of("GPT-4"));
         return new PaginatedTweetsDto(List.of(row), new PaginationDto(1, 10, 1L, 1));
+    }
+
+    /**
+     * Reads the semaphore a controller bounds its credential verifications with.
+     *
+     * @param controller the controller to read
+     * @return that controller's verification permits
+     */
+    private static Semaphore verificationPermitsOf(AuthController controller) {
+        try {
+            Field declared = AuthController.class.getDeclaredField("verificationPermits");
+            declared.setAccessible(true);
+            return (Semaphore) declared.get(controller);
+        } catch (ReflectiveOperationException absent) {
+            throw new AssertionError(
+                    "AuthController declares a verificationPermits semaphore", absent);
+        }
+    }
+
+    /**
+     * An authentication manager that holds every verification open until it is released, counting
+     * the most that were open at one time — DL-272.
+     */
+    private static final class BlockingAuthenticationManager implements AuthenticationManager {
+
+        private final String resolvedPrincipalName;
+
+        private final CountDownLatch entered;
+
+        private final CountDownLatch released = new CountDownLatch(1);
+
+        private final AtomicInteger inProgress = new AtomicInteger();
+
+        private final AtomicInteger peakInProgress = new AtomicInteger();
+
+        private BlockingAuthenticationManager(String resolvedPrincipalName, int expectedEntries) {
+            this.resolvedPrincipalName = resolvedPrincipalName;
+            this.entered = new CountDownLatch(expectedEntries);
+        }
+
+        @Override
+        public Authentication authenticate(Authentication authentication) {
+            peakInProgress.accumulateAndGet(inProgress.incrementAndGet(), Math::max);
+            entered.countDown();
+            try {
+                released.await(BLOCKED_VERIFICATION_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+            } finally {
+                inProgress.decrementAndGet();
+            }
+            return new UsernamePasswordAuthenticationToken(resolvedPrincipalName, null, List.of());
+        }
+
+        private void awaitEntries() throws InterruptedException {
+            assertThat(entered.await(BLOCKED_VERIFICATION_TIMEOUT_SECONDS, TimeUnit.SECONDS))
+                    .as("every permit was taken up by a verification").isTrue();
+        }
+
+        private void release() {
+            released.countDown();
+        }
+
+        private int peakInProgress() {
+            return peakInProgress.get();
+        }
     }
 
     /**

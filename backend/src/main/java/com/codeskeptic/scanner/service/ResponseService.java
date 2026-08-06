@@ -127,6 +127,12 @@ public class ResponseService {
      */
     private static final int DEFAULT_PER_PAGE = 10;
 
+    /**
+      * Highest {@code per_page} this route serves, which is
+      * {@value com.codeskeptic.scanner.util.QueryParameters#MAXIMUM_PAGE_SIZE} — DL-123.
+      */
+    private static final int MAXIMUM_PER_PAGE = QueryParameters.MAXIMUM_PAGE_SIZE;
+
     private static final int WIRE_PAGE_OFFSET = 1;
 
     /** Rows one page statement returns, however large {@code per_page} is — DL-249. */
@@ -237,10 +243,11 @@ public class ResponseService {
      *
      * <p>{@code page} is 1-based, as the query parameter at {@code backend/app/api/responses.py:L11}
      * is, and is converted to the 0-based index {@code findAll(Pageable)} takes. A {@code page} below
-     * {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE} and a {@code perPage} below {@code 1}
-     * is read as {@value #DEFAULT_PER_PAGE}; neither is rejected, and no upper bound is applied to
-     * {@code perPage}. A {@code page} beyond the last one yields an empty {@code responses} list and
-     * a populated pagination block.
+     * {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}, a {@code perPage} below {@code 1} is
+     * read as {@value #DEFAULT_PER_PAGE} and a {@code perPage} above {@value #MAXIMUM_PER_PAGE} is
+     * read as {@value #MAXIMUM_PER_PAGE}; none of the three is rejected, and the pagination block
+     * restates the size served. A {@code page} beyond the last one yields an empty {@code responses}
+     * list and a populated pagination block.
      *
      * <p>A {@code page} whose first row lies beyond {@link Integer#MAX_VALUE} rows — that is, one for
      * which {@code (page - 1) * perPage} exceeds that bound — is answered the same way: the empty list
@@ -261,24 +268,26 @@ public class ResponseService {
      * <p>A page of at most {@value #PAGE_FETCH_CHUNK_ROWS} rows is read by one statement. A larger page
      * is read as consecutive chunks of that bound, each chunk converted before the next is read, so the
      * rows one statement returns are bounded however large {@code per_page} is — see
-     * docs/DECISION_LOG.md DL-249. Rows are ordered by {@code responses.id} ascending. The rows the page
-     * itself holds are bounded by the table, which is the wire contract this migration preserves — see
-     * docs/DECISION_LOG.md DL-123, DL-200 and DL-249.
+     * docs/DECISION_LOG.md DL-249. Rows are ordered by {@code responses.id} ascending. The rows one
+     * response carries are bounded by {@value #MAXIMUM_PER_PAGE} and by the table — see
+     * docs/DECISION_LOG.md DL-123 and DL-249.
      *
      * @param page    the 1-based page number to return; a value below {@value #DEFAULT_PAGE} is read
      *                as {@value #DEFAULT_PAGE}
      * @param perPage the number of rows per page; a value below {@code 1} is read as
-     *                {@value #DEFAULT_PER_PAGE} and no larger value is reduced
+     *                {@value #DEFAULT_PER_PAGE} and a value above {@value #MAXIMUM_PER_PAGE} is read
+     *                as {@value #MAXIMUM_PER_PAGE}
      * @return the {@code responses} and {@code pagination} envelope, never {@code null}; the
      *         {@code responses} list is empty when the page holds no row and is unmodifiable
      */
     @Transactional(readOnly = true)
     public PaginatedResponsesDto getPaginatedResponses(int page, int perPage) {
-        // Out-of-range values are read as the defaults of backend/app/api/responses.py:L11-12 —
+        // A value below the first page reads as the default of backend/app/api/responses.py:L11 —
         // DL-123 — see docs/DECISION_LOG.md
         int requestedPage = (page < DEFAULT_PAGE) ? DEFAULT_PAGE : page;
-        // No upper bound is applied; the source declared none — see docs/DECISION_LOG.md DL-123
-        int requestedPerPage = (perPage < 1) ? DEFAULT_PER_PAGE : perPage;
+        // The page size is bounded by the single declaration both list routes share — DL-123 — see
+        // docs/DECISION_LOG.md
+        int requestedPerPage = QueryParameters.boundPageSize(perPage, DEFAULT_PER_PAGE);
 
         // The wire page of backend/app/api/responses.py:L11 is 1-based; PageRequest is 0-based —
         // DL-038 — see docs/DECISION_LOG.md
@@ -492,7 +501,7 @@ public class ResponseService {
      * not overloads of one name — DL-226.
      *
      * <p>Behaves exactly as {@link #generateResponseIfAbsent(String)} in every respect except one: the
-     * subject's column values are taken from the supplied entity rather than selected, so the only
+     * subject's column values are taken from the supplied entity and are not selected, so the only
      * {@code tweets} statement this path issues is the presence test of the preflight — see
      * docs/DECISION_LOG.md DL-226. The in-process claim on the
      * row's identifier, the transaction-scoped
@@ -764,7 +773,7 @@ public class ResponseService {
      * carrying a value its column cannot hold never reaches this method: {@code dto.UpdateResponseRequest}
      * refuses it while the body is being bound — see docs/DECISION_LOG.md DL-231. Both
      * members are declared required by the wire contract of {@code backend/app/schema/response.py:L6,L8}
-     * (DL-080), so a write that would leave either of them empty is reported with the literal of
+     * (DL-080), so a write that leaves either of them empty is reported with the literal of
      * {@code :L65} and rolls this transaction back, leaving the row as it was. {@code id},
      * {@code generated_at} and {@code tweet_id} are not written by this method, and no value is trimmed
      * or normalised on the way in.
@@ -784,8 +793,8 @@ public class ResponseService {
      * @throws BadRequestException when {@code request} is {@code null} or carries neither updatable
      *                             member, carrying the wire literal of
      *                             {@code backend/app/api/responses.py:L57}
-     * @throws NotFoundException   when {@code responseId} names no row, and when the update would
-     *                             leave {@code content} or {@code is_approved} empty; both carry the
+     * @throws NotFoundException   when {@code responseId} names no row, and when the update leaves
+     *                             {@code content} or {@code is_approved} empty; both carry the
      *                             wire literal of {@code backend/app/api/responses.py:L65}
      */
     @Transactional(timeout = LOCK_WAIT_SECONDS)
@@ -827,11 +836,11 @@ public class ResponseService {
         }
 
         // The two writable columns are nullable, and dto/ResponseDto declares both members required
-        // — DL-080. A write that would leave either empty is reported with the wire literal of
+        // — DL-080. A write that leaves either empty is reported with the wire literal of
         // backend/app/api/responses.py:L65 and this transaction rolls back, so no row is left in a
         // state the wire contract cannot render — DL-244 — see docs/DECISION_LOG.md
         if (response.getContent() == null || response.getIsApproved() == null) {
-            log.warn("Rejected the update of response '{}': the update would leave a member the "
+            log.warn("Rejected the update of response '{}': the update leaves a member the "
                     + "wire contract declares required empty.", LogSafe.logSafe(responseId));
             throw NotFoundException.responseNotFoundOrUpdateFailed();
         }

@@ -49,9 +49,13 @@ class JwtAuthenticationFilterTest {
     /** Principal the credential store does not hold. */
     private static final String RETIRED_USERNAME = "retired-admin";
 
-    /** Signing secret of the tokens these tests mint; 75 bytes. */
+    /**
+     * Signing secret of the tokens these tests mint: the Base64 encoding of 75 bytes of key material,
+     * which is the form {@code scanner.jwt.secret} carries — DL-186.
+     */
     private static final String SECRET =
-            "test-only-jwt-secret-for-code-skeptic-scanner-build-verification-0123456789";
+            "dGVzdC1vbmx5LWp3dC1zZWNyZXQtZm9yLWNvZGUtc2tlcHRpYy1zY2FubmVyLWJ1aWxkLXZlcmlmaWNhdGlvbi0w"
+                    + "MTIzNDU2Nzg5";
 
     /** A route the chain protects; the filter reads the method only. */
     private static final String PROTECTED_PATH = "/tweets";

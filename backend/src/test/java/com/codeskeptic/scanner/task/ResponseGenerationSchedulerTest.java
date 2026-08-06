@@ -35,10 +35,11 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
-import org.mockito.InjectMocks;
+import org.junit.jupiter.api.BeforeEach;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.slf4j.LoggerFactory;
+import java.time.Clock;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.scheduling.annotation.Async;
@@ -54,6 +55,7 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
+import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.NotionService;
 import com.codeskeptic.scanner.service.ResponseService;
@@ -117,6 +119,15 @@ class ResponseGenerationSchedulerTest {
     /** {@code responses.generated_at} every stubbed reply carries. */
     private static final LocalDateTime GENERATED_AT = LocalDateTime.of(2026, 1, 2, 3, 4, 5);
 
+    /** Candidate ceiling no case of this class reaches — DL-282. */
+    private static final int UNREACHABLE_CEILING = 100_000;
+
+    /** Provider allowance no case of this class spends — DL-283. */
+    private static final int UNREACHABLE_ALLOWANCE = 1_000_000;
+
+    /** Consecutive-failure threshold no case of this class reaches — DL-283. */
+    private static final int UNREACHABLE_FAILURE_THRESHOLD = 1_000;
+
     @Mock
     private TweetRepository tweetRepository;
 
@@ -126,8 +137,51 @@ class ResponseGenerationSchedulerTest {
     @Mock
     private NotionService notionService;
 
-    @InjectMocks
     private ResponseGenerationScheduler scheduler;
+
+    /**
+     * Assembles the pass over its three doubles, a bound configuration and a real work budget.
+     *
+     * <p>The budget is the delivered component, not a double. It is configured with an allowance and a
+     * failure threshold no case of this class reaches, and every case observes the granting behaviour.
+     * The cases that assert the two ceilings configure their own — DL-282, DL-283.
+     */
+    @BeforeEach
+    void assemblePass() {
+        ScannerProperties bound = boundWith(UNREACHABLE_CEILING, UNREACHABLE_ALLOWANCE,
+                UNREACHABLE_FAILURE_THRESHOLD);
+        scheduler = new ResponseGenerationScheduler(tweetRepository, responseService, notionService,
+                bound, new ProviderWorkBudget(bound, Clock.systemUTC()));
+    }
+
+    /**
+     * Builds a bound configuration carrying the supplied background ceilings.
+     *
+     * @param candidateCeiling value of {@code scanner.background.max-candidates-per-pass}
+     * @param allowance value of {@code scanner.background.provider-calls-per-window}
+     * @param failureThreshold value of {@code scanner.background.provider-failure-threshold}
+     * @return the bound configuration
+     */
+    private static ScannerProperties boundWith(int candidateCeiling,
+            int allowance,
+            int failureThreshold) {
+        return new ScannerProperties(null, 100, 60L, null, null, null, null, null, null, null,
+                new ScannerProperties.Background(true, true, true, 120L, 30L, candidateCeiling,
+                        allowance, 3_600L, failureThreshold, 300L));
+    }
+
+    /**
+     * Assembles a pass over the three doubles and the supplied configuration and budget.
+     *
+     * @param bound the bound configuration
+     * @param budget the work budget
+     * @return the assembled pass
+     */
+    private ResponseGenerationScheduler passWith(ScannerProperties bound,
+            ProviderWorkBudget budget) {
+        return new ResponseGenerationScheduler(tweetRepository, responseService, notionService,
+                bound, budget);
+    }
 
     @Test
     @DisplayName("presents one public no-argument method as the pass a scheduler runs")
@@ -166,8 +220,8 @@ class ResponseGenerationSchedulerTest {
     }
 
     @Test
-    @DisplayName("binds exactly the three collaborators one pass uses")
-    void bindsExactlyTheThreeCollaboratorsOnePassUses() {
+    @DisplayName("binds exactly the five collaborators one pass uses")
+    void bindsExactlyTheFiveCollaboratorsOnePassUses() {
         Constructor<?>[] constructors = ResponseGenerationScheduler.class.getDeclaredConstructors();
 
         assertThat(constructors).as("declared constructors").hasSize(1);
@@ -175,7 +229,8 @@ class ResponseGenerationSchedulerTest {
         Class<?>[] parameterTypes = constructors[0].getParameterTypes();
         assertThat(parameterTypes)
                 .as("collaborators bound by the constructor")
-                .containsExactly(TweetRepository.class, ResponseService.class, NotionService.class);
+                .containsExactly(TweetRepository.class, ResponseService.class, NotionService.class,
+                        ScannerProperties.class, ProviderWorkBudget.class);
         assertThat(parameterTypes)
                 .extracting(Class::getSimpleName)
                 .doesNotContain("LlmService");
@@ -184,18 +239,30 @@ class ResponseGenerationSchedulerTest {
     @Test
     @DisplayName("rejects a missing collaborator, naming the one that is absent")
     void rejectsAMissingCollaborator() {
+        ScannerProperties bound = boundWith(UNREACHABLE_CEILING, UNREACHABLE_ALLOWANCE,
+                UNREACHABLE_FAILURE_THRESHOLD);
+        ProviderWorkBudget budget = new ProviderWorkBudget(bound, Clock.systemUTC());
+
         assertThatNullPointerException()
                 .isThrownBy(() -> new ResponseGenerationScheduler(null, responseService,
-                        notionService))
+                        notionService, bound, budget))
                 .withMessageContaining("tweetRepository");
         assertThatNullPointerException()
                 .isThrownBy(() -> new ResponseGenerationScheduler(tweetRepository, null,
-                        notionService))
+                        notionService, bound, budget))
                 .withMessageContaining("responseService");
         assertThatNullPointerException()
                 .isThrownBy(() -> new ResponseGenerationScheduler(tweetRepository, responseService,
-                        null))
+                        null, bound, budget))
                 .withMessageContaining("notionService");
+        assertThatNullPointerException()
+                .isThrownBy(() -> new ResponseGenerationScheduler(tweetRepository, responseService,
+                        notionService, null, budget))
+                .withMessageContaining("properties");
+        assertThatNullPointerException()
+                .isThrownBy(() -> new ResponseGenerationScheduler(tweetRepository, responseService,
+                        notionService, bound, null))
+                .withMessageContaining("providerWorkBudget");
     }
 
     @Test

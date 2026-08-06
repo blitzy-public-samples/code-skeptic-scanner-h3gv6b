@@ -40,7 +40,7 @@ import org.w3c.dom.NodeList;
  *       {@code tomcat.version} at or above {@value #TOMCAT_FLOOR} and {@code postgresql.version} at
  *       or above {@value #POSTGRESQL_FLOOR}.</li>
  *   <li>The artifacts actually on the classpath report those same versions, read from the shipped
- *       jars at runtime rather than from the file: {@link ServerInfo#getServerNumber()} for the
+ *       jars at runtime and not from the file: {@link ServerInfo#getServerNumber()} for the
  *       embedded container and {@code org.postgresql.util.DriverInfo.DRIVER_VERSION}, read
  *       reflectively so the compiler cannot fold the constant into this class.</li>
  *   <li>Every version the file states is a concrete version. No {@code LATEST}, no {@code RELEASE}
@@ -118,6 +118,17 @@ class BuildDependencyContractTest {
                     .isEqualTo("spring-boot-starter-parent");
             assertThat(text(childElement(parent, "version"))).isEqualTo("3.5.16");
             assertThat(propertyValue("java.version")).isEqualTo("21");
+        }
+
+        // Net-new: the support horizon of the pinned Boot line — DL-003 — see docs/DECISION_LOG.md
+        @Test
+        @DisplayName("points at the recorded support horizon for the pinned Boot line")
+        void pointsAtTheRecordedSupportHorizonForThePinnedBootLine() throws Exception {
+            String manifest = Files.readString(projectDescriptorPath());
+
+            assertThat(manifest)
+                    .contains("final open-source release of the 3.5.x line")
+                    .contains("docs/DECISION_LOG.md DL-003");
         }
 
         @ParameterizedTest(name = "[{index}] {0} is not overridden")
@@ -341,16 +352,26 @@ class BuildDependencyContractTest {
     }
 
     /**
-     * Parses {@code backend/pom.xml} into its document element.
+     * Locates {@code backend/pom.xml} from either the module or the repository working directory.
      *
-     * @return the {@code <project>} element; never {@code null}
+     * @return the readable path of the project descriptor; never {@code null}
      */
-    private static Element readProjectDescriptor() {
+    private static Path projectDescriptorPath() {
         Path descriptor = Path.of("pom.xml");
         if (!Files.isRegularFile(descriptor)) {
             descriptor = Path.of("backend", "pom.xml");
         }
         assertThat(Files.isRegularFile(descriptor)).as("%s is readable", descriptor).isTrue();
+        return descriptor;
+    }
+
+    /**
+     * Parses {@code backend/pom.xml} into its document element.
+     *
+     * @return the {@code <project>} element; never {@code null}
+     */
+    private static Element readProjectDescriptor() {
+        Path descriptor = projectDescriptorPath();
 
         try (InputStream source = Files.newInputStream(descriptor)) {
             DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();

@@ -47,8 +47,8 @@ scanner:
 
   datasource:
     # Net-new (no Python counterpart) — DL-270, DL-271 — see docs/DECISION_LOG.md
-    # The build reaches one in-memory database from one process. Every value is declared rather than
-    # defaulted, as the OpenAI keys are — see docs/DECISION_LOG.md DL-205, DL-271.
+    # The build reaches one in-memory database from one process. Every value is declared here and none
+    # is left to its default, as with the OpenAI keys — see docs/DECISION_LOG.md DL-205, DL-271.
     pool:
       maximum-size: 4
       minimum-idle: 1
@@ -122,9 +122,11 @@ scanner:
     max-retries: 2
 
   jwt:
-    # Key ported from backend/app/core/security.py:L11; test value is net-new — DL-016 — see docs/DECISION_LOG.md
-    # 75 bytes.
-    secret: test-only-jwt-secret-for-code-skeptic-scanner-build-verification-0123456789
+    # Key ported from backend/app/core/security.py:L11; test value is net-new — DL-016, DL-186 — see
+    # docs/DECISION_LOG.md
+    # Base64 encoding of 48 bytes of key material. The value is decoded before it becomes the signing
+    # key, and the decoded material is what the 32-byte floor applies to.
+    secret: Y29kZS1za2VwdGljLXNjYW5uZXItYnVpbGQtdmVyaWZpY2F0aW9uLWtleS0wMDAx
     # Ported from backend/app/core/security.py:L11 (faithful port) — DL-015 — see docs/DECISION_LOG.md
     algorithm: HS256
     # Ported from backend/app/core/security.py:L9-10 (faithful port) — DL-017 — see docs/DECISION_LOG.md
@@ -163,3 +165,14 @@ scanner:
     enabled: true
     stream-enabled: true
     response-generation-enabled: true
+    # Net-new (no Python counterpart) — DL-281, DL-282, DL-283 — see docs/DECISION_LOG.md
+    # Every bound is declared under this profile so a test context states the values it runs with. The
+    # lease term is the shortest the binder accepts, renewed at half of it, so a context that claims
+    # the lease holds it for the whole of its own lifetime and releases it at shutdown.
+    lease-ttl-seconds: 10
+    lease-renew-seconds: 5
+    max-candidates-per-pass: 200
+    provider-calls-per-window: 500
+    provider-window-seconds: 3600
+    provider-failure-threshold: 5
+    provider-circuit-open-seconds: 300

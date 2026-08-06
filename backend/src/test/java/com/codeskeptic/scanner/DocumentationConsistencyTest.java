@@ -45,8 +45,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 final class DocumentationConsistencyTest {
 
     /**
-     * Number of test classes the Agent Action Plan's fixed inventory named. It records a plan rather
-     * than a delivery, and it is the one figure here that is not derived from the tree.
+     * Number of test classes the Agent Action Plan's fixed inventory named. It records a plan and not
+     * a delivery, and it is the one figure here that is not derived from the tree.
      */
     private static final int PLANNED_TEST_CLASS_COUNT = 19;
 

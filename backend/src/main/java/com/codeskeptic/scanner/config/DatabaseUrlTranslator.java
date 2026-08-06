@@ -60,11 +60,22 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  *       schemes.</li>
  * </ol>
  *
- * <p>{@link TranslatedDatabaseUrl#jdbcUrl()} never carries a username or a password, on either
- * path — DL-072 — see docs/DECISION_LOG.md. Credential material is recognised in the user-info
- * component of an authority and in a {@code ?}, {@code &} or {@code ;} separated property named
- * {@code user}, {@code username}, {@code password}, {@code passwd}, {@code pwd},
- * {@code password1}, {@code password2} or {@code password3}, matched case-insensitively.
+ * <p>{@link TranslatedDatabaseUrl#jdbcUrl()} never carries a username, a password or any other
+ * secret-bearing property, on either path — DL-072 — see docs/DECISION_LOG.md. Two property
+ * classes are recognised, both case-insensitively:
+ * <ul>
+ *   <li>A <b>primary credential</b> property, named {@code user}, {@code username}, {@code uid},
+ *       {@code password}, {@code passwd}, {@code pwd}, {@code password1}, {@code password2} or
+ *       {@code password3}. Its name is matched exactly. On the parse path its value fills whichever
+ *       half of the credential pair the user-info component left unset, and the property is removed
+ *       from the URL.</li>
+ *   <li>A <b>secondary secret</b> property, whose name carries one of the tokens
+ *       {@code password}, {@code passwd}, {@code pwd}, {@code passphrase}, {@code secret},
+ *       {@code credential} or {@code token} anywhere within it — {@code sslpassword},
+ *       {@code trustCertificateKeyStorePassword} and {@code xdevapi.ssl-truststore-password} among
+ *       them. There is nowhere to bind such a value to, so the whole URL is <em>rejected</em>, with a
+ *       message naming the offending property names and no value of any of them.</li>
+ * </ul>
  *
  * <p>Extraction and detection read one grammar — DL-072:
  * <ul>
@@ -75,7 +86,7 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  *       property that becomes the first one carries no separator. A query whose every property is a
  *       credential leaves no {@code ?} segment at all.</li>
  *   <li><b>Detection</b> splits on {@code '?'}, {@code '&'} and {@code ';'} alike and runs over the
- *       reassembled URL, so it is a check on the outcome rather than a second grammar. On the parse
+ *       reassembled URL, so it is a check on the outcome and not a second grammar. On the parse
  *       path extraction has already removed every credential property, so detection finds none. On
  *       the {@code jdbc:} pass-through path nothing is extracted, so a value carrying a credential
  *       property under any of the three separators is <em>rejected</em> and never altered.</li>
@@ -167,7 +178,23 @@ public final class DatabaseUrlTranslator {
      * docs/DECISION_LOG.md.
      */
     private static final Set<String> CREDENTIAL_PROPERTY_NAMES = Set.of(
-            "user", "username", "password", "passwd", "pwd", "password1", "password2", "password3");
+            "user", "username", "uid", "password", "passwd", "pwd",
+            "password1", "password2", "password3");
+
+    /**
+     * The primary credential names whose value fills the <em>username</em> half of the pair. Every
+     * other member of {@link #CREDENTIAL_PROPERTY_NAMES} fills the password half — DL-072.
+     */
+    private static final Set<String> IDENTITY_PROPERTY_NAMES = Set.of("user", "username", "uid");
+
+    /**
+     * Tokens whose presence anywhere in a property name makes that property secret-bearing. Each is
+     * matched case-insensitively as a substring of the text before a property's {@code '='}, so a
+     * vendor property naming a secret under any of these tokens is caught — DL-072 — see
+     * docs/DECISION_LOG.md.
+     */
+    private static final Set<String> SECRET_NAME_TOKENS = Set.of(
+            "password", "passwd", "pwd", "passphrase", "secret", "credential", "token");
 
     /** Separates properties inside the query or property section of a URL. */
     private static final Pattern PROPERTY_SEPARATOR = Pattern.compile("[?&;]");
@@ -285,6 +312,9 @@ public final class DatabaseUrlTranslator {
             // docs/DECISION_LOG.md
             rejectCredentialMaterial(databaseUrl, "DATABASE_URL already holds a JDBC URL that "
                     + "carries credential material");
+            // The same invariant covers a secret this service cannot bind anywhere — DL-072 — see
+            // docs/DECISION_LOG.md
+            rejectSecretBearingProperties(databaseUrl);
             LOG.info("DATABASE_URL already holds a JDBC URL; it is used exactly as supplied and no "
                     + "credentials are extracted from it.");
             return new TranslatedDatabaseUrl(databaseUrl, null, null);
@@ -336,6 +366,9 @@ public final class DatabaseUrlTranslator {
         final String assembled = jdbcUrl.toString();
         rejectCredentialMaterial(assembled, "DATABASE_URL carries credential material that cannot be "
                 + "separated from its JDBC URL");
+        // A retained property whose name carries a secret token is refused; it never reaches the
+        // driver — DL-072 — see docs/DECISION_LOG.md
+        rejectSecretBearingProperties(assembled);
 
         // Logging baseline - see docs/DECISION_LOG.md DL-052. The record names the resolved vendor
         // only; host, port, database path, query and user-info are omitted.
@@ -360,6 +393,82 @@ public final class DatabaseUrlTranslator {
         throw new IllegalStateException(summary + ": a username or a password must not appear in the "
                 + "JDBC URL. Supply them through the user-info component of " + EXPECTED_FORM + " so "
                 + "they are held apart from the URL.");
+    }
+
+    // Secondary secrets carried by a URL property — DL-072 — see docs/DECISION_LOG.md
+    /**
+     * Rejects a URL carrying a property whose name declares it to hold a secret this service cannot
+     * separate from the URL.
+     *
+     * <p>Only properties are inspected: every {@code ?}, {@code &} and {@code ;} separated segment
+     * after the first, which is the same grammar {@link #carriesCredentialMaterial(String)} reads. A
+     * primary credential property is not reported here — on the parse path it has already been
+     * extracted, and on the pass-through path
+     * {@link #rejectCredentialMaterial(String, String)} has already refused it.
+     *
+     * <p>The failure names the offending property names, in the order they appear and as they were
+     * written, and never any part of a value. A deployment carrying such a property removes it from
+     * {@code DATABASE_URL}: this service binds the pool from
+     * {@code scanner.datasource.pool.*}, whose eight members carry geometry and timing only, so there
+     * is no property to move a driver secret to — DL-270, DL-271.
+     *
+     * @param url the URL to inspect, either a passed-through value or a reassembled one
+     * @throws IllegalStateException if any property name carries a token of
+     *     {@link #SECRET_NAME_TOKENS}
+     */
+    private static void rejectSecretBearingProperties(String url) {
+        final List<String> offending = new ArrayList<>();
+        final String[] tokens = PROPERTY_SEPARATOR.split(url, -1);
+        for (int i = 1; i < tokens.length; i++) {
+            final String name = propertyName(tokens[i]);
+            if (name.isEmpty() || CREDENTIAL_PROPERTY_NAMES.contains(name.toLowerCase(Locale.ROOT))) {
+                continue;
+            }
+            if (carriesSecretToken(name)) {
+                offending.add(name);
+            }
+        }
+        if (offending.isEmpty()) {
+            return;
+        }
+
+        final String named = String.join(", ", offending);
+        LOG.error("DATABASE_URL carries {} secret-bearing propert{}: {}. No value is reproduced.",
+                offending.size(), offending.size() == 1 ? "y" : "ies", named);
+        throw new IllegalStateException("DATABASE_URL carries secret-bearing propert"
+                + (offending.size() == 1 ? "y " : "ies ") + named + ": a driver secret must not "
+                + "appear in the URL, and this service has no property to bind one to. Remove "
+                + (offending.size() == 1 ? "it" : "them") + " from DATABASE_URL. No value is "
+                + "reproduced here.");
+    }
+
+    /**
+     * Reports whether a property name carries a token that makes it secret-bearing.
+     *
+     * @param name the property name as written, never {@code null}
+     * @return {@code true} when the lower-cased name holds any member of
+     *     {@link #SECRET_NAME_TOKENS} as a substring
+     */
+    private static boolean carriesSecretToken(String name) {
+        final String normalised = name.toLowerCase(Locale.ROOT);
+        for (String token : SECRET_NAME_TOKENS) {
+            if (normalised.contains(token)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Reads the name of a {@code name=value} property token.
+     *
+     * @param token one property segment, never {@code null}
+     * @return the text before the first {@code '='}, stripped; the whole stripped token when it
+     *     carries no {@code '='}
+     */
+    private static String propertyName(String token) {
+        final int equals = token.indexOf(EQUALS_SIGN);
+        return (equals < 0 ? token : token.substring(0, equals)).strip();
     }
 
     /**
@@ -400,11 +509,9 @@ public final class DatabaseUrlTranslator {
         return false;
     }
 
-    /** Reports whether a {@code name=value} token names a credential property. */
+    /** Reports whether a {@code name=value} token names a primary credential property. */
     private static boolean isCredentialProperty(String token) {
-        final int equals = token.indexOf(EQUALS_SIGN);
-        final String name = equals < 0 ? token : token.substring(0, equals);
-        return CREDENTIAL_PROPERTY_NAMES.contains(name.strip().toLowerCase(Locale.ROOT));
+        return CREDENTIAL_PROPERTY_NAMES.contains(propertyName(token).toLowerCase(Locale.ROOT));
     }
 
     /**
@@ -447,7 +554,7 @@ public final class DatabaseUrlTranslator {
                 continue;
             }
             final String value = equals < 0 ? "" : decodeUriComponent(token.substring(equals + 1));
-            if (name.equals("user") || name.equals("username")) {
+            if (IDENTITY_PROPERTY_NAMES.contains(name)) {
                 if (username == null) {
                     username = value;
                 }

@@ -3,6 +3,7 @@ package com.codeskeptic.scanner;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
 
 import java.time.Duration;
@@ -67,9 +68,13 @@ import com.codeskeptic.scanner.service.ResponseService;
 import com.codeskeptic.scanner.service.SentimentAnalysisService;
 import com.codeskeptic.scanner.service.SettingsService;
 import com.codeskeptic.scanner.service.TwitterService;
+import com.codeskeptic.scanner.entity.Setting;
+import com.codeskeptic.scanner.task.BackgroundOwnership;
+import com.codeskeptic.scanner.task.ProviderWorkBudget;
 import com.codeskeptic.scanner.task.ResponseGenerationScheduler;
 import com.codeskeptic.scanner.task.TweetStreamClient;
 import com.codeskeptic.scanner.task.TweetStreamListener;
+import com.codeskeptic.scanner.util.QueryParameters;
 
 // Replaces backend/tests/test_api.py, which imported fastapi.testclient at :L2 against a Flask
 // application and could not be collected — see docs/DECISION_LOG.md DL-021, DL-115
@@ -173,7 +178,9 @@ class ScannerApplicationTests {
                 Arguments.of("SettingRepository", SettingRepository.class),
                 Arguments.of("TweetStreamClient", TweetStreamClient.class),
                 Arguments.of("TweetStreamListener", TweetStreamListener.class),
-                Arguments.of("ResponseGenerationScheduler", ResponseGenerationScheduler.class));
+                Arguments.of("ResponseGenerationScheduler", ResponseGenerationScheduler.class),
+                Arguments.of("BackgroundOwnership", BackgroundOwnership.class),
+                Arguments.of("ProviderWorkBudget", ProviderWorkBudget.class));
     }
 
     @ParameterizedTest(name = "[{index}] {0} {1}")
@@ -235,41 +242,110 @@ class ScannerApplicationTests {
                 .contains("tweet_popularity_threshold");
     }
 
+    // The finite page-size bound on the wire — DL-123 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("serves at most the maximum page size for a list request naming a larger one")
+    void servesAtMostTheMaximumPageSizeForAListRequestNamingALargerOne() throws Exception {
+        String token = accessToken();
+
+        for (String route : List.of("/tweets", "/responses")) {
+            MockHttpServletResponse response = mockMvc.perform(get(route)
+                            .param("per_page", String.valueOf(Integer.MAX_VALUE))
+                            .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                    .andReturn().getResponse();
+
+            assertThat(response.getStatus()).as("status of %s", route)
+                    .isEqualTo(HttpStatus.OK.value());
+            assertThat(response.getContentAsString()).as("body of %s", route)
+                    .contains("\"per_page\":" + QueryParameters.MAXIMUM_PAGE_SIZE)
+                    .doesNotContain("\"per_page\":" + Integer.MAX_VALUE);
+        }
+    }
+
     @Test
     @DisplayName("leaves ingestion stopped when the X consumer credentials carry nothing")
     void leavesIngestionStoppedWhenTheXConsumerCredentialsCarryNothing() {
         assertThat(context.getBean(TweetStreamClient.class).isRunning()).isFalse();
     }
 
-    // Full-context scheduler state under the test profile — DL-239 — see docs/DECISION_LOG.md
+    // Full-context scheduler state under the test profile — DL-239, DL-281 — see
+    // docs/DECISION_LOG.md
     @Test
-    @DisplayName("keeps the one response-generation trigger pending beyond the suite window")
-    void keepsTheOneResponseGenerationTriggerPendingBeyondTheSuiteWindow() {
+    @DisplayName("registers the response-generation trigger and the ownership renewal, and keeps the "
+            + "trigger pending beyond the suite window")
+    void registersTheResponseGenerationTriggerAndTheOwnershipRenewal() {
         Map<String, ScheduledTaskHolder> holders =
                 context.getBeansOfType(ScheduledTaskHolder.class);
         assertThat(holders).hasSize(1);
 
         ScheduledTaskHolder holder = holders.values().iterator().next();
-        assertThat(holder.getScheduledTasks()).hasSize(1);
+        // Two tasks: the completion-based generation pass and the fixed-delay ownership renewal
+        assertThat(holder.getScheduledTasks()).hasSize(2);
+        assertThat(holder.getScheduledTasks())
+                .extracting(scheduledTask -> scheduledTask.getTask().getClass().getSimpleName())
+                .containsExactlyInAnyOrder("TriggerTask", "FixedDelayTask");
 
-        ScheduledTask scheduled = holder.getScheduledTasks().iterator().next();
-        assertThat(scheduled.getTask()).isInstanceOf(TriggerTask.class);
-
-        ThreadPoolTaskScheduler taskScheduler =
-                context.getBean(ThreadPoolTaskScheduler.class);
+        ScheduledTask pass = holder.getScheduledTasks().stream()
+                .filter(scheduledTask -> scheduledTask.getTask() instanceof TriggerTask)
+                .findFirst()
+                .orElseThrow();
 
         // The first pass runs at startup, which is the work-then-sleep order of
         // backend/app/tasks/response_generation.py:L41-50 — DL-245, DL-251 — so what the test profile
         // guarantees is that no second pass falls inside the suite window: the interval in force is a
-        // day, and at most the one startup pass can have completed.
+        // day.
         assertThat(context.getBean(ScannerProperties.class).responseGenerationDelaySeconds())
                 .isEqualTo(86_400L);
-        assertThat(taskScheduler.getScheduledThreadPoolExecutor().getCompletedTaskCount())
-                .isLessThanOrEqualTo(1L);
 
-        Instant nextExecution = scheduled.nextExecution();
+        Instant nextExecution = pass.nextExecution();
         assertThat(nextExecution).isNotNull();
         assertThat(nextExecution).isBefore(Instant.now().plus(Duration.ofHours(25)));
+
+        // The renewal is paced by the bound scanner.background.lease-renew-seconds — DL-281
+        assertThat(context.getBean(ScannerProperties.class).background().leaseRenewSeconds())
+                .isEqualTo(5L);
+    }
+
+    // The background-ownership lease under the test profile — DL-281 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("holds the background-ownership lease in the one running process")
+    void holdsTheBackgroundOwnershipLeaseInTheOneRunningProcess() {
+        BackgroundOwnership ownership = context.getBean(BackgroundOwnership.class);
+
+        assertThat(ownership.isRunning()).isTrue();
+        assertThat(ownership.isOwner()).isTrue();
+        assertThat(ownership.instanceId()).isNotBlank();
+        assertThat(context.getBean(SettingRepository.class)
+                .findById(BackgroundOwnership.OWNER_SETTING_KEY))
+                .isPresent()
+                .get()
+                .extracting(Setting::getValue, org.assertj.core.api.InstanceOfAssertFactories.STRING)
+                .contains(ownership.instanceId());
+    }
+
+    // The reserved coordination key — DL-284 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("withholds the ownership lease row from GET /settings and refuses to write it")
+    void withholdsTheOwnershipLeaseRowFromTheSettingsRoute() throws Exception {
+        MockHttpServletResponse listed = mockMvc.perform(get("/settings")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken()))
+                .andReturn()
+                .getResponse();
+
+        assertThat(listed.getStatus()).isEqualTo(HttpStatus.OK.value());
+        assertThat(listed.getContentAsString())
+                .doesNotContain(BackgroundOwnership.OWNER_SETTING_KEY);
+
+        MockHttpServletResponse written = mockMvc.perform(
+                        put("/settings/" + BackgroundOwnership.OWNER_SETTING_KEY)
+                                .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken())
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"value\":\"stolen\"}"))
+                .andReturn()
+                .getResponse();
+
+        assertThat(written.getStatus()).isEqualTo(HttpStatus.NOT_FOUND.value());
+        assertThat(written.getContentAsString()).isEqualTo("{\"error\":\"Setting not found\"}");
     }
 
     // The error-dispatch strategy of DL-183 — see docs/DECISION_LOG.md

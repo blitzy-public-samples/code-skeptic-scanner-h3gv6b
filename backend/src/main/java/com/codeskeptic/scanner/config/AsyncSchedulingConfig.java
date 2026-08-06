@@ -18,6 +18,7 @@ import org.springframework.scheduling.config.ScheduledTaskRegistrar;
 
 import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.repository.SettingRepository;
+import com.codeskeptic.scanner.task.BackgroundOwnership;
 import com.codeskeptic.scanner.task.ResponseGenerationScheduler;
 import com.codeskeptic.scanner.util.LogSafe;
 
@@ -39,7 +40,9 @@ import com.codeskeptic.scanner.util.LogSafe;
  * table takes precedence, and {@code scanner.response-generation-delay-seconds} applies when that row
  * is absent or does not hold a positive number of seconds — DL-227.
  *
- * <p>The scheduler carries a pool of {@value #POOL_SIZE} thread, and at shutdown it stops accepting
+ * <p>The scheduler carries a pool of {@value #POOL_SIZE} threads — one for the generation pass
+ * and one for the ownership renewal, so a pass that runs long cannot delay a renewal and let the
+ * lease lapse (DL-281) — and at shutdown it stops accepting
  * work and awaits a pass that is already running for up to {@value #SHUTDOWN_AWAIT_SECONDS} seconds.
  * The cancellation policy is left at the {@link ThreadPoolTaskScheduler} default.
  * {@code @EnableAsync} is not declared. No message broker, queue, distributed scheduler lock,
@@ -54,7 +57,7 @@ import com.codeskeptic.scanner.util.LogSafe;
  * {@code scanner.background.response-generation-enabled} must both hold, and a process for which
  * either is {@code false} registers no task at all — see docs/DECISION_LOG.md DL-250.
  *
- * <p>The first pass runs immediately rather than one interval after startup, matching the
+ * <p>The first pass runs immediately, and not one interval after startup, matching the
  * work-then-sleep order of {@code backend/app/tasks/response_generation.py:L41-50}. A resolved interval
  * is read within {@value #MINIMUM_DELAY_SECONDS} second and {@value #MAXIMUM_DELAY_SECONDS} seconds, a
  * settings read that fails leaves the configured value in force, and no failure of the trigger can
@@ -78,7 +81,7 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
     private static final String THREAD_NAME_PREFIX = "scanner-scheduler-";
 
     /** Threads the scheduler runs concurrently. */
-    private static final int POOL_SIZE = 1;
+    private static final int POOL_SIZE = 2;
 
     /**
      * Seconds the container waits at shutdown for a pass that is already running — DL-251 — see
@@ -105,6 +108,9 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
     /** The pass that runs on the registered fixed-delay task. */
     private final ResponseGenerationScheduler responseGenerationScheduler;
 
+    /** Decides whether this process runs background work at all — DL-281. */
+    private final BackgroundOwnership backgroundOwnership;
+
     /** Data access for the {@code settings} table, read once per pass — DL-227. */
     private final SettingRepository settingRepository;
 
@@ -120,6 +126,9 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
     /** Guards the record raised when the resolved interval is replaced by a bound — DL-251. */
     private final AtomicBoolean delayBoundedReported = new AtomicBoolean();
 
+    /** Guards the record raised when a pass is skipped for want of ownership — DL-281. */
+    private final AtomicBoolean passSkippedReported = new AtomicBoolean();
+
     /**
      * Binds the scheduled pass, the {@code settings} row that paces it and the configured fallback.
      *
@@ -129,16 +138,21 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
      *                                    read from, must not be {@code null}
      * @param properties                  the bound configuration root carrying the fallback interval,
      *                                    must not be {@code null}
+     * @param backgroundOwnership         the lease every registered task is gated on, must not be
+     *                                    {@code null}
      * @throws NullPointerException when any argument is {@code null}
      */
     public AsyncSchedulingConfig(ResponseGenerationScheduler responseGenerationScheduler,
             SettingRepository settingRepository,
-            ScannerProperties properties) {
+            ScannerProperties properties,
+            BackgroundOwnership backgroundOwnership) {
         this.responseGenerationScheduler = Objects.requireNonNull(responseGenerationScheduler,
                 "responseGenerationScheduler must not be null.");
         this.settingRepository = Objects.requireNonNull(settingRepository,
                 "settingRepository must not be null.");
         this.properties = Objects.requireNonNull(properties, "properties must not be null.");
+        this.backgroundOwnership = Objects.requireNonNull(backgroundOwnership,
+                "backgroundOwnership must not be null.");
     }
 
     /**
@@ -150,7 +164,7 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
      * context holds exactly one scheduler.
      *
      * <p>Four values are set on the instance: the thread-name prefix, a pool of
-     * {@value #POOL_SIZE} thread, waiting for tasks to complete on shutdown, and a termination wait of
+     * {@value #POOL_SIZE} threads, waiting for tasks to complete on shutdown, and a termination wait of
      * {@value #SHUTDOWN_AWAIT_SECONDS} seconds — DL-251. The cancellation policy is left at the
      * {@link ThreadPoolTaskScheduler} default and {@code spring.task.scheduling.*} is not read. No
      * {@code ErrorHandler} is set; the framework default applies, under which an exception thrown by a
@@ -198,6 +212,17 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
      */
     @Override
     public void configureTasks(ScheduledTaskRegistrar registrar) {
+        // The renewal keeps or takes the lease every background path is gated on, so it is registered
+        // in every process whose switches admit any background work — DL-281 — see
+        // docs/DECISION_LOG.md
+        if (backgroundOwnership.isAutoStartup()) {
+            long renewSeconds = leaseRenewSeconds();
+            registrar.addFixedDelayTask(backgroundOwnership::renewOwnership,
+                    Duration.ofSeconds(renewSeconds));
+            log.info("Background-ownership renewal registered as a fixed-delay task every {}s",
+                    renewSeconds);
+        }
+
         // Only the designated background worker registers the pass — DL-250 — see
         // docs/DECISION_LOG.md
         if (!runsResponseGeneration()) {
@@ -207,13 +232,50 @@ public class AsyncSchedulingConfig implements SchedulingConfigurer {
             return;
         }
 
-        registrar.addTriggerTask(responseGenerationScheduler::generatePendingResponses,
+        registrar.addTriggerTask(this::runResponseGenerationPass,
                 this::nextResponseGenerationPass);
 
         log.info("Response generation registered as a fixed-delay task paced by the '{}' setting row, "
                 + "falling back to scanner.response-generation-delay-seconds ({}s); the first pass "
                 + "runs immediately",
                 RESPONSE_GENERATION_DELAY_SETTING_KEY, properties.responseGenerationDelaySeconds());
+    }
+
+    // Net-new ownership gate on the registered pass — DL-281 — see docs/DECISION_LOG.md
+    /**
+     * Runs one generation pass when this process holds the background-ownership lease.
+     *
+     * <p>A pass is skipped whenever the lease is not held, which is the state of every process that is
+     * not the background owner and of the owner itself once a renewal has failed. The skip is
+     * recorded once per uninterrupted run of skipped passes: a process that never owns the lease
+     * writes one record in total, none per interval — DL-197, DL-281.
+     *
+     * <p>The method raises nothing: {@link ResponseGenerationScheduler#generatePendingResponses()}
+     * records and suppresses every failure of its own.
+     */
+    private void runResponseGenerationPass() {
+        if (!backgroundOwnership.isOwner()) {
+            if (passSkippedReported.compareAndSet(false, true)) {
+                log.info("Response generation pass skipped: this process does not hold the "
+                        + "background-ownership lease");
+            }
+            return;
+        }
+        passSkippedReported.set(false);
+        responseGenerationScheduler.generatePendingResponses();
+    }
+
+    /**
+     * Reports the renewal interval in force.
+     *
+     * @return the bound value of {@code scanner.background.lease-renew-seconds}, or the declared
+     *     default when the group is unbound
+     */
+    private long leaseRenewSeconds() {
+        ScannerProperties.Background background = properties.background();
+        return background == null
+                ? ScannerProperties.Background.of(true, true, true).leaseRenewSeconds()
+                : background.leaseRenewSeconds();
     }
 
     /**

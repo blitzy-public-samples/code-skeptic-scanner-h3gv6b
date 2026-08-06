@@ -92,8 +92,17 @@ public class TwitterService {
     /** Wire value of {@code per_page} when the request omits it. */
     private static final int DEFAULT_PER_PAGE = 10;
 
-    /** Lowest {@code per_page} a page request accepts. */
-    private static final int MINIMUM_PER_PAGE = 1;
+    /**
+      * Lowest {@code per_page} a page request accepts, which is
+      * {@value com.codeskeptic.scanner.util.QueryParameters#MINIMUM_PAGE_SIZE} — DL-123.
+      */
+    private static final int MINIMUM_PER_PAGE = QueryParameters.MINIMUM_PAGE_SIZE;
+
+    /**
+      * Highest {@code per_page} this route serves, which is
+      * {@value com.codeskeptic.scanner.util.QueryParameters#MAXIMUM_PAGE_SIZE} — DL-123.
+      */
+    private static final int MAXIMUM_PER_PAGE = QueryParameters.MAXIMUM_PAGE_SIZE;
 
     /** Rows one page statement returns, however large {@code per_page} is — DL-249. */
     private static final int PAGE_FETCH_CHUNK_ROWS = 500;
@@ -168,9 +177,10 @@ public class TwitterService {
      * {@link PaginationDto#page()} of the result restates the 1-based number.
      *
      * <p>Arguments outside the accepted range are replaced and the replacement is logged at
-     * {@code WARN}: a {@code page} below {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}, and
-     * a {@code perPage} below {@value #MINIMUM_PER_PAGE} is read as {@value #DEFAULT_PER_PAGE}, and no
-     * upper bound is applied to {@code perPage} — DL-123 — see docs/DECISION_LOG.md.
+     * {@code WARN}: a {@code page} below {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}, a
+     * {@code perPage} below {@value #MINIMUM_PER_PAGE} is read as {@value #DEFAULT_PER_PAGE}, and a
+     * {@code perPage} above {@value #MAXIMUM_PER_PAGE} is read as {@value #MAXIMUM_PER_PAGE} — DL-123
+     * — see docs/DECISION_LOG.md. The page size the pagination block restates is the size served.
      *
      * <p>A {@code page} beyond the last populated page yields an empty {@link
      * PaginatedTweetsDto#tweets()} list while {@link PaginationDto#total()} and
@@ -188,25 +198,26 @@ public class TwitterService {
      * <p>A page of at most {@value #PAGE_FETCH_CHUNK_ROWS} rows is read by one statement. A larger page
      * is read as consecutive chunks of that bound, each chunk converted before the next is read, so the
      * rows one statement returns are bounded however large {@code per_page} is — see
-     * docs/DECISION_LOG.md DL-249. Rows are ordered by {@code tweets.id} ascending. The rows the page
-     * itself holds are bounded by the table, which is the wire contract this migration preserves — see
-     * docs/DECISION_LOG.md DL-123, DL-200 and DL-249.
+     * docs/DECISION_LOG.md DL-249. Rows are ordered by {@code tweets.id} ascending. The rows one
+     * response carries are bounded by {@value #MAXIMUM_PER_PAGE} and by the table — see
+     * docs/DECISION_LOG.md DL-123 and DL-249.
      *
      * @param page    the 1-based page number requested through the {@code page} query parameter; a
      *                value below {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}
      * @param perPage the page size requested through the {@code per_page} query parameter; a value
-     *                below {@value #MINIMUM_PER_PAGE} is read as {@value #DEFAULT_PER_PAGE} and no
-     *                larger value is reduced
+     *                below {@value #MINIMUM_PER_PAGE} is read as {@value #DEFAULT_PER_PAGE} and a
+     *                value above {@value #MAXIMUM_PER_PAGE} is read as {@value #MAXIMUM_PER_PAGE}
      * @return the {@code tweets} and {@code pagination} pair rendered by {@code GET /tweets}, never
      *         {@code null}
      */
     @Transactional(readOnly = true)
     public PaginatedTweetsDto getPaginatedTweets(int page, int perPage) {
-        // Only the values PageRequest.of cannot express are replaced; a large per_page is honoured
-        // as requested — DL-123, DL-217 — see docs/DECISION_LOG.md
+        // A page number below the first page reads as the first page — DL-123, DL-217 — see
+        // docs/DECISION_LOG.md
         int effectivePage = (page < DEFAULT_PAGE) ? DEFAULT_PAGE : page;
-        // No upper bound is applied; the source declared none — see docs/DECISION_LOG.md DL-123
-        int effectivePerPage = (perPage < MINIMUM_PER_PAGE) ? DEFAULT_PER_PAGE : perPage;
+        // The page size is bounded by the single declaration both list routes share — DL-123 — see
+        // docs/DECISION_LOG.md
+        int effectivePerPage = QueryParameters.boundPageSize(perPage, DEFAULT_PER_PAGE);
         if (effectivePage != page || effectivePerPage != perPage) {
             log.warn("Read requested page {} size {} as page {} size {}.",
                     page, perPage, effectivePage, effectivePerPage);
@@ -408,7 +419,7 @@ public class TwitterService {
      * <p>The comparison is the one of {@code backend/app/services/twitter_service.py:L46} and is
      * identical to the one {@link #meetsPopularityThreshold(Integer)} performs. This overload reads no
      * table and opens no transaction, so a caller that evaluates the gate once per delivered record
-     * pays for one threshold resolution per cycle rather than one per record — DL-255.
+     * pays for one threshold resolution per cycle, and not one per record — DL-255.
      *
      * <p>A {@code null} like count reports {@code false}.
      *

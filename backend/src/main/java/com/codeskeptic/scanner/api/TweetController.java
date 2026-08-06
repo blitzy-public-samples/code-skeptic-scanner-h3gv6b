@@ -149,7 +149,11 @@ public class TweetController {
      * negative value: this method applies no minimum, no maximum and no re-basing.
      * {@code service.TwitterService.getPaginatedTweets} reads a 1-based {@code page} and requests the
      * matching 0-based repository index, and the {@code page} value it reports back is 1-based — see
-     * docs/DECISION_LOG.md DL-038.
+     * docs/DECISION_LOG.md DL-038. That method is where the page size is bounded: a {@code per_page}
+     * above {@value com.codeskeptic.scanner.util.QueryParameters#MAXIMUM_PAGE_SIZE} is served
+     * {@value com.codeskeptic.scanner.util.QueryParameters#MAXIMUM_PAGE_SIZE} rows and the
+     * {@code pagination} block restates that size, while the status stays 200 — see
+     * docs/DECISION_LOG.md DL-123.
      *
      * <p>Example request: {@code GET /tweets} carrying the query string {@code page=3} with
      * {@code per_page=25}, which reads the third page of 25 rows.

@@ -1,6 +1,5 @@
 package com.codeskeptic.scanner.security;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Date;
@@ -8,6 +7,7 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 import javax.crypto.SecretKey;
 
@@ -23,6 +23,8 @@ import io.jsonwebtoken.Jws;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.JwtParser;
 import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.io.DecodingException;
+import io.jsonwebtoken.io.Decoders;
 import io.jsonwebtoken.security.Keys;
 
 // Minting is ported from backend/app/core/security.py:L6-12 (faithful port) — see
@@ -48,11 +50,16 @@ import io.jsonwebtoken.security.Keys;
  * {@code exp}, its {@code sub} is non-blank and its {@code exp} lies strictly after its
  * {@code iat} — DL-109.
  *
+ * <p>{@code scanner.jwt.secret} carries a **Base64 or Base64URL encoding** of the key material, and
+ * never the key material as text: the configured value is decoded before it reaches
+ * {@link Keys#hmacShaKeyFor(byte[])}, and the decoded material is what must be at least
+ * {@value #MINIMUM_SECRET_BYTES} bytes long — DL-186.
+ *
  * <p>Construction fails with {@link IllegalStateException} when {@code scanner.jwt.secret} carries
  * nothing — it is absent, blank, or still holds the unresolved {@code ${SECRET_KEY}} placeholder
- * text an unset environment variable leaves behind — DL-016, DL-185, DL-186 — when it supplies
- * fewer than the {@value #MINIMUM_SECRET_BYTES} bytes {@value #REQUIRED_ALGORITHM} requires —
- * DL-186 — when {@code scanner.jwt.algorithm} names anything other than
+ * text an unset environment variable leaves behind — DL-016, DL-185, DL-186 — when it is not an
+ * encoding in either Base64 alphabet, when it decodes to fewer than the
+ * {@value #MINIMUM_SECRET_BYTES} bytes {@value #REQUIRED_ALGORITHM} requires — DL-186 — when {@code scanner.jwt.algorithm} names anything other than
  * {@value #REQUIRED_ALGORITHM} — DL-015, DL-108, DL-184 — and when
  * {@code scanner.jwt.expiration-minutes} lies outside
  * {@value #MINIMUM_EXPIRATION_MINUTES}..{@value #MAXIMUM_EXPIRATION_MINUTES} — DL-110. Every one of
@@ -96,8 +103,25 @@ public class JwtService {
     /** Multiplier applied by {@link #getExpirationSeconds()} to the configured lifetime in minutes. */
     private static final long SECONDS_PER_MINUTE = 60L;
 
-    /** Shortest accepted {@code scanner.jwt.secret}, in bytes of its UTF-8 encoding — DL-186. */
+    /**
+     * Shortest accepted {@code scanner.jwt.secret}, in bytes of the key material its encoding decodes
+     * to — DL-186.
+     */
     private static final int MINIMUM_SECRET_BYTES = 32;
+
+    /**
+     * Shape of a {@code scanner.jwt.secret} written in the standard Base64 alphabet: at least one
+     * character of {@code A-Za-z0-9+/} followed by at most two {@code =} pad characters — DL-186.
+     */
+    private static final Pattern BASE64_SECRET =
+            Pattern.compile("^[A-Za-z0-9+/]+={0,2}$");
+
+    /**
+     * Shape of a {@code scanner.jwt.secret} written in the URL-safe Base64 alphabet, which carries
+     * {@code -} and {@code _} where the standard alphabet carries {@code +} and {@code /} — DL-186.
+     */
+    private static final Pattern BASE64URL_SECRET =
+            Pattern.compile("^[A-Za-z0-9\\-_]+={0,2}$");
 
     /** Bits per byte used in secret-length diagnostics — DL-186. */
     private static final int BITS_PER_BYTE = 8;
@@ -106,6 +130,18 @@ public class JwtService {
     private static final String MISSING_SECRET_MESSAGE =
             "scanner.jwt.secret is not configured; supply it through the SECRET_KEY environment "
                     + "variable. It has no default value.";
+
+    /**
+     * Message raised for a {@code scanner.jwt.secret} that is not a Base64 or Base64URL encoding of
+     * key material — DL-186. It names the property, the environment variable and the required
+     * encoding, and reproduces no part of the configured value.
+     */
+    private static final String UNDECODABLE_SECRET_MESSAGE =
+            "scanner.jwt.secret is not Base64-encoded. Set the SECRET_KEY environment variable to a "
+                    + "Base64 or Base64URL encoding of at least " + MINIMUM_SECRET_BYTES
+                    + " bytes of random key material, for example the output of "
+                    + "`openssl rand -base64 " + MINIMUM_SECRET_BYTES + "`. The configured value is "
+                    + "not reproduced here.";
 
     /** Names of the only claims a token this service accepts may carry — DL-109. */
     private static final Set<String> REQUIRED_CLAIM_NAMES = Set.of(
@@ -132,7 +168,8 @@ public class JwtService {
     /**
      * Resolves the signing key, the parser and the token lifetime from configuration.
      *
-     * <p>All three are resolved once here, replacing the per-call {@code get_settings()} at
+     * <p>The signing key is the decoded {@code scanner.jwt.secret}. All three are resolved once here,
+     * replacing the per-call {@code get_settings()} at
      * {@code backend/app/core/config.py:L17-18} that the source invoked at
      * {@code backend/app/core/security.py:L7}.
      *
@@ -140,8 +177,9 @@ public class JwtService {
      *     secret, the algorithm name and the lifetime
      * @throws NullPointerException if {@code properties} is {@code null}
      * @throws IllegalStateException if {@code scanner.jwt.secret} is absent, blank or an unresolved
-     *     {@code ${SECRET_KEY}} placeholder, if it supplies fewer than
-     *     {@value #MINIMUM_SECRET_BYTES} bytes, if {@code scanner.jwt.algorithm} names anything
+     *     {@code ${SECRET_KEY}} placeholder, if it is not a Base64 or Base64URL encoding, if it
+     *     decodes to fewer than {@value #MINIMUM_SECRET_BYTES} bytes, if
+     *     {@code scanner.jwt.algorithm} names anything
      *     other than {@value #REQUIRED_ALGORITHM}, or if
      *     {@code scanner.jwt.expiration-minutes} lies outside
      *     {@value #MINIMUM_EXPIRATION_MINUTES}..{@value #MAXIMUM_EXPIRATION_MINUTES}
@@ -150,12 +188,12 @@ public class JwtService {
         Objects.requireNonNull(properties, "properties must not be null");
 
         ScannerProperties.Jwt jwtProperties = properties.jwt();
-        String secret = requireConfiguredSecret(
+        byte[] keyMaterial = requireConfiguredSecret(
                 (jwtProperties == null) ? null : jwtProperties.secret());
 
         requireSupportedAlgorithm(jwtProperties.algorithm());
 
-        this.signingKey = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+        this.signingKey = Keys.hmacShaKeyFor(keyMaterial);
         this.expirationMinutes = requireSupportedLifetime(jwtProperties.expirationMinutes());
         this.parser = Jwts.parser()
                 .verifyWith(this.signingKey)
@@ -294,34 +332,69 @@ public class JwtService {
     }
 
     /**
-     * Confirms that a configured secret carries key material HS256 can use.
+     * Decodes a configured secret into the key material HS256 signs and verifies with.
      *
      * <p>{@code null}, a blank value and an unresolved {@code ${SECRET_KEY}} placeholder are all read
-     * as an unsupplied secret and raise the same message — DL-186. A value shorter than
+     * as an unsupplied secret and raise the same message — DL-186.
+     *
+     * <p>The configured value is an **encoding** of key material and never key material itself: it is
+     * held to the standard Base64 alphabet of {@link #BASE64_SECRET} or the URL-safe alphabet of
+     * {@link #BASE64URL_SECRET}, surrounding whitespace discarded, and is decoded with the matching
+     * {@code io.jsonwebtoken.io.Decoders} decoder. A value matching neither alphabet, and a value
+     * whose alphabet matches but which the decoder rejects, both raise
+     * {@value #UNDECODABLE_SECRET_MESSAGE}. Material that decodes to fewer than
      * {@value #MINIMUM_SECRET_BYTES} bytes is rejected before it reaches
-     * {@link Keys#hmacShaKeyFor(byte[])} — DL-186. Neither failure message reproduces any part of the
-     * configured value — DL-111.
+     * {@link Keys#hmacShaKeyFor(byte[])} — DL-186.
+     *
+     * <p>No failure message reproduces any part of the configured value, and no message states its
+     * length — DL-111, DL-186.
      *
      * @param configuredSecret value of {@code scanner.jwt.secret}, which may be {@code null}
-     * @return the validated secret
-     * @throws IllegalStateException if the value carries nothing or is shorter than
-     *     {@value #MINIMUM_SECRET_BYTES} bytes
+     * @return the decoded key material, at least {@value #MINIMUM_SECRET_BYTES} bytes long
+     * @throws IllegalStateException if the value carries nothing, is not a Base64 or Base64URL
+     *     encoding, or decodes to fewer than {@value #MINIMUM_SECRET_BYTES} bytes
      */
-    private static String requireConfiguredSecret(String configuredSecret) {
+    // Base64-encoded key material, decoded with the jjwt decoders — DL-186 — see
+    // docs/DECISION_LOG.md
+    private static byte[] requireConfiguredSecret(String configuredSecret) {
         if (ConfiguredValues.isUnset(configuredSecret)) {
             throw new IllegalStateException(MISSING_SECRET_MESSAGE);
         }
 
-        int suppliedBytes = configuredSecret.getBytes(StandardCharsets.UTF_8).length;
-        if (suppliedBytes < MINIMUM_SECRET_BYTES) {
+        String encoded = configuredSecret.trim();
+        byte[] keyMaterial = decodeSecret(encoded);
+
+        if (keyMaterial.length < MINIMUM_SECRET_BYTES) {
             throw new IllegalStateException(
-                    "scanner.jwt.secret supplies " + (suppliedBytes * BITS_PER_BYTE) + " bits, and "
-                            + REQUIRED_ALGORITHM + " requires "
-                            + (MINIMUM_SECRET_BYTES * BITS_PER_BYTE) + ". Set the SECRET_KEY "
-                            + "environment variable to a value of at least " + MINIMUM_SECRET_BYTES
-                            + " bytes. The configured value is not reproduced here.");
+                    "scanner.jwt.secret decodes to fewer than "
+                            + (MINIMUM_SECRET_BYTES * BITS_PER_BYTE) + " bits, which is what "
+                            + REQUIRED_ALGORITHM + " requires. Set the SECRET_KEY environment "
+                            + "variable to a Base64 or Base64URL encoding of at least "
+                            + MINIMUM_SECRET_BYTES + " bytes of random key material. The configured "
+                            + "value is not reproduced here.");
         }
-        return configuredSecret;
+        return keyMaterial;
+    }
+
+    /**
+     * Decodes a trimmed {@code scanner.jwt.secret} under whichever Base64 alphabet it is written in.
+     *
+     * @param encoded the trimmed configured value, neither {@code null} nor blank
+     * @return the decoded bytes
+     * @throws IllegalStateException if the value matches neither alphabet or the decoder rejects it
+     */
+    private static byte[] decodeSecret(String encoded) {
+        try {
+            if (BASE64_SECRET.matcher(encoded).matches()) {
+                return Decoders.BASE64.decode(encoded);
+            }
+            if (BASE64URL_SECRET.matcher(encoded).matches()) {
+                return Decoders.BASE64URL.decode(encoded);
+            }
+        } catch (DecodingException undecodable) {
+            throw new IllegalStateException(UNDECODABLE_SECRET_MESSAGE);
+        }
+        throw new IllegalStateException(UNDECODABLE_SECRET_MESSAGE);
     }
 
 

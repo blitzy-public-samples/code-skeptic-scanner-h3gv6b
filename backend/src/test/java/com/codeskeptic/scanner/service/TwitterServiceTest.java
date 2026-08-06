@@ -399,7 +399,7 @@ class TwitterServiceTest {
     @Test
     @DisplayName("warns again when the stored threshold holds a different unparseable value")
     void warnsAgainWhenTheStoredThresholdHoldsADifferentUnparseableValue() {
-        // Consecutive answers are chained rather than passed as varargs: a generic varargs array of
+        // Consecutive answers are chained and are not passed as varargs: a generic varargs array of
         // Optional<Setting> cannot be created without an unchecked warning.
         when(settingRepository.findById(POPULARITY_THRESHOLD_KEY))
                 .thenReturn(Optional.of(thresholdRow("first")))
@@ -420,7 +420,7 @@ class TwitterServiceTest {
     @Test
     @DisplayName("warns again when a value that parses is stored between two unparseable ones")
     void warnsAgainWhenAValueThatParsesIsStoredBetweenTwoUnparseableOnes() {
-        // Consecutive answers are chained rather than passed as varargs: a generic varargs array of
+        // Consecutive answers are chained and are not passed as varargs: a generic varargs array of
         // Optional<Setting> cannot be created without an unchecked warning.
         when(settingRepository.findById(POPULARITY_THRESHOLD_KEY))
                 .thenReturn(Optional.of(thresholdRow("bad")))
@@ -825,8 +825,8 @@ class TwitterServiceTest {
     @ParameterizedTest(name = "page {0} of size {1} is queried, its offset being at most 2147483647")
     @CsvSource({
             "214748365,10",
-            "2,2147483647",
-            "1,2147483647",
+            "2,1000",
+            "1,1000",
             "214748364,10"
     })
     @DisplayName("queries a page whose offset the paged query can express")
@@ -848,9 +848,9 @@ class TwitterServiceTest {
     @CsvSource({
             "2147483647,10",
             "2147483646,10",
-            "99999999,99999999",
+            "99999999,1000",
             "214748366,10",
-            "3,2147483647"
+            "2147485,1000"
     })
     @DisplayName("answers a page beyond the queryable offset with an empty page and no query")
     void answersAPageBeyondTheQueryableOffsetWithAnEmptyPageAndNoQuery(int page, int perPage) {
@@ -881,23 +881,32 @@ class TwitterServiceTest {
         assertThat(envelope.pagination().totalPages()).isZero();
     }
 
-    @ParameterizedTest(name = "a per_page of {0} is restated unreduced and read in bounded windows")
-    @ValueSource(ints = {100, 101, 500, 10_000, Integer.MAX_VALUE})
-    @DisplayName("applies no upper bound to per_page and reads it in bounded windows")
-    void appliesNoUpperBoundToPerPage(int perPage) {
+    @ParameterizedTest(name = "a per_page of {0} is served as {1} and read in bounded windows")
+    @CsvSource({
+            "100,100",
+            "101,101",
+            "500,500",
+            "1000,1000",
+            "1001,1000",
+            "10000,1000",
+            "2147483647,1000"
+    })
+    @DisplayName("serves per_page up to the maximum and reduces a larger one to it")
+    void servesPerPageUpToTheMaximumAndReducesALargerOneToIt(int perPage, int servedSize) {
         stubEveryWindowRead(0L);
 
         PaginatedTweetsDto rendered =
                 serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
 
         assertThat(rendered.pagination().perPage())
-                .as("per_page the envelope restates").isEqualTo(perPage);
+                .as("per_page the envelope restates").isEqualTo(servedSize);
+        assertThat(servedSize).isLessThanOrEqualTo(QueryParameters.MAXIMUM_PAGE_SIZE);
         assertThatEveryWindowIsBounded();
     }
 
     @Test
-    @DisplayName("restates the unreduced per_page in the pagination block")
-    void restatesTheUnreducedPerPageInThePaginationBlock() {
+    @DisplayName("restates a per_page within the maximum in the pagination block")
+    void restatesAPerPageWithinTheMaximumInThePaginationBlock() {
         when(tweetRepository.findAll(any(Pageable.class)))
                 .thenReturn(new PageImpl<>(List.of(), PageRequest.of(0, 500), 0L));
         when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
@@ -939,8 +948,8 @@ class TwitterServiceTest {
     @CsvSource({
             "214748366,10",
             "2147483647,10",
-            "2147483647,2147483647",
-            "3,1073741824"
+            "2147483647,1000",
+            "2147485,1000"
     })
     @DisplayName("renders the empty page for a page whose first row lies beyond the largest "
             + "addressable offset, without asking the repository for it")
@@ -1047,17 +1056,19 @@ class TwitterServiceTest {
     // getPaginatedTweets(int, int) — the envelope
     // -----------------------------------------------------------------------
 
-    // No upper bound is applied to per_page — IR9 — see docs/DECISION_LOG.md DL-200
+    // The finite page-size bound — DL-123 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "per_page {0} reads page size {1}")
     @CsvSource({
             "99,99",
             "100,100",
             "101,101",
             "1000,1000",
-            "2147483647,2147483647"
+            "1001,1000",
+            "2147483647,1000"
     })
-    @DisplayName("reads a per_page above the former upper bound unreduced")
-    void readsAPerPageAboveTheUpperBoundAsTheUpperBound(int perPage, int expectedSize) {
+    @DisplayName("reads a per_page at or below the maximum unreduced and a larger one as the maximum")
+    void readsAPerPageAtOrBelowTheMaximumUnreducedAndALargerOneAsTheMaximum(int perPage,
+            int expectedSize) {
         stubEveryWindowRead(0L);
 
         PaginatedTweetsDto rendered =
@@ -1185,36 +1196,38 @@ class TwitterServiceTest {
         assertThat(rendered.pagination().totalPages()).isZero();
     }
 
-    // backend/app/api/tweets.py:L12-13 declares a default for an absent parameter and no bound —
-    // DL-123 and DL-217 — see docs/DECISION_LOG.md
+    // backend/app/api/tweets.py:L12-13 declares a default for an absent parameter; the maximum is
+    // DL-123 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("serves the page size asked for, however large, applying no upper bound")
-    void requestsThePageSizeAskedForHoweverLarge() {
+    @DisplayName("serves the maximum page size for a request naming a larger one")
+    void servesTheMaximumPageSizeForARequestNamingALargerOne() {
         stubEveryWindowRead(0L);
 
         PaginatedTweetsDto rendered =
                 serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, 99999);
 
         assertThat(rendered.pagination().page()).as("page the envelope restates").isEqualTo(1);
-        assertThat(rendered.pagination().perPage())
-                .as("per_page the envelope restates").isEqualTo(99999);
+        assertThat(rendered.pagination().perPage()).as("per_page the envelope restates")
+                .isEqualTo(QueryParameters.MAXIMUM_PAGE_SIZE);
         assertThat(pageRequestsIssued()).as("windows the page read asked for")
                 .isNotEmpty()
                 .allSatisfy(window -> assertThat(window.getOffset()).isZero());
         assertThatEveryWindowIsBounded();
     }
 
-    // The per_page cap of DL-123 — see docs/DECISION_LOG.md
+    // The per_page maximum of DL-123 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "a per_page of {0} reads a page of size {1}")
     @CsvSource({
             "99,99",
             "100,100",
             "101,101",
             "250,250",
-            "2147483647,2147483647"
+            "1000,1000",
+            "1001,1000",
+            "2147483647,1000"
     })
-    @DisplayName("passes the page size through with no upper bound")
-    void passesThePageSizeThroughWithNoUpperBound(int perPage, int expectedSize) {
+    @DisplayName("passes a page size within the maximum through and reduces a larger one")
+    void passesAPageSizeWithinTheMaximumThroughAndReducesALargerOne(int perPage, int expectedSize) {
         stubEveryWindowRead(0L);
 
         PaginatedTweetsDto rendered =
@@ -1238,17 +1251,19 @@ class TwitterServiceTest {
         assertThat(rendered.pagination().perPage()).isEqualTo(500);
     }
 
-    // The source applied no upper bound to per_page at backend/app/api/tweets.py:L13 — DL-123
-    @ParameterizedTest(name = "per_page {0} is requested as {0}")
-    @ValueSource(ints = {1, 99, 100, 101, 1_000, 10_000, Integer.MAX_VALUE})
-    @DisplayName("restates the page size it was given however large it is")
-    void requestsThePageSizeItWasGivenHoweverLargeItIs(int perPage) {
+    // The page size the route serves for a requested one — DL-123 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "per_page {0} is served as at most the maximum")
+    @ValueSource(ints = {1, 99, 100, 101, 1_000, 1_001, 10_000, Integer.MAX_VALUE})
+    @DisplayName("restates the page size it serves, which is the smaller of the request and the "
+            + "maximum")
+    void restatesThePageSizeItServes(int perPage) {
         stubEveryWindowRead(0L);
 
         PaginatedTweetsDto rendered =
                 serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
 
-        assertThat(rendered.pagination().perPage()).isEqualTo(perPage);
+        assertThat(rendered.pagination().perPage())
+                .isEqualTo(Math.min(perPage, QueryParameters.MAXIMUM_PAGE_SIZE));
         assertThatEveryWindowIsBounded();
     }
 

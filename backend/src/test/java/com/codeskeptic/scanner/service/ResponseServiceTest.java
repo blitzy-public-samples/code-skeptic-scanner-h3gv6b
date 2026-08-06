@@ -88,6 +88,7 @@ import com.codeskeptic.scanner.exception.BadRequestException;
 import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.exception.ResponseGenerationException;
 import com.codeskeptic.scanner.util.LogSafe;
+import com.codeskeptic.scanner.util.QueryParameters;
 import com.codeskeptic.scanner.repository.ResponseRepository;
 import com.codeskeptic.scanner.repository.ResponseRepository.ResponseRow;
 import com.codeskeptic.scanner.repository.TweetRepository;
@@ -816,7 +817,7 @@ class ResponseServiceTest {
         verify(responseRepository).save(any(Response.class));
     }
 
-    // The per-instance claim is keyed by the parsed Integer rather than the raw path text — DL-195.
+    // The per-instance claim is keyed by the parsed Integer, and not by the raw path text — DL-195.
     @Test
     @DisplayName("treats alternate decimal spellings as one in-process generation claim")
     void treatsAlternateDecimalSpellingsAsOneInProcessGenerationClaim() throws Exception {
@@ -1363,17 +1364,26 @@ class ResponseServiceTest {
         assertThat(requested.getPageSize()).isEqualTo(10);
     }
 
-    // backend/app/api/responses.py:L11-12 declares defaults and no bound — DL-123
-    @ParameterizedTest(name = "a per_page of {0} is restated unreduced and read in bounded windows")
-    @ValueSource(ints = {100, 101, 500, 10_000, Integer.MAX_VALUE})
-    @DisplayName("applies no upper bound to per_page and reads it in bounded windows")
-    void appliesNoUpperBoundToPerPage(int perPage) {
+    // backend/app/api/responses.py:L11-12 declares the defaults; the maximum is DL-123
+    @ParameterizedTest(name = "a per_page of {0} is served as {1} and read in bounded windows")
+    @CsvSource({
+            "100,100",
+            "101,101",
+            "500,500",
+            "1000,1000",
+            "1001,1000",
+            "10000,1000",
+            "2147483647,1000"
+    })
+    @DisplayName("serves per_page up to the maximum and reduces a larger one to it")
+    void servesPerPageUpToTheMaximumAndReducesALargerOneToIt(int perPage, int servedSize) {
         stubEveryWindowRead(0L);
 
         PaginatedResponsesDto envelope = service.getPaginatedResponses(1, perPage);
 
         assertThat(envelope.pagination().perPage())
-                .as("per_page the envelope restates").isEqualTo(perPage);
+                .as("per_page the envelope restates").isEqualTo(servedSize);
+        assertThat(servedSize).isLessThanOrEqualTo(QueryParameters.MAXIMUM_PAGE_SIZE);
         assertThatEveryWindowIsBounded();
     }
 
@@ -1458,8 +1468,8 @@ class ResponseServiceTest {
     @CsvSource({
             "214748366,10",
             "2147483647,10",
-            "2147483647,2147483647",
-            "3,1073741824"
+            "2147483647,1000",
+            "2147485,1000"
     })
     @DisplayName("renders the empty page for a page whose first row lies beyond the largest "
             + "addressable offset, without asking the repository for it")
@@ -1516,17 +1526,19 @@ class ResponseServiceTest {
         assertThat(envelope.pagination().page()).isEqualTo(3);
     }
 
-    // No upper bound is applied to per_page — IR9 — see docs/DECISION_LOG.md DL-200
-    @ParameterizedTest(name = "a per_page of {0} reads a page of size {0}")
+    // The finite page-size bound — DL-123 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "a per_page of {0} reads a page of size {1}")
     @CsvSource({
             "99,99",
             "100,100",
             "101,101",
             "250,250",
-            "2147483647,2147483647"
+            "1000,1000",
+            "1001,1000",
+            "2147483647,1000"
     })
-    @DisplayName("passes the page size through with no upper bound")
-    void passesThePageSizeThroughWithNoUpperBound(int perPage, int expectedSize) {
+    @DisplayName("passes a page size within the maximum through and reduces a larger one")
+    void passesAPageSizeWithinTheMaximumThroughAndReducesALargerOne(int perPage, int expectedSize) {
         stubEveryWindowRead(0L);
 
         PaginatedResponsesDto envelope = service.getPaginatedResponses(1, perPage);
@@ -1535,10 +1547,10 @@ class ResponseServiceTest {
         assertThatEveryWindowIsBounded();
     }
 
-    // No upper bound is applied to per_page — IR9 — see docs/DECISION_LOG.md DL-200
+    // A page size within the maximum is restated as requested — DL-123 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("reports the supplied page size in the pagination block it builds")
-    void reportsTheSuppliedPageSizeInThePaginationBlockItBuilds() {
+    @DisplayName("reports a supplied page size within the maximum in the pagination block it builds")
+    void reportsASuppliedPageSizeWithinTheMaximumInThePaginationBlockItBuilds() {
         when(responseRepository.findAllRows(any(Pageable.class)))
                 .thenReturn(pageOfStoredRows(0, 500, 0L));
 
@@ -1581,7 +1593,7 @@ class ResponseServiceTest {
     @CsvSource({
             "214748365,10",
             "214748364,10",
-            "2,2147483647"
+            "2,1000"
     })
     @DisplayName("queries a page whose offset the paged query can express")
     void queriesAPageWhoseOffsetThePagedQueryCanExpress(int page, int perPage) {
@@ -1601,9 +1613,9 @@ class ResponseServiceTest {
     @CsvSource({
             "2147483647,10",
             "2147483646,10",
-            "99999999,99999999",
+            "99999999,1000",
             "214748366,10",
-            "3,2147483647"
+            "2147485,1000"
     })
     @DisplayName("answers a page beyond the queryable offset with an empty page and no query")
     void answersAPageBeyondTheQueryableOffsetWithAnEmptyPageAndNoQuery(int page, int perPage) {

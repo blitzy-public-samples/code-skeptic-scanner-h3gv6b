@@ -234,8 +234,8 @@ public class RestClientConfig {
      * Builds the request factory the Notion client uses, with a finite read timeout taken from
      * {@code scanner.notion.read-timeout-seconds}.
      *
-     * <p>The transport is the retained JDK HTTP client of {@link #notionHttpClient()}, named rather
-     * than detected on the classpath, so a call issued from any thread behaves the same and the
+     * <p>The transport is the retained JDK HTTP client of {@link #notionHttpClient()}, named here and
+     * not detected on the classpath, so a call issued from any thread behaves the same and the
      * transport can be shut down at context close - see docs/DECISION_LOG.md DL-221 and DL-264. The
      * connect bound belongs to the client and is applied there; only the read bound is applied per
      * request here - see docs/DECISION_LOG.md DL-150, DL-128.

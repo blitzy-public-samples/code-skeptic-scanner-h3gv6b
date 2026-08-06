@@ -1,6 +1,7 @@
 package com.codeskeptic.scanner.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -66,6 +67,7 @@ import com.codeskeptic.scanner.exception.BadRequestException;
 import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.service.mapper.SettingMapper;
+import com.codeskeptic.scanner.task.BackgroundOwnership;
 import com.codeskeptic.scanner.util.StreamRuleTerms;
 
 // Net-new (no Python counterpart; backend/app/api/settings.py:L3 imports a service that exists nowhere in the repository) — see docs/DECISION_LOG.md
@@ -457,8 +459,46 @@ class SettingsServiceTest {
 
         service.getAllSettings();
 
-        verify(settingMapper).toDtoList(same(rows));
+        ArgumentCaptor<List<Setting>> rendered = ArgumentCaptor.captor();
+        verify(settingMapper).toDtoList(rendered.capture());
+        assertThat(rendered.getValue()).containsExactlyElementsOf(rows);
         verifyNoMoreInteractions(settingMapper);
+    }
+
+    // The reserved coordination key is not part of the configuration surface — DL-284 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("withholds the ownership lease row from the rendered collection")
+    void withholdsTheOwnershipLeaseRowFromTheRenderedCollection() {
+        Setting lease = new Setting();
+        lease.setKey(BackgroundOwnership.OWNER_SETTING_KEY);
+        lease.setValue("instance@123");
+        lease.setDescription("lease");
+        List<Setting> rows = new ArrayList<>(threeStoredRows());
+        rows.add(lease);
+        when(settingRepository.findAll()).thenReturn(rows);
+        stubMapperToConvertEveryRow();
+
+        service.getAllSettings();
+
+        ArgumentCaptor<List<Setting>> rendered = ArgumentCaptor.captor();
+        verify(settingMapper).toDtoList(rendered.capture());
+        assertThat(rendered.getValue())
+                .extracting(Setting::getKey)
+                .doesNotContain(BackgroundOwnership.OWNER_SETTING_KEY)
+                .hasSize(threeStoredRows().size());
+    }
+
+    @Test
+    @DisplayName("reports the ownership lease key as absent on an update")
+    void reportsTheOwnershipLeaseKeyAsAbsentOnAnUpdate() {
+        assertThatExceptionOfType(NotFoundException.class)
+                .isThrownBy(() -> service.updateSetting(
+                        BackgroundOwnership.OWNER_SETTING_KEY, "taken"))
+                .withMessage("Setting not found");
+
+        verify(settingRepository, never()).findById(BackgroundOwnership.OWNER_SETTING_KEY);
+        verify(settingRepository, never()).save(any(Setting.class));
     }
 
     // -----------------------------------------------------------------------
@@ -1302,7 +1342,7 @@ class SettingsServiceTest {
      * Shuts the supplied executor down and asserts that it terminates.
      *
      * <p>Termination is awaited for at most {@value #CONCURRENCY_TIMEOUT_SECONDS} seconds. A thread
-     * still running at that bound fails the test rather than being left behind for the rest of the
+     * still running at that bound fails the test and is not left behind for the rest of the
      * build. An interrupt while awaiting is restored on the calling thread and reported, so the
      * interrupt is neither swallowed nor mistaken for a clean termination.
      *

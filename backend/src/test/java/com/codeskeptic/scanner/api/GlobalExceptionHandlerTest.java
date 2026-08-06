@@ -842,7 +842,7 @@ class GlobalExceptionHandlerTest {
             assertThat(logged)
                     .contains("Rejecting a request body the converter could not bind with HTTP 400")
                     .contains("HttpMessageConversionException")
-                    .contains("detail sha256:");
+                    .contains("detail hmac256:");
             assertThat(logged)
                     .doesNotContain("password")
                     .doesNotContain("s3cr3t-pa55phrase")
@@ -871,11 +871,11 @@ class GlobalExceptionHandlerTest {
 
         // Two requests that provoke the same library message share a token: the token names the
         // failure shape, not the caller or the body.
-        assertThat(repeated).startsWith("sha256:").isEqualTo(repeatedAgain).isEqualTo(otherRoute);
+        assertThat(repeated).startsWith("hmac256:").isEqualTo(repeatedAgain).isEqualTo(otherRoute);
 
         // A different library message yields a different token.
         assertThat(correlationTokenFor(new HttpMessageConversionException("a different failure")))
-                .startsWith("sha256:")
+                .startsWith("hmac256:")
                 .isNotEqualTo(repeated);
     }
 
@@ -906,8 +906,8 @@ class GlobalExceptionHandlerTest {
 
     // Net-new (no Python counterpart) — DL-197 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("attaches the throwable only for this service's own unexpected failure")
-    void attachesTheThrowableOnlyForThisServicesOwnUnexpectedFailure() {
+    @DisplayName("records the catch-all failure as bounded metadata and attaches no throwable")
+    void recordsTheCatchAllFailureAsBoundedMetadataAndAttachesNoThrowable() {
         ListAppender<ILoggingEvent> recorded = attachAdviceAppender();
         try {
             handler.handleUnexpectedException(new IllegalStateException("a defect in our own code"));
@@ -916,10 +916,109 @@ class GlobalExceptionHandlerTest {
                     .filter(event -> event.getLevel() == Level.ERROR)
                     .toList();
             assertThat(errors).hasSize(1);
-            assertThat(errors.get(0).getThrowableProxy()).isNotNull();
+            ILoggingEvent error = errors.get(0);
+            assertThat(error.getThrowableProxy()).as("throwable attached to the record").isNull();
+            assertThat(error.getFormattedMessage())
+                    .startsWith("Unhandled exception reached the error-handling advice; "
+                            + "responding HTTP 500. Failure IllegalStateException, raised at ")
+                    .contains("GlobalExceptionHandlerTest.")
+                    .contains(", correlation hmac256:")
+                    .doesNotContain("a defect in our own code");
+        } finally {
+            detachAdviceAppender(recorded);
+        }
+    }
+
+    // Log-capture proof that hostile failure text never reaches the ERROR record — DL-197 — see
+    // docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {0}")
+    @ValueSource(strings = {
+        "jdbc:postgresql://db.internal:5432/codeskeptic?user=scanner&password=s3cr3t",
+        "Connection refused: db.internal/10.0.0.7:5432",
+        "duplicate key value violates unique constraint \"tweets_pkey\": Detail: Key (id)=(4711)",
+        "\r\n2026-01-01 00:00:00 ERROR forged record boundary",
+        "value 'HUNTER2SECRET' at [Source: (String)\"{\"password\":\"HUNTER2SECRET\"}\"]",
+    })
+    @DisplayName("keeps hostile failure text out of the record the catch-all leaves")
+    void keepsHostileFailureTextOutOfTheRecordTheCatchAllLeaves(String hostileMessage) {
+        ListAppender<ILoggingEvent> recorded = attachAdviceAppender();
+        try {
+            handler.handleUnexpectedException(
+                    new IllegalStateException(hostileMessage, new RuntimeException(hostileMessage)));
+
+            List<ILoggingEvent> errors = recorded.list.stream()
+                    .filter(event -> event.getLevel() == Level.ERROR)
+                    .toList();
+            assertThat(errors).hasSize(1);
             assertThat(errors.get(0).getFormattedMessage())
-                    .isEqualTo("Unhandled exception reached the error-handling advice; "
-                            + "responding HTTP 500");
+                    .as("the ERROR record")
+                    .contains("Failure IllegalStateException <- RuntimeException")
+                    .doesNotContain(hostileMessage)
+                    .doesNotContain("password")
+                    .doesNotContain("s3cr3t")
+                    .doesNotContain("HUNTER2SECRET")
+                    .doesNotContain("db.internal")
+                    .doesNotContain("\n")
+                    .doesNotContain("\r");
+            assertThat(errors.get(0).getThrowableProxy()).isNull();
+        } finally {
+            detachAdviceAppender(recorded);
+        }
+    }
+
+    // The sanitized detail is reachable at the diagnostic level only — DL-197 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("writes the sanitized detail at DEBUG and nothing at all when DEBUG is off")
+    void writesTheSanitizedDetailAtDebugAndNothingAtAllWhenDebugIsOff() {
+        Logger adviceLogger = (Logger) LoggerFactory.getLogger(GlobalExceptionHandler.class);
+        ListAppender<ILoggingEvent> recorded = new ListAppender<>();
+        recorded.start();
+        adviceLogger.addAppender(recorded);
+        try {
+            adviceLogger.setLevel(Level.INFO);
+            handler.handleUnexpectedException(new IllegalStateException("first defect"));
+            assertThat(recorded.list.stream().filter(event -> event.getLevel() == Level.DEBUG))
+                    .as("DEBUG records written at INFO").isEmpty();
+
+            recorded.list.clear();
+            adviceLogger.setLevel(Level.DEBUG);
+            handler.handleUnexpectedException(new IllegalStateException("second defect"));
+
+            List<ILoggingEvent> debug = recorded.list.stream()
+                    .filter(event -> event.getLevel() == Level.DEBUG)
+                    .toList();
+            assertThat(debug).hasSize(1);
+            assertThat(debug.get(0).getFormattedMessage())
+                    .startsWith("Sanitized detail of the unhandled failure: "
+                            + "IllegalStateException[second defect] at ")
+                    .contains("GlobalExceptionHandlerTest.");
+            assertThat(debug.get(0).getThrowableProxy()).isNull();
+        } finally {
+            adviceLogger.detachAppender(recorded);
+            adviceLogger.setLevel(null);
+            recorded.stop();
+        }
+    }
+
+    // A newline inside a failure message cannot forge a record boundary, even at DEBUG — DL-149,
+    // DL-197 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("guards a newline inside a failure message at the diagnostic level too")
+    void guardsANewlineInsideAFailureMessageAtTheDiagnosticLevelToo() {
+        ListAppender<ILoggingEvent> recorded = attachAdviceAppender();
+        try {
+            handler.handleUnexpectedException(
+                    new IllegalStateException("first line\r\nforged ERROR second line"));
+
+            List<ILoggingEvent> debug = recorded.list.stream()
+                    .filter(event -> event.getLevel() == Level.DEBUG)
+                    .toList();
+            assertThat(debug).hasSize(1);
+            assertThat(debug.get(0).getFormattedMessage())
+                    .contains("IllegalStateException[first line??forged ERROR second line]")
+                    .doesNotContain("\r")
+                    .doesNotContain("\n");
         } finally {
             detachAdviceAppender(recorded);
         }
@@ -1114,11 +1213,14 @@ class GlobalExceptionHandlerTest {
             handler.handleIllegalArgument(new IllegalArgumentException(SUBMITTED_CREDENTIAL),
                     requestCarryingContentType("application/json"));
 
-            assertThat(appender.list).hasSize(2);
-            ILoggingEvent genuineFailureRecord = appender.list.get(1);
-            assertThat(genuineFailureRecord.getLevel()).isEqualTo(Level.ERROR);
-            assertThat(genuineFailureRecord.getFormattedMessage()).doesNotContain(SUBMITTED_CREDENTIAL);
-            assertThat(genuineFailureRecord.getThrowableProxy()).isNotNull();
+            ILoggingEvent genuineFailureRecord = appender.list.stream()
+                    .filter(event -> event.getLevel() == Level.ERROR)
+                    .findFirst()
+                    .orElseThrow();
+            assertThat(genuineFailureRecord.getFormattedMessage())
+                    .contains("Failure IllegalArgumentException")
+                    .doesNotContain(SUBMITTED_CREDENTIAL);
+            assertThat(genuineFailureRecord.getThrowableProxy()).isNull();
         } finally {
             detachAdviceAppender(appender);
         }

@@ -1862,7 +1862,7 @@ class LlmServiceTest {
             assertThatExceptionOfType(TimeoutException.class)
                     .isThrownBy(() -> shutdown.get(SETTLE_MILLIS, TimeUnit.MILLISECONDS));
 
-            // A request arriving during the wait is rejected rather than queued behind the release.
+            // A request arriving during the wait is rejected and is not queued behind the release.
             assertThatIllegalStateException()
                     .isThrownBy(() -> holdingAClient.generateResponse(tweet()))
                     .withMessageContaining("destroyed");
@@ -2149,7 +2149,7 @@ class LlmServiceTest {
     /**
      * Builds an unseamed {@link LlmService} whose cached client is the supplied one.
      *
-     * <p>The cached field is written directly, which is the only way to place a stubbed client where
+     * <p>The cached field is written directly, which places a stubbed client where
      * {@link LlmService#closeOpenAiClient()} reads it: {@link SeamedService} overrides the accessor
      * and leaves that field unpopulated.
      *

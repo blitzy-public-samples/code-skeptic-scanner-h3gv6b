@@ -24,6 +24,7 @@ import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.exception.BadRequestException;
 import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.repository.SettingRepository;
+import com.codeskeptic.scanner.task.BackgroundOwnership;
 import com.codeskeptic.scanner.service.mapper.SettingMapper;
 import com.codeskeptic.scanner.util.LogSafe;
 import com.codeskeptic.scanner.util.StreamRuleTerms;
@@ -35,6 +36,11 @@ import com.codeskeptic.scanner.util.StreamRuleTerms;
  *
  * <p>Three operations are exposed. {@link #getAllSettings()} renders every row.
  * {@link #updateSetting(String, String)} replaces the {@code value} of one row that already exists.
+ *
+ * <p>One key is reserved and is not part of the configuration surface:
+ * {@link BackgroundOwnership#OWNER_SETTING_KEY} holds the background-ownership lease. It is withheld
+ * from the collection {@link #getAllSettings()} renders, and {@link #updateSetting(String, String)}
+ * reports it as absent, so the route answers its own 404 literal for it — DL-284.
  * {@link #seedDefaultSettings()} inserts each of three default rows that is absent.
  *
  * <p>The first two correspond to the call sites the retired Flask blueprint already declared:
@@ -194,9 +200,30 @@ public class SettingsService {
      */
     @Transactional(readOnly = true)
     public List<SettingDto> getAllSettings() {
-        List<SettingDto> settings = settingMapper.toDtoList(settingRepository.findAll());
+        // The ownership lease row is coordination state, not configuration — DL-284 — see
+        // docs/DECISION_LOG.md
+        List<Setting> rows = settingRepository.findAll().stream()
+                .filter(row -> !isReserved(row.getKey()))
+                .toList();
+        List<SettingDto> settings = settingMapper.toDtoList(rows);
         log.debug("Rendering {} setting row(s).", settings.size());
         return settings;
+    }
+
+    // Net-new: the reserved coordination key — DL-284 — see docs/DECISION_LOG.md
+    /**
+     * Reports whether a key names coordination state, which is not a configuration value.
+     *
+     * <p>{@link BackgroundOwnership#OWNER_SETTING_KEY} is the one reserved key. It holds the
+     * background-ownership lease, is written by {@code task/BackgroundOwnership} alone, and is
+     * neither rendered by {@code GET /settings} nor writable through {@code PUT /settings/{key}}
+     * — DL-284.
+     *
+     * @param key the key to test, may be {@code null}
+     * @return {@code true} when the key is reserved
+     */
+    private boolean isReserved(String key) {
+        return BackgroundOwnership.OWNER_SETTING_KEY.equals(key);
     }
 
     // Call sites backend/app/api/settings.py:L13-24 — see docs/DECISION_LOG.md
@@ -238,7 +265,9 @@ public class SettingsService {
         // backend/app/api/settings.py:L21-22
         // Deviation from the literal call site: a null key is reported as absent, matching the
         // 404 branch of backend/app/api/settings.py:L21-22 — see docs/DECISION_LOG.md DL-048
-        Optional<Setting> existing = (key == null)
+        // A reserved coordination key is reported as absent as well — DL-284 — see
+        // docs/DECISION_LOG.md
+        Optional<Setting> existing = (key == null || isReserved(key))
                 ? Optional.empty()
                 : settingRepository.findById(key);
         if (existing.isEmpty()) {

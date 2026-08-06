@@ -25,10 +25,11 @@ import org.springframework.data.domain.Pageable;
  * Exercises the query-parameter conversion the two list routes perform.
  *
  * <p>The contract is the one {@code request.args.get(name, default, type=int)} implemented: the
- * default is returned whenever {@code int()} would raise, so a request carrying a malformed value is
- * served rather than rejected.
+ * default is returned for every value {@code int()} cannot convert, so a request carrying a malformed
+ * value is served and is not rejected.
  *
- * <p>Also exercises the offset ceiling a converted page number can still exceed — DL-225.
+ * <p>Also exercises the offset ceiling a converted page number can still exceed — DL-225, and the
+ * finite page-size bound both list routes serve — DL-123.
  */
 @DisplayName("QueryParameters")
 class QueryParametersTest {
@@ -111,6 +112,60 @@ class QueryParametersTest {
 
         assertThat(request.getOffset()).isEqualTo(Integer.MAX_VALUE);
         assertThat(QueryParameters.withinQueryableOffset(request)).isTrue();
+    }
+
+    // The finite page-size bound both list routes serve — DL-123 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "a requested size of {0} is served as {1}")
+    @CsvSource({
+            "1,1",
+            "2,2",
+            "10,10",
+            "999,999",
+            "1000,1000",
+            "1001,1000",
+            "1002,1000",
+            "10000,1000",
+            "1073741824,1000",
+            "2147483647,1000"
+    })
+    @DisplayName("serves a size within the bounds unchanged and reduces a larger one to the maximum")
+    void servesASizeWithinTheBoundsUnchangedAndReducesALargerOneToTheMaximum(int requestedSize,
+            int servedSize) {
+
+        assertThat(QueryParameters.boundPageSize(requestedSize, PER_PAGE_DEFAULT))
+                .isEqualTo(servedSize);
+    }
+
+    @ParameterizedTest(name = "a requested size of {0} is served the route default")
+    @ValueSource(ints = {0, -1, -10, -2147483648})
+    @DisplayName("serves the route default for a size below the minimum")
+    void servesTheRouteDefaultForASizeBelowTheMinimum(int requestedSize) {
+        assertThat(QueryParameters.boundPageSize(requestedSize, PER_PAGE_DEFAULT))
+                .isEqualTo(PER_PAGE_DEFAULT);
+        assertThat(QueryParameters.boundPageSize(requestedSize, 25)).isEqualTo(25);
+    }
+
+    @Test
+    @DisplayName("declares a minimum of one and a finite maximum above the two route defaults")
+    void declaresAMinimumOfOneAndAFiniteMaximumAboveTheTwoRouteDefaults() {
+        assertThat(QueryParameters.MINIMUM_PAGE_SIZE).isEqualTo(1);
+        assertThat(QueryParameters.MAXIMUM_PAGE_SIZE)
+                .isGreaterThan(PER_PAGE_DEFAULT)
+                .isLessThan(Integer.MAX_VALUE)
+                .isEqualTo(1_000);
+    }
+
+    @Test
+    @DisplayName("keeps every served size within the declared bounds for every requested size")
+    void keepsEverySizeWithinTheDeclaredBoundsForEveryRequestedSize() {
+        int[] requested = {Integer.MIN_VALUE, -1, 0, 1, 10, 999, 1_000, 1_001, 65_536,
+                Integer.MAX_VALUE};
+
+        for (int size : requested) {
+            int served = QueryParameters.boundPageSize(size, PER_PAGE_DEFAULT);
+            assertThat(served).as("served size for a requested %s", size)
+                    .isBetween(QueryParameters.MINIMUM_PAGE_SIZE, QueryParameters.MAXIMUM_PAGE_SIZE);
+        }
     }
 
     @Test
@@ -282,7 +337,7 @@ class QueryParametersTest {
     }
 
     /**
-     * Renders each row value as the text a mapper would produce.
+     * Renders each row value as the text a mapper produces.
      *
      * @param rows the values to render
      * @return one rendered value per row

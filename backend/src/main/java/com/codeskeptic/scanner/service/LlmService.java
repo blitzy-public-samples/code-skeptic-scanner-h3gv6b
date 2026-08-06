@@ -124,7 +124,7 @@ public class LlmService {
      * The reasoning-effort values the configured GPT-5.x model accepts. It is narrower than the
      * SDK-global {@link ReasoningEffort.Value} set, which the client carries for every model it can
      * address: {@code minimal} is refused by the configured model with HTTP 400
-     * {@code unsupported_value}, so it is rejected here rather than sent — DL-145, DL-245.
+     * {@code unsupported_value}, and it is rejected here and never sent — DL-145, DL-245.
      */
     private static final Set<ReasoningEffort.Value> ACCEPTED_REASONING_EFFORT_VALUES =
             Collections.unmodifiableSet(EnumSet.of(
@@ -167,7 +167,7 @@ public class LlmService {
     /**
      * Accepted shape of a provider-controlled rejection member once the log guard has rendered it —
      * DL-084, DL-119. A machine-readable member carries no intra-value spacing, so a rendering that
-     * does is free text and is refused rather than carried.
+     * does is free text and is refused, and no part of it is carried.
      */
     private static final Pattern GUARDED_MEMBER_SHAPE = Pattern.compile("\\S{1,64}");
 
@@ -476,7 +476,7 @@ public class LlmService {
     // docs/DECISION_LOG.md
     @PreDestroy
     public void closeOpenAiClient() {
-        // Closing is marked before the wait, so a request arriving during it is rejected rather than
+        // Closing is marked before the wait, so a request arriving during it is rejected and is never
         // started — DL-266 — see docs/DECISION_LOG.md
         markDestroyed();
 
@@ -715,7 +715,7 @@ public class LlmService {
      * record boundary needs — and bounds the value at 64 characters. The bounded rendering is then
      * held to {@link #GUARDED_MEMBER_SHAPE}: a member the provider publishes for a machine to read
      * carries no intra-value spacing, so a rendering that does is free text and is reported as
-     * {@value #ABSENT} rather than carried into a record. An empty {@link Optional} is likewise
+     * {@value #ABSENT} and is not carried into a record. An empty {@link Optional} is likewise
      * rendered as {@value #ABSENT}.
      *
      * @param providerValue the member the provider supplied, possibly empty
@@ -751,8 +751,8 @@ public class LlmService {
     // Net-new guard: the two request members cannot be sent together — DL-267 — see
     // docs/DECISION_LOG.md
     /**
-     * Refuses a configuration that would send {@code temperature} alongside a reasoning effort the
-     * model does not accept it with.
+     * Refuses a configuration that carries {@code temperature} alongside a reasoning effort the model
+     * does not accept it with.
      *
      * @param effort the resolved reasoning effort, never {@code null}
      * @throws IllegalStateException when an effort other than {@code none} is carried, naming both

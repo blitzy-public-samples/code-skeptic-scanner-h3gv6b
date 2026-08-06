@@ -101,7 +101,8 @@ class AnalyticsServiceTest {
      * The instant every case measures the window from: 2026-08-06T10:30:00Z. Its UTC date is
      * 2026-08-06, its date in {@code Pacific/Midway} (UTC-11:00) is 2026-08-05 and its date in
      * {@code Pacific/Kiritimati} (UTC+14:00) is 2026-08-07, so a cutoff computed on the JVM default
-     * zone rather than on UTC lands a day early in the first zone and a day late in the second.
+     * zone lands a day early in the first zone and a day late in the second; a cutoff computed on UTC
+     * lands on 2026-08-06 in both.
      */
     private static final Instant FIXED_INSTANT = Instant.parse("2026-08-06T10:30:00Z");
 
@@ -666,7 +667,7 @@ class AnalyticsServiceTest {
         TimeZone originalZone = TimeZone.getDefault();
         try {
             // At 2026-08-06T10:30:00Z the local date in Pacific/Midway (UTC-11:00) is 2026-08-05,
-            // one day earlier, so a cutoff read from the default zone would open a day early.
+            // one day earlier, so a cutoff read from the default zone opens a day early.
             TimeZone.setDefault(TimeZone.getTimeZone("Pacific/Midway"));
             stubTheConfiguredWindow(SHORTER_TREND_WINDOW_DAYS);
             stubTheReturnedBuckets();
@@ -686,7 +687,7 @@ class AnalyticsServiceTest {
         TimeZone originalZone = TimeZone.getDefault();
         try {
             // At 2026-08-06T10:30:00Z the local date in Pacific/Kiritimati (UTC+14:00) is
-            // 2026-08-07, one day later, so a cutoff read from the default zone would open a day late.
+            // 2026-08-07, one day later, so a cutoff read from the default zone opens a day late.
             TimeZone.setDefault(TimeZone.getTimeZone("Pacific/Kiritimati"));
             stubTheConfiguredWindow(SHORTER_TREND_WINDOW_DAYS);
             stubTheReturnedBuckets();

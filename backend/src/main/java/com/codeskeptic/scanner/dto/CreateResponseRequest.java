@@ -44,7 +44,7 @@ public record CreateResponseRequest(
         JsonNode tweetId) {
 
     /**
-     * Returns the identifier the source handler would have carried past its guard.
+     * Returns the identifier the source handler carried past its guard.
      *
      * <p>The guard at {@code backend/app/api/responses.py:L40} is {@code if not tweet_id}, so it
      * rejects an absent member, a JSON {@code null}, an empty string, a zero of any numeric form,
@@ -53,7 +53,7 @@ public record CreateResponseRequest(
      * <p>An accepted value is rendered as text: a JSON string yields its own characters, a number or
      * a boolean yields its JSON spelling, and an array or object yields its compact JSON document, so
      * a value that names no {@code tweets} row reaches the generation path and is reported with the
-     * literal of {@code backend/app/api/responses.py:L49} rather than with the guard's literal.
+     * literal of {@code backend/app/api/responses.py:L49}, and not with the guard's literal.
      *
      * @return the identifier text to generate for, never empty; {@code null} when the carried value
      *         is one the source guard rejected
@@ -82,7 +82,7 @@ public record CreateResponseRequest(
      * an absent member are false. A non-finite number is true, as it is in Python.
      *
      * @param value the carried node, or {@code null} when the body omitted the member
-     * @return {@code true} when the source guard would have accepted the value
+     * @return {@code true} when the source guard accepted the value
      */
     private static boolean carriesValue(JsonNode value) {
         if (value == null || value.isNull() || value.isMissingNode()) {

@@ -35,8 +35,8 @@ import com.codeskeptic.scanner.repository.ResponseRepository.ResponseRow;
  * place, {@link ResponseDto}, which rejects a {@code null} for each of the five components the wire
  * contract of {@code backend/app/schema/response.py:L5-9} declares required. Converting a row that
  * leaves such a column empty fails in the record's constructor, not here. An absent
- * {@code tweet} association yields a {@code null} {@code tweet_id} rather than dereferencing the
- * association.
+ * {@code tweet} association yields a {@code null} {@code tweet_id}; the association is not
+ * dereferenced.
  *
  * <p>Conversion runs in one direction: this mapper declares no entity-producing operation and
  * performs no persistence access and no outbound call. Instances hold no state and are thread-safe.

@@ -187,7 +187,7 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
      *
      * @param tweetId the primary key of the {@code tweets} row to test. A {@code null} argument makes
      *                the derived predicate {@code tweet_id is null}, so it tests for {@code responses}
-     *                rows that name no tweet rather than reporting {@code false}. No delivered caller
+     *                rows that name no tweet, and does not report {@code false}. No delivered caller
      *                passes {@code null}: {@code ResponseService} parses the identifier before it
      *                attempts ownership — see docs/DECISION_LOG.md DL-195.
      * @return {@code true} when at least one {@code responses} row names {@code tweetId}, or, for a
@@ -209,8 +209,8 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
      * {@code PUT /responses/{responseId}} requests are served at the same moment — DL-122.
      *
      * <p>The wait is bounded: {@link #LOCK_WAIT_HINT} caps the statement at
-     * {@link #LOCK_WAIT_MILLIS} milliseconds, after which the provider reports the contention rather
-     * than waiting further — see docs/DECISION_LOG.md DL-246.
+     * {@link #LOCK_WAIT_MILLIS} milliseconds, after which the provider reports the contention and
+     * does not wait further — see docs/DECISION_LOG.md DL-246.
      *
      * <p>The lock is acquired for the duration of the caller's transaction, so this operation must be
      * called from inside one; {@code ResponseService.updateResponse} declares

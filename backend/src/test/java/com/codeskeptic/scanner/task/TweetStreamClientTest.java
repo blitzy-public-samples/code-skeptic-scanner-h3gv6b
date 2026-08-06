@@ -12,6 +12,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -54,6 +55,7 @@ import org.springframework.web.reactive.function.client.ClientRequest;
 import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.ExchangeFunction;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.entity.Setting;
@@ -250,7 +252,7 @@ class TweetStreamClientTest {
             client = new TweetStreamClient(webClient(request -> {
                 throw new AssertionError("No X endpoint may be contacted.");
             }), properties(null, ingestion(BASE_TERMS)), aiToolRepository, settingRepository,
-                    tweetStreamListener);
+                    tweetStreamListener, heldLease());
 
             assertThatCode(() -> client.start()).doesNotThrowAnyException();
             assertThat(client.isRunning()).isFalse();
@@ -376,7 +378,7 @@ class TweetStreamClientTest {
             client.start();
 
             // A second attempt can only happen if the first was abandoned: with no bound the client
-            // would wait on the first answer for as long as the connection stayed open.
+            // waits on the first answer for as long as the connection stays open.
             awaitCondition(() -> tokenAttempts.get() >= 2);
             assertThat(exchanges).extracting(RecordedExchange::path).containsOnly(TOKEN_PATH);
         }
@@ -513,7 +515,7 @@ class TweetStreamClientTest {
             client = new TweetStreamClient(webClient(request -> {
                 throw new AssertionError("No X endpoint may be contacted.");
             }), properties(twitter(CONSUMER_KEY, CONSUMER_SECRET), ingestion(List.of())),
-                    aiToolRepository, settingRepository, tweetStreamListener);
+                    aiToolRepository, settingRepository, tweetStreamListener, heldLease());
 
             client.start();
 
@@ -528,7 +530,7 @@ class TweetStreamClientTest {
             client = new TweetStreamClient(
                     webClient(routes(streamOf(""))),
                     properties(twitter(CONSUMER_KEY, CONSUMER_SECRET), null),
-                    aiToolRepository, settingRepository, tweetStreamListener);
+                    aiToolRepository, settingRepository, tweetStreamListener, heldLease());
             client.start();
 
             assertThat(registeredTags()).containsExactly("Copilot");
@@ -564,7 +566,7 @@ class TweetStreamClientTest {
             client = startedAgainst(countedChunks(records, emittedChunks));
 
             assertThat(handlerEntered.await(20, TimeUnit.SECONDS)).isTrue();
-            // A default prefetch of 256 would pull every chunk while the handler blocks
+            // A default prefetch of 256 pulls every chunk while the handler blocks
             assertThat(emittedChunks.get()).isLessThanOrEqualTo(5);
 
             releaseHandler.countDown();
@@ -1036,7 +1038,7 @@ class TweetStreamClientTest {
                         .doesNotContain("\n")
                         .doesNotContain("\r")
                         .contains("(1 not created, 1 invalid)")
-                        .contains("sha256:");
+                        .contains("hmac256:");
             } finally {
                 detachClientAppender(recorded);
             }
@@ -1381,7 +1383,7 @@ class TweetStreamClientTest {
         @DisplayName("waits for the rate-limit reset instant a 429 names")
         void waitsForTheRateLimitResetInstantA429Names() {
             AtomicInteger streamAttempts = new AtomicInteger();
-            long resetFarAhead = Instant.now().plus(Duration.ofHours(1)).getEpochSecond();
+            long resetFarAhead = Instant.now().plus(Duration.ofMinutes(10)).getEpochSecond();
             client = clientWith(CONSUMER_KEY, CONSUMER_SECRET, request -> {
                 String path = request.url().getPath();
                 if (path.equals(TOKEN_PATH)) {
@@ -1404,7 +1406,7 @@ class TweetStreamClientTest {
         }
 
         @ParameterizedTest(name = "reset header [{0}]")
-        @ValueSource(strings = {"", "99999999999999999999"})
+        @ValueSource(strings = {"", "99999999999999999999", "9223372036854775807"})
         @DisplayName("falls back to the backoff delay when the reset header is unusable")
         void fallsBackToTheBackoffDelayWhenTheResetHeaderIsUnusable(String header) {
             AtomicInteger streamAttempts = new AtomicInteger();
@@ -1429,7 +1431,7 @@ class TweetStreamClientTest {
         }
 
         @ParameterizedTest(name = "reset header [{0}]")
-        @ValueSource(strings = {"   ", "not-a-number"})
+        @ValueSource(strings = {"   ", "not-a-number", "31556889864403200"})
         @DisplayName("applies the backoff delay rather than reconnecting at once on an unusable "
                 + "reset header")
         void appliesTheBackoffDelayRatherThanReconnectingAtOnceOnAnUnusableResetHeader(
@@ -1480,6 +1482,103 @@ class TweetStreamClientTest {
 
             assertThat(streamAttempts.get()).isEqualTo(afterStop);
             assertThat(client.isRunning()).isFalse();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The reconnect delay a rate-limit answer produces
+    // -----------------------------------------------------------------------
+
+    // Bounded rate-limit reset horizon — DL-280 — see docs/DECISION_LOG.md
+    @Nested
+    @DisplayName("the rate-limit reset horizon")
+    class RateLimitResetHorizon {
+
+        /** Delay the caller computed, standing in for the jittered exponential backoff. */
+        private static final Duration BACKOFF = Duration.ofSeconds(5L);
+
+        /** Longest delay a reported reset may produce. */
+        private static final Duration HORIZON = Duration.ofMinutes(15L);
+
+        @Test
+        @DisplayName("waits until a reset that falls inside the horizon")
+        void waitsUntilAResetThatFallsInsideTheHorizon() throws Exception {
+            long reset = Instant.now().plusSeconds(120L).getEpochSecond();
+
+            Duration delay = rateLimitDelayFor(String.valueOf(reset), BACKOFF);
+
+            assertThat(delay).isBetween(Duration.ofSeconds(110L), Duration.ofSeconds(121L));
+        }
+
+        @Test
+        @DisplayName("applies the horizon to a reset ten years away")
+        void appliesTheHorizonToAResetTenYearsAway() throws Exception {
+            long reset = Instant.now().plus(Duration.ofDays(3650L)).getEpochSecond();
+
+            assertThat(rateLimitDelayFor(String.valueOf(reset), BACKOFF)).isEqualTo(HORIZON);
+        }
+
+        @Test
+        @DisplayName("applies the horizon to the largest reset an instant represents")
+        void appliesTheHorizonToTheLargestResetAnInstantRepresents() throws Exception {
+            assertThat(rateLimitDelayFor(String.valueOf(Instant.MAX.getEpochSecond()), BACKOFF))
+                    .isEqualTo(HORIZON);
+        }
+
+        @Test
+        @DisplayName("reports the horizon it applied and no header value")
+        void reportsTheHorizonItAppliedAndNoHeaderValue() throws Exception {
+            long reset = Instant.now().plus(Duration.ofDays(3650L)).getEpochSecond();
+            Logger clientLogger = (Logger) LoggerFactory.getLogger(TweetStreamClient.class);
+            ListAppender<ILoggingEvent> appender = new ListAppender<>();
+            appender.start();
+            clientLogger.addAppender(appender);
+            try {
+                rateLimitDelayFor(String.valueOf(reset), BACKOFF);
+            } finally {
+                clientLogger.detachAppender(appender);
+                appender.stop();
+            }
+
+            List<String> rendered = appender.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .collect(Collectors.toList());
+            assertThat(rendered).anySatisfy(record -> assertThat(record)
+                    .contains("beyond the 900s reconnect horizon")
+                    .doesNotContain(String.valueOf(reset)));
+        }
+
+        @Test
+        @DisplayName("leaves the backoff delay in force for a reset already past")
+        void leavesTheBackoffDelayInForceForAResetAlreadyPast() throws Exception {
+            long reset = Instant.now().minusSeconds(3600L).getEpochSecond();
+
+            assertThat(rateLimitDelayFor(String.valueOf(reset), BACKOFF)).isEqualTo(BACKOFF);
+        }
+
+        @Test
+        @DisplayName("leaves the backoff delay in force for an absent header")
+        void leavesTheBackoffDelayInForceForAnAbsentHeader() throws Exception {
+            assertThat(rateLimitDelayFor(null, BACKOFF)).isEqualTo(BACKOFF);
+        }
+
+        @ParameterizedTest(name = "reset header [{0}]")
+        @ValueSource(strings = {"9223372036854775807", "-9223372036854775808",
+            "31556889864403200", "99999999999999999999", "not-a-number", "", "   ", "1e9",
+            "0x7fffffff", "9223372036854775808"})
+        @DisplayName("leaves the backoff delay in force for a header it cannot read")
+        void leavesTheBackoffDelayInForceForAHeaderItCannotRead(String header) throws Exception {
+            assertThat(rateLimitDelayFor(header, BACKOFF)).isEqualTo(BACKOFF);
+        }
+
+        @ParameterizedTest(name = "reset header [{0}]")
+        @ValueSource(strings = {"9223372036854775807", "31556889864403200", "99999999999999999999",
+            "not-a-number", "", "   ", "-1", "0", "2147483647", "31556889864403199"})
+        @DisplayName("produces a delay within the horizon for every header value")
+        void producesADelayWithinTheHorizonForEveryHeaderValue(String header) throws Exception {
+            Duration delay = rateLimitDelayFor(header, BACKOFF);
+
+            assertThat(delay).isGreaterThanOrEqualTo(BACKOFF).isLessThanOrEqualTo(HORIZON);
         }
     }
 
@@ -1552,19 +1651,19 @@ class TweetStreamClientTest {
 
             assertThatExceptionOfType(NullPointerException.class).isThrownBy(() ->
                     new TweetStreamClient(null, bound, aiToolRepository, settingRepository,
-                            tweetStreamListener));
+                            tweetStreamListener, heldLease()));
             assertThatExceptionOfType(NullPointerException.class).isThrownBy(() ->
                     new TweetStreamClient(transport, null, aiToolRepository, settingRepository,
-                            tweetStreamListener));
+                            tweetStreamListener, heldLease()));
             assertThatExceptionOfType(NullPointerException.class).isThrownBy(() ->
                     new TweetStreamClient(transport, bound, null, settingRepository,
-                            tweetStreamListener));
+                            tweetStreamListener, heldLease()));
             assertThatExceptionOfType(NullPointerException.class).isThrownBy(() ->
                     new TweetStreamClient(transport, bound, aiToolRepository, null,
-                            tweetStreamListener));
+                            tweetStreamListener, heldLease()));
             assertThatExceptionOfType(NullPointerException.class).isThrownBy(() ->
                     new TweetStreamClient(transport, bound, aiToolRepository, settingRepository,
-                            null));
+                            null, heldLease()));
         }
     }
 
@@ -1667,7 +1766,7 @@ class TweetStreamClientTest {
             ExchangeFunction exchange, ScannerProperties.Ingestion ingestion) {
         return new TweetStreamClient(webClient(exchange),
                 properties(twitter(consumerKey, consumerSecret), ingestion),
-                aiToolRepository, settingRepository, tweetStreamListener);
+                aiToolRepository, settingRepository, tweetStreamListener, heldLease());
     }
 
     /**
@@ -1760,7 +1859,7 @@ class TweetStreamClientTest {
         return new TweetStreamClient(webClient(exchange),
                 properties(twitter(CONSUMER_KEY, CONSUMER_SECRET, timeoutSeconds),
                         ingestion(BASE_TERMS)),
-                aiToolRepository, settingRepository, tweetStreamListener);
+                aiToolRepository, settingRepository, tweetStreamListener, heldLease());
     }
 
     /**
@@ -1856,6 +1955,29 @@ class TweetStreamClientTest {
      * @param resetHeader value of {@code x-rate-limit-reset}
      * @return the canned response
      */
+    /**
+     * Invokes the delay computation of a rate-limit answer directly.
+     *
+     * @param resetHeader the reset header value to present, or {@code null} to present none
+     * @param backoff the delay the caller computed
+     * @return the delay the client applies
+     * @throws Exception when the declared method cannot be invoked
+     */
+    private static Duration rateLimitDelayFor(String resetHeader, Duration backoff)
+            throws Exception {
+        HttpHeaders headers = new HttpHeaders();
+        if (resetHeader != null) {
+            headers.add("x-rate-limit-reset", resetHeader);
+        }
+        WebClientResponseException failure = new WebClientResponseException(
+                HttpStatus.TOO_MANY_REQUESTS.value(), "Too Many Requests", headers,
+                new byte[0], StandardCharsets.UTF_8);
+        Method method = TweetStreamClient.class.getDeclaredMethod(
+                "rateLimitDelay", WebClientResponseException.class, Duration.class);
+        method.setAccessible(true);
+        return (Duration) method.invoke(null, failure, backoff);
+    }
+
     private static ClientResponse rateLimited(String resetHeader) {
         return ClientResponse.create(HttpStatus.TOO_MANY_REQUESTS)
                 .header("x-rate-limit-reset", resetHeader)
@@ -2022,6 +2144,17 @@ class TweetStreamClientTest {
             ScannerProperties.Ingestion ingestion) {
         return new ScannerProperties(null, 100, 60L, twitter, null, null, null, null, null,
                 ingestion, null);
+    }
+
+    /**
+     * Builds a lease reporting this process as the background owner — DL-281.
+     *
+     * @return the lease every client of this class is constructed with
+     */
+    private static BackgroundOwnership heldLease() {
+        BackgroundOwnership lease = org.mockito.Mockito.mock(BackgroundOwnership.class);
+        when(lease.isOwner()).thenReturn(true);
+        return lease;
     }
 
     /**

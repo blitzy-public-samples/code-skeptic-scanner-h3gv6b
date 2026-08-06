@@ -182,8 +182,8 @@ class JpaMappingIntegrationTest {
     private static final int H2_UNBOUNDED_CHARACTER_CAPACITY = 1_000_000_000;
 
     /**
-     * A key length beyond the capacity an undeclared length would have rendered, used to store a
-     * {@code settings} key no invented bound would admit — DL-069 — see docs/DECISION_LOG.md.
+     * A key length beyond the capacity an undeclared length renders, used to store a
+     * {@code settings} key an invented bound rejects — DL-069 — see docs/DECISION_LOG.md.
      */
     private static final int BEYOND_UNDECLARED_LENGTH_FACET = 1_000;
 
@@ -1318,6 +1318,9 @@ class JpaMappingIntegrationTest {
         PaginatedResponsesDto responsesInChunks = responses.getPaginatedResponses(1,
                 Integer.MAX_VALUE);
 
+        // A per_page above the served maximum reads as that maximum — DL-123 — see
+        // docs/DECISION_LOG.md
+
         assertThat(tweetsInChunks.tweets()).as("tweet rows the chunked read rendered")
                 .containsExactlyElementsOf(tweetsInOneStatement.tweets())
                 .hasSize(PAGE_CHUNK_ROW_COUNT);
@@ -1327,7 +1330,11 @@ class JpaMappingIntegrationTest {
         assertThat(tweetsInChunks.pagination().totalPages())
                 .as("tweet total_pages the chunked read reported").isEqualTo(1);
         assertThat(tweetsInChunks.pagination().perPage())
-                .as("per_page the chunked read restated").isEqualTo(Integer.MAX_VALUE);
+                .as("per_page the chunked read restated")
+                .isEqualTo(QueryParameters.MAXIMUM_PAGE_SIZE);
+        assertThat(responsesInChunks.pagination().perPage())
+                .as("per_page the chunked response read restated")
+                .isEqualTo(QueryParameters.MAXIMUM_PAGE_SIZE);
         assertThat(tweetsInChunks.tweets()).extracting(TweetDto::id)
                 .as("tweet identifiers in ascending order")
                 .containsExactlyElementsOf(stored.stream().map(row -> String.valueOf(row.getId()))
@@ -1497,8 +1504,8 @@ class JpaMappingIntegrationTest {
      * Shuts the supplied executor down and asserts that it terminates.
      *
      * <p>Termination is awaited for at most {@value #EXECUTOR_TERMINATION_SECONDS} seconds. A thread
-     * still running at that bound fails the test rather than being left behind for the rest of the
-     * build, where it would hold a JDBC connection from the pool. An interrupt while awaiting is
+     * still running at that bound fails the test and is not left behind for the rest of the
+     * build holding a JDBC connection from the pool. An interrupt while awaiting is
      * restored on the calling thread and reported, so the interrupt is neither swallowed nor mistaken
      * for a clean termination.
      *

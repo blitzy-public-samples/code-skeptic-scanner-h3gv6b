@@ -83,7 +83,7 @@ class SettingsServiceSeedingIntegrationTest {
     private static final String OPERATOR_DESCRIPTION = "Edited through PUT /settings/{key}.";
 
     /**
-     * A key length past the capacity an undeclared {@code @Column#length()} would have rendered. The
+     * A key length past the capacity an undeclared {@code @Column#length()} renders. The
      * mapping states the capacity-free character type, so the column admits it — DL-069 — see
      * docs/DECISION_LOG.md.
      */

@@ -19,8 +19,9 @@ import org.springframework.util.ClassUtils;
  * <p>{@code src/test/resources/application-test.yml} is build-scoped: it pins an in-memory H2
  * database with {@code create-drop}, supplies empty X credentials that reach no provider, and carries
  * a signing key and a bcrypt hash that are held in version control — see docs/DECISION_LOG.md
- * DL-205. A deployed revision started with {@code SPRING_PROFILES_ACTIVE=test} would mint tokens
- * under a published key and serve against a throwaway schema that is dropped at shutdown — DL-279.
+ * DL-205. A deployed revision started with {@code SPRING_PROFILES_ACTIVE=test} mints tokens under a
+ * published key and serves against a throwaway schema that is dropped at shutdown; this guard refuses
+ * to start such a revision — DL-279.
  *
  * <p>The signal this guard reads is the presence of {@value #TEST_FRAMEWORK_CLASS} on the bean class
  * loader. A Spring Boot executable jar carries no test-scoped dependency, and that class is absent
@@ -31,7 +32,7 @@ import org.springframework.util.ClassUtils;
  * singleton, so a deployment that activates the profile fails on the profile itself and not on
  * whichever bean is built first. A bean factory post-processor is instantiated before constructor
  * autowiring is available, and the two values this class reads arrive through
- * {@link EnvironmentAware} and {@link BeanClassLoaderAware} instead of through a constructor —
+ * {@link EnvironmentAware} and {@link BeanClassLoaderAware}, and not through a constructor —
  * DL-279.
  *
  * <p>Every other profile, and the default profile, are left untouched: this class matches the profile

@@ -55,17 +55,17 @@ import org.junit.jupiter.api.Test;
  *   <li>the entry that owns the character-column mapping names every column the entities actually
  *       declare a length facet on, and the entry that owns the primary-key bound states its value —
  *       so a facet cannot be added, removed or retuned without the log saying so;</li>
- *   <li>at least one row is cited from outside the log itself, so the routes above are exercised
- *       rather than merely well-formed;</li>
- *   <li>no comment under {@code src} or in the POM carries decision rationale — the reasoning,
- *       alternatives and risks behind a choice live in the log and nowhere else (Rule 1, DL-058).</li>
+ *   <li>at least one row is cited from outside the log itself, which exercises the routes above;</li>
+ *   <li>no comment under {@code src}, in the POM or in the four edited operations files carries a
+ *       wording of the six-group rationale policy {@link #RATIONALE_POLICY} declares (Rule 1,
+ *       DL-058).</li>
  * </ol>
  *
- * <p>The fifth property is the one that decays silently. Redirecting a row is how a superseded subject
- * keeps a resolvable identifier, and the log states the resulting set in prose that claims to be
- * complete; nothing but this assertion holds that claim to the rows it describes.
+ * <p>The fifth property has no other check on it. Redirecting a row is how a superseded subject keeps
+ * a resolvable identifier, and the log states the resulting set in prose that claims to be complete;
+ * this assertion is what holds that claim to the rows it describes.
  *
- * <p>The scan is over the working tree rather than the classpath, so it covers resources, the POM and
+ * <p>The scan reads the working tree and not the classpath, so it covers resources, the POM and
  * both Markdown documents as well as Java sources. Surefire runs with the module root as its working
  * directory, which is what every path below is resolved against.
  */
@@ -106,22 +106,94 @@ class DecisionLogCitationTest {
             Path.of("../scripts/deploy.sh"));
 
     /**
-     * Wordings that mark a comment as arguing for a choice rather than stating what the code does.
+     * Wordings that state the grounds of a choice: the first group of {@link #RATIONALE_POLICY}.
      *
-     * <p>Each names an author's preference, a rejected option, a cost, a risk, a causal justification
-     * or an obligation placed on a reader — the content the log's own columns carry. A comment may
-     * name the source construct, the delivered contract and the decision identifier; it may not carry
-     * any of these.
+     * <p>Each one introduces the ground a construct exists on. The log's Rationale column carries that
+     * content.
      */
-    private static final List<String> RATIONALE_MARKERS = List.of(
-            "by design", "deliberately", "deliberate", "intentionally", "on purpose",
-            "trade-off", "tradeoff", "at the cost of", "we chose", "chosen over",
-            "in preference to", "for readability", "would have been", "the alternative",
-            "no reason to", "is cheaper", "is safer", "arguably", "preferable",
-            "because", "so that", "therefore", "for that reason",
-            "which is why", "which is what makes", "in order to", "must configure",
-            "no need to", "we prefer", "is preferred", "at no cost", "is redundant",
-            "would break", "would lose", "would add", "would require", "avoids");
+    private static final List<String> GROUNDS_WORDINGS = List.of(
+            "because", "so that", "therefore", "for that reason", "for this reason",
+            "for these reasons", "which is why", "that is why", "this is why",
+            "which is what makes", "is what makes", "in order to", "as a result",
+            "consequently", "thus ", "hence ", "owing to", "due to", "on the grounds");
+
+    /**
+     * Wordings that weigh one option against another: the second group of {@link #RATIONALE_POLICY}.
+     *
+     * <p>Each one names an option that was available and the standing of the delivered one beside it.
+     * The log's Alternatives column carries that content. A comment states one behaviour and, where a
+     * second behaviour is part of the same contract, states it as its own claim.
+     */
+    private static final List<String> COMPARISON_WORDINGS = List.of(
+            "rather than", "instead of", "in preference to", "in favour of", "in favor of",
+            "the alternative", "alternatively", "chosen over", "we chose", "we prefer",
+            "is preferred", "preferable", "prefer", "as opposed to", "whereas ",
+            "in exchange for", "at the expense of", "the better", "the worse");
+
+    /**
+     * Wordings that describe an outcome the tree does not produce: the third group of
+     * {@link #RATIONALE_POLICY}.
+     *
+     * <p>Each one places a claim in a state of affairs other than the delivered one. A comment states
+     * the delivered behaviour in the indicative.
+     */
+    private static final List<String> COUNTERFACTUAL_WORDINGS = List.of(
+            "would", "could have", "might have", "were it", "if it were", "had it been",
+            "hypothetically", "no reason to", "no need to");
+
+    /**
+     * Wordings that appraise a construct: the fourth group of {@link #RATIONALE_POLICY}.
+     *
+     * <p>Each one rates a cost, a hazard, a gain or a sufficiency. The log's last two content columns
+     * carry that content. The noun naming the last of those columns is absent from this group, and
+     * DL-058 records why.
+     */
+    private static final List<String> APPRAISAL_WORDINGS = List.of(
+            "at the cost of", "trade-off", "tradeoff", "trade off", "downside", "drawback",
+            "benefit", "is cheaper", "cheaper", "expensive", "costly", "wasteful", "is safer",
+            "safer", "harmless", "worth ", "is redundant", "at no cost", "arguably", "silently",
+            "only way", "unnecessary", "needless", "pointless", "cleanest", "simplest",
+            "for readability", "for clarity", "for simplicity", "elegant", "avoids", "avoid ");
+
+    /**
+     * Wordings that place an obligation on a reader: the fifth group of {@link #RATIONALE_POLICY}.
+     *
+     * <p>Each one addresses the reader. A comment states what the code does and leaves an operator
+     * obligation to the log and to the configuration documentation.
+     */
+    private static final List<String> DIRECTIVE_WORDINGS = List.of(
+            "must configure", "beware", "caution", "take care", "remember to", "ought to",
+            "make sure", "should not");
+
+    /**
+     * Wordings that assert an author's intent: the sixth group of {@link #RATIONALE_POLICY}.
+     *
+     * <p>Each one asserts an author's intent, which is a claim about an author and not about the
+     * code.
+     */
+    private static final List<String> INTENT_WORDINGS = List.of(
+            "by design", "deliberately", "deliberate", "intentionally", "intentional",
+            "on purpose");
+
+    /**
+     * The wording policy every comment under the scanned roots is held to, in six named groups.
+     *
+     * <p>A comment run carrying any wording of any group fails the assertion, and the failure names
+     * the group and the wording. A comment may name the source path and line range it was ported
+     * from, state that the construct is net-new, state the contract the construct delivers, and name
+     * the identifier of the log entry that governs it — DL-058.
+     *
+     * <p>The scan decides wordings and not meaning: it is a floor under Rule 1 and not a proof of it.
+     * Each group is matched case-insensitively as a substring of one joined comment run, so a wording
+     * split over a line break is read as one text.
+     */
+    private static final Map<String, List<String>> RATIONALE_POLICY = Map.of(
+            "grounds of a choice", GROUNDS_WORDINGS,
+            "comparison of options", COMPARISON_WORDINGS,
+            "counterfactual state", COUNTERFACTUAL_WORDINGS,
+            "appraisal of a construct", APPRAISAL_WORDINGS,
+            "directive to a reader", DIRECTIVE_WORDINGS,
+            "assertion of intent", INTENT_WORDINGS);
 
     /** Openers of a comment line in the scanned file kinds. */
     private static final List<String> COMMENT_OPENERS =
@@ -424,14 +496,12 @@ class DecisionLogCitationTest {
         for (Path file : rationaleScannedFiles()) {
             for (CommentBlock block : commentBlocks(read(file))) {
                 String lowered = block.text().toLowerCase(Locale.ROOT);
-                String marker = RATIONALE_MARKERS.stream()
+                RATIONALE_POLICY.forEach((group, wordings) -> wordings.stream()
                         .filter(lowered::contains)
                         .findFirst()
-                        .orElse(null);
-                if (marker != null) {
-                    offending.put(file + ":" + block.firstLine() + " [" + marker + "]",
-                            block.text());
-                }
+                        .ifPresent(wording -> offending.put(
+                                file + ":" + block.firstLine() + " [" + group + ": " + wording + "]",
+                                block.text())));
             }
         }
 
@@ -452,8 +522,8 @@ class DecisionLogCitationTest {
     /**
      * Splits a file into the runs of consecutive comment lines it carries.
      *
-     * <p>A wording that spans a line break is one text here, so the marker scan reads a comment the
-     * way a reader does instead of one line at a time.
+     * <p>A wording that spans a line break is one text here, so the scan reads a comment the way a
+     * reader does and not one line at a time.
      *
      * @param content the file text
      * @return the comment runs, in file order

@@ -136,7 +136,7 @@ public interface TweetRepository extends JpaRepository<Tweet, Integer> {
      *
      * <p>The wait is bounded: {@link ResponseRepository#LOCK_WAIT_HINT} caps the statement at
      * {@link ResponseRepository#LOCK_WAIT_MILLIS} milliseconds, after which the provider reports the
-     * contention rather than waiting further — see docs/DECISION_LOG.md DL-246.
+     * contention and does not wait further — see docs/DECISION_LOG.md DL-246.
      *
      * <p>The {@code responses} collection of the returned {@link Tweet} is not initialised by this
      * call. An empty {@link Optional} denotes a row that is not present, and no lock is then held.

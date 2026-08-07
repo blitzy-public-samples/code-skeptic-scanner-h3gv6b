@@ -11,7 +11,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-import com.codeskeptic.scanner.util.LogSafe;
 import com.google.api.gax.retrying.RetrySettings;
 import com.google.api.gax.rpc.UnaryCallSettings;
 import com.google.cloud.language.v1.AnalyzeSentimentRequest;
@@ -212,7 +211,7 @@ public class SentimentAnalysisService {
         } catch (RuntimeException e) {
             // Provider seam: type only, never the provider message — see docs/DECISION_LOG.md DL-197
             log.error("Sentiment analysis failed for {} character(s) of text: {}",
-                    text.length(), LogSafe.type(e));
+                    text.length(), e.getClass().getSimpleName());
             throw e;
         } finally {
             activeUse.unlock();
@@ -412,7 +411,7 @@ public class SentimentAnalysisService {
             log.info("Closed the Natural Language API client");
         } catch (RuntimeException e) {
             log.warn("Closing the Natural Language API client did not complete: {}",
-                    LogSafe.type(e));
+                    e.getClass().getSimpleName());
         }
     }
 }

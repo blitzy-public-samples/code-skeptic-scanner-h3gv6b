@@ -15,10 +15,8 @@ jobs:
 
     # Replaces the retired Python 3.9 toolchain step - see backend/docs/DECISION_LOG.md DL-004,
     # DL-005
-    # Pinned to a full commit SHA on the node24 runtime line - see
-    # backend/docs/DECISION_LOG.md DL-103
     - name: Set up JDK 21
-      uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961  # v5.7.0
+      uses: actions/setup-java@v4
       with:
         distribution: 'temurin'
         java-version: '21'

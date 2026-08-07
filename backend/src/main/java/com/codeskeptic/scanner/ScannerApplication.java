@@ -1,8 +1,11 @@
 package com.codeskeptic.scanner;
 
+import java.time.Clock;
+
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
+import org.springframework.context.annotation.Bean;
 
 /**
  * Entry point and composition root of the Code Skeptic Scanner backend service.
@@ -60,5 +63,24 @@ public class ScannerApplication {
      */
     public static void main(String[] args) {
         SpringApplication.run(ScannerApplication.class, args);
+    }
+
+    /**
+     * Publishes the UTC time source every reader of the current instant resolves.
+     *
+     * <p>{@code service.AnalyticsService} is the consumer: it derives the
+     * {@code GET /analytics/trends} observation window from this clock. Scheduling reads its own clock
+     * from the framework and does not resolve this bean.
+     *
+     * <p>The published instance is immutable and safe for concurrent use.
+     *
+     * @return the single {@link Clock} bean in the application context, resolvable by type and by the
+     *     name {@code utcClock}; never {@code null}
+     */
+    // Net-new (no Python counterpart: backend/app/api/analytics.py:L13-14 read no clock and the
+    // AnalyticsService it imported did not exist) — DL-278 — see docs/DECISION_LOG.md
+    @Bean
+    public Clock utcClock() {
+        return Clock.systemUTC();
     }
 }

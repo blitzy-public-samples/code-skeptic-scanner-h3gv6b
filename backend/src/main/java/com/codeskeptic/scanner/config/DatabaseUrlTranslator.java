@@ -17,7 +17,6 @@ import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.codeskeptic.scanner.util.ConfiguredValues;
 
 // Net-new class derived from backend/app/core/config.py:L9 — the opaque DATABASE_URL the retired
 // tree read at backend/app/db/database.py:L5 and never interpreted — DL-027, DL-071, DL-072 — see
@@ -26,16 +25,15 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  * Translates the opaque {@code DATABASE_URL} value, bound to {@code scanner.database-url}, into a
  * JDBC URL together with the username and the password as separate values.
  *
- * <p>Existing lower-case {@code jdbc:} values pass through after credential checks. SQLAlchemy-style
- * PostgreSQL, MySQL and MariaDB URLs are parsed into vendor JDBC URLs; user-info and recognised
- * credential query properties are returned separately. Unsupported, malformed, unresolved or
- * credential-bearing JDBC values fail with {@link IllegalStateException} — DL-072 — see
- * docs/DECISION_LOG.md.
+ * <p>Existing lower-case {@code jdbc:} values pass through unchanged. SQLAlchemy-style PostgreSQL,
+ * MySQL, MariaDB and H2 URLs are parsed into vendor JDBC URLs; user-info and recognised credential
+ * query properties are returned separately. Unsupported, malformed or unresolved values fail with
+ * {@link IllegalStateException} — DL-064, DL-072 — see docs/DECISION_LOG.md.
  *
  * <p>The value is consumed exactly as supplied: no character of it is trimmed, case-folded or
  * otherwise normalised on the way into a returned URL. A value padded with leading or trailing
  * whitespace is not a parseable URL and raises {@link IllegalStateException}. Classification is the
- * one place trimmed text is used: {@link ConfiguredValues#isUnset(String)} trims before testing for
+ * one place trimmed text is used: {@link #isUnset(String)} trims before testing for
  * blankness and for the unresolved-placeholder shape, so a padded {@code ${DATABASE_URL}} is
  * recognised as unset — DL-186. That trimmed copy is used for the test alone and never reaches the
  * returned URL.
@@ -47,9 +45,9 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  *       environment variable is absent — DL-186 — see docs/DECISION_LOG.md.</li>
  *   <li>A value beginning with the literal lower-case {@code jdbc:} is returned exactly as
  *       supplied, character for character, with a {@code null} username and a {@code null}
- *       password. It is not parsed, rewritten, trimmed or stripped, and its scheme is matched
- *       case-sensitively. Such a value carrying credential material is rejected; it is never
- *       altered — DL-072 — see docs/DECISION_LOG.md.</li>
+ *       password. It is not parsed, rewritten, trimmed, stripped or inspected, and its scheme is
+ *       matched case-sensitively; a value carrying credential material passes through it too —
+ *       DL-064 — see docs/DECISION_LOG.md.</li>
  *   <li>Any other value is parsed as a {@link URI}. Everything from the first {@code '+'} of the
  *       scheme onward is discarded, the remaining scheme is mapped case-insensitively to a JDBC
  *       vendor, the user-info component is split on its first {@code ':'} into the username and the
@@ -63,45 +61,27 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  *       schemes.</li>
  * </ol>
  *
- * <p>{@link TranslatedDatabaseUrl#jdbcUrl()} never carries a username, a password or any other
- * secret-bearing property, on either path — DL-072 — see docs/DECISION_LOG.md. Two property
- * classes are recognised, both case-insensitively:
- * <ul>
- *   <li>A <b>primary credential</b> property, named {@code user}, {@code username}, {@code uid},
- *       {@code password}, {@code passwd}, {@code pwd}, {@code password1}, {@code password2} or
- *       {@code password3}. Its name is matched exactly. On the parse path its value fills whichever
- *       half of the credential pair the user-info component left unset, and the property is removed
- *       from the URL.</li>
- *   <li>A <b>secondary secret</b> property, whose name carries one of the tokens
- *       {@code password}, {@code passwd}, {@code pwd}, {@code passphrase}, {@code secret},
- *       {@code credential} or {@code token} anywhere within it — {@code sslpassword},
- *       {@code trustCertificateKeyStorePassword} and {@code xdevapi.ssl-truststore-password} among
- *       them. There is nowhere to bind such a value to, so the whole URL is <em>rejected</em>, with a
- *       message naming the offending property names and no value of any of them.</li>
- * </ul>
+ * <p>On the parse path {@link TranslatedDatabaseUrl#jdbcUrl()} carries no username and no password:
+ * the user-info component is split out, and a property whose name is {@code user}, {@code username},
+ * {@code uid}, {@code password}, {@code passwd}, {@code pwd}, {@code password1}, {@code password2} or
+ * {@code password3} — matched exactly and case-insensitively — is removed from the query and fills
+ * whichever half of the credential pair the user-info component left unset — DL-072 — see
+ * docs/DECISION_LOG.md. Every other property, a vendor property naming a driver secret included, is
+ * retained verbatim; AAP 0.6.5.1 reassembles the query as supplied.
  *
- * <p>Extraction and detection read one grammar — DL-072:
- * <ul>
- *   <li><b>Extraction</b>, on the parse path, splits the query component on {@code '&'} and
- *       {@code ';'} alike. A credential property is removed under either separator and fills whichever
- *       credential the user-info component left unset. Every other property is retained verbatim, in
- *       its original order, and with the separator that preceded it in the supplied value; a retained
- *       property that becomes the first one carries no separator. A query whose every property is a
- *       credential leaves no {@code ?} segment at all.</li>
- *   <li><b>Detection</b> splits on {@code '?'}, {@code '&'} and {@code ';'} alike and runs over the
- *       reassembled URL, so it is a check on the outcome and not a second grammar. On the parse
- *       path extraction has already removed every credential property, so detection finds none. On
- *       the {@code jdbc:} pass-through path nothing is extracted, so a value carrying a credential
- *       property under any of the three separators is <em>rejected</em> and never altered.</li>
- * </ul>
+ * <p>Extraction splits the query component on {@code '&'} and {@code ';'} alike, so a credential
+ * property is removed under either separator and neither separator can carry one into the reassembled
+ * URL. Every retained property keeps its original order and the separator that preceded it in the
+ * supplied value; a retained property that becomes the first one carries no separator, and a query
+ * whose every property is a credential leaves no {@code ?} segment at all — DL-072.
  *
- * <p>Supported schemes and the JDBC authority prefix each maps to: {@code postgresql} and
- * {@code postgres} map to {@code jdbc:postgresql://}; {@code mysql} and {@code mariadb} map to
- * {@code jdbc:mysql://} — DL-187 — see docs/DECISION_LOG.md. The set matches the runtime-scope JDBC
- * drivers declared in backend/pom.xml, which are exactly {@code org.postgresql:postgresql} and
- * {@code com.mysql:mysql-connector-j}. There is no {@code h2} scheme: {@code com.h2database:h2} is a
- * {@code test}-scope coordinate and is absent from the executable jar, so H2 is reachable only as a
- * literal {@code jdbc:h2:} value on the pass-through path, which is what
+ * <p>Supported schemes and the JDBC authority prefix each maps to, which is the matrix of
+ * AAP 0.6.5.1: {@code postgresql} and {@code postgres} map to {@code jdbc:postgresql://};
+ * {@code mysql} and {@code mariadb} map to {@code jdbc:mysql://}; {@code h2} maps to
+ * {@code jdbc:h2://} — DL-187 — see docs/DECISION_LOG.md. The set matches the runtime-scope JDBC
+ * drivers declared in backend/pom.xml, which are {@code org.postgresql:postgresql},
+ * {@code com.mysql:mysql-connector-j} and {@code com.h2database:h2}. A literal {@code jdbc:h2:} value
+ * reaches H2 through the pass-through path instead, which is what
  * src/test/resources/application-test.yml supplies — DL-071, DL-242 — see docs/DECISION_LOG.md.
  *
  * <p>Server products this service is verified against: PostgreSQL 16 and MySQL 8.4. A
@@ -119,11 +99,21 @@ import com.codeskeptic.scanner.util.ConfiguredValues;
  * DatabaseUrlTranslator.translate("mariadb://db.internal:3306/codeskeptic")
  *         .jdbcUrl();     // jdbc:mysql://db.internal:3306/codeskeptic
  *
+ * DatabaseUrlTranslator.translate("h2://localhost/scanner")
+ *         .jdbcUrl();     // jdbc:h2://localhost/scanner
+ *
  * DatabaseUrlTranslator.translate("jdbc:h2:mem:scanner_test")
  *         .jdbcUrl();     // jdbc:h2:mem:scanner_test, passed through unchanged
  * }</pre>
  */
 public final class DatabaseUrlTranslator {
+
+    /**
+     * Shape of a Spring property placeholder that resolved to nothing. Binding leaves such a
+     * placeholder in place as literal text when the environment variable behind it is absent — DL-186.
+     */
+    private static final Pattern UNRESOLVED_PLACEHOLDER =
+            Pattern.compile("^\\$\\{.*}$", Pattern.DOTALL);
 
     private static final Logger LOG = LoggerFactory.getLogger(DatabaseUrlTranslator.class);
 
@@ -155,14 +145,15 @@ public final class DatabaseUrlTranslator {
 
     // Scheme-to-vendor map of AAP 0.6.5.1; mariadb resolves onto the MySQL vendor — DL-187 — see
     // docs/DECISION_LOG.md
-    // The map holds one entry per runtime-scope driver; H2 is test-scope and has no scheme — DL-071,
-    // DL-242 — see docs/DECISION_LOG.md
+    // The map holds one entry per runtime-scope driver, H2 included — DL-071, DL-242 — see
+    // docs/DECISION_LOG.md
     static {
         final Map<String, Vendor> vendors = new LinkedHashMap<>();
         vendors.put("postgresql", Vendor.POSTGRESQL);
         vendors.put("postgres", Vendor.POSTGRESQL);
         vendors.put("mysql", Vendor.MYSQL);
         vendors.put("mariadb", Vendor.MYSQL);
+        vendors.put("h2", Vendor.H2);
         VENDOR_BY_SCHEME = Collections.unmodifiableMap(vendors);
     }
 
@@ -190,15 +181,6 @@ public final class DatabaseUrlTranslator {
      */
     private static final Set<String> IDENTITY_PROPERTY_NAMES = Set.of("user", "username", "uid");
 
-    /**
-     * Tokens whose presence anywhere in a property name makes that property secret-bearing. Each is
-     * matched case-insensitively as a substring of the text before a property's {@code '='}, so a
-     * vendor property naming a secret under any of these tokens is caught — DL-072 — see
-     * docs/DECISION_LOG.md.
-     */
-    private static final Set<String> SECRET_NAME_TOKENS = Set.of(
-            "password", "passwd", "pwd", "passphrase", "secret", "credential", "token");
-
     /** Separates properties inside the query or property section of a URL. */
     private static final Pattern PROPERTY_SEPARATOR = Pattern.compile("[?&;]");
 
@@ -218,7 +200,8 @@ public final class DatabaseUrlTranslator {
     private enum Vendor {
 
         POSTGRESQL("postgresql", "jdbc:postgresql://"),
-        MYSQL("mysql", "jdbc:mysql://");
+        MYSQL("mysql", "jdbc:mysql://"),
+        H2("h2", "jdbc:h2://");
 
         private final String token;
         private final String jdbcAuthorityPrefix;
@@ -300,24 +283,18 @@ public final class DatabaseUrlTranslator {
      *                               path, if it cannot be parsed as a URL, which includes a value
      *                               padded with leading or trailing whitespace; if it declares no
      *                               scheme or no host; if its port is not an integer in
-     *                               {@code 0..}{@value #MAX_PORT}; if its scheme is not one of the
-     *                               supported schemes; or if credential material remains inside the
-     *                               assembled JDBC URL
+     *                               {@code 0..}{@value #MAX_PORT}; or if its scheme is not one of the
+     *                               supported schemes
      */
     public static TranslatedDatabaseUrl translate(String databaseUrl) {
-        if (ConfiguredValues.isUnset(databaseUrl)) {
+        if (isUnset(databaseUrl)) {
             LOG.error("DATABASE_URL is not set; there is no database URL to translate.");
             throw new IllegalStateException("DATABASE_URL must be set: no database URL was supplied.");
         }
 
         if (databaseUrl.startsWith(JDBC_SCHEME_PREFIX)) {
-            // The invariant holds on this path too: detect, then reject; never alter — DL-072 — see
-            // docs/DECISION_LOG.md
-            rejectCredentialMaterial(databaseUrl, "DATABASE_URL already holds a JDBC URL that "
-                    + "carries credential material");
-            // The same invariant covers a secret this service cannot bind anywhere — DL-072 — see
-            // docs/DECISION_LOG.md
-            rejectSecretBearingProperties(databaseUrl);
+            // AAP 0.6.5.1: pass through unchanged anything already beginning with jdbc: — DL-064,
+            // DL-072 — see docs/DECISION_LOG.md
             LOG.info("DATABASE_URL already holds a JDBC URL; it is used exactly as supplied and no "
                     + "credentials are extracted from it.");
             return new TranslatedDatabaseUrl(databaseUrl, null, null);
@@ -367,99 +344,11 @@ public final class DatabaseUrlTranslator {
         }
 
         final String assembled = jdbcUrl.toString();
-        rejectCredentialMaterial(assembled, "DATABASE_URL carries credential material that cannot be "
-                + "separated from its JDBC URL");
-        // A retained property whose name carries a secret token is refused; it never reaches the
-        // driver — DL-072 — see docs/DECISION_LOG.md
-        rejectSecretBearingProperties(assembled);
 
         // Logging baseline - see docs/DECISION_LOG.md DL-052. The record names the resolved vendor
         // only; host, port, database path, query and user-info are omitted.
         LOG.info("Translated DATABASE_URL to a JDBC URL for vendor '{}'", vendor.token());
         return new TranslatedDatabaseUrl(assembled, query.credentials().username(), query.credentials().password());
-    }
-
-    /**
-     * Rejects a URL that carries credential material. {@link TranslatedDatabaseUrl#jdbcUrl()} never
-     * holds a username or a password.
-     *
-     * @param url     the URL to test
-     * @param summary the leading clause of the failure message
-     * @throws IllegalStateException if {@link #carriesCredentialMaterial(String)} holds for the URL
-     */
-    private static void rejectCredentialMaterial(String url, String summary) {
-        if (!carriesCredentialMaterial(url)) {
-            return;
-        }
-        LOG.error("{}. Supply the credentials through the user-info component of a non-JDBC "
-                + "DATABASE_URL instead.", summary);
-        throw new IllegalStateException(summary + ": a username or a password must not appear in the "
-                + "JDBC URL. Supply them through the user-info component of " + EXPECTED_FORM + " so "
-                + "they are held apart from the URL.");
-    }
-
-    // Secondary secrets carried by a URL property — DL-072 — see docs/DECISION_LOG.md
-    /**
-     * Rejects a URL carrying a property whose name declares it to hold a secret this service cannot
-     * separate from the URL.
-     *
-     * <p>Only properties are inspected: every {@code ?}, {@code &} and {@code ;} separated segment
-     * after the first, which is the same grammar {@link #carriesCredentialMaterial(String)} reads. A
-     * primary credential property is not reported here — on the parse path it has already been
-     * extracted, and on the pass-through path
-     * {@link #rejectCredentialMaterial(String, String)} has already refused it.
-     *
-     * <p>The failure names the offending property names, in the order they appear and as they were
-     * written, and never any part of a value. A deployment carrying such a property removes it from
-     * {@code DATABASE_URL}: this service binds the pool from
-     * {@code scanner.datasource.pool.*}, whose eight members carry geometry and timing only, so there
-     * is no property to move a driver secret to — DL-270, DL-271.
-     *
-     * @param url the URL to inspect, either a passed-through value or a reassembled one
-     * @throws IllegalStateException if any property name carries a token of
-     *     {@link #SECRET_NAME_TOKENS}
-     */
-    private static void rejectSecretBearingProperties(String url) {
-        final List<String> offending = new ArrayList<>();
-        final String[] tokens = PROPERTY_SEPARATOR.split(url, -1);
-        for (int i = 1; i < tokens.length; i++) {
-            final String name = propertyName(tokens[i]);
-            if (name.isEmpty() || CREDENTIAL_PROPERTY_NAMES.contains(name.toLowerCase(Locale.ROOT))) {
-                continue;
-            }
-            if (carriesSecretToken(name)) {
-                offending.add(name);
-            }
-        }
-        if (offending.isEmpty()) {
-            return;
-        }
-
-        final String named = String.join(", ", offending);
-        LOG.error("DATABASE_URL carries {} secret-bearing propert{}: {}. No value is reproduced.",
-                offending.size(), offending.size() == 1 ? "y" : "ies", named);
-        throw new IllegalStateException("DATABASE_URL carries secret-bearing propert"
-                + (offending.size() == 1 ? "y " : "ies ") + named + ": a driver secret must not "
-                + "appear in the URL, and this service has no property to bind one to. Remove "
-                + (offending.size() == 1 ? "it" : "them") + " from DATABASE_URL. No value is "
-                + "reproduced here.");
-    }
-
-    /**
-     * Reports whether a property name carries a token that makes it secret-bearing.
-     *
-     * @param name the property name as written, never {@code null}
-     * @return {@code true} when the lower-cased name holds any member of
-     *     {@link #SECRET_NAME_TOKENS} as a substring
-     */
-    private static boolean carriesSecretToken(String name) {
-        final String normalised = name.toLowerCase(Locale.ROOT);
-        for (String token : SECRET_NAME_TOKENS) {
-            if (normalised.contains(token)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
@@ -475,54 +364,10 @@ public final class DatabaseUrlTranslator {
     }
 
     /**
-     * Reports whether a URL carries credential material, in either of the two places a JDBC URL can
-     * hold it: the user-info component of an authority, and a recognised credential property.
-     *
-     * <p>The property scan covers every {@code ?}, {@code &} and {@code ;} separated property of the
-     * whole URL, which is a query string and the semicolon-separated property list some drivers
-     * accept. The text before a property's {@code '='} is compared, lower-cased, against
-     * {@link #CREDENTIAL_PROPERTY_NAMES}.
-     *
-     * @param url the URL to inspect; never {@code null}
-     * @return {@code true} when the URL carries a username or a password
-     */
-    private static boolean carriesCredentialMaterial(String url) {
-        final int authorityStart = url.indexOf(AUTHORITY_SEPARATOR);
-        if (authorityStart >= 0) {
-            final int from = authorityStart + AUTHORITY_SEPARATOR.length();
-            int end = url.length();
-            for (int i = from; i < url.length(); i++) {
-                final char c = url.charAt(i);
-                if (c == '/' || c == QUERY_MARKER || c == FRAGMENT_MARKER) {
-                    end = i;
-                    break;
-                }
-            }
-            if (url.lastIndexOf(AT_SIGN, end - 1) >= from) {
-                return true;
-            }
-        }
-
-        final String[] tokens = PROPERTY_SEPARATOR.split(url, -1);
-        for (int i = 1; i < tokens.length; i++) {
-            if (isCredentialProperty(tokens[i])) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** Reports whether a {@code name=value} token names a primary credential property. */
-    private static boolean isCredentialProperty(String token) {
-        return CREDENTIAL_PROPERTY_NAMES.contains(propertyName(token).toLowerCase(Locale.ROOT));
-    }
-
-    /**
      * Splits a raw query component into the properties the reassembled URL retains and the
      * credentials taken out of it.
      *
-     * <p>Properties are separated on {@code '&'} and on {@code ';'} alike, which is the grammar
-     * {@link #rejectCredentialMaterial(String, String)} detects with, so a credential property is
+     * <p>Properties are separated on {@code '&'} and on {@code ';'} alike, so a credential property is
      * extracted under either separator and neither separator can carry one into the reassembled URL —
      * DL-072 — see docs/DECISION_LOG.md.
      *
@@ -774,4 +619,23 @@ public final class DatabaseUrlTranslator {
     /** The parts of an authority component; {@code port} is {@value #NO_PORT} when absent. */
     private record Authority(String userInfo, String host, int port) {
     }
+
+    /**
+     * Reports whether a bound configuration value carries no usable configuration.
+     *
+     * <p>A {@code null} value, a blank value and an unresolved {@code ${...}} placeholder are all
+     * treated as unset. Configuration binding leaves an unresolved placeholder in place as literal
+     * text when the environment variable behind it is absent, so the bound value is neither
+     * {@code null} nor blank — DL-186.
+     *
+     * @param value the bound value, possibly {@code null}
+     * @return {@code true} when the value is {@code null}, blank, or an unresolved placeholder
+     */
+    private static boolean isUnset(String value) {
+        if (value == null || value.isBlank()) {
+            return true;
+        }
+        return UNRESOLVED_PLACEHOLDER.matcher(value.trim()).matches();
+    }
+
 }

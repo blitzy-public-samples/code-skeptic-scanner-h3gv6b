@@ -12,9 +12,8 @@
 # scanner.auth.password-hash below is a bcrypt hash of the plaintext `test-password` — DL-020.
 #
 # BUILD-ONLY PROFILE. The scanner.jwt.secret and scanner.auth.password-hash values below are real,
-# usable credentials scoped to `mvn clean verify`. config/BuildProfileGuard refuses to start a
-# revision on which this profile is active outside the build; a deployment supplies SECRET_KEY and
-# AUTH_PASSWORD_HASH, and neither application.yml value carries a default — DL-016, DL-020, DL-279.
+# usable credentials scoped to `mvn clean verify`. A deployment supplies SECRET_KEY and
+# AUTH_PASSWORD_HASH, and neither application.yml value carries a default — DL-016, DL-020.
 #
 # scanner.twitter.consumer-key and scanner.twitter.consumer-secret are blank. task/TweetStreamClient
 # takes its blank-credential path and the build performs no X network call — DL-046, DL-239.
@@ -44,19 +43,6 @@ scanner:
   # net-new — DL-009, DL-027 — see docs/DECISION_LOG.md
   database-url: 'jdbc:h2:mem:scanner_test;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE'
 
-  datasource:
-    # Net-new (no Python counterpart) — DL-270, DL-271 — see docs/DECISION_LOG.md
-    # The build reaches one in-memory database from one process. Every value is declared here; none is
-    # left to its default — see docs/DECISION_LOG.md DL-271.
-    pool:
-      maximum-size: 4
-      minimum-idle: 1
-      connection-timeout-millis: 30000
-      validation-timeout-millis: 5000
-      idle-timeout-millis: 10000
-      max-lifetime-millis: 30000
-      leak-detection-threshold-millis: 0
-      name: code-skeptic-scanner-test-pool
   # Ported from backend/app/core/config.py:L10 and backend/app/services/twitter_service.py:L43,L46 (faithful port) — see docs/DECISION_LOG.md
   popularity-threshold: 100
   # Ported from backend/app/core/config.py:L11 and backend/app/tasks/response_generation.py:L50 (faithful port) — see docs/DECISION_LOG.md
@@ -159,17 +145,12 @@ scanner:
 
   background:
     # Net-new (no Python counterpart) — DL-250 — see docs/DECISION_LOG.md
-    # Both background paths are declared enabled under this profile. The composition assertions then
-    # observe the same ownership decision a single-process deployment takes. The X stream still
-    # declines to start: both consumer credentials are blank under this profile — DL-046.
+    # Both background paths are declared enabled under this profile, which is what a single-process
+    # deployment runs with. The X stream still declines to start: both consumer credentials are blank
+    # under this profile — DL-046.
     enabled: true
     stream-enabled: true
     response-generation-enabled: true
-    # Net-new (no Python counterpart) — DL-281, DL-282 — see docs/DECISION_LOG.md
-    # Both bounds are declared under this profile, which states the values a test context runs with.
-    # The lease term is the shortest the binder accepts and the renewal interval is half of it: a
-    # context that claims the lease holds it for the whole of its own lifetime and releases it at
-    # shutdown.
-    lease-ttl-seconds: 10
-    lease-renew-seconds: 5
+    # Net-new (no Python counterpart) — DL-282 — see docs/DECISION_LOG.md
+    # The bound is declared under this profile, which states the value a test context runs with.
     max-candidates-per-pass: 200

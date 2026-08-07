@@ -36,13 +36,6 @@ import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
-import org.springframework.security.web.header.HeaderWriter;
-import org.springframework.security.web.header.writers.CacheControlHeadersWriter;
-import org.springframework.security.web.header.writers.CompositeHeaderWriter;
-import org.springframework.security.web.header.writers.HstsHeaderWriter;
-import org.springframework.security.web.header.writers.XContentTypeOptionsHeaderWriter;
-import org.springframework.security.web.header.writers.XXssProtectionHeaderWriter;
-import org.springframework.security.web.header.writers.frameoptions.XFrameOptionsHeaderWriter;
 import org.springframework.security.web.context.RequestAttributeSecurityContextRepository;
 import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
@@ -51,7 +44,6 @@ import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
-import com.codeskeptic.scanner.util.ConfiguredValues;
 
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ReadListener;
@@ -74,15 +66,11 @@ import jakarta.servlet.http.HttpServletResponse;
  * {@code backend/app/api/settings.py:L8,L14} and {@code backend/app/api/analytics.py:L8,L18}, each
  * applied without parentheses. The chain declared here authenticates all eleven — DL-021.
  *
- * <p>Six beans are published, and no other:
+ * <p>Five beans are published, and no other:
  *
  * <ul>
  *   <li>{@link #securityFilterChain(HttpSecurity)} — the chain, carrying the authorization rules,
  *       the unauthenticated-request entry point and {@link JwtAuthenticationFilter}.
- *   <li>{@link #transportSecurityHeaderWriter()} — the composed transport-security header policy,
- *       injected into {@code com.codeskeptic.scanner.config.ContainerErrorResponseConfig} so a
- *       rejection the container answers before any filter runs carries the same headers the chain
- *       writes — DL-277, DL-237.
  *   <li>{@link #securityContextRepository()} — the request-scoped context store the chain reads and
  *       {@link JwtAuthenticationFilter} writes — DL-112.
  *   <li>{@link #passwordEncoder()} — successor of the passlib bcrypt helpers at
@@ -147,6 +135,13 @@ import jakarta.servlet.http.HttpServletResponse;
 public class SecurityConfig {
 
     // Logging baseline — DL-052 — see docs/DECISION_LOG.md
+    /**
+     * Shape of a Spring property placeholder that resolved to nothing. Binding leaves such a
+     * placeholder in place as literal text when the environment variable behind it is absent — DL-186.
+     */
+    private static final Pattern UNRESOLVED_PLACEHOLDER =
+            Pattern.compile("^\\$\\{.*}$", Pattern.DOTALL);
+
     private static final Logger log = LoggerFactory.getLogger(SecurityConfig.class);
 
     /** Path of the one route this chain permits with no authentication — DL-019. */
@@ -324,48 +319,6 @@ public class SecurityConfig {
         return http.build();
     }
 
-    // Net-new (no Python counterpart) — DL-277 — see docs/DECISION_LOG.md
-    /**
-     * Publishes the transport-security header policy of this application, as one writer.
-     *
-     * <p>The composed writers are the ones Spring Security's {@code HeadersConfigurer} applies by
-     * default, in its order: {@code X-Content-Type-Options}, {@code X-XSS-Protection},
-     * the cache directives {@code Cache-Control}, {@code Pragma} and {@code Expires},
-     * {@code Strict-Transport-Security} on a secure request only, and {@code X-Frame-Options}. This
-     * class customises none of them, and the chain's {@code HeaderWriterFilter} and this bean apply the
-     * same policy from the same declaration — see docs/DECISION_LOG.md DL-277.
-     *
-     * <p>Each composed writer either skips a name the response already carries or replaces its value
-     * through {@code setHeader}, so applying this bean to a response the chain has already written
-     * leaves each header with exactly one value.
-     * {@code com.codeskeptic.scanner.config.ContainerErrorResponseConfig} applies it to a rejection the
-     * container answers before any filter runs, which {@code HeaderWriterFilter} never sees — DL-237,
-     * DL-277.
-     *
-     * @return the composed policy; never {@code null}
-     */
-    @Bean
-    public HeaderWriter transportSecurityHeaderWriter() {
-        return defaultTransportSecurityHeaderWriter();
-    }
-
-    /**
-     * Builds the policy {@link #transportSecurityHeaderWriter()} publishes.
-     *
-     * <p>This is the one declaration site of the policy: the bean above returns it, and a caller
-     * outside the container obtains the same composition — see docs/DECISION_LOG.md DL-277.
-     *
-     * @return a writer composing Spring Security's default header writers; never {@code null}
-     */
-    public static HeaderWriter defaultTransportSecurityHeaderWriter() {
-        return new CompositeHeaderWriter(List.of(
-                new XContentTypeOptionsHeaderWriter(),
-                new XXssProtectionHeaderWriter(),
-                new CacheControlHeadersWriter(),
-                new HstsHeaderWriter(),
-                new XFrameOptionsHeaderWriter()));
-    }
-
     // Net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-112
     /**
      * Publishes the context store the chain reads and {@link JwtAuthenticationFilter} writes.
@@ -507,7 +460,7 @@ public class SecurityConfig {
     private String configuredPasswordHash() {
         ScannerProperties.Auth auth = properties.auth();
         String passwordHash = (auth == null) ? null : auth.passwordHash();
-        if (ConfiguredValues.isUnset(passwordHash)) {
+        if (isUnset(passwordHash)) {
             throw new IllegalStateException(MISSING_PASSWORD_HASH_MESSAGE);
         }
         String trimmed = passwordHash.trim();
@@ -679,4 +632,23 @@ public class SecurityConfig {
             }
         }
     }
+
+    /**
+     * Reports whether a bound configuration value carries no usable configuration.
+     *
+     * <p>A {@code null} value, a blank value and an unresolved {@code ${...}} placeholder are all
+     * treated as unset. Configuration binding leaves an unresolved placeholder in place as literal
+     * text when the environment variable behind it is absent, so the bound value is neither
+     * {@code null} nor blank — DL-186.
+     *
+     * @param value the bound value, possibly {@code null}
+     * @return {@code true} when the value is {@code null}, blank, or an unresolved placeholder
+     */
+    private static boolean isUnset(String value) {
+        if (value == null || value.isBlank()) {
+            return true;
+        }
+        return UNRESOLVED_PLACEHOLDER.matcher(value.trim()).matches();
+    }
+
 }

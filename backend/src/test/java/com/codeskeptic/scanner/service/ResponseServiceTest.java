@@ -8,7 +8,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mockingDetails;
@@ -25,7 +24,6 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -87,8 +85,6 @@ import com.codeskeptic.scanner.entity.Tweet;
 import com.codeskeptic.scanner.exception.BadRequestException;
 import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.exception.ResponseGenerationException;
-import com.codeskeptic.scanner.util.LogSafe;
-import com.codeskeptic.scanner.util.QueryParameters;
 import com.codeskeptic.scanner.repository.ResponseRepository;
 import com.codeskeptic.scanner.repository.ResponseRepository.ResponseRow;
 import com.codeskeptic.scanner.repository.TweetRepository;
@@ -383,7 +379,7 @@ class ResponseServiceTest {
                 responseMapper);
     }
 
-    // Every log record naming a caller-supplied identifier passes it through util/LogSafe, the
+    // No log record names a caller-supplied identifier, which is the
     // failure-wrapping record included — DL-208 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("bounds a caller-supplied identifier on the failure-wrapping path as well as on the "
@@ -1145,39 +1141,47 @@ class ResponseServiceTest {
                 Arguments.of(NullNode.getInstance(), NullNode.getInstance()));
     }
 
-    // A carried value the addressed column cannot hold is refused by the record — DL-231 — see
-    // docs/DECISION_LOG.md
+    // Every JSON type a body may carry is accepted, which is validation parity with the free-form
+    // request.json of backend/app/api/responses.py:L54 — DL-050, DL-231 — see docs/DECISION_LOG.md
     @ParameterizedTest
-    @MethodSource("unusableUpdateBodies")
-    @DisplayName("refuses a carried value the addressed column cannot hold")
-    void refusesACarriedValueTheAddressedColumnCannotHold(JsonNode content, JsonNode isApproved) {
-        assertThatThrownBy(() -> new UpdateResponseRequest(content, isApproved))
-                .isInstanceOf(IllegalArgumentException.class);
+    @MethodSource("carriedValuesOfEveryJsonType")
+    @DisplayName("accepts a carried value of any JSON type and reads the value the column stores")
+    void acceptsACarriedValueOfAnyJsonType(JsonNode content, JsonNode isApproved,
+            String expectedContent, Boolean expectedApproval) {
 
+        UpdateResponseRequest request = new UpdateResponseRequest(content, isApproved);
+
+        assertThat(request.contentValue()).as("value the content column stores")
+                .isEqualTo(expectedContent);
+        assertThat(request.approvalValue()).as("value the is_approved column stores")
+                .isEqualTo(expectedApproval);
         verifyNoInteractions(responseRepository, responseMapper);
     }
 
     /**
-     * The component pairs carrying a value the addressed column cannot hold.
+     * One case per JSON type a carried member may hold, with the value each column stores for it.
      *
-     * @return one argument pair per refused body
+     * @return the carried pair and the two stored values
      */
-    private static Stream<Arguments> unusableUpdateBodies() {
+    private static Stream<Arguments> carriedValuesOfEveryJsonType() {
         ObjectNode object = JsonNodeFactory.instance.objectNode();
         object.put("x", 1);
         ArrayNode array = JsonNodeFactory.instance.arrayNode();
         array.add("a");
         return Stream.of(
-                Arguments.of(IntNode.valueOf(123), null),
-                Arguments.of(BooleanNode.TRUE, null),
-                Arguments.of(array, null),
-                Arguments.of(object, null),
-                Arguments.of(null, IntNode.valueOf(1)),
-                Arguments.of(null, TextNode.valueOf("true")),
-                Arguments.of(null, array),
-                Arguments.of(null, object),
-                Arguments.of(TextNode.valueOf(REVISED_CONTENT), TextNode.valueOf("true")),
-                Arguments.of(IntNode.valueOf(7), BooleanNode.TRUE));
+                Arguments.of(IntNode.valueOf(123), null, "123", null),
+                Arguments.of(BooleanNode.TRUE, null, "true", null),
+                Arguments.of(array, null, "[\"a\"]", null),
+                Arguments.of(object, null, "{\"x\":1}", null),
+                Arguments.of(null, IntNode.valueOf(1), null, Boolean.TRUE),
+                Arguments.of(null, IntNode.valueOf(0), null, Boolean.FALSE),
+                Arguments.of(null, TextNode.valueOf("true"), null, Boolean.TRUE),
+                Arguments.of(null, TextNode.valueOf("no"), null, Boolean.FALSE),
+                Arguments.of(null, array, null, Boolean.FALSE),
+                Arguments.of(null, object, null, Boolean.FALSE),
+                Arguments.of(TextNode.valueOf(REVISED_CONTENT), TextNode.valueOf("true"),
+                        REVISED_CONTENT, Boolean.TRUE),
+                Arguments.of(IntNode.valueOf(7), BooleanNode.TRUE, "7", Boolean.TRUE));
     }
 
     // Presence decides whether a column is written and the carried value decides what is stored, each
@@ -1364,67 +1368,28 @@ class ResponseServiceTest {
         assertThat(requested.getPageSize()).isEqualTo(10);
     }
 
-    // backend/app/api/responses.py:L11-12 declares the defaults; the maximum is DL-123
-    @ParameterizedTest(name = "a per_page of {0} is served as {1} and read in bounded windows")
-    @CsvSource({
-            "100,100",
-            "101,101",
-            "500,500",
-            "1000,1000",
-            "1001,1000",
-            "10000,1000",
-            "2147483647,1000"
-    })
-    @DisplayName("serves per_page up to the maximum and reduces a larger one to it")
-    void servesPerPageUpToTheMaximumAndReducesALargerOneToIt(int perPage, int servedSize) {
+    // No page size is reduced — DL-217 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "a per_page of {0} is served unreduced")
+    @ValueSource(ints = {100, 101, 500, 1_000, 1_001, 10_000, Integer.MAX_VALUE})
+    @DisplayName("serves every per_page it is given without reducing it")
+    void servesEveryPerPageWithoutReducingIt(int perPage) {
         stubEveryWindowRead(0L);
 
         PaginatedResponsesDto envelope = service.getPaginatedResponses(1, perPage);
 
         assertThat(envelope.pagination().perPage())
-                .as("per_page the envelope restates").isEqualTo(servedSize);
-        assertThat(servedSize).isLessThanOrEqualTo(QueryParameters.MAXIMUM_PAGE_SIZE);
-        assertThatEveryWindowIsBounded();
-    }
-
-    // One page larger than the chunk bound is read as consecutive bounded chunks — DL-249 — see
-    // docs/DECISION_LOG.md
-    @Test
-    @DisplayName("reads a page larger than the chunk bound as consecutive chunks that cover it once")
-    void readsAPageLargerThanTheChunkBoundAsConsecutiveChunks() {
-        int chunkBound = declaredChunkBound();
-        int perPage = chunkBound * 2;
-        List<ResponseRow> firstChunk = projectedRows(chunkBound);
-        List<ResponseRow> secondChunk = projectedRows(3);
-        when(responseRepository.findRowChunk(any(Pageable.class)))
-                .thenReturn(firstChunk)
-                .thenReturn(secondChunk);
-        when(responseRepository.count()).thenReturn((long) chunkBound + secondChunk.size());
-        when(responseMapper.toDtoRowList(anyList()))
-                .thenAnswer(invocation -> dtosFor(invocation.getArgument(0)));
-
-        PaginatedResponsesDto envelope = service.getPaginatedResponses(1, perPage);
-
-        assertThat(envelope.responses()).as("rows the page rendered")
-                .hasSize(chunkBound + secondChunk.size());
-        assertThat(envelope.pagination().perPage())
                 .as("per_page the envelope restates").isEqualTo(perPage);
-        assertThat(envelope.pagination().total()).as("total the envelope reports")
-                .isEqualTo((long) chunkBound + secondChunk.size());
-        assertThat(pageRequestsIssued()).as("windows the page read asked for").hasSize(2);
-        assertThat(pageRequestsIssued()).extracting(Pageable::getOffset)
-                .as("first row of each window").containsExactly(0L, (long) chunkBound);
-        verify(responseMapper, times(2)).toDtoRowList(anyList());
-        verify(responseRepository, never()).findAllRows(any(Pageable.class));
-        assertThatEveryWindowIsBounded();
+        assertThat(pageRequestsIssued()).as("windows the page read asked for")
+                .isNotEmpty()
+                .allSatisfy(window -> assertThat(window.getPageSize())
+                        .as("rows the statement was asked for").isEqualTo(perPage));
     }
 
-    // A page at or below the chunk bound is read by one statement — DL-249 — see
-    // docs/DECISION_LOG.md
+    // One paged query answers a page of any size — DL-217 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "a per_page of {0} is read by the single page statement")
-    @ValueSource(ints = {1, 10, 499, 500})
-    @DisplayName("reads a page at or below the chunk bound with one page statement and no row count")
-    void readsAPageAtOrBelowTheChunkBoundWithOnePageStatement(int perPage) {
+    @ValueSource(ints = {1, 10, 499, 500, 1_000, 5_000})
+    @DisplayName("reads a page of any size with one page statement and no row count")
+    void readsAPageOfAnySizeWithOnePageStatement(int perPage) {
         when(responseRepository.findAllRows(any(Pageable.class))).thenAnswer(invocation ->
                 new PageImpl<>(List.of(), invocation.<Pageable>getArgument(0), 0L));
 
@@ -1432,11 +1397,10 @@ class ResponseServiceTest {
 
         assertThat(theRequestedPage().getPageSize())
                 .as("rows the single statement was asked for").isEqualTo(perPage);
-        verify(responseRepository, never()).findRowChunk(any(Pageable.class));
         verify(responseRepository, never()).count();
     }
 
-    // Every page read carries a total order — DL-249 — see docs/DECISION_LOG.md
+    // Every page read carries a total order — DL-038 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("orders every page read by identifier ascending")
     void ordersEveryPageReadByIdentifierAscending() {
@@ -1450,7 +1414,7 @@ class ResponseServiceTest {
                         .as("sort of one window").isEqualTo(Sort.by(Sort.Direction.ASC, "id")));
     }
 
-    // backend/app/api/responses.py:L11-12 declares defaults and no bound — DL-123
+    // backend/app/api/responses.py:L11-12 declares defaults and no bound — DL-217
     @Test
     @DisplayName("restates the unreduced per_page in the pagination block")
     void restatesTheUnreducedPerPageInThePaginationBlock() {
@@ -1526,31 +1490,22 @@ class ResponseServiceTest {
         assertThat(envelope.pagination().page()).isEqualTo(3);
     }
 
-    // The finite page-size bound — DL-123 — see docs/DECISION_LOG.md
-    @ParameterizedTest(name = "a per_page of {0} reads a page of size {1}")
-    @CsvSource({
-            "99,99",
-            "100,100",
-            "101,101",
-            "250,250",
-            "1000,1000",
-            "1001,1000",
-            "2147483647,1000"
-    })
-    @DisplayName("passes a page size within the maximum through and reduces a larger one")
-    void passesAPageSizeWithinTheMaximumThroughAndReducesALargerOne(int perPage, int expectedSize) {
+    // No upper bound is applied to per_page — DL-217 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "a per_page of {0} reads a page of the same size")
+    @ValueSource(ints = {99, 100, 101, 250, 1_000, 1_001, Integer.MAX_VALUE})
+    @DisplayName("passes every page size through unreduced")
+    void passesEveryPageSizeThroughUnreduced(int perPage) {
         stubEveryWindowRead(0L);
 
         PaginatedResponsesDto envelope = service.getPaginatedResponses(1, perPage);
 
-        assertThat(envelope.pagination().perPage()).isEqualTo(expectedSize);
-        assertThatEveryWindowIsBounded();
+        assertThat(envelope.pagination().perPage()).isEqualTo(perPage);
     }
 
-    // A page size within the maximum is restated as requested — DL-123 — see docs/DECISION_LOG.md
+    // A page size is restated as requested — DL-217 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("reports a supplied page size within the maximum in the pagination block it builds")
-    void reportsASuppliedPageSizeWithinTheMaximumInThePaginationBlockItBuilds() {
+    @DisplayName("reports the supplied page size in the pagination block it builds")
+    void reportsTheSuppliedPageSizeInThePaginationBlockItBuilds() {
         when(responseRepository.findAllRows(any(Pageable.class)))
                 .thenReturn(pageOfStoredRows(0, 500, 0L));
 
@@ -1559,7 +1514,7 @@ class ResponseServiceTest {
         assertThat(pagination.perPage()).isEqualTo(500);
     }
 
-    // Lower bounds applied to page and per_page — DL-123 — see docs/DECISION_LOG.md
+    // Lower bounds applied to page and per_page — DL-217 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "page {0} of size {1} reads page index {2} of size {3}")
     @CsvSource({
             "0,10,0,10",
@@ -1605,7 +1560,6 @@ class ResponseServiceTest {
                 .isNotEmpty()
                 .allMatch(window -> window.getOffset() <= Integer.MAX_VALUE);
         assertThat(envelope.pagination().page()).isEqualTo(page);
-        assertThatEveryWindowIsBounded();
     }
 
     // The offset ceiling of a paged query — DL-225 — see docs/DECISION_LOG.md
@@ -1921,30 +1875,6 @@ class ResponseServiceTest {
     }
 
     /**
-     * Builds the requested number of projected page rows.
-     *
-     * @param rows the number of rows to build
-     * @return the rows
-     */
-    private static List<ResponseRow> projectedRows(int rows) {
-        List<ResponseRow> built = new ArrayList<>(rows);
-        for (int row = 0; row < rows; row++) {
-            built.add(projectedRow());
-        }
-        return List.copyOf(built);
-    }
-
-    /**
-     * Builds one wire form per supplied projected row, as the mapper does.
-     *
-     * @param rows the rows to render
-     * @return one wire form per row
-     */
-    private static List<ResponseDto> dtosFor(List<ResponseRow> rows) {
-        return rows.stream().map(row -> storedDto()).toList();
-    }
-
-    /**
      * Builds one projected page row carrying the five values the wire contract renders.
      *
      * @return the projected row, never {@code null}
@@ -2059,7 +1989,7 @@ class ResponseServiceTest {
                 .filteredOn(record -> record.getLevel() == Level.ERROR)
                 .hasSize(1)
                 .allSatisfy(record -> assertThat(record.getFormattedMessage())
-                        .contains("Generating a response for tweet")
+                        .contains("Generating a response for the requested tweet failed")
                         .contains(DataIntegrityViolationException.class.getSimpleName())
                         .doesNotContain("23502")
                         .doesNotContain("could not execute statement"));
@@ -2143,14 +2073,13 @@ class ResponseServiceTest {
 
     /**
      * Answers every read one page request can issue with an empty result and the supplied row total:
-     * the single page statement, the bounded chunk statement and the row count.
+     * the page statement and the row count.
      *
      * @param total the value {@code count()} and the page's {@code total} report
      */
     private void stubEveryWindowRead(long total) {
         lenient().when(responseRepository.findAllRows(any(Pageable.class))).thenAnswer(invocation ->
                 new PageImpl<>(List.of(), invocation.<Pageable>getArgument(0), total));
-        lenient().when(responseRepository.findRowChunk(any(Pageable.class))).thenReturn(List.of());
         lenient().when(responseRepository.count()).thenReturn(total);
     }
 
@@ -2165,32 +2094,6 @@ class ResponseServiceTest {
                 .filter(Pageable.class::isInstance)
                 .map(Pageable.class::cast)
                 .toList();
-    }
-
-    /**
-     * Asserts that no statement was asked for more rows than the declared chunk bound — DL-249.
-     */
-    private void assertThatEveryWindowIsBounded() {
-        assertThat(pageRequestsIssued()).as("windows the page read asked for")
-                .isNotEmpty()
-                .allSatisfy(window -> assertThat(window.getPageSize())
-                        .as("rows one statement was asked for")
-                        .isLessThanOrEqualTo(declaredChunkBound()));
-    }
-
-    /**
-     * Reads the chunk bound the service declares, so these assertions and the service cannot drift.
-     *
-     * @return the value of the service's declared chunk bound
-     */
-    private static int declaredChunkBound() {
-        try {
-            Field bound = ResponseService.class.getDeclaredField("PAGE_FETCH_CHUNK_ROWS");
-            bound.setAccessible(true);
-            return (int) bound.get(null);
-        } catch (ReflectiveOperationException absent) {
-            throw new AssertionError("ResponseService must declare PAGE_FETCH_CHUNK_ROWS.", absent);
-        }
     }
 
     /**

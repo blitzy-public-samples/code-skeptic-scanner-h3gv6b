@@ -15,7 +15,6 @@ import com.codeskeptic.scanner.dto.AnalysisResultDto;
 import com.codeskeptic.scanner.dto.PaginatedTweetsDto;
 import com.codeskeptic.scanner.dto.TweetDto;
 import com.codeskeptic.scanner.service.TwitterService;
-import com.codeskeptic.scanner.util.QueryParameters;
 
 // Endpoint contract ported from backend/app/api/tweets.py:L9-55 (faithful port) — see
 // docs/DECISION_LOG.md DL-021, DL-022, DL-023, DL-036, DL-037, DL-038, DL-048, DL-059
@@ -149,11 +148,9 @@ public class TweetController {
      * negative value: this method applies no minimum, no maximum and no re-basing.
      * {@code service.TwitterService.getPaginatedTweets} reads a 1-based {@code page} and requests the
      * matching 0-based repository index, and the {@code page} value it reports back is 1-based — see
-     * docs/DECISION_LOG.md DL-038. That method is where the page size is bounded: a {@code per_page}
-     * above {@value com.codeskeptic.scanner.util.QueryParameters#MAXIMUM_PAGE_SIZE} is served
-     * {@value com.codeskeptic.scanner.util.QueryParameters#MAXIMUM_PAGE_SIZE} rows and the
-     * {@code pagination} block restates that size, while the status stays 200 — see
-     * docs/DECISION_LOG.md DL-123.
+     * docs/DECISION_LOG.md DL-038. That method is also where a page size below one is read as the
+     * route default; no page size is reduced and the status stays 200 — see docs/DECISION_LOG.md
+     * DL-217.
      *
      * <p>Example request: {@code GET /tweets} carrying the query string {@code page=3} with
      * {@code per_page=25}, which reads the third page of 25 rows.
@@ -180,8 +177,8 @@ public class TweetController {
 
         // backend/app/api/tweets.py:L12-13 — request.args.get(..., type=int) returns the default when
         // the conversion raises — DL-217 — see docs/DECISION_LOG.md
-        int page = QueryParameters.intOrDefault(rawPage, DEFAULT_PAGE);
-        int perPage = QueryParameters.intOrDefault(rawPerPage, DEFAULT_PER_PAGE);
+        int page = intOrDefault(rawPage, DEFAULT_PAGE);
+        int perPage = intOrDefault(rawPerPage, DEFAULT_PER_PAGE);
 
         log.debug("Serving GET /tweets for page {} of size {}.", page, perPage);
 
@@ -264,6 +261,39 @@ public class TweetController {
                 analysisResult);
 
         return ResponseEntity.ok(new AnalysisResultDto(tweetId, analysisResult));
+    }
+
+
+    // Query-parameter conversion of request.args.get(..., type=int) at
+    // backend/app/api/tweets.py:L12-13 — see docs/DECISION_LOG.md DL-217
+    /**
+     * Converts one raw query-parameter value into an {@code int}.
+     *
+     * <p>The default is returned for a {@code null} value, which is an absent parameter; for a blank
+     * value, which is a parameter present with nothing after the {@code =}; for a value carrying any
+     * character a decimal {@code int} cannot hold, which includes a fractional value, a hexadecimal
+     * value and a value carrying a unit; and for a value beyond the range of an {@code int}. That is
+     * the fallback behaviour of Werkzeug's {@code type=int} conversion, which the retired handlers
+     * relied on. Surrounding whitespace is discarded and a leading sign is accepted.
+     *
+     * @param rawValue     the value as the request carried it, or {@code null} when the request
+     *                     carried none
+     * @param defaultValue the value to return when {@code rawValue} carries no {@code int}
+     * @return the converted value, or {@code defaultValue}
+     */
+    private static int intOrDefault(String rawValue, int defaultValue) {
+        if (rawValue == null) {
+            return defaultValue;
+        }
+        String trimmed = rawValue.trim();
+        if (trimmed.isEmpty()) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(trimmed);
+        } catch (NumberFormatException notAnInteger) {
+            return defaultValue;
+        }
     }
 
 }

@@ -23,7 +23,6 @@ import org.springframework.web.bind.annotation.RestController;
 import com.codeskeptic.scanner.dto.LoginRequest;
 import com.codeskeptic.scanner.dto.TokenResponse;
 import com.codeskeptic.scanner.security.JwtService;
-import com.codeskeptic.scanner.util.LogSafe;
 
 // Net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-019, DL-117, DL-118
 /**
@@ -85,9 +84,8 @@ import com.codeskeptic.scanner.util.LogSafe;
  * {@code PasswordEncoder}. It reads no entity, holds no repository and adds no table: the schema this
  * service creates stays the four tables of {@code backend/app/db/models.py}.
  *
- * <p>No submitted password, no submitted principal name and no minted token is written to the log at
- * any level — DL-052. The resolved principal of a successful issuance reaches the log as the
- * correlation token {@code util/LogSafe} derives from it, never as its own text — DL-197.
+ * <p>No submitted password, no submitted principal name, no resolved principal name and no minted
+ * token is written to the log at any level — DL-052, DL-197.
  *
  * <p>The credential-verification work this process performs at one time is bounded: a submitted
  * credential of accepted length acquires one of {@link #MAXIMUM_CONCURRENT_VERIFICATIONS} permits,
@@ -294,7 +292,7 @@ public class AuthController {
             // Only the exception's type is logged: never the submitted principal name, never the
             // submitted password, never the provider's message. Bounded reporting — DL-272.
             reportRejection(unreportedNotAuthenticated, lastNotAuthenticatedReportNanos,
-                    "did not authenticate: {}", LogSafe.type(rejected));
+                    "did not authenticate: {}", rejected.getClass().getSimpleName());
             return unauthorized();
         } finally {
             verificationPermits.release();
@@ -305,10 +303,8 @@ public class AuthController {
         String token = jwtService.generateToken(authentication.getName());
         TokenResponse body = new TokenResponse(token, TOKEN_TYPE, jwtService.getExpirationSeconds());
 
-        // The principal reaches the log as a correlation token only, never as its own text — see
-        // docs/DECISION_LOG.md DL-197
-        log.info("Issued a bearer token to principal {}, valid for {} second(s)",
-                LogSafe.correlation(authentication.getName()), body.expiresIn());
+        // The principal name never reaches the log — see docs/DECISION_LOG.md DL-197
+        log.info("Issued a bearer token, valid for {} second(s)", body.expiresIn());
 
         return ResponseEntity.ok(body);
     }

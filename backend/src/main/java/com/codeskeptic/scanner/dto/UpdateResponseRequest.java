@@ -1,8 +1,5 @@
 package com.codeskeptic.scanner.dto;
 
-import java.util.Locale;
-import java.util.function.Predicate;
-
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -28,14 +25,12 @@ import com.fasterxml.jackson.databind.JsonNode;
  *       presence accessor reports {@code true} and the value accessor reports the value.
  * </ul>
  *
- * <p>The canonical constructor accepts a carried {@code content} only as a JSON string and a carried
- * {@code is_approved} only as a JSON boolean, an explicit JSON {@code null} for either included. Any
- * other carried type — a number, a boolean under {@code content}, a string under {@code is_approved},
- * an object or an array — is rejected with {@link IllegalArgumentException}, which Jackson reports as
- * {@code ValueInstantiationException} and the request-body converter as
- * {@code HttpMessageNotReadableException}, so the request is answered 400
- * {@code {"error": "Bad request"}} — see docs/DECISION_LOG.md DL-231 and DL-092. No value is trimmed,
- * defaulted or coerced.
+ * <p>No carried type is rejected: the free-form {@code request.json} of
+ * {@code backend/app/api/responses.py:L54} assigned whatever the body held to the column, so this
+ * record accepts whatever the body holds and renders it deterministically. A carried {@code content}
+ * that is a JSON string yields its text and any other carried node yields its JSON rendering; a
+ * carried {@code is_approved} yields the boolean the node evaluates to. No value is trimmed or
+ * defaulted — see docs/DECISION_LOG.md DL-231.
  *
  * @param content    raw {@code content} node, {@code null} when the body omits the key
  * @param isApproved raw {@code is_approved} node, {@code null} when the body omits the key
@@ -53,24 +48,6 @@ public record UpdateResponseRequest(
 ) {
 
     /**
-     * Rejects a carried key whose value the addressed column cannot hold.
-     *
-     * @throws IllegalArgumentException when {@code content} is carried as anything but a JSON string
-     *                                 or an explicit JSON {@code null}, or {@code isApproved} as
-     *                                 anything but a JSON boolean or an explicit JSON {@code null}
-     */
-    public UpdateResponseRequest {
-        if (carriesUnusableValue(content, JsonNode::isTextual)) {
-            throw new IllegalArgumentException(
-                    "content must be a JSON string or null; a " + typeOf(content) + " was carried.");
-        }
-        if (carriesUnusableValue(isApproved, JsonNode::isBoolean)) {
-            throw new IllegalArgumentException("is_approved must be a JSON boolean or null; a "
-                    + typeOf(isApproved) + " was carried.");
-        }
-    }
-
-    /**
      * Reports whether the request body carried the {@code content} key.
      *
      * @return {@code true} when the body carried the key, an explicit JSON {@code null} included
@@ -82,11 +59,14 @@ public record UpdateResponseRequest(
     /**
      * Returns the value to write to the {@code content} column.
      *
-     * @return the text of the carried JSON string; {@code null} when the body omitted the key or
-     *     carried an explicit JSON {@code null}
+     * @return the text of the carried JSON string, or the JSON rendering of any other carried node;
+     *     {@code null} when the body omitted the key or carried an explicit JSON {@code null}
      */
     public String contentValue() {
-        return (content == null || content.isNull()) ? null : content.textValue();
+        if (content == null || content.isNull()) {
+            return null;
+        }
+        return content.isTextual() ? content.textValue() : content.toString();
     }
 
     /**
@@ -101,11 +81,11 @@ public record UpdateResponseRequest(
     /**
      * Returns the value to write to the {@code is_approved} column.
      *
-     * @return the carried JSON boolean; {@code null} when the body omitted the key or carried an
-     *     explicit JSON {@code null}
+     * @return the boolean the carried node evaluates to; {@code null} when the body omitted the key
+     *     or carried an explicit JSON {@code null}
      */
     public Boolean approvalValue() {
-        return (isApproved == null || isApproved.isNull()) ? null : isApproved.booleanValue();
+        return (isApproved == null || isApproved.isNull()) ? null : isApproved.asBoolean();
     }
 
     /**
@@ -116,29 +96,6 @@ public record UpdateResponseRequest(
      */
     public boolean carriesNoUpdatableMember() {
         return content == null && isApproved == null;
-    }
-
-    /**
-     * Reports whether a carried node holds a value its column cannot hold.
-     *
-     * @param carried  the node the body carried, or {@code null} when the key was omitted
-     * @param accepted the shape the column accepts
-     * @return {@code true} when a node is carried, is not an explicit JSON {@code null} and does not
-     *     satisfy {@code accepted}
-     */
-    private static boolean carriesUnusableValue(JsonNode carried,
-            Predicate<JsonNode> accepted) {
-        return carried != null && !carried.isNull() && !accepted.test(carried);
-    }
-
-    /**
-     * Names the JSON type of a carried node for the rejection message.
-     *
-     * @param carried the carried node; must not be {@code null}
-     * @return the lower-case node-type name, such as {@code number} or {@code object}
-     */
-    private static String typeOf(JsonNode carried) {
-        return carried.getNodeType().name().toLowerCase(Locale.ROOT);
     }
 
 }

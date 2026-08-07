@@ -90,7 +90,6 @@ import com.codeskeptic.scanner.dto.PaginationDto;
 import com.codeskeptic.scanner.dto.TweetDto;
 import com.codeskeptic.scanner.dto.TokenResponse;
 import com.codeskeptic.scanner.security.JwtService;
-import com.codeskeptic.scanner.util.LogSafe;
 import com.codeskeptic.scanner.service.SentimentAnalysisService;
 import com.codeskeptic.scanner.service.TwitterService;
 import com.codeskeptic.scanner.security.SecurityConfig;
@@ -264,9 +263,7 @@ class AuthControllerTest {
         assertThat(success.getThrowableProxy()).isNull();
 
         String written = success.getFormattedMessage();
-        assertThat(written).contains("Issued a bearer token to principal ");
-        assertThat(written).contains(LogSafe.correlation(configuredUsername()));
-        assertThat(written).startsWith("Issued a bearer token to principal hmac256:");
+        assertThat(written).startsWith("Issued a bearer token, valid for ");
         assertThat(written).doesNotContain(configuredUsername());
         assertThat(written).doesNotContain(TEST_PASSWORD);
         assertThat(written).doesNotContain(mintedToken());
@@ -372,12 +369,14 @@ class AuthControllerTest {
     }
 
     @Test
-    @DisplayName("answers a GET on the token route with the method envelope for a bearer caller")
-    void answersAGetOnTheTokenRouteWithTheMethodEnvelopeForABearerCaller() throws Exception {
+    @DisplayName("answers a GET on the token route with 405, an allow header and no body for a "
+            + "bearer caller")
+    void answersAGetOnTheTokenRouteWith405ForABearerCaller() throws Exception {
         mockMvc.perform(get(TOKEN_ENDPOINT)
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + mintedToken()))
                 .andExpect(status().isMethodNotAllowed())
-                .andExpect(jsonPath("$.error").value("Method not allowed"));
+                .andExpect(header().string("Allow", "POST"))
+                .andExpect(content().string(""));
     }
 
     @Test
@@ -553,13 +552,13 @@ class AuthControllerTest {
     }
 
     @Test
-    @DisplayName("returns the bad request envelope for malformed JSON")
-    void returnsTheBadRequestEnvelopeForMalformedJson() throws Exception {
+    @DisplayName("returns 400 with no body for malformed JSON")
+    void returns400WithNoBodyForMalformedJson() throws Exception {
         mockMvc.perform(post(TOKEN_ENDPOINT)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"username\":"))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("Bad request"));
+                .andExpect(content().string(""));
     }
 
     // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
@@ -575,8 +574,7 @@ class AuthControllerTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.length()").value(1))
-                .andExpect(jsonPath("$.error").value("Bad request"))
+                .andExpect(content().string(""))
                 .andReturn()
                 .getResponse()
                 .getContentAsString();
@@ -586,46 +584,46 @@ class AuthControllerTest {
         assertThat(rendered).doesNotContain("fallback");
     }
 
-    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
-    @ParameterizedTest(name = "[{index}] {0}")
-    @ValueSource(strings = {
-        "{\"username\":\"admin\",\"username\":\"root\",\"password\":\"a\"}",
-        "{\"password\":\"a\",\"password\":\"b\"}"
-    })
-    @DisplayName("answers a body repeating a credential member as an unreadable body, never with a "
-            + "validation envelope and never leaking the member")
-    void bindsABodyRepeatingACredentialMemberBeforeCompletion(String body) throws Exception {
+    // A body repeating a member the converter can still complete binds to the member's last value,
+    // so the request reaches authentication and is refused there — DL-188 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("binds a body repeating the username to its last value and refuses the unknown "
+            + "principal with 401 and no body")
+    void bindsABodyRepeatingTheUsernameToItsLastValue() throws Exception {
         MvcResult result = mockMvc.perform(post(TOKEN_ENDPOINT)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(body))
-                .andExpect(status().isBadRequest())
+                        .content("{\"username\":\"" + configuredUsername() + "\","
+                                + "\"username\":\"" + UNKNOWN_USERNAME + "\","
+                                + "\"password\":\"" + TEST_PASSWORD + "\"}"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().string(""))
                 .andReturn();
 
         String rendered = result.getResponse().getContentAsString();
-        assertThat(rendered).isEqualTo("{\"error\":\"Bad request\"}");
         assertThat(rendered).doesNotContain("password");
         assertThat(rendered).doesNotContain("username");
+        assertBareUnauthorized(result);
     }
 
     @Test
-    @DisplayName("returns the unsupported media type envelope for a plain text body")
-    void returnsTheUnsupportedMediaTypeEnvelopeForAPlainTextBody() throws Exception {
+    @DisplayName("returns 415 with no body for a plain text body")
+    void returns415WithNoBodyForAPlainTextBody() throws Exception {
         mockMvc.perform(post(TOKEN_ENDPOINT)
                         .contentType(MediaType.TEXT_PLAIN)
                         .content(configuredUsername() + ":" + TEST_PASSWORD))
                 .andExpect(status().isUnsupportedMediaType())
-                .andExpect(jsonPath("$.error").value("Unsupported media type"));
+                .andExpect(content().string(""));
     }
 
     @Test
-    @DisplayName("returns the not acceptable envelope when only XML is accepted")
-    void returnsTheNotAcceptableEnvelopeWhenOnlyXmlIsAccepted() throws Exception {
+    @DisplayName("returns 406 with no body when only XML is accepted")
+    void returns406WithNoBodyWhenOnlyXmlIsAccepted() throws Exception {
         mockMvc.perform(post(TOKEN_ENDPOINT)
                         .contentType(MediaType.APPLICATION_JSON)
                         .accept(MediaType.APPLICATION_XML)
                         .content(credentialBody(configuredUsername(), TEST_PASSWORD)))
                 .andExpect(status().isNotAcceptable())
-                .andExpect(jsonPath("$.error").value("Not acceptable"));
+                .andExpect(content().string(""));
     }
 
     @Test

@@ -4,8 +4,6 @@ import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.repository.AiToolRepository;
 import com.codeskeptic.scanner.repository.SettingRepository;
-import com.codeskeptic.scanner.util.LogSafe;
-import com.codeskeptic.scanner.util.StreamRuleTerms;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -80,7 +78,7 @@ import reactor.util.retry.Retry;
  * nothing the cycle records the condition at {@code ERROR}, opens no connection and leaves
  * {@link #isRunning()} reporting {@code false}.
  *
- * <p>Every term is held to the one shared grammar of {@link StreamRuleTerms} before it is rendered as
+ * <p>Every term is held to the one shared grammar of the rule grammar of {@link #isUsableTerm(String)} before it is rendered as
  * a rule expression: a term outside that allowlist is dropped, and no term value is written to the
  * log — DL-257. The
  * collection is bounded by {@code scanner.ingestion.max-stream-rules}, only {@code ai_tools.name} is
@@ -111,11 +109,7 @@ import reactor.util.retry.Retry;
  * <p>{@link #start()} opens no connection at all, and {@link #isAutoStartup()} reports
  * {@code false}, when {@code scanner.background.enabled} or {@code scanner.background.stream-enabled}
  * is {@code false}: only the process designated as the background worker streams — see
- * docs/DECISION_LOG.md DL-250. Both switches holding is necessary and not sufficient: the process must
- * also hold the background-ownership lease {@code task/BackgroundOwnership} claims, so one process
- * streams at a time however many replicas run and whatever their switches say — see
- * docs/DECISION_LOG.md DL-281. That component starts the stream when it takes over a lapsed lease and
- * stops it when a renewal fails.
+ * docs/DECISION_LOG.md DL-250.
  *
  * <p>{@link #start()} opens no connection at all when {@code scanner.twitter.consumer-key} or
  * {@code scanner.twitter.consumer-secret} is unset or blank; it records the condition at
@@ -273,6 +267,58 @@ public class TweetStreamClient implements SmartLifecycle {
     /** Most rules one mutation request carries; a larger set is sent as consecutive requests. */
     private static final int MAX_RULES_PER_REQUEST = 25;
 
+    // The X filtered-stream rule grammar every composed term is held to — DL-257 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Most characters an accepted term holds. A longer term is refused, and the rendered expression is
+     * bounded at {@value #MAX_TERM_CHARS} plus the two quotes a phrase carries — well inside the
+     * length the X standard filtered-stream rule grammar accepts.
+     */
+    private static final int MAX_TERM_CHARS = 128;
+
+    /**
+     * The characters an accepted term may hold in addition to letters and digits. A term may not open
+     * or close with one of them.
+     */
+    private static final String ADDITIONAL_TERM_CHARACTERS = " -_.'";
+
+    /** Separator of the terms held in the {@value #STREAM_KEYWORDS_SETTING_KEY} row. */
+    private static final String TERM_DELIMITER = ",";
+
+    /**
+     * Most segments a delimited value is split into. A value carrying more delimiters than this leaves
+     * its whole tail in the last segment, which the grammar then refuses on length — DL-254.
+     */
+    private static final int MAX_TERM_SEGMENTS = 512;
+
+    /**
+     * Number of {@code ai_tools} names read per page while the rule terms are composed — DL-291 — see
+     * docs/DECISION_LOG.md.
+     */
+    // Net-new page bound — DL-291 — see docs/DECISION_LOG.md
+    private static final int AI_TOOL_PAGE_ROWS = 100;
+
+    /**
+     * Greatest number of {@code ai_tools} rows the composition reads before it stops paging. It bounds
+     * a table whose rows carry no acceptable name; reaching it is recorded at {@code WARN} — DL-291 —
+     * see docs/DECISION_LOG.md.
+     */
+    // Net-new scan bound — DL-291 — see docs/DECISION_LOG.md
+    private static final int MAX_AI_TOOL_ROWS_SCANNED = 10_000;
+
+    // Bound and replacement of the failure-message log guard — DL-197 — see docs/DECISION_LOG.md
+    /** Most characters of a rendered failure message a log record carries. */
+    private static final int MAX_MESSAGE_CHARS = 256;
+
+    /** Written in place of every character a rendered failure message may not carry. */
+    private static final char MESSAGE_REPLACEMENT = '?';
+
+    /** Lowest character a rendered failure message carries literally: the ASCII space. */
+    private static final char FIRST_PRINTABLE_ASCII = 0x20;
+
+    /** Highest character a rendered failure message carries literally: the ASCII tilde. */
+    private static final char LAST_PRINTABLE_ASCII = 0x7E;
+
     // Bounded queueing between the connection and the dispatch worker — DL-258 — see
     // docs/DECISION_LOG.md
     /** Records the dispatch worker may hold ahead of the one it is handling. */
@@ -344,9 +390,6 @@ public class TweetStreamClient implements SmartLifecycle {
     /** Handles one delivered record. */
     private final TweetStreamListener tweetStreamListener;
 
-    /** Reports whether this process holds the background-ownership lease — DL-281. */
-    private final BackgroundOwnership backgroundOwnership;
-
     /** Reports whether {@link #start()} has taken effect and the cycle has not yet terminated. */
     private final AtomicBoolean running = new AtomicBoolean(false);
 
@@ -367,6 +410,14 @@ public class TweetStreamClient implements SmartLifecycle {
 
     /** Records handed to the listener that have not yet returned — DL-259. */
     private final AtomicInteger inFlightDispatches = new AtomicInteger();
+
+    /**
+     * Generation of the most recently subscribed cycle. Every lifecycle transition advances it, and a
+     * cycle's terminal callback compares its own generation against this value before it writes shared
+     * state — DL-290 — see docs/DECISION_LOG.md.
+     */
+    // Net-new cycle generation — DL-290 — see docs/DECISION_LOG.md
+    private final AtomicLong cycleGeneration = new AtomicLong();
 
     /** Records dropped for reaching {@link #MAX_RECORD_BYTES} since the last report — DL-260. */
     private final AtomicLong unreportedOverlongRecords = new AtomicLong();
@@ -398,8 +449,7 @@ public class TweetStreamClient implements SmartLifecycle {
             ScannerProperties properties,
             AiToolRepository aiToolRepository,
             SettingRepository settingRepository,
-            TweetStreamListener tweetStreamListener,
-            BackgroundOwnership backgroundOwnership) {
+            TweetStreamListener tweetStreamListener) {
         this.webClient = Objects.requireNonNull(webClient, "webClient must not be null.");
         this.properties = Objects.requireNonNull(properties, "properties must not be null.");
         this.aiToolRepository =
@@ -408,8 +458,6 @@ public class TweetStreamClient implements SmartLifecycle {
                 Objects.requireNonNull(settingRepository, "settingRepository must not be null.");
         this.tweetStreamListener =
                 Objects.requireNonNull(tweetStreamListener, "tweetStreamListener must not be null.");
-        this.backgroundOwnership = Objects.requireNonNull(backgroundOwnership,
-                "backgroundOwnership must not be null.");
     }
 
     /**
@@ -469,7 +517,10 @@ public class TweetStreamClient implements SmartLifecycle {
             bearerToken = null;
             log.info("Starting X filtered stream ingestion");
 
-            subscription = ingestionCycle()
+            // Advanced only once a cycle is actually subscribed, so a start that the guards decline
+            // leaves a live cycle's generation current — DL-290 — see docs/DECISION_LOG.md
+            long generation = cycleGeneration.incrementAndGet();
+            subscription = ingestionCycle(generation)
                     .subscribeOn(Schedulers.boundedElastic())
                     .subscribe(
                             ignored -> {
@@ -502,8 +553,11 @@ public class TweetStreamClient implements SmartLifecycle {
     public void stop() {
         lifecycleLock.lock();
         try {
+            // New intake is refused before the drain begins, so the counter this loop watches can
+            // only fall — DL-259, DL-290 — see docs/DECISION_LOG.md
             stopRequested = true;
             running.set(false);
+            cycleGeneration.incrementAndGet();
 
             // The connection is cancelled only once no record is being handled — DL-259 — see
             // docs/DECISION_LOG.md
@@ -582,8 +636,7 @@ public class TweetStreamClient implements SmartLifecycle {
     @Override
     public boolean isAutoStartup() {
         ScannerProperties.Background background = properties.background();
-        boolean switchesAllow = background == null || background.runsStream();
-        return switchesAllow && backgroundOwnership.isOwner();
+        return background == null || background.runsStream();
     }
 
     /**
@@ -602,14 +655,25 @@ public class TweetStreamClient implements SmartLifecycle {
     /**
      * Assembles the cycle and its reconnection policy.
      *
+     * <p>The terminal callback clears {@link #running} only while {@code generation} is still the
+     * current cycle generation, so a callback delivered late by a cycle that has already been replaced
+     * writes nothing — DL-290.
+     *
+     * @param generation the cycle generation this subscription owns
      * @return a sequence that emits nothing, completes when the listener reports that streaming
      *     should stop or when the composed term collection resolves to nothing, and otherwise
      *     reconnects without bound
      */
-    private Mono<Void> ingestionCycle() {
+    private Mono<Void> ingestionCycle(long generation) {
         return Mono.defer(this::runOneConnection)
                 .retryWhen(reconnectPolicy())
-                .doFinally(signal -> running.set(false));
+                // Shared state is cleared only while this cycle is still the current one — DL-290 —
+                // see docs/DECISION_LOG.md
+                .doFinally(signal -> {
+                    if (cycleGeneration.get() == generation) {
+                        running.set(false);
+                    }
+                });
     }
 
     /**
@@ -653,7 +717,7 @@ public class TweetStreamClient implements SmartLifecycle {
      *
      * <ol>
      *   <li>The {@value #STREAM_KEYWORDS_SETTING_KEY} {@code settings} row, when it is present and
-     *       holds a non-blank value, is split on {@value StreamRuleTerms#TERM_DELIMITER} and
+     *       holds a non-blank value, is split on {@value #TERM_DELIMITER} and
      *       replaces the whole collection. An absent row and a blank value both fall through to the
      *       next step.</li>
      *   <li>Otherwise the configured {@value #STREAM_BASE_KEYWORDS_PROPERTY} terms are joined with
@@ -662,9 +726,14 @@ public class TweetStreamClient implements SmartLifecycle {
      * </ol>
      *
      * <p>Every step trims each term, drops a {@code null} or blank term, drops a term that
-     * {@link StreamRuleTerms#isUsable(String)} refuses, and removes a repeat without regard to letter
+     * {@link #isUsableTerm(String)} refuses, and removes a repeat without regard to letter
      * case while keeping the order in which terms were first seen and the letter case of the first
      * occurrence.
+     *
+     * <p>The {@code ai_tools} names are read a page at a time and filtered as each page is merged, so
+     * a blank, refused or repeated name consumes none of the budget and a usable name that follows one
+     * is still reached. Only the collected terms are bounded by the rule cap, never the rows read —
+     * DL-291.
      *
      * <p>The result holds at most {@code scanner.ingestion.max-stream-rules} terms. A composition that
      * yields more is truncated to the first that many and the two counts are recorded at {@code WARN},
@@ -691,7 +760,7 @@ public class TweetStreamClient implements SmartLifecycle {
 
         Map<String, String> merged = new LinkedHashMap<>();
         mergeTerms(merged, configuredTerms);
-        mergeTerms(merged, readAiToolNames(maxStreamRules()));
+        mergeAiToolNames(merged, maxStreamRules());
         List<String> composed = List.copyOf(merged.values());
 
         return boundedToRuleCap(composed.isEmpty() ? configuredTerms : composed);
@@ -761,30 +830,59 @@ public class TweetStreamClient implements SmartLifecycle {
             return List.of();
         }
 
-        // The one shared split, bounded at StreamRuleTerms.MAX_SEGMENTS so an over-long row cannot
-        // produce an unbounded collection — DL-254, DL-257 — see docs/DECISION_LOG.md
-        return distinctTerms(StreamRuleTerms.split(stored));
+        // The split is bounded at MAX_TERM_SEGMENTS so an over-long row cannot produce an unbounded
+        // collection — DL-254, DL-257 — see docs/DECISION_LOG.md
+        return distinctTerms(splitTerms(stored));
     }
 
-    // Only ai_tools.name is selected, bounded by the rule cap — DL-254 — see docs/DECISION_LOG.md
+    // Only ai_tools.name is selected, read a page at a time — DL-254, DL-291 — see
+    // docs/DECISION_LOG.md
     /**
-     * Reads at most {@code bound} {@code ai_tools} names.
+     * Merges the {@code name} of every {@code ai_tools} row into {@code target} until {@code wanted}
+     * distinct usable terms have been collected or the table is exhausted.
      *
      * <p>Only the {@code name} column is selected, so no other column of the table is transferred, and
-     * the query returns at most {@code bound} rows in {@code id} order.
+     * the rows are read in {@code id} order {@value #AI_TOOL_PAGE_ROWS} at a time. Each page is passed
+     * through {@link #mergeTerms(Map, List)}, so a blank name, a name the rule grammar refuses and a
+     * repeat are all discarded as the page is merged, and not after the collection has been bounded.
+     * A row carrying no acceptable name therefore consumes none of {@code wanted}, and a usable name
+     * that follows one is still reached — DL-291.
      *
-     * @param bound the greatest number of names to read, at least {@code 1}
-     * @return the names the bounded query returned, with a {@code null} or blank name omitted
+     * <p>Paging stops on the first of three conditions: {@code target} holds {@code wanted} terms, a
+     * short page reports the table exhausted, or {@value #MAX_AI_TOOL_ROWS_SCANNED} rows have been
+     * read. The third is recorded at {@code WARN} with the two counts and no name value; it
+     * means the table holds more rows than the composition reads.
+     *
+     * <p>The repository read blocks. This method runs only on {@link Schedulers#boundedElastic()}.
+     *
+     * @param target the accumulator keyed by lower-cased term, must not be {@code null}
+     * @param wanted the number of terms after which paging stops, at least {@code 1}
      */
-    private List<String> readAiToolNames(int bound) {
-        List<String> selected = aiToolRepository.findNames(PageRequest.of(0, bound));
-        List<String> names = new ArrayList<>(selected.size());
-        for (String name : selected) {
-            if (!isBlank(name)) {
-                names.add(name);
+    private void mergeAiToolNames(Map<String, String> target, int wanted) {
+        int rowsScanned = 0;
+        for (int page = 0; target.size() < wanted && rowsScanned < MAX_AI_TOOL_ROWS_SCANNED; page++) {
+            List<String> selected =
+                    aiToolRepository.findNames(PageRequest.of(page, AI_TOOL_PAGE_ROWS));
+            if (selected.isEmpty()) {
+                return;
+            }
+
+            rowsScanned += selected.size();
+            // Blank, refused and repeated names are discarded here, before any cap applies — DL-291 —
+            // see docs/DECISION_LOG.md
+            mergeTerms(target, selected);
+
+            if (selected.size() < AI_TOOL_PAGE_ROWS) {
+                return;
             }
         }
-        return names;
+
+        if (rowsScanned >= MAX_AI_TOOL_ROWS_SCANNED && target.size() < wanted) {
+            // Counts only; no name value is recorded — DL-052, DL-257 — see docs/DECISION_LOG.md
+            log.warn("Read {} ai_tools row(s) and collected {} rule term(s) against a wanted count of "
+                    + "{}; paging stopped at the scan bound and any later row is not read",
+                    rowsScanned, target.size(), wanted);
+        }
     }
 
     // X API v2 filtered stream rule reconciliation — see docs/DECISION_LOG.md DL-045
@@ -815,7 +913,7 @@ public class TweetStreamClient implements SmartLifecycle {
     private Mono<Void> reconcileStreamRules(String token, List<String> terms) {
         Map<String, String> desired = new LinkedHashMap<>();
         for (String term : terms) {
-            desired.put(StreamRuleTerms.expressionOf(term), term);
+            desired.put(expressionOf(term), term);
         }
 
         return listStreamRules(token)
@@ -970,14 +1068,8 @@ public class TweetStreamClient implements SmartLifecycle {
      * zero. A refusal does not fail the mutation: the stream still connects with the rules the
      * endpoint did accept.
      *
-     * <p>The record names the two summary counts and a fingerprint of each refused expression, and
-     * never the expression the provider reflected or any free text it returned — DL-275, DL-197. A
-     * fingerprint is {@link LogSafe#correlation(Object)} of the reflected value, so it is fixed in
-     * shape and length however long that value is, and it matches
-     * {@code LogSafe.correlation(StreamRuleTerms.expressionOf(term))} for the term this application
-     * composed. At most {@value #MAX_RULES_PER_REQUEST} fingerprints are listed — one request's
-     * worth, which is every rule the answered request could refuse — while the count is reported in
-     * full.
+     * <p>The record names the two summary counts and the number of refused expressions, and never
+     * the expression the provider reflected or any free text it returned — DL-275, DL-197.
      *
      * @param payload the mutation answer, may be {@code null}
      */
@@ -992,18 +1084,11 @@ public class TweetStreamClient implements SmartLifecycle {
 
         JsonNode errors = payload.path(RULES_KEY_ERRORS);
         int refused = 0;
-        List<String> fingerprints = new ArrayList<>();
         if (errors.isArray()) {
             for (JsonNode error : errors) {
                 String expression = error.path(RULES_KEY_VALUE).asText("");
-                if (expression.isBlank()) {
-                    continue;
-                }
-                refused++;
-                // A provider-reflected expression reaches the record as a fingerprint only — DL-275 —
-                // see docs/DECISION_LOG.md
-                if (fingerprints.size() < MAX_RULES_PER_REQUEST) {
-                    fingerprints.add(LogSafe.correlation(expression));
+                if (!expression.isBlank()) {
+                    refused++;
                 }
             }
         }
@@ -1012,9 +1097,8 @@ public class TweetStreamClient implements SmartLifecycle {
             return;
         }
 
-        log.warn("X refused {} stream rule(s) ({} not created, {} invalid); refused expression "
-                + "fingerprint(s): {}",
-                Math.max(refused, notCreated + invalid), notCreated, invalid, fingerprints);
+        log.warn("X refused {} stream rule(s) ({} not created, {} invalid)",
+                Math.max(refused, notCreated + invalid), notCreated, invalid);
     }
 
     /**
@@ -1345,12 +1429,22 @@ public class TweetStreamClient implements SmartLifecycle {
      * <p>A record handed to the listener is counted as in flight until the listener returns, so
      * {@link #stop(Runnable)} can wait for it — DL-259.
      *
+     * <p>Once a stop has been requested this method takes no further record: it returns {@code false}
+     * without parsing or counting, so the bounded drain of {@link #stop()} waits only for dispatches
+     * already counted as in flight — DL-259.
+     *
      * @param record one complete record, may be {@code null}
      * @param popularityThreshold the popularity threshold resolved for this cycle — DL-255
      * @return {@code true} to keep the connection open, and {@code false} once the listener has
      *     reported that streaming should stop
      */
     private boolean dispatchRecord(String record, int popularityThreshold) {
+        // New intake is refused before anything is parsed or counted, so the drain of stop() watches a
+        // counter that can only fall — DL-259 — see docs/DECISION_LOG.md
+        if (stopRequested) {
+            return false;
+        }
+
         String candidate = record == null ? "" : record.trim();
         if (candidate.isEmpty()) {
             return true;
@@ -1363,7 +1457,7 @@ public class TweetStreamClient implements SmartLifecycle {
             // Neither the record nor the parse failure's message is written: the counts and the
             // failure's type only — DL-149, DL-260 — see docs/DECISION_LOG.md
             reportDroppedRecords(unreportedUnreadableRecords, lastUnreadableReportNanos,
-                    "could not be read as JSON ({})", LogSafe.type(failure));
+                    "could not be read as JSON ({})", failure.getClass().getSimpleName());
             return true;
         }
 
@@ -1383,7 +1477,7 @@ public class TweetStreamClient implements SmartLifecycle {
             // The listener failure can quote a value it was handed, so only its type is recorded —
             // DL-149 — see docs/DECISION_LOG.md
             log.error("Skipping an X filtered stream record: the listener failed after {}",
-                    LogSafe.type(failure));
+                    failure.getClass().getSimpleName());
             return true;
         } finally {
             inFlightDispatches.decrementAndGet();
@@ -1568,8 +1662,8 @@ public class TweetStreamClient implements SmartLifecycle {
      * Adds every usable term of {@code terms} to {@code target}.
      *
      * <p>A {@code null} term, a term that is blank once trimmed, and a term that
-     * {@link StreamRuleTerms#isUsable(String)} refuses are all dropped. A dropped term is recorded at
-     * {@code WARN} with its length and a correlation token only, never with its characters — DL-257.
+     * {@link #isUsableTerm(String)} refuses are all dropped. A dropped term is recorded at
+     * {@code WARN} with its length only, never with its characters — DL-257.
      *
      * @param target accumulator keyed by the lower-cased term with the trimmed term as value, must
      *     not be {@code null}
@@ -1585,18 +1679,77 @@ public class TweetStreamClient implements SmartLifecycle {
             if (trimmed.isEmpty()) {
                 continue;
             }
-            // The one shared grammar decides which terms reach the rule DSL — DL-257 — see
+            // The grammar decides which terms reach the rule DSL — DL-257 — see
             // docs/DECISION_LOG.md
-            if (!StreamRuleTerms.isUsable(trimmed)) {
+            if (!isUsableTerm(trimmed)) {
                 log.warn("Dropping a stream rule term that holds a character outside letters, digits "
                         + "and '{}', that opens or closes with one of those, or that exceeds {} "
-                        + "character(s); term {} is {} character(s) long",
-                        StreamRuleTerms.ADDITIONAL_TERM_CHARACTERS, StreamRuleTerms.MAX_TERM_CHARS,
-                        LogSafe.correlation(trimmed), trimmed.length());
+                        + "character(s); the dropped term is {} character(s) long",
+                        ADDITIONAL_TERM_CHARACTERS, MAX_TERM_CHARS, trimmed.length());
                 continue;
             }
             target.putIfAbsent(trimmed.toLowerCase(Locale.ROOT), trimmed);
         }
+    }
+
+    // The X filtered-stream rule grammar — DL-257 — see docs/DECISION_LOG.md
+    /**
+     * Reports whether a term can be carried as a match expression.
+     *
+     * @param term the term to test, possibly {@code null}
+     * @return {@code true} when {@code term} is non-{@code null} and, once trimmed, is non-empty,
+     *     holds at most {@value #MAX_TERM_CHARS} characters, opens and closes with a letter or a
+     *     digit, and holds nothing but letters, digits and the characters of
+     *     {@value #ADDITIONAL_TERM_CHARACTERS}
+     */
+    private static boolean isUsableTerm(String term) {
+        if (term == null) {
+            return false;
+        }
+        String trimmed = term.trim();
+        if (trimmed.isEmpty() || trimmed.length() > MAX_TERM_CHARS) {
+            return false;
+        }
+        if (!Character.isLetterOrDigit(trimmed.charAt(0))
+                || !Character.isLetterOrDigit(trimmed.charAt(trimmed.length() - 1))) {
+            return false;
+        }
+        for (int index = 0; index < trimmed.length(); index++) {
+            char character = trimmed.charAt(index);
+            if (!Character.isLetterOrDigit(character)
+                    && ADDITIONAL_TERM_CHARACTERS.indexOf(character) < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Renders one term as a match expression.
+     *
+     * <p>A term holding whitespace is wrapped in double quotes, which matches it as a phrase; every
+     * other term is carried unchanged. No escaping is applied: {@link #isUsableTerm(String)} admits no
+     * term carrying a character escaping addresses.
+     *
+     * @param term the term to render, must not be {@code null}
+     * @return the match expression, never {@code null}
+     */
+    private static String expressionOf(String term) {
+        return term.chars().anyMatch(Character::isWhitespace) ? '"' + term + '"' : term;
+    }
+
+    /**
+     * Splits a delimited value into its terms.
+     *
+     * @param value the delimited value, possibly {@code null}
+     * @return at most {@value #MAX_TERM_SEGMENTS} parts of {@code value} split on
+     *     {@value #TERM_DELIMITER}, or an empty collection when {@code value} is {@code null} or blank
+     */
+    private static List<String> splitTerms(String value) {
+        if (isBlank(value)) {
+            return List.of();
+        }
+        return List.of(value.split(TERM_DELIMITER, MAX_TERM_SEGMENTS));
     }
 
     /**
@@ -1610,15 +1763,15 @@ public class TweetStreamClient implements SmartLifecycle {
     }
 
 
-    // Every failure rendering passes the shared log guard — DL-197 — see docs/DECISION_LOG.md
+    // Every failure rendering passes the log guard below — DL-197 — see docs/DECISION_LOG.md
     /**
      * Renders a failure for a log event.
      *
-     * <p>The runtime type comes from {@link LogSafe#type(Throwable)} and is carried literally. A
-     * message is carried only through {@link LogSafe#logSafe(String)}, so every character outside
-     * printable ASCII — the carriage return and the line feed included — becomes {@code ?} and the
-     * rendering is bounded. A message a remote peer, a proxy, a TLS stack or a URL contributed
-     * forges no record boundary and floods no record — DL-197.
+     * <p>The runtime type is carried literally. A message is carried only through
+     * {@link #guardedMessage(String)}, so every character outside printable ASCII — the carriage
+     * return and the line feed included — becomes {@code ?} and the rendering is bounded at
+     * {@value #MAX_MESSAGE_CHARS} characters. A message a remote peer, a proxy, a TLS stack or a URL
+     * contributed forges no record boundary and floods no record — DL-197.
      *
      * @param failure the failure to render, may be {@code null}
      * @return the simple type name of {@code failure} followed by its guarded message when it carries
@@ -1631,7 +1784,28 @@ public class TweetStreamClient implements SmartLifecycle {
         }
         String message = failure.getMessage();
         return isBlank(message)
-                ? LogSafe.type(failure)
-                : LogSafe.type(failure) + ": " + LogSafe.logSafe(message);
+                ? failure.getClass().getSimpleName()
+                : failure.getClass().getSimpleName() + ": " + guardedMessage(message);
+    }
+
+    /**
+     * Renders an externally supplied failure message for a log record.
+     *
+     * <p>Every character outside printable ASCII becomes {@value #MESSAGE_REPLACEMENT} and the
+     * rendering is bounded at {@value #MAX_MESSAGE_CHARS} characters — DL-197.
+     *
+     * @param message the message to render, must not be {@code null}
+     * @return the guarded rendering, never {@code null}
+     */
+    private static String guardedMessage(String message) {
+        int length = Math.min(message.length(), MAX_MESSAGE_CHARS);
+        StringBuilder guarded = new StringBuilder(length);
+        for (int index = 0; index < length; index++) {
+            char character = message.charAt(index);
+            guarded.append((character >= FIRST_PRINTABLE_ASCII && character <= LAST_PRINTABLE_ASCII)
+                    ? character
+                    : MESSAGE_REPLACEMENT);
+        }
+        return guarded.toString();
     }
 }

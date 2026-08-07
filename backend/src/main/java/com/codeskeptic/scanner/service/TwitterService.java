@@ -8,6 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -21,8 +22,6 @@ import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
-import com.codeskeptic.scanner.util.LogSafe;
-import com.codeskeptic.scanner.util.QueryParameters;
 
 // Ported from backend/app/services/twitter_service.py:L6-50 (faithful port) — see docs/DECISION_LOG.md
 /**
@@ -93,24 +92,13 @@ public class TwitterService {
     private static final int DEFAULT_PER_PAGE = 10;
 
     /**
-      * Lowest {@code per_page} a page request accepts, which is
-      * {@value com.codeskeptic.scanner.util.QueryParameters#MINIMUM_PAGE_SIZE} — DL-123.
-      */
-    private static final int MINIMUM_PER_PAGE = QueryParameters.MINIMUM_PAGE_SIZE;
-
-    /**
-      * Highest {@code per_page} this route serves, which is
-      * {@value com.codeskeptic.scanner.util.QueryParameters#MAXIMUM_PAGE_SIZE} — DL-123.
-      */
-    private static final int MAXIMUM_PER_PAGE = QueryParameters.MAXIMUM_PAGE_SIZE;
-
-    /** Rows one page statement returns, however large {@code per_page} is — DL-249. */
-    private static final int PAGE_FETCH_CHUNK_ROWS = 500;
-
-    /**
-     * Order of every page read: {@code tweets.id} ascending, the total order consecutive chunks of one
-     * page are positioned in — DL-249 — see docs/DECISION_LOG.md.
+     * Lowest {@code per_page} a page request accepts. A page size below it reads as
+     * {@value #DEFAULT_PER_PAGE}: a paged query cannot express a page of no rows. No upper bound is
+     * declared — DL-217.
      */
+    private static final int MINIMUM_PER_PAGE = 1;
+
+    /** Order of every page read: {@code tweets.id} ascending. */
     private static final Sort PAGE_ORDER = Sort.by(Sort.Direction.ASC, "id");
 
     /** Data access for the {@code tweets} table. */
@@ -178,9 +166,9 @@ public class TwitterService {
      *
      * <p>Arguments outside the accepted range are replaced and the replacement is logged at
      * {@code WARN}: a {@code page} below {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}, a
-     * {@code perPage} below {@value #MINIMUM_PER_PAGE} is read as {@value #DEFAULT_PER_PAGE}, and a
-     * {@code perPage} above {@value #MAXIMUM_PER_PAGE} is read as {@value #MAXIMUM_PER_PAGE} — DL-123
-     * — see docs/DECISION_LOG.md. The page size the pagination block restates is the size served.
+     * and a {@code perPage} below {@value #MINIMUM_PER_PAGE} is read as
+     * {@value #DEFAULT_PER_PAGE} — DL-217 — see docs/DECISION_LOG.md. No upper bound is applied to
+     * {@code perPage}. The page size the pagination block restates is the size served.
      *
      * <p>A {@code page} beyond the last populated page yields an empty {@link
      * PaginatedTweetsDto#tweets()} list while {@link PaginationDto#total()} and
@@ -195,29 +183,25 @@ public class TwitterService {
      * <p>The rows are converted inside this method's transaction and the returned lists are
      * unmodifiable.
      *
-     * <p>A page of at most {@value #PAGE_FETCH_CHUNK_ROWS} rows is read by one statement. A larger page
-     * is read as consecutive chunks of that bound, each chunk converted before the next is read, so the
-     * rows one statement returns are bounded however large {@code per_page} is — see
-     * docs/DECISION_LOG.md DL-249. Rows are ordered by {@code tweets.id} ascending. The rows one
-     * response carries are bounded by {@value #MAXIMUM_PER_PAGE} and by the table — see
-     * docs/DECISION_LOG.md DL-123 and DL-249.
+     * <p>The page is read by one paged query. Rows are ordered by {@code tweets.id} ascending, and the
+     * rows one response carries are bounded by the requested page size and by the table.
      *
      * @param page    the 1-based page number requested through the {@code page} query parameter; a
      *                value below {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}
      * @param perPage the page size requested through the {@code per_page} query parameter; a value
-     *                below {@value #MINIMUM_PER_PAGE} is read as {@value #DEFAULT_PER_PAGE} and a
-     *                value above {@value #MAXIMUM_PER_PAGE} is read as {@value #MAXIMUM_PER_PAGE}
+     *                below {@value #MINIMUM_PER_PAGE} is read as {@value #DEFAULT_PER_PAGE} and no
+     *                value is reduced
      * @return the {@code tweets} and {@code pagination} pair rendered by {@code GET /tweets}, never
      *         {@code null}
      */
     @Transactional(readOnly = true)
     public PaginatedTweetsDto getPaginatedTweets(int page, int perPage) {
-        // A page number below the first page reads as the first page — DL-123, DL-217 — see
+        // A page number below the first page reads as the first page — DL-217 — see
         // docs/DECISION_LOG.md
         int effectivePage = (page < DEFAULT_PAGE) ? DEFAULT_PAGE : page;
-        // The page size is bounded by the single declaration both list routes share — DL-123 — see
+        // A page size below one reads as the route default; no upper bound is applied — DL-217 — see
         // docs/DECISION_LOG.md
-        int effectivePerPage = QueryParameters.boundPageSize(perPage, DEFAULT_PER_PAGE);
+        int effectivePerPage = (perPage < MINIMUM_PER_PAGE) ? DEFAULT_PER_PAGE : perPage;
         if (effectivePage != page || effectivePerPage != perPage) {
             log.warn("Read requested page {} size {} as page {} size {}.",
                     page, perPage, effectivePage, effectivePerPage);
@@ -229,28 +213,22 @@ public class TwitterService {
 
         List<TweetDto> tweets;
         long total;
-        if (!QueryParameters.withinQueryableOffset(requested)) {
+        if (!withinQueryableOffset(requested)) {
             // A page whose first row lies past the offset the query can express is answered without a
             // paged query — DL-225 — see docs/DECISION_LOG.md
             tweets = List.of();
             total = tweetRepository.count();
-        } else if (effectivePerPage <= PAGE_FETCH_CHUNK_ROWS) {
+        } else {
             Page<Tweet> tweetPage = tweetRepository.findAll(requested);
             tweets = tweetMapper.toDtoList(tweetPage.getContent());
             total = tweetPage.getTotalElements();
-        } else {
-            // A page larger than the chunk bound is read as consecutive bounded chunks, each mapped
-            // before the next is read — DL-249 — see docs/DECISION_LOG.md
-            tweets = QueryParameters.mapInChunks(requested, PAGE_FETCH_CHUNK_ROWS,
-                    tweetRepository::findChunk, tweetMapper::toDtoList);
-            total = tweetRepository.count();
         }
 
         PaginationDto pagination = new PaginationDto(
                 effectivePage,
                 effectivePerPage,
                 total,
-                QueryParameters.totalPages(total, effectivePerPage));
+                totalPages(total, effectivePerPage));
 
         log.debug("Rendering {} tweet row(s) for page {} of {}, {} row(s) in total.",
                 tweets.size(), pagination.page(), pagination.totalPages(), pagination.total());
@@ -486,8 +464,8 @@ public class TwitterService {
         try {
             return Integer.parseInt(tweetId);
         } catch (NumberFormatException ex) {
-            log.debug("Reporting tweet identifier '{}' as a row that is not present.",
-                    LogSafe.logSafe(tweetId));
+            log.debug("Reporting a tweet identifier that does not parse as an integer as a row "
+                    + "that is not present.");
             throw NotFoundException.tweetNotFound().withCause(ex);
         }
     }
@@ -555,4 +533,39 @@ public class TwitterService {
         log.warn("Setting '{}' does not hold an integer; applying "
                 + "scanner.popularity-threshold instead.", POPULARITY_THRESHOLD_SETTING_KEY);
     }
+
+    // The offset ceiling org.springframework.data.jpa.support.PageableUtils enforces — DL-225 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Reports whether a page request names an offset a paged query can position its first row at.
+     *
+     * <p>The largest offset a paged query can express is {@link Integer#MAX_VALUE}, which it passes as
+     * an {@code int}. The offset compared here is the 0-based page index multiplied by the page size,
+     * computed as a {@code long} and free of overflow. An offset of exactly {@link Integer#MAX_VALUE}
+     * is expressible and reads as {@code true} — DL-225.
+     *
+     * @param request the page request to test; must not be {@code null}
+     * @return {@code true} when the request's offset is at most {@link Integer#MAX_VALUE}
+     */
+    private static boolean withinQueryableOffset(Pageable request) {
+        return request.getOffset() <= Integer.MAX_VALUE;
+    }
+
+    // The total_pages member of the pagination envelope — DL-038 — see docs/DECISION_LOG.md
+    /**
+     * Returns the number of pages a page size divides a row total into, which is the
+     * {@code total_pages} member of the pagination envelope.
+     *
+     * <p>The value is the one {@link org.springframework.data.domain.Page#getTotalPages()} reports for
+     * the same total and size: the total divided by the size and rounded up. A total of {@code 0}
+     * yields {@code 0}.
+     *
+     * @param total    the number of rows the table holds; never negative
+     * @param pageSize the page size the envelope restates; at least one
+     * @return the number of pages, never negative
+     */
+    private static int totalPages(long total, int pageSize) {
+        return (int) Math.ceil((double) total / (double) pageSize);
+    }
+
 }

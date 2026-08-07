@@ -3,16 +3,16 @@
 # Ported from backend/app/main.py:L53 (faithful port) — DL-029 — see docs/DECISION_LOG.md
 server:
   port: ${PORT:5000}
-  # Net-new (no Python counterpart) — DL-277 — see docs/DECISION_LOG.md
-  # Under this strategy HttpServletRequest.isSecure() reports the forwarded X-Forwarded-Proto scheme.
-  # Spring Security's Strict-Transport-Security writer reads that value.
+  # Net-new (no Python counterpart) — DL-293 — see docs/DECISION_LOG.md
+  # Under this strategy HttpServletRequest.isSecure() reports the forwarded X-Forwarded-Proto scheme,
+  # which is the value the Strict-Transport-Security writer declared on the chain by
+  # security/SecurityConfig reads.
   forward-headers-strategy: ${FORWARD_HEADERS_STRATEGY:framework}
   # Net-new (no Python counterpart) — DL-238 — see docs/DECISION_LOG.md
   # The embedded container's own default, declared explicitly. Request headers above this size are
-  # rejected by the connector before any filter runs; the response is written by the error-report valve
-  # config/ContainerErrorResponseConfig installs — DL-237.
+  # rejected by the connector before any filter runs.
   max-http-request-header-size: ${MAX_HTTP_REQUEST_HEADER_SIZE:8KB}
-  # Net-new (no Python counterpart) — DL-271 — see docs/DECISION_LOG.md
+  # Net-new (no Python counterpart) — DL-294 — see docs/DECISION_LOG.md
   # The connector stops accepting requests and drains those already in flight before the context
   # closes; the connection pool config/DataSourceConfig publishes closes after that drain completes.
   # The drain is bounded by spring.lifecycle.timeout-per-shutdown-phase below.
@@ -32,20 +32,17 @@ spring:
   main:
     # Net-new (no Python counterpart) — DL-030 — see docs/DECISION_LOG.md
     web-application-type: servlet
-  # Net-new (no Python counterpart) — DL-271 — see docs/DECISION_LOG.md
+  # Net-new (no Python counterpart) — DL-294 — see docs/DECISION_LOG.md
   # Ceiling on the graceful drain configured by server.shutdown above. A request still in flight at
   # this bound is abandoned and shutdown proceeds, so a stuck request cannot hold the process open.
   lifecycle:
     timeout-per-shutdown-phase: ${SHUTDOWN_GRACE_PERIOD:30s}
-  # spring.datasource.url / .username / .password / .driver-class-name — not set, and refused when
-  # configured; the pool surface is scanner.datasource.pool.* — DL-027, DL-270 — see docs/DECISION_LOG.md
+  # spring.datasource.* — not read; the connection identity comes from scanner.database-url and the
+  # pool takes the HikariCP defaults — DL-027, DL-270 — see docs/DECISION_LOG.md
   # spring.jackson.property-naming-strategy — not set — DL-022 — see docs/DECISION_LOG.md
-  jackson:
-    parser:
-      # Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
-      # A request body repeating a member is reported as unreadable input, answering
-      # 400 {"error": "Bad request"}.
-      strict-duplicate-detection: true
+  # spring.jackson.parser.* — not set: no parser feature is enabled beyond the framework default, so a
+  # request body carrying a repeated member binds exactly as the free-form request.json of the retired
+  # handlers did — DL-188 — see docs/DECISION_LOG.md
   jpa:
     hibernate:
       # Net-new (no Python counterpart) — DL-026 — see docs/DECISION_LOG.md
@@ -63,33 +60,6 @@ scanner:
   # Ported from backend/app/core/config.py:L9 and backend/app/db/database.py:L7 (faithful port) — DL-027 — see docs/DECISION_LOG.md
   database-url: ${DATABASE_URL}
 
-  datasource:
-    # Net-new (no Python counterpart: backend/app/db/database.py:L5-8 built a fresh unpooled engine
-    # per call) — DL-270, DL-271 — see docs/DECISION_LOG.md
-    # The complete pool surface. Geometry and timing only: no URL, credential, driver, catalog,
-    # schema, initialisation statement or driver-property map is configurable here, and the
-    # spring.datasource.* surface is not read at all. Every value below is range-checked as it binds
-    # and refuses to start outside its range.
-    pool:
-      # Connections this replica opens at most. Accepted range: 1 to 100 inclusive.
-      maximum-size: ${DB_POOL_MAXIMUM_SIZE:10}
-      # Connections kept open while idle. Accepted range: 0 to maximum-size inclusive. HikariCP's own
-      # default for this setting is maximum-size.
-      minimum-idle: ${DB_POOL_MINIMUM_IDLE:2}
-      # How long a caller waits for a connection. Accepted range: 250ms or greater.
-      connection-timeout-millis: ${DB_POOL_CONNECTION_TIMEOUT_MILLIS:30000}
-      # How long a connection test may take. Accepted range: 250ms or greater.
-      validation-timeout-millis: ${DB_POOL_VALIDATION_TIMEOUT_MILLIS:5000}
-      # Age at which a connection above minimum-idle is retired. Accepted: 0 — never — or 10000ms or
-      # greater.
-      idle-timeout-millis: ${DB_POOL_IDLE_TIMEOUT_MILLIS:600000}
-      # Age at which any connection is retired. Accepted: 0 — no maximum — or 30000ms or greater.
-      max-lifetime-millis: ${DB_POOL_MAX_LIFETIME_MILLIS:1800000}
-      # How long a connection may be held out of the pool before HikariCP reports it. Accepted: 0 —
-      # off — or 2000ms or greater.
-      leak-detection-threshold-millis: ${DB_POOL_LEAK_DETECTION_THRESHOLD_MILLIS:0}
-      # Name HikariCP carries on its own log records, threads and metrics.
-      name: ${DB_POOL_NAME:code-skeptic-scanner-pool}
   # Ported from backend/app/core/config.py:L10 and backend/app/services/twitter_service.py:L43,L46 (faithful port) — see docs/DECISION_LOG.md
   popularity-threshold: ${TWEET_POPULARITY_THRESHOLD:100}
   # Ported from backend/app/core/config.py:L11 and backend/app/tasks/response_generation.py:L50 (faithful port) — see docs/DECISION_LOG.md
@@ -160,9 +130,10 @@ scanner:
 
   jwt:
     # Ported from backend/app/core/security.py:L11 (faithful port) — DL-016, DL-184, DL-185, DL-186 — see docs/DECISION_LOG.md
-    # Carries a Base64 or Base64URL encoding of the HS256 key material, never the key material as
-    # text: the value is decoded at startup and the decoded material must reach 32 bytes. Startup
-    # fails for a value in neither alphabet and for material below that floor. Generate one with
+    # Carries the HS256 key material as text, which is the contract of the PyJWT call at
+    # backend/app/core/security.py:L11: the value's UTF-8 bytes are the key material and must number
+    # at least 32. No encoding is applied or expected; any character a configuration value can carry
+    # is accepted. Startup fails for material below that floor. Generate one with
     # `openssl rand -base64 32`.
     # Declared with no default: SECRET_KEY must be supplied. Startup fails when it is unset, blank or
     # still the unresolved text ${SECRET_KEY}.
@@ -206,13 +177,6 @@ scanner:
     enabled: ${SCANNER_BACKGROUND_ENABLED:true}
     stream-enabled: ${TWITTER_STREAM_ENABLED:true}
     response-generation-enabled: ${RESPONSE_GENERATION_ENABLED:true}
-    # Net-new (no Python counterpart) — DL-281 — see docs/DECISION_LOG.md
-    # Term of the ownership lease held in the `background_owner` settings row, and the interval it is
-    # renewed at. Accepted: 10..3600 seconds for the term; 1 second up to half the term for the
-    # renewal, so a renewal always precedes an expiry. A process that holds no lease runs no
-    # background path, whatever the three switches above say.
-    lease-ttl-seconds: ${BACKGROUND_LEASE_TTL_SECONDS:120}
-    lease-renew-seconds: ${BACKGROUND_LEASE_RENEW_SECONDS:30}
     # Net-new (no Python counterpart) — DL-282 — see docs/DECISION_LOG.md
     # Candidates one generation pass attempts, whatever the backlog holds. Accepted: 1 or more.
     max-candidates-per-pass: ${RESPONSE_GENERATION_MAX_CANDIDATES_PER_PASS:200}

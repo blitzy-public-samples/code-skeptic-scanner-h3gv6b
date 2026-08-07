@@ -20,7 +20,6 @@ import org.springframework.stereotype.Service;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.TweetDto;
-import com.codeskeptic.scanner.util.LogSafe;
 import com.openai.client.OpenAIClient;
 import com.openai.client.okhttp.OpenAIOkHttpClient;
 import com.openai.errors.OpenAIServiceException;
@@ -169,7 +168,8 @@ public class LlmService {
      * DL-084, DL-119. A machine-readable member carries no intra-value spacing, so a rendering that
      * does is free text and is refused, and no part of it is carried.
      */
-    private static final Pattern GUARDED_MEMBER_SHAPE = Pattern.compile("\\S{1,64}");
+    private static final Pattern GUARDED_MEMBER_SHAPE =
+            Pattern.compile("[\\x21-\\x7E]{1,64}");
 
     /** Reported when work arrives after this bean has been destroyed — DL-266. */
     private static final String DESTROYED_MESSAGE =
@@ -269,10 +269,8 @@ public class LlmService {
         String prompt = buildPrompt(tweet);
         String model = requireConfigured(openai().model(), "scanner.openai.model");
 
-        // Every caller-supplied and configuration-derived value rendered through the log guard —
-        // DL-149 — see docs/DECISION_LOG.md
-        log.debug("Requesting a generated reply for tweet {} from model {} with a {} character prompt",
-                LogSafe.logSafe(tweet.id()), LogSafe.logSafe(model), prompt.length());
+        log.debug("Requesting a generated reply from model {} with a {} character prompt",
+                model, prompt.length());
 
         ChatCompletionCreateParams params = buildParams(model, prompt);
 
@@ -289,16 +287,16 @@ public class LlmService {
         } catch (OpenAIServiceException rejected) {
             // Every provider-controlled member passes the log guard before it is recorded — DL-149
             // — see docs/DECISION_LOG.md
-            log.error("Model {} rejected the generation request for tweet {} with HTTP {}: "
+            log.error("Model {} rejected the generation request with HTTP {}: "
                     + "type {}, code {}, param {}",
-                    LogSafe.logSafe(model), LogSafe.logSafe(tweet.id()), rejected.statusCode(),
+                    model, rejected.statusCode(),
                     guarded(rejected.type()),
                     guarded(rejected.code()),
                     guarded(rejected.param()));
             throw rejected;
         } catch (RuntimeException failure) {
-            log.error("Requesting a generated reply for tweet {} from model {} failed with {}",
-                    LogSafe.logSafe(tweet.id()), LogSafe.logSafe(model), LogSafe.type(failure));
+            log.error("Requesting a generated reply from model {} failed with {}",
+                    model, failure.getClass().getSimpleName());
             throw failure;
         } finally {
             activeUse.unlock();
@@ -306,8 +304,8 @@ public class LlmService {
 
         String generatedText = firstChoiceContent(completion);
 
-        log.info("Model {} returned {} character(s) of generated text for tweet {}",
-                LogSafe.logSafe(model), generatedText.length(), LogSafe.logSafe(tweet.id()));
+        log.info("Model {} returned {} character(s) of generated text",
+                model, generatedText.length());
 
         return generatedText;
     }
@@ -535,7 +533,7 @@ public class LlmService {
             local.close();
         } catch (RuntimeException e) {
             log.warn("Closing the OpenAI API client did not complete: {}",
-                    LogSafe.type(e));
+                    e.getClass().getSimpleName());
         }
     }
 
@@ -642,7 +640,7 @@ public class LlmService {
      * {@code choices[0].text.strip()}. A finish reason other than
      * {@code stop} accompanying accepted content is recorded once at {@code WARN} under
      * {@value #INCOMPLETE_PREFIX} followed by that reason, which is an enumerated provider token
-     * rendered through {@link LogSafe#logSafe(String)} — DL-197, DL-202.
+     * rendered through {@link #guarded(Optional)} — DL-197, DL-202.
      *
      * <p>Three outcomes carry no usable content. Each is reported at {@code WARN} under a fixed
      * unusable-output code and raised as an {@link IllegalStateException} whose message is that code
@@ -703,19 +701,18 @@ public class LlmService {
             return;
         }
         log.warn("The Chat Completions reply is accepted with an incomplete finish [{}{}]",
-                INCOMPLETE_PREFIX, LogSafe.logSafe(finishReason.asString()));
+                INCOMPLETE_PREFIX, guarded(Optional.ofNullable(finishReason.asString())));
     }
 
     /**
      * Renders one provider-controlled member of a rejection for a log record.
      *
-     * <p>The rendering is guarded twice. {@link LogSafe#logSafe(String)} first replaces every
-     * character outside printable ASCII — which includes the carriage return and line feed a forged
-     * record boundary needs — and bounds the value at 64 characters. The bounded rendering is then
-     * held to {@link #GUARDED_MEMBER_SHAPE}: a member the provider publishes for a machine to read
-     * carries no intra-value spacing, so a rendering that does is free text and is reported as
-     * {@value #ABSENT} and is not carried into a record. An empty {@link Optional} is likewise
-     * rendered as {@value #ABSENT}.
+     * <p>The value is held to {@link #GUARDED_MEMBER_SHAPE}: a member the provider publishes for a
+     * machine to read carries one to 64 characters drawn from printable ASCII and no space, so a value
+     * carrying the carriage return or line feed a forged record boundary needs, a value carrying any
+     * other control character, a value carrying intra-value spacing, and a value longer than that
+     * bound are each free text and are reported as {@value #ABSENT} and not carried into a record. An
+     * empty {@link Optional} is likewise rendered as {@value #ABSENT}.
      *
      * @param providerValue the member the provider supplied, possibly empty
      * @return the guarded rendering; never {@code null}
@@ -727,8 +724,7 @@ public class LlmService {
         if (value == null) {
             return ABSENT;
         }
-        String rendered = LogSafe.logSafe(value);
-        return GUARDED_MEMBER_SHAPE.matcher(rendered).matches() ? rendered : ABSENT;
+        return GUARDED_MEMBER_SHAPE.matcher(value).matches() ? value : ABSENT;
     }
 
     /**

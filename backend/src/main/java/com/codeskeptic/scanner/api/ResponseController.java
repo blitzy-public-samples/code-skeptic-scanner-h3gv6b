@@ -19,7 +19,6 @@ import com.codeskeptic.scanner.dto.PaginatedResponsesDto;
 import com.codeskeptic.scanner.dto.ResponseDto;
 import com.codeskeptic.scanner.dto.UpdateResponseRequest;
 import com.codeskeptic.scanner.service.ResponseService;
-import com.codeskeptic.scanner.util.QueryParameters;
 
 // Endpoint contract ported from backend/app/api/responses.py:L8-65 (faithful port) — see
 // docs/DECISION_LOG.md DL-021, DL-022, DL-023, DL-038, DL-048, DL-050, DL-059, DL-076, DL-092
@@ -103,9 +102,9 @@ import com.codeskeptic.scanner.util.QueryParameters;
  * <p>Both path variables are bound as {@link String}, the type Flask's default path converter
  * delivered at {@code backend/app/api/responses.py:L22} and {@code :L51} — DL-048.
  *
- * <p>{@code page} and {@code per_page} are bound as {@link String} and converted by
- * {@code util.QueryParameters}, which substitutes the default for an absent, blank or non-numeric
- * value as {@code request.args.get(..., type=int)} did at
+ * <p>{@code page} and {@code per_page} are bound as {@link String} and read as whole numbers here,
+ * substituting the declared default for an absent, blank or non-numeric value as
+ * {@code request.args.get(..., type=int)} did at
  * {@code backend/app/api/responses.py:L11-12}. No query parameter on these routes produces an error
  * status — DL-217.
  *
@@ -184,12 +183,9 @@ public class ResponseController {
      * <p>A value that holds a whole number is passed to the service unchanged, including {@code 0} and
      * a negative value: it is not clamped or bounds-checked here. {@code page} is 1-based on the wire,
      * and {@code service.ResponseService} performs the conversion to the 0-based index Spring Data
-     * takes and reports the 1-based number back — DL-038. That service is also where the page size is
-     * bounded: a {@code per_page} above
-     * {@value com.codeskeptic.scanner.util.QueryParameters#MAXIMUM_PAGE_SIZE} is served
-     * {@value com.codeskeptic.scanner.util.QueryParameters#MAXIMUM_PAGE_SIZE} rows and the
-     * {@code pagination} block restates that size, while the status stays 200 — see
-     * docs/DECISION_LOG.md DL-123.
+     * takes and reports the 1-based number back — DL-038. That service is also where a page size below
+     * one is read as the route default; no page size is reduced and the status stays 200 — see
+     * docs/DECISION_LOG.md DL-217.
      *
      * <p>Example response body for page 1 of 10 per page over a single row:
      *
@@ -212,8 +208,8 @@ public class ResponseController {
 
         // backend/app/api/responses.py:L11-12 — request.args.get(..., type=int) returns the default
         // when the conversion raises — DL-217 — see docs/DECISION_LOG.md
-        int page = QueryParameters.intOrDefault(rawPage, DEFAULT_PAGE);
-        int perPage = QueryParameters.intOrDefault(rawPerPage, DEFAULT_PER_PAGE);
+        int page = intOrDefault(rawPage, DEFAULT_PAGE);
+        int perPage = intOrDefault(rawPerPage, DEFAULT_PER_PAGE);
 
         // backend/app/api/responses.py:L15 — constructed per request in the source
         return ResponseEntity.ok(responseService.getPaginatedResponses(page, perPage));
@@ -300,16 +296,13 @@ public class ResponseController {
      * {@link UpdateResponseRequest}. No other property is bound or forwarded: {@code id},
      * {@code generated_at} and {@code tweet_id} are not writable through this route.
      *
-     * <p>Two distinct mechanisms govern the body, and neither is Bean Validation.
+     * <p>The body is governed by one mechanism, and it is not Bean Validation.
      * {@link UpdateResponseRequest} declares no Bean Validation constraint and this parameter declares
      * no {@code @Valid} annotation, matching the free-form {@code request.json} read at {@code :L54} —
-     * see docs/DECISION_LOG.md DL-050. First, and net-new, the record's canonical constructor rejects
-     * at binding time a carried key whose value the addressed column cannot hold — a {@code content}
-     * that is neither a JSON string nor an explicit JSON {@code null}, and an {@code is_approved} that
-     * is neither a JSON boolean nor an explicit JSON {@code null} — which the converter reports as 400
-     * {@code {"error": "Bad request"}} — see docs/DECISION_LOG.md DL-231. Second, the presence of a key
-     * decides which column is written and the carried value decides what is stored, an explicit JSON
-     * {@code null} included — see docs/DECISION_LOG.md DL-082 and DL-244.
+     * see docs/DECISION_LOG.md DL-050. The presence of a key decides which column is written and the
+     * carried value decides what is stored, an explicit JSON {@code null} included; a carried value of
+     * any JSON type is accepted, as {@code request.json} accepted any type at {@code :L54} — see
+     * docs/DECISION_LOG.md DL-082, DL-231 and DL-244.
      *
      * <p>Neither value the body carries is trimmed, defaulted or coerced. An absent body binds to
      * {@code null}. Reproducing the {@code if not update_data} guard at {@code :L56}, an absent body
@@ -331,4 +324,37 @@ public class ResponseController {
             @RequestBody(required = false) UpdateResponseRequest request) {
         return ResponseEntity.ok(responseService.updateResponse(responseId, request));
     }
+
+    // Query-parameter conversion of request.args.get(..., type=int) at
+    // backend/app/api/tweets.py:L12-13 — see docs/DECISION_LOG.md DL-217
+    /**
+     * Converts one raw query-parameter value into an {@code int}.
+     *
+     * <p>The default is returned for a {@code null} value, which is an absent parameter; for a blank
+     * value, which is a parameter present with nothing after the {@code =}; for a value carrying any
+     * character a decimal {@code int} cannot hold, which includes a fractional value, a hexadecimal
+     * value and a value carrying a unit; and for a value beyond the range of an {@code int}. That is
+     * the fallback behaviour of Werkzeug's {@code type=int} conversion, which the retired handlers
+     * relied on. Surrounding whitespace is discarded and a leading sign is accepted.
+     *
+     * @param rawValue     the value as the request carried it, or {@code null} when the request
+     *                     carried none
+     * @param defaultValue the value to return when {@code rawValue} carries no {@code int}
+     * @return the converted value, or {@code defaultValue}
+     */
+    private static int intOrDefault(String rawValue, int defaultValue) {
+        if (rawValue == null) {
+            return defaultValue;
+        }
+        String trimmed = rawValue.trim();
+        if (trimmed.isEmpty()) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(trimmed);
+        } catch (NumberFormatException notAnInteger) {
+            return defaultValue;
+        }
+    }
+
 }

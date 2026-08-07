@@ -3,46 +3,44 @@ package com.codeskeptic.scanner;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import javax.sql.DataSource;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
-import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
-import org.springframework.boot.autoconfigure.web.servlet.error.BasicErrorController;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.web.servlet.error.ErrorAttributes;
-import org.springframework.boot.web.servlet.error.ErrorController;
 import org.springframework.context.ApplicationContext;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletResponse;
-import org.springframework.http.ResponseEntity;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+import org.springframework.scheduling.config.FixedDelayTask;
 import org.springframework.scheduling.config.ScheduledTask;
 import org.springframework.scheduling.config.ScheduledTaskHolder;
-import org.springframework.scheduling.config.TaskExecutionOutcome.Status;
-import org.springframework.scheduling.config.TriggerTask;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.cors.CorsConfigurationSource;
 
 import com.codeskeptic.scanner.api.AnalyticsController;
@@ -51,11 +49,8 @@ import com.codeskeptic.scanner.api.GlobalExceptionHandler;
 import com.codeskeptic.scanner.api.ResponseController;
 import com.codeskeptic.scanner.api.SettingController;
 import com.codeskeptic.scanner.api.TweetController;
-import com.codeskeptic.scanner.config.DataSourcePoolProperties;
 import com.codeskeptic.scanner.config.ScannerProperties;
-import com.zaxxer.hikari.HikariDataSource;
-
-import javax.sql.DataSource;
+import com.codeskeptic.scanner.entity.AiTool;
 import com.codeskeptic.scanner.repository.AiToolRepository;
 import com.codeskeptic.scanner.repository.ResponseRepository;
 import com.codeskeptic.scanner.repository.SettingRepository;
@@ -68,15 +63,12 @@ import com.codeskeptic.scanner.service.ResponseService;
 import com.codeskeptic.scanner.service.SentimentAnalysisService;
 import com.codeskeptic.scanner.service.SettingsService;
 import com.codeskeptic.scanner.service.TwitterService;
-import com.codeskeptic.scanner.entity.Setting;
-import com.codeskeptic.scanner.task.BackgroundOwnership;
 import com.codeskeptic.scanner.task.ResponseGenerationScheduler;
 import com.codeskeptic.scanner.task.TweetStreamClient;
 import com.codeskeptic.scanner.task.TweetStreamListener;
-import com.codeskeptic.scanner.util.QueryParameters;
+import com.zaxxer.hikari.HikariDataSource;
+import reactor.core.publisher.Mono;
 
-// Replaces backend/tests/test_api.py, which imported fastapi.testclient at :L2 against a Flask
-// application and could not be collected — see docs/DECISION_LOG.md DL-021, DL-115
 /**
  * Proves the whole application context assembles and that the route surface is the one the retired
  * blueprints served.
@@ -177,8 +169,7 @@ class ScannerApplicationTests {
                 Arguments.of("SettingRepository", SettingRepository.class),
                 Arguments.of("TweetStreamClient", TweetStreamClient.class),
                 Arguments.of("TweetStreamListener", TweetStreamListener.class),
-                Arguments.of("ResponseGenerationScheduler", ResponseGenerationScheduler.class),
-                Arguments.of("BackgroundOwnership", BackgroundOwnership.class));
+                Arguments.of("ResponseGenerationScheduler", ResponseGenerationScheduler.class));
     }
 
     @ParameterizedTest(name = "[{index}] {0} {1}")
@@ -240,10 +231,10 @@ class ScannerApplicationTests {
                 .contains("tweet_popularity_threshold");
     }
 
-    // The finite page-size bound on the wire — DL-123 — see docs/DECISION_LOG.md
+    // No page-size bound is applied on the wire — DL-217 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("serves at most the maximum page size for a list request naming a larger one")
-    void servesAtMostTheMaximumPageSizeForAListRequestNamingALargerOne() throws Exception {
+    @DisplayName("restates a very large per_page unreduced on both list routes")
+    void restatesAVeryLargePerPageUnreducedOnBothListRoutes() throws Exception {
         String token = accessToken();
 
         for (String route : List.of("/tweets", "/responses")) {
@@ -255,8 +246,7 @@ class ScannerApplicationTests {
             assertThat(response.getStatus()).as("status of %s", route)
                     .isEqualTo(HttpStatus.OK.value());
             assertThat(response.getContentAsString()).as("body of %s", route)
-                    .contains("\"per_page\":" + QueryParameters.MAXIMUM_PAGE_SIZE)
-                    .doesNotContain("\"per_page\":" + Integer.MAX_VALUE);
+                    .contains("\"per_page\":" + Integer.MAX_VALUE);
         }
     }
 
@@ -266,31 +256,161 @@ class ScannerApplicationTests {
         assertThat(context.getBean(TweetStreamClient.class).isRunning()).isFalse();
     }
 
-    // Full-context scheduler state under the test profile — DL-239, DL-281 — see
+    // New intake is refused once a stop has been requested, so the bounded drain waits only for
+    // dispatches already counted in flight — DL-259 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("refuses a record emitted after a stop has been requested, without counting it in "
+            + "flight")
+    void refusesARecordEmittedAfterAStopHasBeenRequested() throws Exception {
+        TweetStreamClient client = context.getBean(TweetStreamClient.class);
+        Method dispatch = TweetStreamClient.class
+                .getDeclaredMethod("dispatchRecord", String.class, int.class);
+        dispatch.setAccessible(true);
+        Field inFlight = TweetStreamClient.class.getDeclaredField("inFlightDispatches");
+        inFlight.setAccessible(true);
+        Field stopRequested = TweetStreamClient.class.getDeclaredField("stopRequested");
+        stopRequested.setAccessible(true);
+
+        String record = "{\"data\":{\"id\":\"1\",\"text\":\"a post\"}}";
+        stopRequested.setBoolean(client, true);
+        try {
+            assertThat((boolean) dispatch.invoke(client, record, 100))
+                    .as("a record emitted during the drain keeps the connection open")
+                    .isFalse();
+            assertThat(((AtomicInteger) inFlight.get(client)).get())
+                    .as("dispatches counted in flight after a refused record").isZero();
+
+            // Every shape is refused, including the keep-alive that is otherwise accepted silently
+            for (String emitted : new String[] {"", "   ", "not json at all", record}) {
+                assertThat((boolean) dispatch.invoke(client, emitted, 100))
+                        .as("a record of shape [%s] emitted during the drain", emitted).isFalse();
+            }
+            assertThat(((AtomicInteger) inFlight.get(client)).get())
+                    .as("dispatches counted in flight after five refused records").isZero();
+        } finally {
+            stopRequested.setBoolean(client, false);
+        }
+    }
+
+    // A terminal callback from a cycle that has been replaced writes no shared state — DL-290 — see
     // docs/DECISION_LOG.md
     @Test
-    @DisplayName("registers the response-generation trigger and the ownership renewal, and keeps the "
-            + "trigger pending beyond the suite window")
-    void registersTheResponseGenerationTriggerAndTheOwnershipRenewal() {
+    @DisplayName("ignores the terminal callback of a cycle that a later transition has replaced")
+    void ignoresTheTerminalCallbackOfAReplacedCycle() throws Exception {
+        TweetStreamClient client = context.getBean(TweetStreamClient.class);
+        Method ingestionCycle =
+                TweetStreamClient.class.getDeclaredMethod("ingestionCycle", long.class);
+        ingestionCycle.setAccessible(true);
+        Field runningField = TweetStreamClient.class.getDeclaredField("running");
+        runningField.setAccessible(true);
+        Field generationField = TweetStreamClient.class.getDeclaredField("cycleGeneration");
+        generationField.setAccessible(true);
+
+        AtomicBoolean running = (AtomicBoolean) runningField.get(client);
+        AtomicLong generation = (AtomicLong) generationField.get(client);
+        long staleGeneration = generation.get();
+
+        // A fresh cycle takes the next generation and reports itself running
+        long freshGeneration = generation.incrementAndGet();
+        running.set(true);
+
+        // The stale cycle's terminal callback is delivered late and must not clear the fresh state
+        assertThat(ingestionCycle.invoke(client, staleGeneration)).isInstanceOf(Mono.class);
+        Mono<?> staleCycle = (Mono<?>) ingestionCycle.invoke(client, staleGeneration);
+        staleCycle.subscribe().dispose();
+        assertThat(running.get())
+                .as("running state of the fresh cycle after the stale cycle terminated").isTrue();
+
+        // The fresh cycle's own callback does clear it: its generation is still current
+        Mono<?> ownCycle = (Mono<?>) ingestionCycle.invoke(client, freshGeneration);
+        ownCycle.subscribe().dispose();
+        assertThat(running.get())
+                .as("running state after the current cycle terminated").isFalse();
+    }
+
+    // ai_tools names are filtered as each page is merged, so leading unusable and repeated rows do
+    // not consume the rule budget and a usable name behind them is still reached — DL-291 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("collects a usable ai_tools name that follows a full rule cap worth of blank, "
+            + "refused and repeated rows")
+    void collectsAUsableAiToolNameThatFollowsUnusableRows() throws Exception {
+        int ruleCap = context.getBean(ScannerProperties.class).ingestion().maxStreamRules();
+        List<AiTool> seeded = new ArrayList<>();
+        // Enough unusable rows to exhaust the cap on their own: whitespace only, a leading and a
+        // trailing separator, and a character the rule grammar does not admit
+        for (int index = 0; index < ruleCap; index++) {
+            seeded.add(aiToolNamed(switch (index % 4) {
+                case 0 -> "   ";
+                case 1 -> "-leading" + index;
+                case 2 -> "trailing" + index + "-";
+                default -> "hash#" + index;
+            }));
+        }
+        // The usable names sit behind every one of them, and one is a repeat of another
+        seeded.add(aiToolNamed("Copilot"));
+        seeded.add(aiToolNamed("copilot"));
+        seeded.add(aiToolNamed("Cursor"));
+
+        AiToolRepository aiTools = context.getBean(AiToolRepository.class);
+        List<AiTool> stored = aiTools.saveAll(seeded);
+        try {
+            TweetStreamClient client = context.getBean(TweetStreamClient.class);
+            Method compose = TweetStreamClient.class.getDeclaredMethod("composeRuleTerms");
+            compose.setAccessible(true);
+
+            @SuppressWarnings("unchecked")
+            List<String> terms = (List<String>) compose.invoke(client);
+
+            assertThat(terms).as("composed rule terms with %s unusable rows ahead of them", ruleCap)
+                    .contains("Copilot", "Cursor")
+                    .doesNotContain("   ", "copilot");
+            assertThat(terms).as("no term the rule grammar refuses reaches the collection")
+                    .noneMatch(term -> term.contains("#") || term.startsWith("-")
+                            || term.endsWith("-") || term.isBlank());
+            assertThat(terms.stream().map(term -> term.toLowerCase(Locale.ROOT)).distinct().count())
+                    .as("distinct terms without regard to letter case").isEqualTo(terms.size());
+            assertThat(terms.size()).as("collected terms against the rule cap")
+                    .isLessThanOrEqualTo(ruleCap);
+        } finally {
+            aiTools.deleteAll(stored);
+        }
+    }
+
+    private static AiTool aiToolNamed(String name) {
+        AiTool tool = new AiTool();
+        tool.setName(name);
+        return tool;
+    }
+
+    // Full-context scheduler state under the test profile — DL-239 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("registers the response-generation pass as the one scheduled task and keeps it "
+            + "pending beyond the suite window")
+    void registersTheResponseGenerationPassAsTheOneScheduledTask() {
         Map<String, ScheduledTaskHolder> holders =
                 context.getBeansOfType(ScheduledTaskHolder.class);
         assertThat(holders).hasSize(1);
 
         ScheduledTaskHolder holder = holders.values().iterator().next();
-        // Two tasks: the completion-based generation pass and the fixed-delay ownership renewal
-        assertThat(holder.getScheduledTasks()).hasSize(2);
-        assertThat(holder.getScheduledTasks())
-                .extracting(scheduledTask -> scheduledTask.getTask().getClass().getSimpleName())
-                .containsExactlyInAnyOrder("TriggerTask", "FixedDelayTask");
+        assertThat(holder.getScheduledTasks()).hasSize(1);
 
+        // TR-12: the one task is registered as a fixed-DELAY task, so the interval runs from the end
+        // of one pass to the start of the next — DL-047 — see docs/DECISION_LOG.md
         ScheduledTask pass = holder.getScheduledTasks().stream()
-                .filter(scheduledTask -> scheduledTask.getTask() instanceof TriggerTask)
+                .filter(scheduledTask -> scheduledTask.getTask() instanceof FixedDelayTask)
                 .findFirst()
                 .orElseThrow();
 
+        FixedDelayTask registered = (FixedDelayTask) pass.getTask();
+        assertThat(registered.getIntervalDuration()).as("the registered fixed delay")
+                .isEqualTo(Duration.ofSeconds(86_400L));
+        assertThat(registered.getInitialDelayDuration()).as("the registered initial delay")
+                .isEqualTo(Duration.ZERO);
+
         // The first pass runs at startup, which is the work-then-sleep order of
-        // backend/app/tasks/response_generation.py:L41-50 — DL-251. The interval in force under the
-        // test profile is a day, and no second pass falls inside the suite window.
+        // backend/app/tasks/response_generation.py:L41-50. The interval in force under the test
+        // profile is a day, and no second pass falls inside the suite window.
         assertThat(context.getBean(ScannerProperties.class).responseGenerationDelaySeconds())
                 .isEqualTo(86_400L);
 
@@ -298,190 +418,12 @@ class ScannerApplicationTests {
         assertThat(nextExecution).isNotNull();
         assertThat(nextExecution).isBefore(Instant.now().plus(Duration.ofHours(25)));
 
-        // The renewal is paced by the bound scanner.background.lease-renew-seconds — DL-281
-        assertThat(context.getBean(ScannerProperties.class).background().leaseRenewSeconds())
-                .isEqualTo(5L);
     }
 
-    // The background-ownership lease under the test profile — DL-281 — see docs/DECISION_LOG.md
+    // Net-new background enablement group — DL-250 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("holds the background-ownership lease in the one running process")
-    void holdsTheBackgroundOwnershipLeaseInTheOneRunningProcess() {
-        BackgroundOwnership ownership = context.getBean(BackgroundOwnership.class);
-
-        assertThat(ownership.isRunning()).isTrue();
-        assertThat(ownership.isOwner()).isTrue();
-        assertThat(ownership.instanceId()).isNotBlank();
-        assertThat(context.getBean(SettingRepository.class)
-                .findById(BackgroundOwnership.OWNER_SETTING_KEY))
-                .isPresent()
-                .get()
-                .extracting(Setting::getValue, org.assertj.core.api.InstanceOfAssertFactories.STRING)
-                .contains(ownership.instanceId());
-    }
-
-    // The reserved coordination key — DL-284 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("withholds the ownership lease row from GET /settings and refuses to write it")
-    void withholdsTheOwnershipLeaseRowFromTheSettingsRoute() throws Exception {
-        MockHttpServletResponse listed = mockMvc.perform(get("/settings")
-                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken()))
-                .andReturn()
-                .getResponse();
-
-        assertThat(listed.getStatus()).isEqualTo(HttpStatus.OK.value());
-        assertThat(listed.getContentAsString())
-                .doesNotContain(BackgroundOwnership.OWNER_SETTING_KEY);
-
-        MockHttpServletResponse written = mockMvc.perform(
-                        put("/settings/" + BackgroundOwnership.OWNER_SETTING_KEY)
-                                .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken())
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"value\":\"stolen\"}"))
-                .andReturn()
-                .getResponse();
-
-        assertThat(written.getStatus()).isEqualTo(HttpStatus.NOT_FOUND.value());
-        assertThat(written.getContentAsString()).isEqualTo("{\"error\":\"Setting not found\"}");
-    }
-
-    // The error-dispatch strategy of DL-183 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("serves the error path with the framework controller over this application's "
-            + "attribute source")
-    void servesTheErrorPathWithTheFrameworkControllerOverThisApplicationsAttributeSource() {
-        assertThat(context.getBeansOfType(ErrorController.class).values())
-                .singleElement()
-                .isInstanceOf(BasicErrorController.class);
-        assertThat(context.getBeansOfType(ErrorAttributes.class)).hasSize(1);
-        assertThat(context.getBean(ErrorAttributes.class).getClass().getEnclosingClass())
-                .isEqualTo(GlobalExceptionHandler.class);
-    }
-
-    // The api package of AAP 0.3.1 — DL-183 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("declares no request-mapped class in the api package beyond the five controllers")
-    void declaresNoRequestMappedClassInTheApiPackageBeyondTheFiveControllers() {
-        assertThat(context.getBeanNamesForAnnotation(RestController.class))
-                .containsExactlyInAnyOrder("tweetController", "responseController",
-                        "settingController", "analyticsController", "authController");
-        // The error path is mapped by basicErrorController, which the framework declares — DL-183
-        assertThat(context.getBeanNamesForAnnotation(RequestMapping.class))
-                .containsExactly("basicErrorController");
-        assertThat(context.getBeansOfType(ErrorController.class).keySet())
-                .containsExactly("basicErrorController");
-    }
-
-    // A direct request to the error path — DL-183 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("answers a direct request to the error path with the internal server error envelope")
-    void answersADirectRequestToTheErrorPathWithTheInternalServerErrorEnvelope() throws Exception {
-        MockHttpServletResponse response = mockMvc.perform(get("/error")
-                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken()))
-                .andReturn().getResponse();
-
-        assertThat(response.getStatus()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
-        assertThat(response.getContentAsString())
-                .isEqualTo("{\"error\":\"Internal server error\"}");
-    }
-
-    // The error path answers the JSON envelope for every representation that admits JSON — DL-183 —
-    // see docs/DECISION_LOG.md
-    @ParameterizedTest(name = "Accept: {0}")
-    @ValueSource(strings = {"application/json", "*/*", "application/*+json",
-        "application/json;q=0.9,*/*;q=0.1"})
-    @DisplayName("answers the error path with the JSON envelope for every representation admitting "
-            + "JSON")
-    void answersTheErrorPathWithTheJsonEnvelopeForEveryRepresentationAdmittingJson(String accept)
-            throws Exception {
-
-        MockHttpServletResponse response = mockMvc.perform(get("/error")
-                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken())
-                        .header(HttpHeaders.ACCEPT, accept))
-                .andReturn().getResponse();
-
-        assertThat(response.getStatus()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
-        assertThat(response.getContentType()).startsWith(MediaType.APPLICATION_JSON_VALUE);
-        assertThat(response.getContentAsString())
-                .isEqualTo("{\"error\":\"Internal server error\"}");
-    }
-
-    // An Accept header admitting no JSON representation carries the status alone — DL-183 — see
-    // docs/DECISION_LOG.md
-    @ParameterizedTest(name = "Accept: {0}")
-    @ValueSource(strings = {"text/plain", "application/xml"})
-    @DisplayName("answers the error path with the status alone when the request admits no JSON")
-    void answersTheErrorPathWithTheStatusAloneWhenTheRequestAdmitsNoJson(String accept)
-            throws Exception {
-
-        MockHttpServletResponse response = mockMvc.perform(get("/error")
-                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken())
-                        .header(HttpHeaders.ACCEPT, accept))
-                .andReturn().getResponse();
-
-        assertThat(response.getStatus()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
-        assertThat(response.getContentAsString()).isEmpty();
-    }
-
-    // An HTML-only error dispatch renders the framework view, which carries no attribute value this
-    // application withholds — DL-183 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("renders the error path for an HTML-only request without any framework attribute "
-            + "value")
-    void rendersTheErrorPathForAnHtmlOnlyRequestWithoutAnyFrameworkAttributeValue() throws Exception {
-        MockHttpServletResponse response = mockMvc.perform(get("/error")
-                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken())
-                        .accept(MediaType.TEXT_HTML))
-                .andReturn().getResponse();
-
-        assertThat(response.getStatus()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
-        assertThat(response.getContentType()).startsWith(MediaType.TEXT_HTML_VALUE);
-        assertThat(response.getContentAsString())
-                .contains("<div id='created'>null</div>")
-                .contains("type=Internal server error, status=null")
-                .doesNotContain("java.lang", "Exception", "at com.codeskeptic",
-                        "org.springframework");
-    }
-
-    @Test
-    @DisplayName("answers a direct unauthenticated request to the error path with a bare 401")
-    void answersADirectUnauthenticatedRequestToTheErrorPathWithABare401() throws Exception {
-        MockHttpServletResponse response = mockMvc.perform(get("/error")).andReturn().getResponse();
-
-        assertThat(response.getStatus()).isEqualTo(HttpStatus.UNAUTHORIZED.value());
-        assertThat(response.getContentAsString()).isEmpty();
-    }
-
-    // The popularity gate of backend/app/core/config.py:L10 and
-    // backend/app/services/twitter_service.py:L43,L46 is a faithful port; the observation window of
-    // the argument-less get_trends() at backend/app/api/analytics.py:L14 is net-new — DL-042 — see
-    // docs/DECISION_LOG.md
-    @Test
-    @DisplayName("binds the popularity threshold and the analytics window from the test profile")
-    void bindsThePopularityThresholdAndTheAnalyticsWindowFromTheTestProfile() {
-        ScannerProperties properties = context.getBean(ScannerProperties.class);
-
-        assertThat(properties.popularityThreshold()).isEqualTo(100);
-        assertThat(properties.analytics().trendWindowDays()).isEqualTo(30);
-    }
-
-    // The three call literals of backend/app/services/llm_service.py:L22-25 are the shipped
-    // defaults — see docs/DECISION_LOG.md DL-034, DL-145, DL-200, DL-202
-    @Test
-    @DisplayName("binds the source's OpenAI call parameters as the shipped defaults")
-    void bindsTheSourcesOpenaiCallParametersAsTheShippedDefaults() {
-        ScannerProperties.Openai openai = context.getBean(ScannerProperties.class).openai();
-
-        assertThat(openai.maxCompletionTokens()).isEqualTo(150L);
-        assertThat(openai.temperature()).isEqualTo(0.7d);
-        assertThat(openai.n()).isEqualTo(1L);
-        assertThat(openai.reasoningEffort()).isEqualTo("none");
-    }
-
-    // Net-new background ownership group — DL-250 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("binds the background ownership group from the test profile")
-    void bindsTheBackgroundOwnershipGroupFromTheTestProfile() {
+    @DisplayName("binds the background enablement group from the test profile")
+    void bindsTheBackgroundEnablementGroupFromTheTestProfile() {
         ScannerProperties.Background background =
                 context.getBean(ScannerProperties.class).background();
 
@@ -503,29 +445,20 @@ class ScannerApplicationTests {
         assertThat(notion.mirrorRetryBackoffMillis()).isZero();
     }
 
-    // The allowlisted pool surface and the bounded graceful shutdown — DL-270, DL-271 — see
+    // The single pooled DataSource and the bounded graceful shutdown — DL-027, DL-294 — see
     // docs/DECISION_LOG.md
     @Test
-    @DisplayName("publishes one pool carrying the geometry the test profile declares")
-    void publishesOnePoolCarryingTheGeometryTheTestProfileDeclares() {
+    @DisplayName("publishes exactly one pool, built from the translated scanner.database-url")
+    void publishesExactlyOnePoolBuiltFromTheTranslatedDatabaseUrl() {
         assertThat(context.getBeansOfType(DataSource.class)).hasSize(1);
         HikariDataSource pool = context.getBean(HikariDataSource.class);
 
-        assertThat(pool.getPoolName()).isEqualTo("code-skeptic-scanner-test-pool");
-        assertThat(pool.getMaximumPoolSize()).isEqualTo(4);
-        assertThat(pool.getMinimumIdle()).isEqualTo(1);
-        assertThat(pool.getMinimumIdle()).isLessThan(pool.getMaximumPoolSize());
         assertThat(pool.getJdbcUrl()).startsWith("jdbc:h2:mem:scanner_test");
     }
 
     @Test
-    @DisplayName("binds the allowlisted pool group and reads no spring.datasource key")
-    void bindsTheAllowlistedPoolGroupAndReadsNoSpringDataSourceKey() {
-        DataSourcePoolProperties pool = context.getBean(DataSourcePoolProperties.class);
-
-        assertThat(pool.maximumSize()).isEqualTo(4);
-        assertThat(pool.connectionTimeoutMillis()).isEqualTo(30_000L);
-        assertThat(pool.leakDetectionThresholdMillis()).isZero();
+    @DisplayName("reads no spring.datasource key at all")
+    void readsNoSpringDataSourceKeyAtAll() {
         assertThat(context.getEnvironment().containsProperty("spring.datasource.url")).isFalse();
         assertThat(context.getEnvironment().containsProperty("spring.datasource.hikari.jdbc-url"))
                 .isFalse();

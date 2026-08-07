@@ -84,8 +84,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  *     <td>{@code backend/app/main.py:L35-37}</td></tr>
  * <tr><td>no authenticated principal</td><td>401</td><td>empty</td>
  *     <td>net-new — DL-021</td></tr>
- * <tr><td>body the converter cannot bind</td><td>400</td>
- *     <td>{@code {"error":"Bad request"}}</td><td>net-new — DL-092, DL-188</td></tr>
+ * <tr><td>body the converter cannot bind</td><td>400</td><td>empty</td>
+ *     <td>net-new — DL-092</td></tr>
  * </table>
  *
  * <p>Decisions covered by the assertions here are recorded in {@code docs/DECISION_LOG.md} DL-021,
@@ -127,9 +127,6 @@ class SettingControllerTest {
 
     /** Wire literal of {@code backend/app/main.py:L37}. */
     private static final String INTERNAL_SERVER_ERROR = "Internal server error";
-
-    /** Message served with 400 for a body the converter cannot bind — DL-092, DL-188. */
-    private static final String BAD_REQUEST = "Bad request";
 
     /** The sanctioned envelope of an unmatched path — backend/app/main.py:L31-33, DL-183. */
     private static final String NOT_FOUND_BODY = "{\"error\":\"Not found\"}";
@@ -799,7 +796,7 @@ class SettingControllerTest {
         "{\"value\":null,\"value\":\"x\"}",
         "{\"value\":\"a\",\"value\":\"b\",\"value\":\"c\"}"
     })
-    @DisplayName("reports a body repeating the value member with 400 and never 500")
+    @DisplayName("reports a body repeating the value member with 400, no body and never 500")
     void reportsABodyRepeatingTheValueMemberWith400(String body) throws Exception {
         mockMvc.perform(put("/settings/{key}", KEY)
                         .header(HttpHeaders.AUTHORIZATION, bearer())
@@ -807,8 +804,7 @@ class SettingControllerTest {
                         .content(body))
                 .andExpect(status().isBadRequest())
                 .andExpect(statusIsNot(HttpStatus.INTERNAL_SERVER_ERROR.value()))
-                .andExpect(jsonPath("$.length()").value(1))
-                .andExpect(jsonPath("$.error").value(BAD_REQUEST));
+                .andExpect(content().string(""));
 
         verify(settingsService, never()).updateSetting(anyString(), any());
     }
@@ -821,7 +817,7 @@ class SettingControllerTest {
         "42",
         "not json at all"
     })
-    @DisplayName("reports a body the converter cannot read with 400 and the Bad request literal")
+    @DisplayName("reports a body the converter cannot read with 400 and no body of its own")
     void reportsABodyTheConverterCannotReadWith400(String body) throws Exception {
         mockMvc.perform(put("/settings/{key}", KEY)
                         .header(HttpHeaders.AUTHORIZATION, bearer())
@@ -829,7 +825,7 @@ class SettingControllerTest {
                         .content(body))
                 .andExpect(status().isBadRequest())
                 .andExpect(statusIsNot(HttpStatus.INTERNAL_SERVER_ERROR.value()))
-                .andExpect(jsonPath("$.error").value(BAD_REQUEST));
+                .andExpect(content().string(""));
 
         verify(settingsService, never()).updateSetting(anyString(), any());
     }
@@ -852,20 +848,21 @@ class SettingControllerTest {
     }
 
     @Test
-    @DisplayName("reports a body whose media type the route does not consume with 415")
+    @DisplayName("reports a body whose media type the route does not consume with 415 and no body")
     void reportsAnUnsupportedMediaTypeWith415() throws Exception {
         mockMvc.perform(put("/settings/{key}", KEY)
                         .header(HttpHeaders.AUTHORIZATION, bearer())
                         .contentType(MediaType.TEXT_PLAIN)
                         .content("{\"value\":\"77\"}"))
                 .andExpect(status().isUnsupportedMediaType())
-                .andExpect(jsonPath("$.error").value("Unsupported media type"));
+                .andExpect(content().string(""));
 
         verifyNoInteractions(settingsService);
     }
 
     @Test
-    @DisplayName("reports a method the collection path does not support with 405 and an allow header")
+    @DisplayName("reports a method the collection path does not support with 405, an allow header "
+            + "and no body")
     void reportsAnUnsupportedMethodWith405() throws Exception {
         mockMvc.perform(post("/settings")
                         .header(HttpHeaders.AUTHORIZATION, bearer())
@@ -873,13 +870,13 @@ class SettingControllerTest {
                         .content("{}"))
                 .andExpect(status().isMethodNotAllowed())
                 .andExpect(header().string("Allow", "GET"))
-                .andExpect(jsonPath("$.error").value("Method not allowed"));
+                .andExpect(content().string(""));
 
         verifyNoInteractions(settingsService);
     }
 
     @Test
-    @DisplayName("reports an Accept header the route cannot satisfy with 406")
+    @DisplayName("reports an Accept header the route cannot satisfy with 406 and no body")
     void reportsAnUnsatisfiableAcceptHeaderWith406() throws Exception {
         when(settingsService.getAllSettings())
                 .thenReturn(List.of(new SettingDto(KEY, "100", DESCRIPTION)));
@@ -888,7 +885,7 @@ class SettingControllerTest {
                         .header(HttpHeaders.AUTHORIZATION, bearer())
                         .accept(MediaType.APPLICATION_XML))
                 .andExpect(status().isNotAcceptable())
-                .andExpect(jsonPath("$.error").value("Not acceptable"));
+                .andExpect(content().string(""));
     }
 
     // -------------------------------------------------------------------------

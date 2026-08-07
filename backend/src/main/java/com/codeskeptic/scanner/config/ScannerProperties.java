@@ -49,6 +49,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param auth the {@code scanner.auth} group, never {@code null} when bound
  * @param analytics the {@code scanner.analytics} group, never {@code null} when bound
  * @param ingestion the {@code scanner.ingestion} group, never {@code null} when bound
+ * @param background the {@code scanner.background} group, never {@code null} when bound
  */
 @ConfigurationProperties(prefix = "scanner")
 public record ScannerProperties(
@@ -86,8 +87,8 @@ public record ScannerProperties(
     private static final String REDACTED = "***REDACTED***";
 
     /**
-     * Renders this record with {@code databaseUrl} redacted and each nested group rendering itself —
-     * DL-052.
+     * Renders this record with {@code databaseUrl} redacted and each of its eight nested groups
+     * rendering itself — DL-052.
      *
      * @return the record's components, with every credential, principal name and resource
      *     identifier redacted
@@ -104,6 +105,7 @@ public record ScannerProperties(
                 + ", auth=" + auth
                 + ", analytics=" + analytics
                 + ", ingestion=" + ingestion
+                + ", background=" + background
                 + "]";
     }
 
@@ -602,35 +604,11 @@ public record ScannerProperties(
             // scanner.background.response-generation-enabled — no Python counterpart — DL-250
             @DefaultValue("true") boolean responseGenerationEnabled,
 
-            // scanner.background.lease-ttl-seconds — no Python counterpart — DL-281
-            @DefaultValue("120") long leaseTtlSeconds,
-
-            // scanner.background.lease-renew-seconds — no Python counterpart — DL-281
-            @DefaultValue("30") long leaseRenewSeconds,
-
             // scanner.background.max-candidates-per-pass — no Python counterpart — DL-282
             @DefaultValue("200") int maxCandidatesPerPass) {
 
-        /** Declared default of {@code scanner.background.lease-ttl-seconds} — DL-281. */
-        private static final long DEFAULT_LEASE_TTL_SECONDS = 120L;
-
-        /** Declared default of {@code scanner.background.lease-renew-seconds} — DL-281. */
-        private static final long DEFAULT_LEASE_RENEW_SECONDS = 30L;
-
         /** Declared default of {@code scanner.background.max-candidates-per-pass} — DL-282. */
         private static final int DEFAULT_MAX_CANDIDATES_PER_PASS = 200;
-
-        /** Smallest accepted value of {@code scanner.background.lease-ttl-seconds} — DL-281. */
-        private static final long MINIMUM_LEASE_TTL_SECONDS = 10L;
-
-        /** Largest accepted value of {@code scanner.background.lease-ttl-seconds} — DL-281. */
-        private static final long MAXIMUM_LEASE_TTL_SECONDS = 3_600L;
-
-        /** Smallest accepted value of {@code scanner.background.lease-renew-seconds} — DL-281. */
-        private static final long MINIMUM_LEASE_RENEW_SECONDS = 1L;
-
-        /** Divisor fixing the longest renewal interval as a fraction of the lease term — DL-281. */
-        private static final long LEASE_RENEW_DIVISOR = 2L;
 
         /**
          * Smallest accepted value of {@code scanner.background.max-candidates-per-pass} — DL-282.
@@ -638,31 +616,22 @@ public record ScannerProperties(
         private static final int MINIMUM_MAX_CANDIDATES_PER_PASS = 1;
 
         /**
-         * Normalises both bounds into a usable value — DL-281, DL-282.
+         * Normalises the per-pass candidate ceiling into a usable value — DL-282.
          *
-         * <p>The lease term is held within {@value #MINIMUM_LEASE_TTL_SECONDS} and
-         * {@value #MAXIMUM_LEASE_TTL_SECONDS} seconds. The renewal interval is held at
-         * {@value #MINIMUM_LEASE_RENEW_SECONDS} second or more and at no more than the resulting term
-         * divided by {@value #LEASE_RENEW_DIVISOR}. The per-pass candidate ceiling is held at
-         * {@value #MINIMUM_MAX_CANDIDATES_PER_PASS} or more.
+         * <p>The ceiling is held at {@value #MINIMUM_MAX_CANDIDATES_PER_PASS} or more.
          */
         public Background {
-            leaseTtlSeconds = Math.min(MAXIMUM_LEASE_TTL_SECONDS,
-                    Math.max(leaseTtlSeconds, MINIMUM_LEASE_TTL_SECONDS));
-            leaseRenewSeconds = Math.min(leaseTtlSeconds / LEASE_RENEW_DIVISOR,
-                    Math.max(leaseRenewSeconds, MINIMUM_LEASE_RENEW_SECONDS));
             maxCandidatesPerPass =
                     Math.max(maxCandidatesPerPass, MINIMUM_MAX_CANDIDATES_PER_PASS);
         }
 
         /**
-         * Builds a group carrying the three switches and the declared default of every bound.
+         * Builds a group carrying the three switches and the declared default of the bound.
          *
-         * <p>The bound values this factory writes are the {@code @DefaultValue} literals of the
-         * components above, so a caller that holds no bound group — a hand-constructed
-         * {@code ScannerProperties} or a null-guarded read — sees the same bounds a deployment sees
-         * when it declares none. {@code config/MainProfileConfigurationContractTest} asserts the
-         * agreement between this factory and the binder.
+         * <p>The bound value this factory writes is the {@code @DefaultValue} literal of the
+         * component above, so a caller that holds no bound group — a hand-constructed
+         * {@code ScannerProperties} or a null-guarded read — sees the same bound a deployment sees
+         * when it declares none.
          *
          * @param enabled whether background work runs in this process at all
          * @param streamEnabled whether the X filtered stream runs in this process
@@ -673,7 +642,6 @@ public record ScannerProperties(
                 boolean streamEnabled,
                 boolean responseGenerationEnabled) {
             return new Background(enabled, streamEnabled, responseGenerationEnabled,
-                    DEFAULT_LEASE_TTL_SECONDS, DEFAULT_LEASE_RENEW_SECONDS,
                     DEFAULT_MAX_CANDIDATES_PER_PASS);
         }
 

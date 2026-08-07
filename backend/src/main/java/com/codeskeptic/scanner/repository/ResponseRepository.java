@@ -24,7 +24,7 @@ import org.springframework.data.repository.query.Param;
  * interface already parsed; it is carried as a {@link String} only at the wire boundary — see
  * docs/DECISION_LOG.md DL-023 and DL-048.
  *
- * <p>Six members are declared below — {@link #findAllRows(Pageable)}, {@link #findRowChunk(Pageable)},
+ * <p>Five members are declared below — {@link #findAllRows(Pageable)},
  * {@link #findApprovalCounts()}, {@link #existsByTweetId(Integer)},
  * {@link #findByIdForUpdate(Integer)} and the {@link ResponseRow} projection they share. Every other
  * operation the consumers perform is inherited from {@link JpaRepository}:
@@ -35,8 +35,7 @@ import org.springframework.data.repository.query.Param;
  *       {@code pagination} envelope of {@code GET /responses}
  *       ({@code backend/app/api/responses.py:L15-20}). The caller constructs the {@link Pageable} and
  *       converts the 1-based wire {@code page} ({@code backend/app/api/responses.py:L11-12}) to the
- *       0-based index this operation takes — see docs/DECISION_LOG.md DL-038. A page larger than the
- *       caller's chunk bound is read through {@link #findRowChunk(Pageable)} instead — DL-249.
+ *       0-based index this operation takes — see docs/DECISION_LOG.md DL-038.
  *   <li>{@code findById(Integer)} returns one row wrapped in an {@link java.util.Optional}. An empty
  *       {@link java.util.Optional} denotes an identifier that is not present, which
  *       {@code ResponseService} translates into the 404 bodies at
@@ -65,7 +64,6 @@ import org.springframework.data.repository.query.Param;
  *
  * <pre>{@code
  * Page<ResponseRow> page = responseRepository.findAllRows(PageRequest.of(wirePage - 1, perPage));
- * List<ResponseRow> chunk = responseRepository.findRowChunk(PageRequest.of(window, chunkRows));
  * ApprovalCounts totals = responseRepository.findApprovalCounts();
  * boolean answered = responseRepository.existsByTweetId(tweetId);
  * Optional<Response> locked = responseRepository.findByIdForUpdate(responseId);
@@ -101,7 +99,7 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
      * association, which the persistence provider resolves from the owning foreign-key column without
      * joining the {@code tweets} table. Rendering a page issues one statement for the rows and the
      * declared count statement, reads no column of {@code tweets}, and places no entity in the
-     * persistence context — DL-245, DL-249.
+     * persistence context — DL-245.
      *
      * <p>Content, order, size and pagination metadata are those of the inherited
      * {@code findAll(Pageable)}: the query states no sort, so the order is the one the database
@@ -122,34 +120,6 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
             """,
             countQuery = "select count(r) from Response r")
     Page<ResponseRow> findAllRows(Pageable pageable);
-
-    /**
-     * Returns one bounded chunk of the projected {@code responses} rows, positioned and ordered by
-     * {@code chunk}.
-     *
-     * <p>The projection, the columns read and the absence of a {@code tweets} join are those of
-     * {@link #findAllRows(Pageable)}. This operation issues no row count: the window's first row, its
-     * row bound and its order are those {@code chunk} carries, and nothing else is read.
-     *
-     * <p>{@code service.ResponseService} reads one page of {@code GET /responses} as consecutive
-     * chunks of this shape when the requested {@code per_page} exceeds the chunk bound, so the rows one
-     * statement holds are bounded independently of {@code per_page} — see docs/DECISION_LOG.md DL-249.
-     *
-     * @param chunk the window's position, row bound and sort; never {@code null}
-     * @return the projected rows the window covers, in the requested order; an empty list when it
-     *         covers none. Never {@code null}
-     */
-    // Net-new (no Python counterpart: get_paginated_responses at backend/app/api/responses.py:L15 did
-    // not exist) — DL-245, DL-249 — see docs/DECISION_LOG.md
-    @Query("""
-            select r.id as id,
-                   r.content as content,
-                   r.generatedAt as generatedAt,
-                   r.isApproved as isApproved,
-                   r.tweet.id as tweetId
-            from Response r
-            """)
-    List<ResponseRow> findRowChunk(Pageable chunk);
 
     // The total_responses and approved_responses metrics of dto/SummaryDto, over the is_approved
     // column at backend/app/db/models.py:L26 — DL-041, DL-180 — see docs/DECISION_LOG.md

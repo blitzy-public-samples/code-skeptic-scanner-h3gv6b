@@ -12,6 +12,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.dao.PessimisticLockingFailureException;
@@ -35,8 +36,6 @@ import com.codeskeptic.scanner.repository.ResponseRepository.ResponseRow;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.mapper.ResponseMapper;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
-import com.codeskeptic.scanner.util.LogSafe;
-import com.codeskeptic.scanner.util.QueryParameters;
 
 // Net-new (no Python module existed; signatures dictated by
 // backend/app/api/responses.py:L15,L26,L44,L60) — see docs/DECISION_LOG.md
@@ -128,20 +127,15 @@ public class ResponseService {
     private static final int DEFAULT_PER_PAGE = 10;
 
     /**
-      * Highest {@code per_page} this route serves, which is
-      * {@value com.codeskeptic.scanner.util.QueryParameters#MAXIMUM_PAGE_SIZE} — DL-123.
-      */
-    private static final int MAXIMUM_PER_PAGE = QueryParameters.MAXIMUM_PAGE_SIZE;
+     * Lowest {@code per_page} a page request accepts. A page size below it reads as
+     * {@value #DEFAULT_PER_PAGE}: a paged query cannot express a page of no rows. No upper bound is
+     * declared — DL-217.
+     */
+    private static final int MINIMUM_PER_PAGE = 1;
 
     private static final int WIRE_PAGE_OFFSET = 1;
 
-    /** Rows one page statement returns, however large {@code per_page} is — DL-249. */
-    private static final int PAGE_FETCH_CHUNK_ROWS = 500;
-
-    /**
-     * Order of every page read: {@code responses.id} ascending, the total order consecutive chunks of
-     * one page are positioned in — DL-249 — see docs/DECISION_LOG.md.
-     */
+    /** Order of every page read: {@code responses.id} ascending. */
     private static final Sort PAGE_ORDER = Sort.by(Sort.Direction.ASC, "id");
 
     /**
@@ -243,11 +237,10 @@ public class ResponseService {
      *
      * <p>{@code page} is 1-based, as the query parameter at {@code backend/app/api/responses.py:L11}
      * is, and is converted to the 0-based index {@code findAll(Pageable)} takes. A {@code page} below
-     * {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}, a {@code perPage} below {@code 1} is
-     * read as {@value #DEFAULT_PER_PAGE} and a {@code perPage} above {@value #MAXIMUM_PER_PAGE} is
-     * read as {@value #MAXIMUM_PER_PAGE}; none of the three is rejected, and the pagination block
-     * restates the size served. A {@code page} beyond the last one yields an empty {@code responses}
-     * list and a populated pagination block.
+     * {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE} and a {@code perPage} below {@code 1} is
+     * read as {@value #DEFAULT_PER_PAGE}; no upper bound is applied to {@code perPage}, neither value
+     * is rejected, and the pagination block restates the size served. A {@code page} beyond the last
+     * one yields an empty {@code responses} list and a populated pagination block.
      *
      * <p>A {@code page} whose first row lies beyond {@link Integer#MAX_VALUE} rows — that is, one for
      * which {@code (page - 1) * perPage} exceeds that bound — is answered the same way: the empty list
@@ -265,29 +258,24 @@ public class ResponseService {
      * whole-table counters unchanged — see docs/DECISION_LOG.md DL-225. No pagination argument is
      * answered with an error status.
      *
-     * <p>A page of at most {@value #PAGE_FETCH_CHUNK_ROWS} rows is read by one statement. A larger page
-     * is read as consecutive chunks of that bound, each chunk converted before the next is read, so the
-     * rows one statement returns are bounded however large {@code per_page} is — see
-     * docs/DECISION_LOG.md DL-249. Rows are ordered by {@code responses.id} ascending. The rows one
-     * response carries are bounded by {@value #MAXIMUM_PER_PAGE} and by the table — see
-     * docs/DECISION_LOG.md DL-123 and DL-249.
+     * <p>The page is read by one paged query. Rows are ordered by {@code responses.id} ascending, and
+     * the rows one response carries are bounded by the requested page size and by the table.
      *
      * @param page    the 1-based page number to return; a value below {@value #DEFAULT_PAGE} is read
      *                as {@value #DEFAULT_PAGE}
      * @param perPage the number of rows per page; a value below {@code 1} is read as
-     *                {@value #DEFAULT_PER_PAGE} and a value above {@value #MAXIMUM_PER_PAGE} is read
-     *                as {@value #MAXIMUM_PER_PAGE}
+     *                {@value #DEFAULT_PER_PAGE} and no value is reduced
      * @return the {@code responses} and {@code pagination} envelope, never {@code null}; the
      *         {@code responses} list is empty when the page holds no row and is unmodifiable
      */
     @Transactional(readOnly = true)
     public PaginatedResponsesDto getPaginatedResponses(int page, int perPage) {
         // A value below the first page reads as the default of backend/app/api/responses.py:L11 —
-        // DL-123 — see docs/DECISION_LOG.md
+        // DL-217 — see docs/DECISION_LOG.md
         int requestedPage = (page < DEFAULT_PAGE) ? DEFAULT_PAGE : page;
-        // The page size is bounded by the single declaration both list routes share — DL-123 — see
+        // A page size below one reads as the route default; no upper bound is applied — DL-217 — see
         // docs/DECISION_LOG.md
-        int requestedPerPage = QueryParameters.boundPageSize(perPage, DEFAULT_PER_PAGE);
+        int requestedPerPage = (perPage < MINIMUM_PER_PAGE) ? DEFAULT_PER_PAGE : perPage;
 
         // The wire page of backend/app/api/responses.py:L11 is 1-based; PageRequest is 0-based —
         // DL-038 — see docs/DECISION_LOG.md
@@ -298,28 +286,22 @@ public class ResponseService {
         // docs/DECISION_LOG.md
         List<ResponseDto> responses;
         long total;
-        if (!QueryParameters.withinQueryableOffset(requested)) {
+        if (!withinQueryableOffset(requested)) {
             // A page whose first row lies past the offset the query can express is answered without a
             // paged query — DL-225 — see docs/DECISION_LOG.md
             responses = List.of();
             total = responseRepository.count();
-        } else if (requestedPerPage <= PAGE_FETCH_CHUNK_ROWS) {
+        } else {
             Page<ResponseRow> found = responseRepository.findAllRows(requested);
             responses = responseMapper.toDtoRowList(found.getContent());
             total = found.getTotalElements();
-        } else {
-            // A page larger than the chunk bound is read as consecutive bounded chunks, each mapped
-            // before the next is read — DL-249 — see docs/DECISION_LOG.md
-            responses = QueryParameters.mapInChunks(requested, PAGE_FETCH_CHUNK_ROWS,
-                    responseRepository::findRowChunk, responseMapper::toDtoRowList);
-            total = responseRepository.count();
         }
 
         PaginationDto pagination = new PaginationDto(
                 requestedPage,
                 requestedPerPage,
                 total,
-                QueryParameters.totalPages(total, requestedPerPage));
+                totalPages(total, requestedPerPage));
 
         log.debug("Rendering {} response row(s) for page {} of {} at {} per page.",
                 responses.size(), pagination.page(), pagination.totalPages(), pagination.perPage());
@@ -353,8 +335,7 @@ public class ResponseService {
 
         // backend/app/api/responses.py:L28-31
         if (existing.isEmpty()) {
-            log.warn("Rejected the read of response '{}': the identifier names no row.",
-                    LogSafe.logSafe(responseId));
+            log.warn("Rejected a response read: the identifier names no row.");
             throw NotFoundException.responseNotFound();
         }
 
@@ -408,7 +389,7 @@ public class ResponseService {
             throw BadRequestException.tweetIdRequired();
         }
 
-        log.info("Generating a response for tweet '{}'.", LogSafe.logSafe(tweetId));
+        log.info("Generating a response for a requested tweet identifier.");
 
         Integer identifier = parseIdentifier(tweetId);
         try {
@@ -416,8 +397,7 @@ public class ResponseService {
             String generatedText = generateText(subject);
             ResponseDto stored = store(identifier, generatedText, false);
 
-            log.info("Stored response {} for tweet '{}' awaiting review.",
-                    stored.id(), LogSafe.logSafe(tweetId));
+            log.info("Stored response {} awaiting review.", stored.id());
             return stored;
         } catch (ResponseGenerationException e) {
             // Already recorded by the layer that raised it — DL-252 — see docs/DECISION_LOG.md
@@ -428,9 +408,9 @@ public class ResponseService {
             // clause above rethrows unrecorded, so exactly one ERROR exists per failure. The record
             // carries the failure's class only — never a statement, a SQL state or a message — see
             // docs/DECISION_LOG.md DL-052, DL-252
-            log.error("Generating a response for tweet '{}' failed: {}; responding with the wire "
-                    + "literal of backend/app/api/responses.py:L49.",
-                    LogSafe.logSafe(tweetId), LogSafe.type(e));
+            log.error("Generating a response for the requested tweet failed: {}; responding with "
+                    + "the wire literal of backend/app/api/responses.py:L49.",
+                    e.getClass().getSimpleName());
             throw new ResponseGenerationException(e);
         }
     }
@@ -502,8 +482,8 @@ public class ResponseService {
      *
      * <p>Behaves exactly as {@link #generateResponseIfAbsent(String)} in every respect except one: the
      * subject's column values are taken from the supplied entity and are not selected, so the only
-     * {@code tweets} statement this path issues is the presence test of the preflight — see
-     * docs/DECISION_LOG.md DL-226. The in-process claim on the
+     * {@code tweets} statement this path issues is the pre-provider existence read — see
+     * docs/DECISION_LOG.md DL-226 and DL-252. The in-process claim on the
      * row's identifier, the transaction-scoped
      * {@link ResponseRepository#existsByTweetId(Integer)} guard, the stored column values and every
      * client-visible message are the same ones {@link #generateResponseIfAbsent(String)} produces —
@@ -596,7 +576,8 @@ public class ResponseService {
         } catch (RuntimeException e) {
             // The one ERROR record this failure receives, ahead of the fixed translation — DL-252 —
             // see docs/DECISION_LOG.md
-            log.error("Response generation failed for tweet '{}': {}.", identifier, LogSafe.type(e));
+            log.error("Response generation failed for tweet '{}': {}.", identifier,
+                    e.getClass().getSimpleName());
             throw new ResponseGenerationException(e);
         } finally {
             claimed.remove(identifier);
@@ -615,9 +596,8 @@ public class ResponseService {
      *
      * <p>A failure already carrying the wire literal of {@code backend/app/api/responses.py:L49}
      * passes through unchanged; every other failure is wrapped so it carries that literal. The record
-     * names the identifier through {@link LogSafe#logSafe(String)} and the failure through
-     * {@link LogSafe#type(Throwable)}: no prompt, no model output and no provider payload reaches the
-     * log.
+     * names the row identifier and the failure's class only: no prompt, no model output and no
+     * provider payload reaches the log.
      *
      * @param subject the wire form of the row to reply to, never {@code null}
      * @return the generated text, never {@code null}
@@ -630,7 +610,7 @@ public class ResponseService {
         } catch (RuntimeException providerFailure) {
             log.debug("The generation provider failed for tweet '{}': {}; responding with the wire "
                     + "literal of backend/app/api/responses.py:L49.",
-                    LogSafe.logSafe(subject.id()), LogSafe.type(providerFailure));
+                    subject.id(), providerFailure.getClass().getSimpleName());
 
             if (providerFailure instanceof ResponseGenerationException alreadyTranslated) {
                 throw alreadyTranslated;
@@ -700,7 +680,8 @@ public class ResponseService {
         } catch (PessimisticLockingFailureException | QueryTimeoutException contended) {
             // A parent row another writer holds for the whole bound is left to that writer — DL-246
             log.warn("Tweet {} stayed locked by another writer for the whole {}s bound ({}); nothing "
-                    + "was stored.", identifier, LOCK_WAIT_SECONDS, LogSafe.type(contended));
+                    + "was stored.", identifier, LOCK_WAIT_SECONDS,
+                    contended.getClass().getSimpleName());
             return null;
         }
     }
@@ -800,8 +781,7 @@ public class ResponseService {
     public ResponseDto updateResponse(String responseId, UpdateResponseRequest request) {
         // A request carrying neither updatable member reaches the existing :L57 failure — DL-082.
         if (request == null || request.carriesNoUpdatableMember()) {
-            log.warn("Rejected the update of response '{}': the request carried no writable value.",
-                    LogSafe.logSafe(responseId));
+            log.warn("Rejected a response update: the request carried no writable value.");
             throw BadRequestException.updateDataRequired();
         }
 
@@ -811,16 +791,15 @@ public class ResponseService {
         try {
             existing = findByIdentifierForUpdate(responseId);
         } catch (PessimisticLockingFailureException | QueryTimeoutException contended) {
-            log.warn("Rejected the update of response '{}': the row stayed locked by another writer "
-                    + "for the whole {}s bound ({}).", LogSafe.logSafe(responseId),
-                    LOCK_WAIT_SECONDS, LogSafe.type(contended));
+            log.warn("Rejected a response update: the row stayed locked by another writer for the "
+                    + "whole {}s bound ({}).", LOCK_WAIT_SECONDS,
+                    contended.getClass().getSimpleName());
             throw NotFoundException.responseNotFoundOrUpdateFailed();
         }
 
         // backend/app/api/responses.py:L62-65 — a literal distinct from the one at :L31
         if (existing.isEmpty()) {
-            log.warn("Rejected the update of response '{}': the identifier names no row.",
-                    LogSafe.logSafe(responseId));
+            log.warn("Rejected a response update: the identifier names no row.");
             throw NotFoundException.responseNotFoundOrUpdateFailed();
         }
 
@@ -839,15 +818,15 @@ public class ResponseService {
         // backend/app/api/responses.py:L65 and this transaction rolls back, so no row is left in a
         // state the wire contract cannot render — DL-244 — see docs/DECISION_LOG.md
         if (response.getContent() == null || response.getIsApproved() == null) {
-            log.warn("Rejected the update of response '{}': the update leaves a member the "
-                    + "wire contract declares required empty.", LogSafe.logSafe(responseId));
+            log.warn("Rejected a response update: the update leaves a member the wire contract "
+                    + "declares required empty.");
             throw NotFoundException.responseNotFoundOrUpdateFailed();
         }
 
         ResponseDto stored = responseMapper.toDto(responseRepository.save(response));
 
-        log.info("Updated response '{}': content {}, approval {}.",
-                LogSafe.logSafe(responseId),
+        log.info("Updated response {}: content {}, approval {}.",
+                stored.id(),
                 request.writesContent() ? "written" : "unchanged",
                 request.writesApproval() ? "written" : "unchanged");
 
@@ -914,4 +893,39 @@ public class ResponseService {
             return null;
         }
     }
+
+    // The offset ceiling org.springframework.data.jpa.support.PageableUtils enforces — DL-225 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Reports whether a page request names an offset a paged query can position its first row at.
+     *
+     * <p>The largest offset a paged query can express is {@link Integer#MAX_VALUE}, which it passes as
+     * an {@code int}. The offset compared here is the 0-based page index multiplied by the page size,
+     * computed as a {@code long} and free of overflow. An offset of exactly {@link Integer#MAX_VALUE}
+     * is expressible and reads as {@code true} — DL-225.
+     *
+     * @param request the page request to test; must not be {@code null}
+     * @return {@code true} when the request's offset is at most {@link Integer#MAX_VALUE}
+     */
+    private static boolean withinQueryableOffset(Pageable request) {
+        return request.getOffset() <= Integer.MAX_VALUE;
+    }
+
+    // The total_pages member of the pagination envelope — DL-038 — see docs/DECISION_LOG.md
+    /**
+     * Returns the number of pages a page size divides a row total into, which is the
+     * {@code total_pages} member of the pagination envelope.
+     *
+     * <p>The value is the one {@link org.springframework.data.domain.Page#getTotalPages()} reports for
+     * the same total and size: the total divided by the size and rounded up. A total of {@code 0}
+     * yields {@code 0}.
+     *
+     * @param total    the number of rows the table holds; never negative
+     * @param pageSize the page size the envelope restates; at least one
+     * @return the number of pages, never negative
+     */
+    private static int totalPages(long total, int pageSize) {
+        return (int) Math.ceil((double) total / (double) pageSize);
+    }
+
 }

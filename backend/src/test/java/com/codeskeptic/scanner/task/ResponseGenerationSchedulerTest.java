@@ -26,12 +26,14 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
@@ -65,8 +67,9 @@ import com.codeskeptic.scanner.service.ResponseService;
 /**
  * Exercises {@link ResponseGenerationScheduler}.
  *
- * <p>Assertions cover the scheduling surface the pass presents — one public no-argument method, and
- * no interval, no rate and no schedule declared on this class — together with the three collaborators
+ * <p>Assertions cover the scheduling surface the pass presents — one public no-argument method
+ * carrying exactly one {@code @Scheduled} declaration, whose fixed delay names
+ * {@code scanner.response-generation-delay-seconds} in seconds — together with the four collaborators
  * its single constructor binds.
  *
  * <p>Assertions then cover the pass itself: one reply generated and mirrored per candidate, in
@@ -75,8 +78,9 @@ import com.codeskeptic.scanner.service.ResponseService;
  * failing candidate, a failing candidate query and a rejected mirror each leaving the pass returning
  * normally; and the candidate row handed on as it was selected.
  *
- * <p>The interval between passes is declared by {@code config/AsyncSchedulingConfig} and asserted by
- * {@code config/AsyncSchedulingConfigTest} — see docs/DECISION_LOG.md DL-047, DL-227.
+ * <p>The interval between passes is declared on the pass itself and asserted here; the scheduling
+ * capability that runs it is activated by {@code config/AsyncSchedulingConfig} — see
+ * docs/DECISION_LOG.md DL-047, DL-227.
  *
  * <p>Every collaborator is a Mockito double. No Spring context is started, no scheduler thread is
  * created, no network call is made and no database is reached.
@@ -151,7 +155,7 @@ class ResponseGenerationSchedulerTest {
      */
     private static ScannerProperties boundWith(int candidateCeiling) {
         return new ScannerProperties(null, 100, 60L, null, null, null, null, null, null, null,
-                new ScannerProperties.Background(true, true, true, 120L, 30L, candidateCeiling));
+                new ScannerProperties.Background(true, true, true, candidateCeiling));
     }
 
     @Test
@@ -175,14 +179,42 @@ class ResponseGenerationSchedulerTest {
                 });
     }
 
+    // TR-12 and IR10: fixed DELAY, measured end-to-start, never fixedRate — DL-047 — see
+    // docs/DECISION_LOG.md
     @Test
-    @DisplayName("declares no interval, no rate and no schedule of its own")
-    void declaresNoPacingOfItsOwn() {
+    @DisplayName("declares its pacing as one fixed delay in seconds naming the configured property")
+    void declaresItsPacingAsOneFixedDelayInSeconds() throws NoSuchMethodException {
+        Scheduled declared = ResponseGenerationScheduler.class
+                .getDeclaredMethod(PASS_METHOD_NAME)
+                .getAnnotation(Scheduled.class);
+
+        assertThat(declared).as("@Scheduled on the pass").isNotNull();
+        assertThat(declared.fixedDelayString())
+                .as("the fixed delay in force")
+                .isEqualTo("${scanner.response-generation-delay-seconds}");
+        assertThat(declared.timeUnit()).as("unit of the declared delay").isEqualTo(TimeUnit.SECONDS);
+
+        // A fixed RATE would measure start-to-start and change the pacing of the source loop — IR10
+        assertThat(declared.fixedRateString()).as("fixedRateString").isEmpty();
+        assertThat(declared.fixedRate()).as("fixedRate").isEqualTo(-1L);
+        assertThat(declared.cron()).as("cron").isEmpty();
+        assertThat(declared.initialDelayString()).as("initialDelayString").isEmpty();
+        assertThat(declared.initialDelay()).as("initialDelay").isEqualTo(-1L);
+    }
+
+    @Test
+    @DisplayName("carries exactly one scheduled method and no asynchronous or enabling annotation")
+    void carriesExactlyOneScheduledMethodAndNoEnablingAnnotation() {
         assertThat(ResponseGenerationScheduler.class.getDeclaredMethods())
                 .as("methods carrying their own interval, rate or schedule")
-                .noneMatch(method -> method.isAnnotationPresent(Scheduled.class)
-                        || method.isAnnotationPresent(Schedules.class)
-                        || method.isAnnotationPresent(Async.class));
+                .filteredOn(method -> method.isAnnotationPresent(Scheduled.class)
+                        || method.isAnnotationPresent(Schedules.class))
+                .extracting(Method::getName)
+                .containsExactly(PASS_METHOD_NAME);
+
+        assertThat(ResponseGenerationScheduler.class.getDeclaredMethods())
+                .as("methods declared asynchronous")
+                .noneMatch(method -> method.isAnnotationPresent(Async.class));
 
         assertThat(ResponseGenerationScheduler.class.getAnnotations())
                 .as("annotations on the type")
@@ -228,6 +260,45 @@ class ResponseGenerationSchedulerTest {
                 .isThrownBy(() -> new ResponseGenerationScheduler(tweetRepository, responseService,
                         notionService, null))
                 .withMessageContaining("properties");
+    }
+
+    // The pass runs only in a process that carries it — DL-250 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "enabled={0} responseGenerationEnabled={1}")
+    @CsvSource({
+        "false,true",
+        "true,false",
+        "false,false"
+    })
+    @DisplayName("reads no candidate in a process that does not carry the pass")
+    void readsNoCandidateInAProcessThatDoesNotCarryThePass(boolean enabled,
+            boolean responseGenerationEnabled) {
+
+        ScannerProperties withheld = new ScannerProperties(null, 100, 60L, null, null, null, null,
+                null, null, null,
+                new ScannerProperties.Background(enabled, true, responseGenerationEnabled,
+                        UNREACHABLE_CEILING));
+
+        new ResponseGenerationScheduler(tweetRepository, responseService, notionService, withheld)
+                .generatePendingResponses();
+
+        verifyNoInteractions(tweetRepository, responseService, notionService);
+    }
+
+    // An unbound background group carries the pass, which is the declared default of both keys —
+    // DL-250 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("runs the pass when the background group is unbound")
+    void runsThePassWhenTheBackgroundGroupIsUnbound() {
+        ScannerProperties unbound =
+                new ScannerProperties(null, 100, 60L, null, null, null, null, null, null, null, null);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(List.of());
+
+        new ResponseGenerationScheduler(tweetRepository, responseService, notionService, unbound)
+                .generatePendingResponses();
+
+        verify(tweetRepository).findUnansweredBatchAfter(isNull(), any(Pageable.class));
+        verifyNoInteractions(responseService, notionService);
     }
 
     @Test

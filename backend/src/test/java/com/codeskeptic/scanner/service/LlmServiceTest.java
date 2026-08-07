@@ -217,8 +217,8 @@ class LlmServiceTest {
     private static final String PADDED_GENERATED_TEXT = "  Even seasoned reviewers disagree.  ";
 
     /**
-     * Longest run of a guarded value a log record carries — the bound
-     * {@code util.LogSafe.logSafe(String)} applies to every provider-supplied member.
+     * Longest run of a guarded value a log record carries — the bound the provider-member shape check
+     * applies to every provider-supplied member. A longer value is withheld in full.
      */
     private static final int GUARDED_VALUE_LIMIT = 64;
 
@@ -498,8 +498,8 @@ class LlmServiceTest {
     }
 
     @Test
-    @DisplayName("folds a line break in a post identifier so no record boundary can be forged")
-    void guardsAPostIdentifierCarryingALineBreak() {
+    @DisplayName("writes no post identifier at all, so no record boundary can be forged through one")
+    void writesNoPostIdentifierAtAll() {
         ListAppender<ILoggingEvent> records = attachLogRecorder();
         TweetDto forging = new TweetDto("47\r\nERROR forged administrative record", TWEET_CONTENT,
                 LIKE_COUNT, CREATED_AT, DOUBT_RATING, MEDIA, null, USER_ID, AI_TOOLS_MENTIONED);
@@ -511,9 +511,9 @@ class LlmServiceTest {
         assertThat(renderedRecords(records)).allSatisfy(record -> assertThat(record)
                 .doesNotContain("\r")
                 .doesNotContain("\n")
+                .doesNotContain("47")
+                .doesNotContain("forged")
                 .doesNotContain("transport down"));
-        assertThat(renderedRecords(records))
-                .anyMatch(record -> record.contains("tweet 47??ERROR"));
         detachLogRecorder(records);
     }
 
@@ -534,16 +534,17 @@ class LlmServiceTest {
                 .filter(record -> record.contains("HTTP 400"))
                 .findFirst()
                 .orElseThrow();
-        assertThat(logged).contains("type invalid??type")
-                .contains("code invalid?code")
-                .contains("param invalid?param");
-        assertThat(logged).doesNotContain("\r").doesNotContain("\n").doesNotContain("\u0000");
+        assertThat(logged).contains("type absent")
+                .contains("code absent")
+                .contains("param absent");
+        assertThat(logged).doesNotContain("invalid")
+                .doesNotContain("\r").doesNotContain("\n").doesNotContain("\u0000");
         detachLogRecorder(records);
     }
 
     @Test
-    @DisplayName("cuts a provider param to the length the log guard carries")
-    void cutsAProviderParamToTheLengthTheLogGuardCarries() {
+    @DisplayName("withholds a provider param longer than the length the log guard carries")
+    void withholdsAProviderParamLongerThanTheLogGuardCarries() {
         ListAppender<ILoggingEvent> records = attachLogRecorder();
         when(openAiClient.chat()).thenReturn(chatService);
         when(chatService.completions()).thenReturn(chatCompletionService);
@@ -557,7 +558,7 @@ class LlmServiceTest {
                 .filter(record -> record.contains("HTTP 400"))
                 .findFirst()
                 .orElseThrow();
-        assertThat(logged).contains("y".repeat(GUARDED_VALUE_LIMIT))
+        assertThat(logged).contains("param absent")
                 .doesNotContain("y".repeat(GUARDED_VALUE_LIMIT + 1));
         detachLogRecorder(records);
     }
@@ -1353,8 +1354,9 @@ class LlmServiceTest {
         assertThat(service.generateResponse(tweet())).isEqualTo(TRIMMED_GENERATED_TEXT);
 
         assertThat(renderedRecords(records))
-                .anyMatch(record -> record.contains("INCOMPLETE:length?WARN forged record"))
-                .noneMatch(record -> record.contains("INCOMPLETE:length\nWARN"));
+                .anyMatch(record -> record.contains("INCOMPLETE:absent"))
+                .noneMatch(record -> record.contains("INCOMPLETE:length\nWARN"))
+                .noneMatch(record -> record.contains("forged"));
         detachLogRecorder(records);
     }
 

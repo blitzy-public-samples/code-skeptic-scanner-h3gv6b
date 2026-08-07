@@ -58,7 +58,6 @@ import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
-import org.springframework.web.bind.ServletRequestBindingException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -87,7 +86,6 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 
-import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -142,13 +140,10 @@ class GlobalExceptionHandlerTest {
     private static final Set<Integer> STATUS_CODES_THIS_ADVICE_EMITS =
             Set.of(400, 404, 405, 406, 415, 500);
 
-    private static final String BAD_REQUEST = "Bad request";
+    /** The only two literals the advice puts on the wire outside a route's own message — DL-092. */
+    private static final Set<String> GLOBAL_WIRE_LITERALS =
+            Set.of("Not found", "Internal server error");
 
-    private static final String METHOD_NOT_ALLOWED = "Method not allowed";
-
-    private static final String UNSUPPORTED_MEDIA_TYPE = "Unsupported media type";
-
-    private static final String NOT_ACCEPTABLE = "Not acceptable";
 
     private static final int UNAUTHORIZED = 401;
 
@@ -329,34 +324,32 @@ class GlobalExceptionHandlerTest {
         assertErrorEnvelope(response, expectedMessage);
     }
 
+    // Only the two literals of backend/app/api/responses.py:L41 and settings.py:L18 reach the wire —
+    // DL-092 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] {0}")
     @ValueSource(strings = {"somethingElse", "content"})
-    @DisplayName("returns 400 and the Bad request literal when the rejected field name is outside the map")
-    void returns400AndTheBadRequestLiteralForAFieldOutsideTheMap(String rejectedField)
-            throws JsonProcessingException {
+    @DisplayName("returns 400 with no body when the rejected field name is outside the map")
+    void returns400WithNoBodyForAFieldOutsideTheMap(String rejectedField) {
         ResponseEntity<ErrorResponse> response =
                 handler.handleMethodArgumentNotValid(validationFailureOn(rejectedField));
 
         assertThat(response.getStatusCode().value()).isEqualTo(400);
-        assertErrorEnvelope(response, BAD_REQUEST);
-        assertThat(response.getBody().error()).isNotEqualTo(TWEET_ID_IS_REQUIRED);
-        assertThat(response.getBody().error()).isNotEqualTo(NO_VALUE_PROVIDED);
-        assertThat(envelopeOf(response).toString()).doesNotContain(rejectedField);
+        assertThat(response.getBody()).as("body of an unmapped validation failure").isNull();
     }
 
     @Test
-    @DisplayName("returns 400 and the Bad request literal when the binding result carries no field error")
-    void returns400AndTheBadRequestLiteralWhenNoFieldErrorIsPresent() throws JsonProcessingException {
+    @DisplayName("returns 400 with no body when the binding result carries no field error")
+    void returns400WithNoBodyWhenNoFieldErrorIsPresent() {
         ResponseEntity<ErrorResponse> response =
                 handler.handleMethodArgumentNotValid(validationFailureWithoutFieldErrors());
 
         assertThat(response.getStatusCode().value()).isEqualTo(400);
-        assertErrorEnvelope(response, BAD_REQUEST);
+        assertThat(response.getBody()).as("body of a fieldless validation failure").isNull();
     }
 
     @Test
-    @DisplayName("emits one of exactly three messages for a body that failed validation")
-    void emitsOneOfExactlyThreeMessagesForABodyThatFailedValidation() {
+    @DisplayName("emits one of exactly two messages, or none, for a body that failed validation")
+    void emitsOneOfExactlyTwoMessagesForABodyThatFailedValidation() {
         List<ResponseEntity<ErrorResponse>> responses = List.of(
                 handler.handleMethodArgumentNotValid(validationFailureOn("tweetId")),
                 handler.handleMethodArgumentNotValid(validationFailureOn("tweet_id")),
@@ -366,10 +359,10 @@ class GlobalExceptionHandlerTest {
                 handler.handleMethodArgumentNotValid(validationFailureWithoutFieldErrors()));
 
         assertThat(responses)
-                .allSatisfy(response -> assertThat(response.getBody()).isNotNull())
-                .extracting(response -> response.getBody().error())
-                .allSatisfy(message -> assertThat(message)
-                        .isIn(TWEET_ID_IS_REQUIRED, NO_VALUE_PROVIDED, BAD_REQUEST));
+                .allSatisfy(response -> assertThat(response.getStatusCode().value()).isEqualTo(400))
+                .allSatisfy(response -> assertThat(response.getBody() == null
+                        ? null : response.getBody().error())
+                        .isIn(TWEET_ID_IS_REQUIRED, NO_VALUE_PROVIDED, null));
     }
 
     @Test
@@ -426,97 +419,96 @@ class GlobalExceptionHandlerTest {
     }
 
     // Net-new (no Python counterpart) — DL-092 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {2}")
+    @MethodSource("frameworkRequestFailures")
+    @DisplayName("answers a framework request failure with the framework's own status and no body")
+    void answersAFrameworkRequestFailureWithItsOwnStatusAndNoBody(Exception reported,
+            int expectedStatus, String description) {
+
+        ResponseEntity<ErrorResponse> response = handler.handleUnexpectedException(reported);
+
+        assertThat(response.getStatusCode().value()).as(description).isEqualTo(expectedStatus);
+        assertThat(response.getBody()).as("body of %s", description).isNull();
+    }
+
+    private static Stream<Arguments> frameworkRequestFailures() {
+        return Stream.of(
+                Arguments.of(malformedBody(), 400, "a syntactically malformed request body"),
+                Arguments.of(new HttpMessageConversionException(CAUSE_MESSAGE), 400,
+                        "a body the converter could not turn into the target record"),
+                Arguments.of(missingParameter(), 400, "a missing query parameter"),
+                Arguments.of(new MissingServletRequestPartException("part"), 400,
+                        "a missing multipart part"),
+                Arguments.of(methodNotSupported(), 405, "a request method no route supports"),
+                Arguments.of(unsupportedMediaType(), 415,
+                        "a request body whose media type no handler consumes"),
+                Arguments.of(new HttpMediaTypeNotAcceptableException("none"), 406,
+                        "an Accept header no handler can satisfy"));
+    }
+
+    // Every other failure is a defect and reads as 500 — DL-092 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] {1}")
-    @MethodSource("clientRequestFailures")
-    @DisplayName("returns 400 and never 500 for a request the framework rejected")
-    void returns400AndNever500ForAClientRequestFailure(Exception reported, String description)
+    @MethodSource("nonFrameworkFailures")
+    @DisplayName("answers a failure that is not a framework request failure with 500 and the "
+            + "Internal server error envelope")
+    void answersANonFrameworkFailureWith500(Exception reported, String description)
             throws JsonProcessingException {
 
-        ResponseEntity<ErrorResponse> response = handler.handleClientRequestFailure(reported);
+        ResponseEntity<ErrorResponse> response = handler.handleUnexpectedException(reported);
 
-        assertThat(response.getStatusCode().value()).as(description).isEqualTo(400);
-        assertErrorEnvelope(response, BAD_REQUEST);
+        assertThat(response.getStatusCode().value()).as(description).isEqualTo(500);
+        assertErrorEnvelope(response, INTERNAL_SERVER_ERROR);
         assertThat(envelopeOf(response).toString()).doesNotContain(CAUSE_MESSAGE);
     }
 
-    private static Stream<Arguments> clientRequestFailures() {
+    private static Stream<Arguments> nonFrameworkFailures() {
         return Stream.of(
-                Arguments.of(malformedBody(), "a syntactically malformed request body"),
-                Arguments.of(missingParameter(), "a missing query parameter"),
-                Arguments.of(new MissingServletRequestPartException("part"), "a missing multipart part"),
+                Arguments.of(new HttpMessageNotWritableException(CAUSE_MESSAGE),
+                        "a response the converter could not write"),
                 Arguments.of(new TypeMismatchException(CAUSE_MESSAGE, Integer.class),
-                        "a request value the target type cannot hold"));
+                        "a value the target type cannot hold"),
+                Arguments.of(new MultipartException(CAUSE_MESSAGE), "a multipart parse failure"),
+                Arguments.of(new IllegalArgumentException(CAUSE_MESSAGE), "an illegal argument"),
+                Arguments.of(new InvalidMediaTypeException("not a media type", "no slash"),
+                        "a Content-Type that names no media type"),
+                Arguments.of(new IllegalStateException(CAUSE_MESSAGE), "a defect in our own code"));
     }
 
-    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
+    // The single decision point that separates the two paths — DL-092 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("returns 400 with the Bad request envelope for a message-conversion failure")
-    void returns400WithBadRequestForAMessageConversionFailure() throws JsonProcessingException {
-        ResponseEntity<ErrorResponse> response = handler.handleMessageConversionFailure(
-                new HttpMessageConversionException(CAUSE_MESSAGE));
+    @DisplayName("routes every framework request failure and every defect to the one catch-all "
+            + "handler")
+    void routesEveryFailureToTheOneCatchAllHandler() {
+        ExceptionHandlerMethodResolver resolver = resolverForTheAdvice();
+        Method catchAll = handlerMethodFor(Exception.class);
 
-        assertThat(response.getStatusCode().value()).isEqualTo(400);
-        assertErrorEnvelope(response, BAD_REQUEST);
-        assertThat(envelopeOf(response).toString()).doesNotContain(CAUSE_MESSAGE);
-    }
+        for (Exception failure : List.of(malformedBody(), missingParameter(),
+                new MissingServletRequestPartException("part"), methodNotSupported(),
+                unsupportedMediaType(), new HttpMediaTypeNotAcceptableException("none"),
+                new HttpMessageConversionException(CAUSE_MESSAGE),
+                new HttpMessageNotWritableException(CAUSE_MESSAGE),
+                new MultipartException(CAUSE_MESSAGE), new IllegalArgumentException(CAUSE_MESSAGE),
+                new IllegalStateException(CAUSE_MESSAGE))) {
 
-    // Converter-failure log sanitisation — DL-197 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("records only the exception class for a message-conversion failure, never its message")
-    void recordsOnlyTheExceptionClassForAMessageConversionFailure() throws JsonProcessingException {
-        String attackerControlled = "SENTINEL-9f3a\r\nWARN forged log line: secret=hunter2";
-        Logger adviceLogger = (Logger) LoggerFactory.getLogger(GlobalExceptionHandler.class);
-        ListAppender<ILoggingEvent> recorded = new ListAppender<>();
-        recorded.start();
-        adviceLogger.addAppender(recorded);
-        try {
-            ResponseEntity<ErrorResponse> response = handler.handleMessageConversionFailure(
-                    new HttpMessageConversionException(attackerControlled));
-
-            assertThat(response.getStatusCode().value()).isEqualTo(400);
-            assertErrorEnvelope(response, BAD_REQUEST);
-        } finally {
-            adviceLogger.detachAppender(recorded);
-            recorded.stop();
+            assertThat(resolver.resolveMethod(failure))
+                    .as("handler resolved for %s", failure.getClass().getSimpleName())
+                    .isEqualTo(catchAll);
         }
-
-        assertThat(recorded.list).hasSize(1);
-        ILoggingEvent event = recorded.list.get(0);
-        assertThat(event.getLevel()).isEqualTo(Level.WARN);
-        assertThat(event.getThrowableProxy()).isNull();
-        assertThat(event.getFormattedMessage())
-                .contains(HttpMessageConversionException.class.getSimpleName())
-                .doesNotContain("SENTINEL-9f3a")
-                .doesNotContain("hunter2")
-                .doesNotContain("\r")
-                .doesNotContain("\n");
     }
 
-    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
+    // Bodies the converter rejects reach the wire as a bodiless 400 or a 500 — DL-092 — see
+    // docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] {1}")
     @MethodSource("bodiesRepeatingARecordComponent")
-    @DisplayName("answers a body repeating a record component after completion with 400 and never "
-            + "500")
-    void answersABodyRepeatingARecordComponentAfterCompletionWith400(
-            Class<?> targetType, String body) throws JsonProcessingException {
-
+    @DisplayName("answers a body repeating a record component without echoing any submitted value")
+    void answersABodyRepeatingARecordComponentWithoutEchoingIt(Class<?> targetType, String body) {
         HttpMessageConversionException raised = conversionFailureReadingBody(defaultConverter(),
                 targetType, body);
 
-        // The advice routes a conversion failure that is not a read failure to its own handler.
-        assertThat(raised).isNotInstanceOf(HttpMessageNotReadableException.class);
-
-        Method resolved = resolverForTheAdvice().resolveMethod(raised);
-        assertThat(resolved)
-                .isNotNull()
-                .isEqualTo(handlerMethodFor(HttpMessageConversionException.class))
-                .isNotEqualTo(handlerMethodFor(Exception.class));
-
-        ResponseEntity<ErrorResponse> response = handler.handleMessageConversionFailure(raised);
+        ResponseEntity<ErrorResponse> response = handler.handleUnexpectedException(raised);
 
         assertThat(response.getStatusCode().value()).isEqualTo(400);
-        assertErrorEnvelope(response, BAD_REQUEST);
-        assertThat(envelopeOf(response).toString()).doesNotContain("password");
+        assertThat(response.getBody()).as("body of a rejected request body").isNull();
     }
 
     // Net-new (no Python counterpart) — DL-197 — see docs/DECISION_LOG.md
@@ -529,23 +521,20 @@ class GlobalExceptionHandlerTest {
     })
     @DisplayName("writes no part of a conversion failure's message to the log")
     void writesNoPartOfAConversionFailuresMessageToTheLog(String attackerControlledMessage) {
+        ListAppender<ILoggingEvent> appender = attachAdviceAppender();
         List<ILoggingEvent> events = new ArrayList<>();
-        Logger advice = (Logger) LoggerFactory.getLogger(GlobalExceptionHandler.class);
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
-        appender.start();
-        advice.addAppender(appender);
         try {
-            handler.handleMessageConversionFailure(
-                    new HttpMessageConversionException(attackerControlledMessage));
+            handler.handleUnexpectedException(
+                    new HttpMessageNotReadableException(attackerControlledMessage,
+                            new MockHttpInputMessage(new byte[0])));
             events.addAll(appender.list);
         } finally {
-            advice.detachAppender(appender);
-            appender.stop();
+            detachAdviceAppender(appender);
         }
 
         assertThat(events).hasSize(1);
         ILoggingEvent event = events.get(0);
-        assertThat(event.getLevel()).isEqualTo(Level.WARN);
+        assertThat(event.getLevel()).isEqualTo(Level.DEBUG);
         assertThat(event.getFormattedMessage())
                 .doesNotContain(attackerControlledMessage)
                 .doesNotContain("forged log record")
@@ -564,19 +553,15 @@ class GlobalExceptionHandlerTest {
     @Test
     @DisplayName("names the exception class in the conversion-failure log record")
     void namesTheExceptionClassInTheConversionFailureLogRecord() {
-        Logger advice = (Logger) LoggerFactory.getLogger(GlobalExceptionHandler.class);
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
-        appender.start();
-        advice.addAppender(appender);
+        ListAppender<ILoggingEvent> appender = attachAdviceAppender();
         String formatted;
         try {
-            handler.handleMessageConversionFailure(
+            handler.handleUnexpectedException(
                     new HttpMessageNotReadableException("body the caller sent",
                             new MockHttpInputMessage(new byte[0])));
             formatted = appender.list.get(0).getFormattedMessage();
         } finally {
-            advice.detachAppender(appender);
-            appender.stop();
+            detachAdviceAppender(appender);
         }
 
         assertThat(formatted)
@@ -586,39 +571,11 @@ class GlobalExceptionHandlerTest {
 
     // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] {1}")
-    @MethodSource("bodiesRepeatingARecordComponent")
-    @DisplayName("answers a body repeating a record component with 400 under strict duplicate "
-            + "detection, where the failure is a read failure")
-    void answersABodyRepeatingARecordComponentWith400UnderStrictDuplicateDetection(
-            Class<?> targetType, String body) throws JsonProcessingException {
-
-        HttpMessageConversionException raised = conversionFailureReadingBody(
-                strictDuplicateDetectionConverter(), targetType, body);
-
-        assertThat(raised).isInstanceOf(HttpMessageNotReadableException.class);
-
-        Method resolved = resolverForTheAdvice().resolveMethod(raised);
-        assertThat(resolved)
-                .isNotNull()
-                .isEqualTo(handlerMethodFor(HttpMessageNotReadableException.class))
-                .isNotEqualTo(handlerMethodFor(Exception.class));
-
-        ResponseEntity<ErrorResponse> response =
-                handler.handleClientRequestFailure(raised);
-
-        assertThat(response.getStatusCode().value()).isEqualTo(400);
-        assertErrorEnvelope(response, BAD_REQUEST);
-        assertThat(envelopeOf(response).toString()).doesNotContain("password");
-    }
-
-    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
-    @ParameterizedTest(name = "[{index}] {1}")
     @MethodSource("bodiesCarryingEachRecordComponentOnce")
     @DisplayName("reads a body carrying each record component once, so the repeated-component cases "
             + "isolate the repetition")
     void readsABodyCarryingEachRecordComponentOnce(Class<?> targetType, String body) {
         assertThat(readBody(defaultConverter(), targetType, body)).isNotNull();
-        assertThat(readBody(strictDuplicateDetectionConverter(), targetType, body)).isNotNull();
     }
 
     private static Stream<Arguments> bodiesRepeatingARecordComponent() {
@@ -640,7 +597,8 @@ class GlobalExceptionHandlerTest {
                         "{\"username\":\"admin\",\"password\":\"a\"}"));
     }
 
-    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
+    // The framework converter binds a repeated component to its last value — DL-188 — see
+    // docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] {0} binds username {1} and password {2}")
     @CsvSource(delimiter = '|', value = {
         "{\"username\":\"admin\",\"username\":\"root\",\"password\":\"a\"} | root  | a",
@@ -664,87 +622,6 @@ class GlobalExceptionHandlerTest {
         assertThat(((LoginRequest) bound).password()).isEqualTo(expectedPassword);
     }
 
-    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("writes no part of a converter message or of a submitted value to the log")
-    void writesNoPartOfAConverterMessageToTheLog() {
-        String submitted = "s3cr3t-submitted-value";
-        HttpMessageConversionException raised = conversionFailureReadingBody(
-                UpdateSettingRequest.class,
-                "{\"value\":\"" + submitted + "\",\"value\":\"" + submitted + "\"}");
-
-        Logger advice = (Logger) org.slf4j.LoggerFactory.getLogger(GlobalExceptionHandler.class);
-        ListAppender<ILoggingEvent> recorded = new ListAppender<>();
-        recorded.start();
-        advice.addAppender(recorded);
-        try {
-            handler.handleMessageConversionFailure(raised);
-        } finally {
-            advice.detachAppender(recorded);
-            recorded.stop();
-        }
-
-        assertThat(recorded.list).hasSize(1);
-        ILoggingEvent event = recorded.list.get(0);
-        assertThat(event.getLevel()).isEqualTo(Level.WARN);
-        assertThat(event.getFormattedMessage())
-                .startsWith("Rejecting a request body the converter could not bind with HTTP 400: "
-                        + raised.getClass().getSimpleName())
-                .doesNotContain(raised.getMessage())
-                .doesNotContain(submitted)
-                .doesNotContain("value")
-                .doesNotContain("fallback")
-                .doesNotContain(raised.getMessage());
-        assertThat(event.getThrowableProxy()).isNull();
-    }
-
-    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("returns 500 with the Internal server error envelope for a response-write failure")
-    void returns500WithInternalServerErrorForAResponseWriteFailure() throws JsonProcessingException {
-        HttpMessageNotWritableException raised = new HttpMessageNotWritableException(CAUSE_MESSAGE);
-
-        Method resolved = resolverForTheAdvice().resolveMethod(raised);
-        assertThat(resolved)
-                .isNotNull()
-                .isEqualTo(handlerMethodFor(HttpMessageNotWritableException.class));
-
-        ResponseEntity<ErrorResponse> response = handler.handleResponseWriteFailure(raised);
-
-        assertThat(response.getStatusCode().value()).isEqualTo(500);
-        assertErrorEnvelope(response, INTERNAL_SERVER_ERROR);
-        assertThat(envelopeOf(response).toString()).doesNotContain(CAUSE_MESSAGE);
-    }
-
-    // Net-new (no Python counterpart) — DL-188 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("routes each type of the conversion hierarchy to its own handler by direction")
-    void routesEachTypeOfTheConversionHierarchyToItsOwnHandler() {
-        ExceptionHandlerMethodResolver resolver = resolverForTheAdvice();
-
-        assertThat(resolver.resolveMethod(malformedBody()))
-                .isEqualTo(handlerMethodFor(HttpMessageNotReadableException.class));
-        assertThat(resolver.resolveMethod(new HttpMessageConversionException(CAUSE_MESSAGE)))
-                .isEqualTo(handlerMethodFor(HttpMessageConversionException.class));
-        assertThat(resolver.resolveMethod(new HttpMessageNotWritableException(CAUSE_MESSAGE)))
-                .isEqualTo(handlerMethodFor(HttpMessageNotWritableException.class));
-
-        Method readable = handlerMethodFor(HttpMessageNotReadableException.class);
-        Method supertype = handlerMethodFor(HttpMessageConversionException.class);
-        Method writable = handlerMethodFor(HttpMessageNotWritableException.class);
-        assertThat(Set.of(readable, supertype, writable)).hasSize(3);
-        assertThat(writable).isNotEqualTo(handlerMethodFor(Exception.class));
-    }
-
-    /**
-     * Reads {@code body} onto {@code targetType} through {@code converter} and returns the conversion
-     * failure it raises.
-     *
-     * @param converter  the converter reading the body
-     * @param targetType the record the body is bound onto
-     * @param body       the request body, as received
-     * @return the raised exception
-     */
     /**
      * Reads {@code body} onto {@code targetType} through the framework's own Jackson converter and
      * returns the conversion failure it raises.
@@ -804,13 +681,6 @@ class GlobalExceptionHandlerTest {
         return new MappingJackson2HttpMessageConverter();
     }
 
-    /** The same converter with {@code STRICT_DUPLICATE_DETECTION} enabled on its parser. */
-    private static MappingJackson2HttpMessageConverter strictDuplicateDetectionConverter() {
-        ObjectMapper strict = new ObjectMapper();
-        strict.enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
-        return new MappingJackson2HttpMessageConverter(strict);
-    }
-
     private static ExceptionHandlerMethodResolver resolverForTheAdvice() {
         return new ExceptionHandlerMethodResolver(GlobalExceptionHandler.class);
     }
@@ -830,53 +700,22 @@ class GlobalExceptionHandlerTest {
 
         ListAppender<ILoggingEvent> recorded = attachAdviceAppender();
         try {
-            handler.handleMessageConversionFailure(raised);
+            handler.handleUnexpectedException(raised);
 
-            List<ILoggingEvent> warnings = recorded.list.stream()
-                    .filter(event -> event.getLevel() == Level.WARN)
-                    .toList();
-            assertThat(warnings).hasSize(1);
-            ILoggingEvent warning = warnings.get(0);
-            String logged = warning.getFormattedMessage();
+            assertThat(recorded.list).hasSize(1);
+            ILoggingEvent record = recorded.list.get(0);
+            String logged = record.getFormattedMessage();
 
-            assertThat(logged)
-                    .contains("Rejecting a request body the converter could not bind with HTTP 400")
-                    .contains("HttpMessageConversionException")
-                    .contains("detail hmac256:");
+            assertThat(logged).contains(raised.getClass().getSimpleName());
             assertThat(logged)
                     .doesNotContain("password")
                     .doesNotContain("s3cr3t-pa55phrase")
                     .doesNotContain("admin")
                     .doesNotContain(raised.getMessage());
-            assertThat(warning.getThrowableProxy()).isNull();
+            assertThat(record.getThrowableProxy()).isNull();
         } finally {
             detachAdviceAppender(recorded);
         }
-    }
-
-    // Net-new (no Python counterpart) — DL-197 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("derives a stable correlation token that identifies the failure shape rather than "
-            + "the request")
-    void derivesAStableCorrelationTokenThatIdentifiesTheFailureShape() {
-        String settingBody = "{\"value\":\"first\",\"value\":\"second\"}";
-        String loginBody = "{\"username\":\"a\",\"password\":\"b\",\"password\":\"c\"}";
-
-        String repeated = correlationTokenFor(
-                conversionFailureReadingBody(UpdateSettingRequest.class, settingBody));
-        String repeatedAgain = correlationTokenFor(
-                conversionFailureReadingBody(UpdateSettingRequest.class, settingBody));
-        String otherRoute = correlationTokenFor(
-                conversionFailureReadingBody(LoginRequest.class, loginBody));
-
-        // Two requests that provoke the same library message share a token: the token names the
-        // failure shape, not the caller or the body.
-        assertThat(repeated).startsWith("hmac256:").isEqualTo(repeatedAgain).isEqualTo(otherRoute);
-
-        // A different library message yields a different token.
-        assertThat(correlationTokenFor(new HttpMessageConversionException("a different failure")))
-                .startsWith("hmac256:")
-                .isNotEqualTo(repeated);
     }
 
     // Net-new (no Python counterpart) — DL-197 — see docs/DECISION_LOG.md
@@ -889,14 +728,14 @@ class GlobalExceptionHandlerTest {
 
         ListAppender<ILoggingEvent> recorded = attachAdviceAppender();
         try {
-            handler.handleClientRequestFailure(raised);
+            handler.handleUnexpectedException(raised);
 
             List<ILoggingEvent> records = recorded.list.stream()
                     .filter(event -> event.getLevel() == Level.DEBUG)
                     .toList();
             assertThat(records).hasSize(1);
             assertThat(records.get(0).getFormattedMessage())
-                    .isEqualTo("Rejecting a malformed request with HTTP 400: "
+                    .isEqualTo("Rejecting a request the framework could not handle with HTTP 400: "
                             + "HttpMessageNotReadableException");
             assertThat(records.get(0).getThrowableProxy()).isNull();
         } finally {
@@ -919,10 +758,8 @@ class GlobalExceptionHandlerTest {
             ILoggingEvent error = errors.get(0);
             assertThat(error.getThrowableProxy()).as("throwable attached to the record").isNull();
             assertThat(error.getFormattedMessage())
-                    .startsWith("Unhandled exception reached the error-handling advice; "
-                            + "responding HTTP 500. Failure IllegalStateException, raised at ")
-                    .contains("GlobalExceptionHandlerTest.")
-                    .contains(", correlation hmac256:")
+                    .isEqualTo("Unhandled exception reached the error-handling advice; "
+                            + "responding HTTP 500. Failure IllegalStateException")
                     .doesNotContain("a defect in our own code");
         } finally {
             detachAdviceAppender(recorded);
@@ -966,79 +803,6 @@ class GlobalExceptionHandlerTest {
         }
     }
 
-    // The sanitized detail is reachable at the diagnostic level only — DL-197 — see
-    // docs/DECISION_LOG.md
-    @Test
-    @DisplayName("writes the sanitized detail at DEBUG and nothing at all when DEBUG is off")
-    void writesTheSanitizedDetailAtDebugAndNothingAtAllWhenDebugIsOff() {
-        Logger adviceLogger = (Logger) LoggerFactory.getLogger(GlobalExceptionHandler.class);
-        ListAppender<ILoggingEvent> recorded = new ListAppender<>();
-        recorded.start();
-        adviceLogger.addAppender(recorded);
-        try {
-            adviceLogger.setLevel(Level.INFO);
-            handler.handleUnexpectedException(new IllegalStateException("first defect"));
-            assertThat(recorded.list.stream().filter(event -> event.getLevel() == Level.DEBUG))
-                    .as("DEBUG records written at INFO").isEmpty();
-
-            recorded.list.clear();
-            adviceLogger.setLevel(Level.DEBUG);
-            handler.handleUnexpectedException(new IllegalStateException("second defect"));
-
-            List<ILoggingEvent> debug = recorded.list.stream()
-                    .filter(event -> event.getLevel() == Level.DEBUG)
-                    .toList();
-            assertThat(debug).hasSize(1);
-            assertThat(debug.get(0).getFormattedMessage())
-                    .startsWith("Sanitized detail of the unhandled failure: "
-                            + "IllegalStateException[second defect] at ")
-                    .contains("GlobalExceptionHandlerTest.");
-            assertThat(debug.get(0).getThrowableProxy()).isNull();
-        } finally {
-            adviceLogger.detachAppender(recorded);
-            adviceLogger.setLevel(null);
-            recorded.stop();
-        }
-    }
-
-    // A newline inside a failure message cannot forge a record boundary, even at DEBUG — DL-149,
-    // DL-197 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("guards a newline inside a failure message at the diagnostic level too")
-    void guardsANewlineInsideAFailureMessageAtTheDiagnosticLevelToo() {
-        ListAppender<ILoggingEvent> recorded = attachAdviceAppender();
-        try {
-            handler.handleUnexpectedException(
-                    new IllegalStateException("first line\r\nforged ERROR second line"));
-
-            List<ILoggingEvent> debug = recorded.list.stream()
-                    .filter(event -> event.getLevel() == Level.DEBUG)
-                    .toList();
-            assertThat(debug).hasSize(1);
-            assertThat(debug.get(0).getFormattedMessage())
-                    .contains("IllegalStateException[first line??forged ERROR second line]")
-                    .doesNotContain("\r")
-                    .doesNotContain("\n");
-        } finally {
-            detachAdviceAppender(recorded);
-        }
-    }
-
-    private static String correlationTokenFor(HttpMessageConversionException raised) {
-        ListAppender<ILoggingEvent> recorded = attachAdviceAppender();
-        try {
-            new GlobalExceptionHandler().handleMessageConversionFailure(raised);
-            return recorded.list.stream()
-                    .filter(event -> event.getLevel() == Level.WARN)
-                    .map(event -> event.getArgumentArray()[1])
-                    .map(String::valueOf)
-                    .findFirst()
-                    .orElseThrow();
-        } finally {
-            detachAdviceAppender(recorded);
-        }
-    }
-
     private static ListAppender<ILoggingEvent> attachAdviceAppender() {
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
@@ -1056,63 +820,98 @@ class GlobalExceptionHandlerTest {
         adviceLogger.setLevel(null);
     }
 
+    // The framework statuses reach the wire with no literal of their own — DL-092 — see
+    // docs/DECISION_LOG.md
     @Test
-    @DisplayName("returns 405 with the allowed methods for an unsupported request method")
-    void returns405WithTheAllowedMethodsForAnUnsupportedRequestMethod() throws JsonProcessingException {
-        ResponseEntity<ErrorResponse> response = handler.handleMethodNotSupported(methodNotSupported());
+    @DisplayName("returns 405 with no body for an unsupported request method")
+    void returns405WithNoBodyForAnUnsupportedRequestMethod() {
+        ResponseEntity<ErrorResponse> response = handler.handleUnexpectedException(methodNotSupported());
 
         assertThat(response.getStatusCode().value()).isEqualTo(405);
-        assertErrorEnvelope(response, METHOD_NOT_ALLOWED);
-        assertThat(response.getHeaders().get(HttpHeaders.ALLOW))
-                .containsExactly(HttpMethod.GET.name());
+        assertThat(response.getBody()).isNull();
     }
 
     @Test
-    @DisplayName("returns 405 without an allow header when no method is reported as supported")
-    void returns405WithoutAnAllowHeaderWhenNoMethodIsReportedAsSupported()
-            throws JsonProcessingException {
-
-        ResponseEntity<ErrorResponse> response = handler.handleMethodNotSupported(
+    @DisplayName("returns 405 with no body when no method is reported as supported")
+    void returns405WithNoBodyWhenNoMethodIsReportedAsSupported() {
+        ResponseEntity<ErrorResponse> response = handler.handleUnexpectedException(
                 new HttpRequestMethodNotSupportedException("PATCH"));
 
         assertThat(response.getStatusCode().value()).isEqualTo(405);
-        assertErrorEnvelope(response, METHOD_NOT_ALLOWED);
-        assertThat(response.getHeaders().containsKey(HttpHeaders.ALLOW)).isFalse();
+        assertThat(response.getBody()).isNull();
     }
 
     @Test
-    @DisplayName("returns 415 for a request body whose media type no handler consumes")
-    void returns415ForARequestBodyWhoseMediaTypeNoHandlerConsumes() throws JsonProcessingException {
+    @DisplayName("returns 415 with no body for a request body whose media type no handler consumes")
+    void returns415WithNoBodyForAnUnsupportedMediaType() {
         ResponseEntity<ErrorResponse> response =
-                handler.handleUnsupportedMediaType(unsupportedMediaType());
+                handler.handleUnexpectedException(unsupportedMediaType());
 
         assertThat(response.getStatusCode().value()).isEqualTo(415);
-        assertErrorEnvelope(response, UNSUPPORTED_MEDIA_TYPE);
+        assertThat(response.getBody()).isNull();
     }
 
-    // Net-new (no Python counterpart) — DL-234 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("returns 415 for a multipart request no route of this service consumes")
-    void returns415ForAMultipartRequestNoRouteConsumes() throws JsonProcessingException {
-        ResponseEntity<ErrorResponse> response = handler.handleMultipartFailure(
+    @DisplayName("returns 406 with no body for a request whose Accept header cannot be satisfied")
+    void returns406WithNoBodyForAnUnacceptableAcceptHeader() {
+        ResponseEntity<ErrorResponse> response = handler.handleUnexpectedException(
+                new HttpMediaTypeNotAcceptableException("none"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(406);
+        assertThat(response.getBody()).isNull();
+    }
+
+    // A multipart parse failure and an unparseable Content-Type are defects of no route this service
+    // declares, so both read as 500 — DL-092 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("returns 500 with the Internal server error envelope for a multipart parse failure")
+    void returns500ForAMultipartParseFailure() throws JsonProcessingException {
+        ResponseEntity<ErrorResponse> response = handler.handleUnexpectedException(
                 new MultipartException("Failed to parse multipart servlet request"));
 
-        assertThat(response.getStatusCode().value()).isEqualTo(415);
-        assertErrorEnvelope(response, UNSUPPORTED_MEDIA_TYPE);
+        assertThat(response.getStatusCode().value()).isEqualTo(500);
+        assertErrorEnvelope(response, INTERNAL_SERVER_ERROR);
     }
 
-    // Net-new (no Python counterpart) — DL-234 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("returns 400 with no body for a missing multipart part and 500 for a parse failure")
+    void separatesAMissingMultipartPartFromAParseFailure() throws JsonProcessingException {
+        assertThat(MultipartException.class
+                .isAssignableFrom(MissingServletRequestPartException.class)).isFalse();
+
+        ResponseEntity<ErrorResponse> missingPart = handler.handleUnexpectedException(
+                new MissingServletRequestPartException("file"));
+        assertThat(missingPart.getStatusCode().value()).isEqualTo(400);
+        assertThat(missingPart.getBody()).isNull();
+
+        ResponseEntity<ErrorResponse> parseFailure =
+                handler.handleUnexpectedException(new MultipartException(CAUSE_MESSAGE));
+        assertThat(parseFailure.getStatusCode().value()).isEqualTo(500);
+        assertErrorEnvelope(parseFailure, INTERNAL_SERVER_ERROR);
+    }
+
+    @Test
+    @DisplayName("returns 500 when the request Content-Type cannot be parsed as a media type at all")
+    void returns500WhenTheRequestContentTypeCannotBeParsed() throws JsonProcessingException {
+        ResponseEntity<ErrorResponse> response = handler.handleUnexpectedException(
+                new InvalidMediaTypeException("not a media type", "does not contain '/'"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(500);
+        assertErrorEnvelope(response, INTERNAL_SERVER_ERROR);
+    }
+
+    // Net-new (no Python counterpart) — DL-197 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("records only the exception class for a multipart failure, never its message or a "
             + "stack trace")
     void recordsOnlyTheExceptionClassForAMultipartFailure() {
         ListAppender<ILoggingEvent> appender = attachAdviceAppender();
         try {
-            handler.handleMultipartFailure(new MultipartException(SUBMITTED_CREDENTIAL));
+            handler.handleUnexpectedException(new MultipartException(SUBMITTED_CREDENTIAL));
 
             assertThat(appender.list).hasSize(1);
             ILoggingEvent record = appender.list.get(0);
-            assertThat(record.getLevel()).isEqualTo(Level.WARN);
+            assertThat(record.getLevel()).isEqualTo(Level.ERROR);
             assertThat(record.getFormattedMessage()).contains("MultipartException");
             assertThat(record.getFormattedMessage()).doesNotContain(SUBMITTED_CREDENTIAL);
             assertThat(record.getThrowableProxy()).isNull();
@@ -1121,97 +920,24 @@ class GlobalExceptionHandlerTest {
         }
     }
 
-    // Net-new (no Python counterpart) — DL-234 — see docs/DECISION_LOG.md
+    // A caller mistake is recorded at DEBUG and a defect at ERROR — DL-197 — see
+    // docs/DECISION_LOG.md
     @Test
-    @DisplayName("keeps a missing multipart part on the 400 path and a multipart parse failure on "
-            + "the 415 path")
-    void keepsAMissingMultipartPartOnThe400PathAndAParseFailureOnThe415Path() {
-        assertThat(MultipartException.class
-                .isAssignableFrom(MissingServletRequestPartException.class)).isFalse();
-
-        ExceptionHandlerMethodResolver resolver = resolverForTheAdvice();
-
-        assertThat(resolver.resolveMethod(new MissingServletRequestPartException("file")))
-                .isEqualTo(handlerMethodFor(MissingServletRequestPartException.class));
-        assertThat(resolver.resolveMethod(new MultipartException(CAUSE_MESSAGE)))
-                .isEqualTo(handlerMethodFor(MultipartException.class));
-    }
-
-    // Net-new (no Python counterpart) — DL-235 — see docs/DECISION_LOG.md
-    @ParameterizedTest(name = "[{index}] Content-Type {0}")
-    @ValueSource(strings = {"*/*", "application/*", "text/*", "multipart/*"})
-    @DisplayName("returns 415 when the request Content-Type names no concrete media type")
-    void returns415WhenTheRequestContentTypeNamesNoConcreteMediaType(String declaredContentType)
-            throws JsonProcessingException {
-
-        ResponseEntity<ErrorResponse> response = handler.handleIllegalArgument(
-                new IllegalArgumentException("Content-Type cannot contain wildcard type '*'"),
-                requestCarryingContentType(declaredContentType));
-
-        assertThat(response.getStatusCode().value()).isEqualTo(415);
-        assertErrorEnvelope(response, UNSUPPORTED_MEDIA_TYPE);
-    }
-
-    // Net-new (no Python counterpart) — DL-235 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("returns 415 when the request Content-Type cannot be parsed as a media type at all")
-    void returns415WhenTheRequestContentTypeCannotBeParsed() throws JsonProcessingException {
-        ResponseEntity<ErrorResponse> response = handler.handleIllegalArgument(
-                new InvalidMediaTypeException("not a media type", "does not contain '/'"),
-                requestCarryingContentType("not a media type"));
-
-        assertThat(response.getStatusCode().value()).isEqualTo(415);
-        assertErrorEnvelope(response, UNSUPPORTED_MEDIA_TYPE);
-    }
-
-    // Net-new (no Python counterpart) — DL-235 — see docs/DECISION_LOG.md
-    @ParameterizedTest(name = "[{index}] Content-Type {0}")
-    @ValueSource(strings = {"application/json", "text/plain", "application/json;charset=UTF-8"})
-    @DisplayName("returns 500 for an illegal-argument failure on a request naming a concrete media "
-            + "type")
-    void returns500ForAnIllegalArgumentFailureOnAConcreteMediaType(String declaredContentType)
-            throws JsonProcessingException {
-
-        ResponseEntity<ErrorResponse> response = handler.handleIllegalArgument(
-                new IllegalArgumentException(CAUSE_MESSAGE),
-                requestCarryingContentType(declaredContentType));
-
-        assertThat(response.getStatusCode().value()).isEqualTo(500);
-        assertErrorEnvelope(response, INTERNAL_SERVER_ERROR);
-    }
-
-    // Net-new (no Python counterpart) — DL-235 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("returns 500 for an illegal-argument failure on a request carrying no Content-Type")
-    void returns500ForAnIllegalArgumentFailureWithoutAContentType() throws JsonProcessingException {
-        ResponseEntity<ErrorResponse> response = handler.handleIllegalArgument(
-                new IllegalArgumentException(CAUSE_MESSAGE), new MockHttpServletRequest());
-
-        assertThat(response.getStatusCode().value()).isEqualTo(500);
-        assertErrorEnvelope(response, INTERNAL_SERVER_ERROR);
-    }
-
-    // Net-new (no Python counterpart) — DL-235 — see docs/DECISION_LOG.md
-    @Test
-    @DisplayName("records a non-concrete media type at WARN without a stack trace and keeps the "
-            + "stack trace for a genuine illegal-argument failure")
-    void separatesTheMediaTypeRecordFromTheGenuineFailureRecord() {
+    @DisplayName("records a framework request failure at DEBUG and a genuine failure at ERROR")
+    void separatesTheFrameworkRecordFromTheGenuineFailureRecord() {
         ListAppender<ILoggingEvent> appender = attachAdviceAppender();
         try {
-            handler.handleIllegalArgument(
-                    new IllegalArgumentException("Content-Type cannot contain wildcard subtype '*'"),
-                    requestCarryingContentType("application/*"));
+            handler.handleUnexpectedException(unsupportedMediaType());
 
             assertThat(appender.list).hasSize(1);
-            ILoggingEvent mediaTypeRecord = appender.list.get(0);
-            assertThat(mediaTypeRecord.getLevel()).isEqualTo(Level.WARN);
-            assertThat(mediaTypeRecord.getFormattedMessage())
-                    .contains("IllegalArgumentException")
-                    .doesNotContain("wildcard subtype");
-            assertThat(mediaTypeRecord.getThrowableProxy()).isNull();
+            ILoggingEvent frameworkRecord = appender.list.get(0);
+            assertThat(frameworkRecord.getLevel()).isEqualTo(Level.DEBUG);
+            assertThat(frameworkRecord.getFormattedMessage())
+                    .isEqualTo("Rejecting a request the framework could not handle with HTTP 415: "
+                            + "HttpMediaTypeNotSupportedException");
+            assertThat(frameworkRecord.getThrowableProxy()).isNull();
 
-            handler.handleIllegalArgument(new IllegalArgumentException(SUBMITTED_CREDENTIAL),
-                    requestCarryingContentType("application/json"));
+            handler.handleUnexpectedException(new IllegalArgumentException(SUBMITTED_CREDENTIAL));
 
             ILoggingEvent genuineFailureRecord = appender.list.stream()
                     .filter(event -> event.getLevel() == Level.ERROR)
@@ -1226,50 +952,11 @@ class GlobalExceptionHandlerTest {
         }
     }
 
-    // Net-new (no Python counterpart) — DL-235 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("resolves an illegal-argument failure to its own handler rather than the catch-all")
-    void resolvesAnIllegalArgumentFailureToItsOwnHandler() {
-        ExceptionHandlerMethodResolver resolver = resolverForTheAdvice();
-
-        assertThat(resolver.resolveMethod(new IllegalArgumentException(CAUSE_MESSAGE)))
-                .isEqualTo(handlerMethodFor(IllegalArgumentException.class))
-                .isNotEqualTo(handlerMethodFor(Exception.class));
-        assertThat(resolver.resolveMethod(new IllegalStateException(CAUSE_MESSAGE)))
-                .isEqualTo(handlerMethodFor(Exception.class));
-    }
-
-    /**
-     * Builds a request declaring one {@code Content-Type} header value.
-     *
-     * @param declaredContentType the raw header value, which need not be a valid media type
-     * @return the request; never {@code null}
-     */
-    private static MockHttpServletRequest requestCarryingContentType(String declaredContentType) {
-        MockHttpServletRequest request = new MockHttpServletRequest();
-        request.setContentType(declaredContentType);
-        return request;
-    }
-
-    @Test
-    @DisplayName("returns 406 for a request whose accept header cannot be satisfied")
-    void returns406ForARequestWhoseAcceptHeaderCannotBeSatisfied() throws JsonProcessingException {
-        ResponseEntity<ErrorResponse> response =
-                handler.handleNotAcceptable(new HttpMediaTypeNotAcceptableException("none"));
-
-        assertThat(response.getStatusCode().value()).isEqualTo(406);
-        assertErrorEnvelope(response, NOT_ACCEPTABLE);
-    }
-
-    @Test
-    @DisplayName("keeps the per-route 400 and 404 literals distinct from the framework 400 literal")
-    void keepsThePerRouteLiteralsDistinctFromTheFrameworkLiteral() {
-        assertThat(BAD_REQUEST)
-                .isNotEqualTo(TWEET_ID_IS_REQUIRED)
-                .isNotEqualTo(UPDATE_DATA_IS_REQUIRED)
-                .isNotEqualTo(NO_VALUE_PROVIDED)
-                .isNotEqualTo(NOT_FOUND)
-                .isNotEqualTo(INTERNAL_SERVER_ERROR);
+    @DisplayName("keeps the per-route literals distinct from the two global literals")
+    void keepsThePerRouteLiteralsDistinctFromTheGlobalLiterals() {
+        assertThat(List.of(TWEET_ID_IS_REQUIRED, UPDATE_DATA_IS_REQUIRED, NO_VALUE_PROVIDED))
+                .doesNotContain(NOT_FOUND, INTERNAL_SERVER_ERROR);
         assertThat(handler.handleBadRequest(BadRequestException.tweetIdRequired()).getBody().error())
                 .isEqualTo(TWEET_ID_IS_REQUIRED);
         assertThat(handler.handleNotFound(NotFoundException.tweetNotFound()).getBody().error())
@@ -1315,22 +1002,50 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
-    @DisplayName("answers every handled exception with the single-key error object and no other key")
+    @DisplayName("answers every handled exception with the single-key error object, or with no body "
+            + "at all, and never with another key")
     void answersEveryHandledExceptionWithTheSingleKeyErrorObject() throws JsonProcessingException {
         for (ResponseEntity<ErrorResponse> response : allHandlerInvocations()) {
-            assertSingleKeyErrorBody(response);
+            if (response.getBody() != null) {
+                assertSingleKeyErrorBody(response);
+            }
         }
     }
 
     @Test
-    @DisplayName("answers every handled exception with an ErrorResponse body and never a ProblemDetail")
+    @DisplayName("answers every handled exception with an ErrorResponse body or none, and never a "
+            + "ProblemDetail")
     void answersEveryHandledExceptionWithAnErrorResponseAndNeverAProblemDetail() {
         for (ResponseEntity<ErrorResponse> response : allHandlerInvocations()) {
             Object body = response.getBody();
 
-            assertThat(body).isInstanceOf(ErrorResponse.class);
-            assertThat(body).isNotInstanceOf(ProblemDetail.class);
+            if (body != null) {
+                assertThat(body)
+                        .isInstanceOf(ErrorResponse.class)
+                        .isNotInstanceOf(ProblemDetail.class);
+            }
         }
+    }
+
+    // Only the two global literals and the eight route literals reach the wire — DL-092 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("puts no literal beyond the route messages and the two global literals on the wire")
+    void putsNoLiteralBeyondTheRouteMessagesAndTheTwoGlobalLiteralsOnTheWire() {
+        Set<String> emitted = new LinkedHashSet<>();
+        for (ResponseEntity<ErrorResponse> response : allHandlerInvocations()) {
+            if (response.getBody() != null) {
+                emitted.add(response.getBody().error());
+            }
+        }
+
+        assertThat(emitted).containsExactlyInAnyOrder(
+                TWEET_NOT_FOUND, RESPONSE_NOT_FOUND, RESPONSE_NOT_FOUND_OR_UPDATE_FAILED,
+                SETTING_NOT_FOUND, TWEET_ID_IS_REQUIRED, UPDATE_DATA_IS_REQUIRED, NO_VALUE_PROVIDED,
+                FAILED_TO_GENERATE_RESPONSE, NOT_FOUND, INTERNAL_SERVER_ERROR);
+        assertThat(emitted)
+                .doesNotContain("Bad request", "Method not allowed", "Unsupported media type",
+                        "Not acceptable");
     }
 
     @Test
@@ -1344,52 +1059,21 @@ class GlobalExceptionHandlerTest {
     // The servlet container's error path — DL-183 — see docs/DECISION_LOG.md
     // -----------------------------------------------------------------------
 
-    /**
-     * Asserts that a response body is the single-key envelope carrying exactly the given message.
-     *
-     * @param response the response under test
-     * @param expectedMessage the value the {@code error} key must hold
-     * @throws JsonProcessingException if the body cannot be serialised
-     */
-    private void assertThatBodyCarriesOnly(
-            ResponseEntity<ErrorResponse> response, String expectedMessage)
-            throws JsonProcessingException {
-
-        assertThat(response.getBody()).isNotNull();
-        assertThat(response.getBody().error()).isEqualTo(expectedMessage);
-
-        JsonNode body = objectMapper.readTree(objectMapper.writeValueAsString(response.getBody()));
-        assertThat(body.properties()).hasSize(1);
-        assertThat(body.get(ERROR_KEY).asText()).isEqualTo(expectedMessage);
-        for (String absentKey : KEYS_ABSENT_FROM_EVERY_BODY) {
-            assertThat(body.has(absentKey)).isFalse();
-        }
-    }
-
+    // The closed handler set the plan sanctions: the three domain failures, the validation failure,
+    // the two unmatched-path types and the catch-all — DL-092 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("handles every domain failure and every client failure Spring MVC raises")
-    void handlesEveryDomainFailureAndEveryClientFailureSpringMvcRaises() {
-        Set<Class<?>> handled = handledExceptionTypes();
-
-        assertThat(handled).contains(
+    @DisplayName("declares exactly the three domain failures, the validation failure, both "
+            + "unmatched-path types and the catch-all, and nothing else")
+    void declaresExactlyTheSanctionedHandlerSet() {
+        assertThat(handledExceptionTypes()).containsExactlyInAnyOrder(
                 NotFoundException.class,
                 BadRequestException.class,
                 ResponseGenerationException.class,
                 MethodArgumentNotValidException.class,
                 NoHandlerFoundException.class,
                 NoResourceFoundException.class,
-                HttpMessageNotReadableException.class,
-                HttpMessageConversionException.class,
-                HttpMessageNotWritableException.class,
-                ServletRequestBindingException.class,
-                MissingServletRequestPartException.class,
-                TypeMismatchException.class,
-                HttpRequestMethodNotSupportedException.class,
-                HttpMediaTypeNotSupportedException.class,
-                HttpMediaTypeNotAcceptableException.class,
-                MultipartException.class,
-                IllegalArgumentException.class,
                 Exception.class);
+        assertThat(exceptionHandlerMethods()).hasSize(6);
     }
 
     @Test
@@ -1476,17 +1160,9 @@ class GlobalExceptionHandlerTest {
     @ParameterizedTest
     @CsvSource({
         "404,Not found",
-        "405,Method not allowed",
-        "406,Not acceptable",
-        "415,Unsupported media type",
-        "400,Bad request",
-        "409,Bad request",
-        "429,Bad request",
-        "500,Internal server error",
-        "502,Internal server error",
-        "503,Internal server error"
+        "500,Internal server error"
     })
-    @DisplayName("renders the single-key envelope for a dispatched status")
+    @DisplayName("renders the single-key envelope for a dispatched 404 and 500")
     void rendersTheSingleKeyEnvelopeForADispatchedStatus(int dispatchedStatus, String expected) {
         Map<String, Object> attributes = errorAttributesFor(dispatchedStatus);
 
@@ -1494,9 +1170,9 @@ class GlobalExceptionHandlerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {UNAUTHORIZED, FORBIDDEN})
-    @DisplayName("renders no attribute for a dispatched 401 or 403")
-    void rendersNoAttributeForADispatchedUnauthorizedOrForbidden(int dispatchedStatus) {
+    @ValueSource(ints = {UNAUTHORIZED, FORBIDDEN, 400, 405, 406, 409, 415, 429, 502, 503})
+    @DisplayName("renders no attribute for a dispatched status other than 404 and 500")
+    void rendersNoAttributeForADispatchedStatusOtherThan404And500(int dispatchedStatus) {
         assertThat(errorAttributesFor(dispatchedStatus)).isEmpty();
     }
 
@@ -1521,21 +1197,6 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
-    @DisplayName("carries every attribute value from the closed literal set this advice declares")
-    void carriesEveryAttributeValueFromTheClosedLiteralSet() {
-        Set<String> rendered = new LinkedHashSet<>();
-        for (int status = 400; status < 600; status++) {
-            Object message = errorAttributesFor(status).get("error");
-            if (message != null) {
-                rendered.add(String.valueOf(message));
-            }
-        }
-
-        assertThat(rendered).containsExactlyInAnyOrder(NOT_FOUND, INTERNAL_SERVER_ERROR,
-                "Bad request", "Method not allowed", "Not acceptable", "Unsupported media type");
-    }
-
-    @Test
     @DisplayName("names an attribute source that records the dispatched exception as the framework does")
     void namesAnAttributeSourceThatRecordsTheDispatchedException() {
         assertThat(errorAttributes()).isInstanceOf(DefaultErrorAttributes.class);
@@ -1556,39 +1217,23 @@ class GlobalExceptionHandlerTest {
         assertThat(GlobalExceptionHandler.class.getAnnotation(Controller.class)).isNull();
     }
 
-    @ParameterizedTest(name = "a dispatch recording {0} is answered {1} carrying {2}")
+    @ParameterizedTest(name = "a dispatch recording {0} carries {1}")
     @CsvSource({
-        "400,400,Bad request",
-        "404,404,Not found",
-        "405,405,Method not allowed",
-        "406,406,Not acceptable",
-        "415,415,Unsupported media type",
-        "409,409,Bad request",
-        "429,429,Bad request",
-        "500,500,Internal server error",
-        "502,500,Internal server error",
-        "503,500,Internal server error",
-        "504,500,Internal server error"
+        "404,Not found",
+        "500,Internal server error"
     })
-    @DisplayName("publishes the mapped status and the single-key literal for a dispatched status")
-    void publishesTheMappedStatusAndTheSingleKeyLiteralForADispatchedStatus(int dispatchedStatus,
-            int expectedStatus, String expectedMessage) {
+    @DisplayName("publishes the single-key literal for a dispatched 404 and 500")
+    void publishesTheSingleKeyLiteralForADispatchedStatus(int dispatchedStatus,
+            String expectedMessage) {
 
-        assertThat(GlobalExceptionHandler.errorDispatchStatusFor(dispatchedStatus))
-                .isEqualTo(expectedStatus);
-        assertThat(GlobalExceptionHandler.errorDispatchMessageFor(dispatchedStatus))
-                .isEqualTo(expectedMessage);
         assertThat(errorAttributesFor(dispatchedStatus))
                 .containsExactly(entry("error", expectedMessage));
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {UNAUTHORIZED, FORBIDDEN})
-    @DisplayName("publishes a dispatched 401 or 403 with that status and no literal at all")
-    void publishesADispatchedUnauthorizedOrForbiddenWithNoLiteral(int dispatchedStatus) {
-        assertThat(GlobalExceptionHandler.errorDispatchStatusFor(dispatchedStatus))
-                .isEqualTo(dispatchedStatus);
-        assertThat(GlobalExceptionHandler.errorDispatchMessageFor(dispatchedStatus)).isNull();
+    @ValueSource(ints = {UNAUTHORIZED, FORBIDDEN, 400, 405, 406, 415, 502, 503, 504})
+    @DisplayName("publishes a dispatched status other than 404 and 500 with no literal at all")
+    void publishesADispatchedOtherStatusWithNoLiteral(int dispatchedStatus) {
         assertThat(errorAttributesFor(dispatchedStatus)).isEmpty();
     }
 
@@ -1614,25 +1259,24 @@ class GlobalExceptionHandlerTest {
                 new ServletWebRequest(new MockHttpServletRequest()),
                 ErrorAttributeOptions.defaults());
 
-        assertThat(GlobalExceptionHandler.errorDispatchStatusFor(
-                HttpStatus.INTERNAL_SERVER_ERROR.value()))
-                .isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.value());
         assertThat(attributes).containsExactly(entry("error", INTERNAL_SERVER_ERROR));
     }
 
+    // The error dispatch adds no literal beyond the two the retired handlers declared — DL-092 — see
+    // docs/DECISION_LOG.md
     @Test
-    @DisplayName("publishes every error-path literal from the closed set this advice declares")
-    void publishesEveryErrorPathLiteralFromTheClosedSet() {
+    @DisplayName("publishes only the two global literals across every dispatchable status")
+    void publishesOnlyTheTwoGlobalLiteralsAcrossEveryDispatchableStatus() {
         Set<String> rendered = new LinkedHashSet<>();
         for (int status = 400; status < 600; status++) {
-            String message = GlobalExceptionHandler.errorDispatchMessageFor(status);
-            if (message != null) {
-                rendered.add(message);
+            Object literal = errorAttributesFor(status).get(ERROR_KEY);
+            if (literal != null) {
+                rendered.add(String.valueOf(literal));
             }
         }
 
-        assertThat(rendered).containsExactlyInAnyOrder(NOT_FOUND, INTERNAL_SERVER_ERROR,
-                "Bad request", "Method not allowed", "Not acceptable", "Unsupported media type");
+        assertThat(rendered).containsExactlyInAnyOrderElementsOf(GLOBAL_WIRE_LITERALS);
+        assertThat(rendered).containsExactlyInAnyOrder(NOT_FOUND, INTERNAL_SERVER_ERROR);
     }
 
     private ErrorAttributes errorAttributes() {
@@ -1662,26 +1306,22 @@ class GlobalExceptionHandlerTest {
         invocations.add(handler.handleMethodArgumentNotValid(validationFailureOn("somethingElse")));
         invocations.add(handler.handleMethodArgumentNotValid(validationFailureWithoutFieldErrors()));
         invocations.add(handler.handleNoHandlerFound());
-        invocations.add(handler.handleClientRequestFailure(malformedBody()));
-        invocations.add(handler.handleClientRequestFailure(missingParameter()));
-        invocations.add(handler.handleMessageConversionFailure(
+        invocations.add(handler.handleUnexpectedException(malformedBody()));
+        invocations.add(handler.handleUnexpectedException(missingParameter()));
+        invocations.add(handler.handleUnexpectedException(
                 new HttpMessageConversionException(CAUSE_MESSAGE)));
-        invocations.add(handler.handleMessageConversionFailure(conversionFailureReadingBody(
+        invocations.add(handler.handleUnexpectedException(conversionFailureReadingBody(
                 defaultConverter(), UpdateSettingRequest.class,
                 "{\"value\":\"first\",\"value\":\"second\"}")));
-        invocations.add(handler.handleClientRequestFailure(conversionFailureReadingBody(
-                strictDuplicateDetectionConverter(), UpdateSettingRequest.class,
-                "{\"value\":\"first\",\"value\":\"second\"}")));
-        invocations.add(handler.handleResponseWriteFailure(
+        invocations.add(handler.handleUnexpectedException(
                 new HttpMessageNotWritableException(CAUSE_MESSAGE)));
-        invocations.add(handler.handleMethodNotSupported(methodNotSupported()));
-        invocations.add(handler.handleUnsupportedMediaType(unsupportedMediaType()));
-        invocations.add(handler.handleMultipartFailure(new MultipartException(CAUSE_MESSAGE)));
-        invocations.add(handler.handleIllegalArgument(new IllegalArgumentException(CAUSE_MESSAGE),
-                requestCarryingContentType("*/*")));
-        invocations.add(handler.handleIllegalArgument(new IllegalArgumentException(CAUSE_MESSAGE),
-                requestCarryingContentType("application/json")));
-        invocations.add(handler.handleNotAcceptable(new HttpMediaTypeNotAcceptableException("none")));
+        invocations.add(handler.handleUnexpectedException(methodNotSupported()));
+        invocations.add(handler.handleUnexpectedException(unsupportedMediaType()));
+        invocations.add(handler.handleUnexpectedException(new MultipartException(CAUSE_MESSAGE)));
+        invocations.add(handler.handleUnexpectedException(
+                new IllegalArgumentException(CAUSE_MESSAGE)));
+        invocations.add(handler.handleUnexpectedException(
+                new HttpMediaTypeNotAcceptableException("none")));
         invocations.add(handler.handleUnexpectedException(new RuntimeException(CAUSE_MESSAGE)));
         invocations.add(handler.handleUnexpectedException(new Exception(CAUSE_MESSAGE)));
         return invocations;
@@ -1793,38 +1433,6 @@ class GlobalExceptionHandlerTest {
 
     private void validationTargetHolder(Object target) {
         // Reflection target of validationTargetParameter(); this method is never invoked.
-    }
-
-    /**
-     * Attaches a capturing appender to the advice's own logger.
-     *
-     * @return the attached appender, already started
-     */
-    private static ListAppender<ILoggingEvent> captureAdviceLog() {
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
-        appender.start();
-        adviceLogger().addAppender(appender);
-        return appender;
-    }
-
-    /**
-     * Detaches a capturing appender from the advice's own logger.
-     *
-     * @param appender the appender to detach
-     */
-    private static void releaseAdviceLog(ListAppender<ILoggingEvent> appender) {
-        adviceLogger().detachAppender(appender);
-        appender.stop();
-    }
-
-    /**
-     * Returns the advice's own logger.
-     *
-     * @return the logger {@link GlobalExceptionHandler} writes to
-     */
-    private static ch.qos.logback.classic.Logger adviceLogger() {
-        return (ch.qos.logback.classic.Logger)
-                org.slf4j.LoggerFactory.getLogger(GlobalExceptionHandler.class);
     }
 
     private static final class ValidationTarget {

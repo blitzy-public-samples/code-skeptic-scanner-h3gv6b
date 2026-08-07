@@ -31,7 +31,7 @@ import com.codeskeptic.scanner.entity.AiTool;
  * <p>Usage:
  *
  * <pre>{@code
- * List<String> toolNames = aiToolRepository.findNames(PageRequest.of(0, 25));
+ * List<String> firstPage = aiToolRepository.findNames(PageRequest.of(0, 100));
  * long trackedAiTools = aiToolRepository.count();
  * }</pre>
  *
@@ -49,11 +49,15 @@ public interface AiToolRepository extends JpaRepository<AiTool, Integer> {
      *
      * <p>Only the {@code name} column is selected, so no other column of the table is transferred. A
      * row whose {@code name} is {@code null} or empty is excluded by the query; a name of whitespace
-     * alone is returned and is dropped downstream by {@code util.StreamRuleTerms}. The results are
-     * ordered by {@code id} ascending so a bounded page is stable across calls.
+     * alone is returned and is dropped by the rule grammar of {@code task.TweetStreamClient}. The
+     * results are ordered by {@code id} ascending, so successive pages are stable and disjoint and a
+     * caller can page to the end of the table — see docs/DECISION_LOG.md DL-291.
      *
-     * @param bound the page bounding the number of names returned, must not be {@code null}
-     * @return the names the bounded page holds, in {@code id} order, never {@code null}
+     * <p>A page shorter than the requested size reports that the table holds no further row, which is
+     * how {@code task.TweetStreamClient} recognises exhaustion.
+     *
+     * @param bound the page to read, must not be {@code null}
+     * @return the names that page holds, in {@code id} order, never {@code null}
      */
     @Query("select t.name from AiTool t where t.name is not null and t.name <> '' order by t.id asc")
     List<String> findNames(Pageable bound);

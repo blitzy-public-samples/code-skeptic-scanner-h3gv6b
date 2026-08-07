@@ -24,10 +24,7 @@ import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.exception.BadRequestException;
 import com.codeskeptic.scanner.exception.NotFoundException;
 import com.codeskeptic.scanner.repository.SettingRepository;
-import com.codeskeptic.scanner.task.BackgroundOwnership;
 import com.codeskeptic.scanner.service.mapper.SettingMapper;
-import com.codeskeptic.scanner.util.LogSafe;
-import com.codeskeptic.scanner.util.StreamRuleTerms;
 
 // Net-new (no Python module existed; signatures dictated by backend/app/api/settings.py:L10,L20) —
 // see docs/DECISION_LOG.md DL-039, DL-040, DL-043
@@ -37,8 +34,8 @@ import com.codeskeptic.scanner.util.StreamRuleTerms;
  * <p>Three operations are exposed. {@link #getAllSettings()} renders every row.
  * {@link #updateSetting(String, String)} replaces the {@code value} of one row that already exists.
  *
- * <p>One key is reserved and is not part of the configuration surface:
- * {@link BackgroundOwnership#OWNER_SETTING_KEY} holds the background-ownership lease. It is withheld
+ * <p>Every row of the table is part of the configuration surface: it is rendered by
+ * {@code GET /settings} and is writable through {@code PUT /settings/{key}}. No key is withheld
  * from the collection {@link #getAllSettings()} renders, and {@link #updateSetting(String, String)}
  * reports it as absent, so the route answers its own 404 literal for it — DL-284.
  * {@link #seedDefaultSettings()} inserts each of three default rows that is absent.
@@ -99,10 +96,14 @@ public class SettingsService {
      * Seeded key that reports the interval between response-generation sweeps. The value is seeded
      * from {@code scanner.response-generation-delay-seconds}, declared with the default {@code 60} as
      * {@code RESPONSE_GENERATION_DELAY} at {@code backend/app/core/config.py:L11} — DL-040 — see
-     * docs/DECISION_LOG.md. The interval in force is resolved before every pass by
-     * {@code config.AsyncSchedulingConfig}, which reads this row first and falls back to the configured
-     * property; editing this row through {@code PUT /settings/{key}} paces every pass after the one
-     * already scheduled — DL-227, DL-228.
+     * docs/DECISION_LOG.md.
+     *
+     * <p>The row reports the interval; it does not set it. Pacing is declared on
+     * {@code task.ResponseGenerationScheduler.generatePendingResponses()} as
+     * {@code @Scheduled(fixedDelayString = "${scanner.response-generation-delay-seconds}")}, which the
+     * framework resolves once when it registers the task, so an edit written through
+     * {@code PUT /settings/{key}} changes what {@code GET /settings} reports and takes effect on the
+     * interval at the next restart — DL-227.
      */
     private static final String RESPONSE_GENERATION_DELAY_KEY = "response_generation_delay";
 
@@ -200,30 +201,9 @@ public class SettingsService {
      */
     @Transactional(readOnly = true)
     public List<SettingDto> getAllSettings() {
-        // The ownership lease row is coordination state, not configuration — DL-284 — see
-        // docs/DECISION_LOG.md
-        List<Setting> rows = settingRepository.findAll().stream()
-                .filter(row -> !isReserved(row.getKey()))
-                .toList();
-        List<SettingDto> settings = settingMapper.toDtoList(rows);
+        List<SettingDto> settings = settingMapper.toDtoList(settingRepository.findAll());
         log.debug("Rendering {} setting row(s).", settings.size());
         return settings;
-    }
-
-    // Net-new: the reserved coordination key — DL-284 — see docs/DECISION_LOG.md
-    /**
-     * Reports whether a key names coordination state, which is not a configuration value.
-     *
-     * <p>{@link BackgroundOwnership#OWNER_SETTING_KEY} is the one reserved key. It holds the
-     * background-ownership lease, is written by {@code task/BackgroundOwnership} alone, and is
-     * neither rendered by {@code GET /settings} nor writable through {@code PUT /settings/{key}}
-     * — DL-284.
-     *
-     * @param key the key to test, may be {@code null}
-     * @return {@code true} when the key is reserved
-     */
-    private boolean isReserved(String key) {
-        return BackgroundOwnership.OWNER_SETTING_KEY.equals(key);
     }
 
     // Call sites backend/app/api/settings.py:L13-24 — see docs/DECISION_LOG.md
@@ -257,74 +237,26 @@ public class SettingsService {
     public SettingDto updateSetting(String key, String value) {
         // backend/app/api/settings.py:L17-18 — the guard tests null alone
         if (value == null) {
-            log.warn("Rejected the update of setting '{}': the request carried no value.",
-                    LogSafe.logSafe(key));
+            log.warn("Rejected a setting update: the request carried no value.");
             throw BadRequestException.noValueProvided();
         }
 
         // backend/app/api/settings.py:L21-22
         // Deviation from the literal call site: a null key is reported as absent, matching the
         // 404 branch of backend/app/api/settings.py:L21-22 — see docs/DECISION_LOG.md DL-048
-        // A reserved coordination key is reported as absent as well — DL-284 — see
-        // docs/DECISION_LOG.md
-        Optional<Setting> existing = (key == null || isReserved(key))
-                ? Optional.empty()
-                : settingRepository.findById(key);
+        Optional<Setting> existing =
+                (key == null) ? Optional.empty() : settingRepository.findById(key);
         if (existing.isEmpty()) {
-            log.warn("Rejected the update of setting '{}': the key names no row.",
-                    LogSafe.logSafe(key));
+            log.warn("Rejected a setting update: the key names no row.");
             throw NotFoundException.settingNotFound();
         }
 
         Setting setting = existing.get();
         setting.setValue(value);
         SettingDto updated = settingMapper.toDto(settingRepository.save(setting));
-        log.info("Updated setting '{}'.", LogSafe.logSafe(key));
-        reportUnusableStreamKeywords(key, value);
+        log.info("Updated one setting row.");
         return updated;
     }
-
-    // The X rule grammar the stored terms must satisfy — DL-257 — see docs/DECISION_LOG.md
-    /**
-     * Records a {@value #STREAM_KEYWORDS_KEY} edit that leaves no term the X rule grammar can carry.
-     *
-     * <p>Usability is decided by {@link StreamRuleTerms#isUsable(String)}, the one grammar
-     * {@code task/TweetStreamClient} also holds its terms to, so a term counted usable here is never
-     * dropped when the rule set is composed — DL-257.
-     *
-     * <p>Nothing is recorded for any other key, and nothing is recorded when the stored value holds at
-     * least one usable term or is blank — a blank value is the seeded "no override" state
-     * {@code task/TweetStreamClient} reads, not an unusable one — DL-044.
-     *
-     * <p>The record names the key and the two counts only. No stored term reaches it — DL-052,
-     * DL-197. The stored value is left exactly as the operator supplied it: ingestion falls back to
-     * the configured base terms, so an unusable edit withholds nothing that was already working.
-     *
-     * @param key   the key that was written, possibly {@code null}
-     * @param value the value that was stored, never {@code null}
-     */
-    private void reportUnusableStreamKeywords(String key, String value) {
-        if (!STREAM_KEYWORDS_KEY.equals(key) || value.isBlank()) {
-            return;
-        }
-        int supplied = StreamRuleTerms.split(value).size();
-        int usable = StreamRuleTerms.countUsable(value);
-        if (usable > 0) {
-            if (usable < supplied) {
-                log.warn("Setting '{}' holds {} term(s) of which {} cannot be carried as an X stream "
-                        + "rule; those are dropped when the rule set is next composed",
-                        STREAM_KEYWORDS_KEY, supplied, supplied - usable);
-            }
-            return;
-        }
-        log.warn("Setting '{}' holds {} term(s) and none can be carried as an X stream rule; "
-                + "ingestion falls back to scanner.ingestion.stream-base-keywords. A term may hold "
-                + "nothing but letters, digits and '{}', must open and close with a letter or a digit, "
-                + "and may not exceed {} character(s)",
-                STREAM_KEYWORDS_KEY, supplied, StreamRuleTerms.ADDITIONAL_TERM_CHARACTERS,
-                StreamRuleTerms.MAX_TERM_CHARS);
-    }
-
 
     // Net-new (no Python counterpart) — DL-040 — see docs/DECISION_LOG.md
     /**
@@ -333,11 +265,13 @@ public class SettingsService {
      * <p>The three keys are {@value #TWEET_POPULARITY_THRESHOLD_KEY},
      * {@value #RESPONSE_GENERATION_DELAY_KEY} and {@value #STREAM_KEYWORDS_KEY}. Each carries a
      * {@code description}. The first two carry a {@code value} rendered from configuration —
-     * {@code scanner.popularity-threshold} and {@code scanner.response-generation-delay-seconds} —
-     * and each is read back in place of that configuration default on every use, by
-     * {@code service.TwitterService} and {@code config.AsyncSchedulingConfig} respectively — DL-040,
-     * DL-227. The third carries the blank value {@value #STREAM_KEYWORDS_SEED_VALUE}, which
-     * {@code task.TweetStreamClient} reads as "no override" — DL-044.
+     * {@code scanner.popularity-threshold} and {@code scanner.response-generation-delay-seconds}. The
+     * first is read back in place of that configuration default on every use, by
+     * {@code service.TwitterService} — DL-040. The second reports the interval and does not set it:
+     * {@code task.ResponseGenerationScheduler} declares its pacing on the method and the
+     * framework resolves that value once when it registers the task — DL-227. The third carries the
+     * blank value {@value #STREAM_KEYWORDS_SEED_VALUE}, which {@code task.TweetStreamClient} reads as
+     * "no override" — DL-044.
      *
      * <p>A key this operation observes as present is left exactly as it stands: its {@code value} and
      * its {@code description} are both untouched, whatever they hold and however they came to hold

@@ -6,16 +6,17 @@ import com.codeskeptic.scanner.entity.Tweet;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.NotionService;
 import com.codeskeptic.scanner.service.ResponseService;
-import com.codeskeptic.scanner.util.LogSafe;
 
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
@@ -32,13 +33,10 @@ import org.springframework.stereotype.Component;
  * docs/DECISION_LOG.md DL-248. The pass declares no transaction, so each batch is read in
  * the repository's own transaction and its rows are detached when that call returns.
  *
- * <p>Pacing lives entirely in {@code config/AsyncSchedulingConfig}, which registers the tick that
- * calls {@link #generatePendingResponses()} as a fixed-delay trigger task: the interval is measured
- * from the end of one pass to the start of the next, is resolved once per pass from the
- * {@code response_generation_delay} {@code settings} row, and falls back to
- * {@code scanner.response-generation-delay-seconds} when that row supplies no positive value — see
- * docs/DECISION_LOG.md DL-047, DL-197, DL-227. This class reads no pacing value and defers no pass: a
- * tick runs a pass.
+ * <p>Pacing is declared on {@link #generatePendingResponses()} itself, as
+ * {@code @Scheduled(fixedDelayString = "${scanner.response-generation-delay-seconds}")} in seconds:
+ * the interval runs from the completion of one pass to the start of the next, which is the
+ * work-then-sleep order of {@code backend/app/tasks/response_generation.py:L41-50} — DL-047, DL-227.
  * The scheduling capability is activated by {@code config/AsyncSchedulingConfig}, the single carrier
  * of {@code @EnableScheduling} in this application; this class declares no thread and submits to no
  * executor. No message broker, queue or task-dispatch infrastructure participates — DL-047.
@@ -124,8 +122,8 @@ public class ResponseGenerationScheduler {
      */
     // Constructor injection replaces the in-function LLMService() at
     // backend/app/tasks/response_generation.py:L19 and NotionService() at :L29; the get_settings()
-    // call at :L37 is replaced by the per-pass resolution config/AsyncSchedulingConfig performs —
-    // DL-227 — see docs/DECISION_LOG.md
+    // call at :L37 is replaced by the injected configuration root — DL-227 — see
+    // docs/DECISION_LOG.md
     public ResponseGenerationScheduler(TweetRepository tweetRepository,
             ResponseService responseService,
             NotionService notionService,
@@ -155,14 +153,17 @@ public class ResponseGenerationScheduler {
      * <p>A candidate ingested after the pass began is answered by this pass when its identifier lies
      * past the cursor at the time the next batch is read, and by the following pass otherwise.
      *
-     * <p>Every tick runs a pass. This method carries no scheduling annotation: when a pass runs is
-     * decided entirely by {@code config.AsyncSchedulingConfig}, which registers this method as a
-     * trigger task and adds the interval in force to the completion of the previous pass, so no pass
-     * overlaps its predecessor. The interval is the {@code response_generation_delay} settings row
-     * when it holds a positive number of seconds and
-     * {@code scanner.response-generation-delay-seconds} otherwise, resolved once per pass. The first
-     * pass runs at the startup instant, and not one interval later — see docs/DECISION_LOG.md
-     * DL-047, DL-227, DL-228, DL-251.
+     * <p>Every tick runs a pass. {@code fixedDelayString} measures the interval from the completion of
+     * one pass to the start of the next, so no pass overlaps its predecessor, and the framework runs
+     * the first pass at the startup instant, and not one interval later — the work-then-sleep order
+     * of {@code backend/app/tasks/response_generation.py:L41-50}. The interval is
+     * {@code scanner.response-generation-delay-seconds}, read once when the task is registered — see
+     * docs/DECISION_LOG.md DL-047 and DL-227.
+     *
+     * <p>Nothing runs in a process that does not carry the pass: {@code scanner.background.enabled} and
+     * {@code scanner.background.response-generation-enabled} must both hold, and a tick in a process
+     * for which either is {@code false} returns without reading a candidate — see
+     * docs/DECISION_LOG.md DL-250.
      *
      * <p>The method takes no argument, returns nothing and throws nothing: every {@link
      * RuntimeException} raised inside it is recorded and suppressed.
@@ -170,11 +171,18 @@ public class ResponseGenerationScheduler {
     // Ported from schedule_response_generation() at
     // backend/app/tasks/response_generation.py:L35-50 (faithful port) — see docs/DECISION_LOG.md
     // DL-047.
-    // The registered trigger task of config/AsyncSchedulingConfig replaces the `time.sleep(...)` call
-    // at :L50, which read `settings.response_generation_interval` while
-    // backend/app/core/config.py:L11 declared RESPONSE_GENERATION_DELAY — see
-    // docs/DECISION_LOG.md DL-047 and DL-227.
+    // fixedDelayString replaces the `while True` loop at :L41 and the trailing `time.sleep(...)` at
+    // :L50, which read `settings.response_generation_interval` while backend/app/core/config.py:L11
+    // declared RESPONSE_GENERATION_DELAY — see docs/DECISION_LOG.md DL-047 and DL-227.
+    @Scheduled(fixedDelayString = "${scanner.response-generation-delay-seconds}",
+            timeUnit = TimeUnit.SECONDS)
     public void generatePendingResponses() {
+        // Only a process that carries the pass runs it — DL-250 — see docs/DECISION_LOG.md
+        if (!runsResponseGeneration()) {
+            log.debug("Response generation is not carried by this process; the pass reads nothing.");
+            return;
+        }
+
         try {
             int attempted = 0;
             int succeeded = 0;
@@ -227,7 +235,7 @@ public class ResponseGenerationScheduler {
                     } catch (RuntimeException e) {
                         failed++;
                         log.error("Scheduled response generation failed for tweet {}: {}",
-                                tweetId, LogSafe.type(e));
+                                tweetId, e.getClass().getSimpleName());
                     }
                 }
 
@@ -255,8 +263,21 @@ public class ResponseGenerationScheduler {
         } catch (RuntimeException e) {
             // Sanitized record: operation and exception class only — DL-084 — see
             // docs/DECISION_LOG.md
-            log.error("Response generation pass failed: {}", LogSafe.type(e));
+            log.error("Response generation pass failed: {}", e.getClass().getSimpleName());
         }
+    }
+
+    // Net-new enablement switch — DL-250 — see docs/DECISION_LOG.md
+    /**
+     * Reports whether this process carries the scheduled response-generation pass.
+     *
+     * @return {@code true} when {@code scanner.background.enabled} and
+     *     {@code scanner.background.response-generation-enabled} both hold; {@code true} when the group
+     *     is unbound, which is the declared default of both keys
+     */
+    private boolean runsResponseGeneration() {
+        ScannerProperties.Background background = properties.background();
+        return background == null || background.runsResponseGeneration();
     }
 
     // Net-new per-pass ceiling — DL-282 — see docs/DECISION_LOG.md
@@ -333,7 +354,7 @@ public class ResponseGenerationScheduler {
         } catch (RuntimeException failure) {
             // service/NotionService owns the failure record — see docs/DECISION_LOG.md DL-197
             log.debug("Mirroring response {} for tweet {} to the Notion database failed with {}",
-                    generated.id(), tweetId, LogSafe.type(failure));
+                    generated.id(), tweetId, failure.getClass().getSimpleName());
             return CandidateOutcome.STORED_UNMIRRORED;
         }
         return CandidateOutcome.STORED_AND_MIRRORED;

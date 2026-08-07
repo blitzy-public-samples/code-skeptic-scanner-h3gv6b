@@ -17,11 +17,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientResponseException;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.TweetDto;
-import com.codeskeptic.scanner.util.LogSafe;
 import com.fasterxml.jackson.databind.JsonNode;
 
 // Ported from backend/app/services/notion_service.py:L5-53 (faithful port) — see docs/DECISION_LOG.md
@@ -251,6 +251,14 @@ public class NotionService {
     /** Largest page size the Notion database-query endpoint accepts. */
     private static final int MAXIMUM_PAGE_SIZE = 100;
 
+    /**
+     * Greatest number of characters the provider accepts in one title or rich-text item. A value longer
+     * than this is carried as consecutive items and is not refused — DL-292 — see
+     * docs/DECISION_LOG.md.
+     */
+    // Net-new item split — DL-292 — see docs/DECISION_LOG.md
+    private static final int MAXIMUM_TEXT_ITEM_CHARS = 2_000;
+
     /** Notion error-body member naming the error. */
     private static final String KEY_CODE = "code";
 
@@ -268,6 +276,15 @@ public class NotionService {
 
     /** Accepted shape of the {@code code} member of a Notion error body. */
     private static final Pattern ERROR_CODE_SHAPE = Pattern.compile("[a-z_]{1,64}");
+
+    /**
+     * Accepted shape of the provider request identifier a rejection carries. A value drawn from
+     * {@code A-Za-z0-9}, {@code _}, {@code .}, {@code -}, {@code [} and {@code ]} is carried
+     * literally; anything else, a value carrying a carriage return or a line feed included, is
+     * reported as {@value #ABSENT}, so no free text can reach a log record through a provider header
+     * and no provider value can forge a record boundary — DL-119.
+     */
+    private static final Pattern REQUEST_ID_SHAPE = Pattern.compile("[A-Za-z0-9_.\\-\\[\\]]{1,64}");
 
     /** Response header carrying Notion's own identifier for the answered request. */
     private static final String HEADER_REQUEST_ID = "x-request-id";
@@ -347,7 +364,7 @@ public class NotionService {
     public String storeTweet(TweetDto tweet) {
         Objects.requireNonNull(tweet, "tweet must not be null.");
 
-        log.debug("Mirroring tweet {} to the Notion database", LogSafe.logSafe(tweet.id()));
+        log.debug("Mirroring tweet {} to the Notion database", tweet.id());
         try {
             String databaseId = requireDatabaseId();
 
@@ -370,12 +387,10 @@ public class NotionService {
                 throw new IllegalStateException(
                         "The Notion page-creation response carried no page identifier.");
             }
-            log.info("Tweet {} is mirrored to the Notion database",
-                    LogSafe.logSafe(tweet.id()));
+            log.info("Tweet {} is mirrored to the Notion database", tweet.id());
             return pageId;
         } catch (RuntimeException e) {
-            logFailure("Mirroring tweet " + LogSafe.logSafe(tweet.id())
-                    + " to the Notion database", e);
+            logFailure("Mirroring tweet " + tweet.id() + " to the Notion database", e);
             throw e;
         }
     }
@@ -492,8 +507,8 @@ public class NotionService {
                 if (pageId == null) {
                     // Caller-propagated value rendered through the log guard — DL-149 — see
                     // docs/DECISION_LOG.md
-                    log.warn("No Notion page carries the {} property {}; the generated response is "
-                            + "not mirrored", PROPERTY_TWEET_ID, LogSafe.logSafe(tweetId));
+                    log.warn("No Notion page carries the requested {} property; the generated "
+                            + "response is not mirrored", PROPERTY_TWEET_ID);
                     return;
                 }
 
@@ -504,26 +519,26 @@ public class NotionService {
                         .retrieve()
                         .toBodilessEntity();
 
-                log.info("The generated response for tweet {} is mirrored to Notion after {} "
-                        + "attempt(s)", LogSafe.logSafe(tweetId), attempt + 1);
+                log.info("The generated response for the requested tweet is mirrored to Notion "
+                        + "after {} attempt(s)", attempt + 1);
                 return;
             } catch (RuntimeException e) {
                 // A retryable answer is attempted again within the configured budget — DL-253 — see
                 // docs/DECISION_LOG.md
                 if (attempt < retries && isRetryable(e)) {
                     long wait = backoffFor(backoffMillis, attempt);
-                    log.warn("Mirroring the generated response for tweet {} failed with {}; "
-                            + "attempt {} of {} follows in {}ms", LogSafe.logSafe(tweetId),
-                            LogSafe.type(e), attempt + 2, retries + 1, wait);
+                    log.warn("Mirroring the generated response for the requested tweet failed "
+                            + "with {}; attempt {} of {} follows in {}ms",
+                            e.getClass().getSimpleName(), attempt + 2, retries + 1, wait);
                     if (!pause(wait)) {
-                        logFailure("Mirroring the generated response for tweet "
-                                + LogSafe.logSafe(tweetId) + " to Notion", e);
+                        logFailure("Mirroring the generated response for the requested tweet "
+                                + "to Notion", e);
                         throw e;
                     }
                     continue;
                 }
 
-                logFailure("Mirroring the generated response for tweet " + LogSafe.logSafe(tweetId)
+                logFailure("Mirroring the generated response for the requested tweet"
                         + " to Notion", e);
                 throw e;
             }
@@ -555,8 +570,14 @@ public class NotionService {
     /**
      * Reports whether a failure is one a later attempt could answer differently.
      *
-     * <p>A status answer is retryable when it is {@code 429} or any {@code 5xx}; every other status is
-     * not. A failure carrying no status is a transport failure and is retryable.
+     * <p>Two kinds are retryable and no other. A status answer is retryable when it is {@code 429} or
+     * any {@code 5xx}; every other status is not. A {@link ResourceAccessException} is retryable;
+     * it is the transport failure the client raises when the request never reached the provider
+     * or its answer never arrived.
+     *
+     * <p>Every other runtime failure is answered the same way by a later attempt and is propagated at
+     * once: a response the client could not decode, a malformed answer, and a programming failure such
+     * as {@link NullPointerException} or {@link IllegalStateException} all fall here — DL-253.
      *
      * @param failure the failure to classify; never {@code null}
      * @return {@code true} when the answer admits another attempt
@@ -567,7 +588,7 @@ public class NotionService {
             int status = answered.getStatusCode().value();
             return status == TOO_MANY_REQUESTS_STATUS || status >= SERVER_ERROR_STATUS;
         }
-        return true;
+        return failure instanceof ResourceAccessException;
     }
 
     /**
@@ -631,19 +652,21 @@ public class NotionService {
         if (failure instanceof RestClientResponseException answered) {
             log.error("{} failed: {} after HTTP {}; Notion code {}, request id {}, "
                     + "explanation length {}",
-                    operation, LogSafe.type(failure), answered.getStatusCode().value(),
+                    operation, failure.getClass().getSimpleName(),
+                    answered.getStatusCode().value(),
                     notionErrorCode(answered), notionRequestId(answered),
                     notionErrorMessageLength(answered));
             return;
         }
-        log.error("{} failed: {}", operation, LogSafe.type(failure));
+        log.error("{} failed: {}", operation, failure.getClass().getSimpleName());
     }
 
     /**
      * Reads the {@code code} member of a Notion error body.
      *
      * @param answered the answered rejection; not {@code null}
-     * @return the error identifier under {@link LogSafe#token(String)}, or {@code absent}
+     * @return the error identifier when it takes the shape of {@link #ERROR_CODE_SHAPE}, or
+     *     {@code absent}
      */
     // DL-119 — see docs/DECISION_LOG.md
     private static String notionErrorCode(RestClientResponseException answered) {
@@ -657,12 +680,18 @@ public class NotionService {
      * <p>It correlates a failure with the provider's own record of the same request.
      *
      * @param answered the answered rejection; not {@code null}
-     * @return the request identifier under {@link LogSafe#token(String)}, or {@code absent}
+     * @return the request identifier when it takes the shape of {@link #REQUEST_ID_SHAPE}, or
+     *     {@code absent}
      */
     // DL-119 — see docs/DECISION_LOG.md
     private static String notionRequestId(RestClientResponseException answered) {
-        return LogSafe.token(answered.getResponseHeaders() == null
-                ? null : answered.getResponseHeaders().getFirst(HEADER_REQUEST_ID));
+        String requestId = answered.getResponseHeaders() == null
+                ? null : answered.getResponseHeaders().getFirst(HEADER_REQUEST_ID);
+        if (requestId == null) {
+            return ABSENT;
+        }
+        String trimmed = requestId.trim();
+        return REQUEST_ID_SHAPE.matcher(trimmed).matches() ? trimmed : ABSENT;
     }
 
     /**
@@ -820,28 +849,64 @@ public class NotionService {
      * Renders a title property. Transcribes the shape at
      * {@code backend/app/services/notion_service.py:L15}.
      *
+     * <p>The text is carried as one item per {@value #MAXIMUM_TEXT_ITEM_CHARS} characters, so a value
+     * longer than the provider's per-item ceiling is represented in full and is not refused — DL-292.
+     *
      * @param value the literal text, or {@code null}
      * @return the rendered property, or {@code null} when {@code value} is {@code null}
      */
     private static Map<String, Object> titleProperty(String value) {
-        return (value == null) ? null : Map.of(KEY_TITLE, List.of(textItem(value)));
+        return (value == null) ? null : Map.of(KEY_TITLE, textItems(value));
     }
 
     /**
      * Renders a rich-text property. Transcribes the shape at
      * {@code backend/app/services/notion_service.py:L16}.
      *
+     * <p>The text is carried as one item per {@value #MAXIMUM_TEXT_ITEM_CHARS} characters, so a value
+     * longer than the provider's per-item ceiling is represented in full and is not refused — DL-292.
+     *
      * @param value the literal text, or {@code null}
      * @return the rendered property, or {@code null} when {@code value} is {@code null}
      */
     private static Map<String, Object> richTextProperty(String value) {
-        return (value == null) ? null : Map.of(KEY_RICH_TEXT, List.of(textItem(value)));
+        return (value == null) ? null : Map.of(KEY_RICH_TEXT, textItems(value));
     }
 
     /**
-     * Renders the single text item shared by the title and rich-text shapes.
+     * Splits literal text into items no longer than the provider's per-item ceiling.
+     *
+     * <p>The split is by character index at {@value #MAXIMUM_TEXT_ITEM_CHARS}, so concatenating the
+     * items in order reproduces {@code value} exactly; {@link #readText(JsonNode, String, String)}
+     * performs that concatenation. An empty value yields a single empty item, which is the shape the
+     * source's own single-item rendering produced — DL-292.
      *
      * @param value the literal text; not {@code null}
+     * @return one or more rendered text items, in order; never {@code null} and never empty
+     */
+    // Net-new item split — DL-292 — see docs/DECISION_LOG.md
+    private static List<Map<String, Object>> textItems(String value) {
+        if (value.length() <= MAXIMUM_TEXT_ITEM_CHARS) {
+            return List.of(textItem(value));
+        }
+
+        List<Map<String, Object>> items =
+                new ArrayList<>((value.length() + MAXIMUM_TEXT_ITEM_CHARS - 1)
+                        / MAXIMUM_TEXT_ITEM_CHARS);
+        for (int start = 0; start < value.length(); start += MAXIMUM_TEXT_ITEM_CHARS) {
+            items.add(textItem(
+                    value.substring(start, Math.min(start + MAXIMUM_TEXT_ITEM_CHARS, value.length()))));
+        }
+        // Counts only; no mirrored text is recorded — DL-149 — see docs/DECISION_LOG.md
+        log.debug("Carrying {} character(s) of mirrored text as {} item(s)", value.length(),
+                items.size());
+        return List.copyOf(items);
+    }
+
+    /**
+     * Renders one text item, the unit shared by the title and rich-text shapes.
+     *
+     * @param value the literal text of this item; not {@code null}
      * @return the rendered text item; never {@code null}
      */
     private static Map<String, Object> textItem(String value) {
@@ -1002,30 +1067,32 @@ public class NotionService {
 
 
     /**
-     * Reads the first non-empty literal text of a title or rich-text property.
+     * Reads the literal text of a title or rich-text property, concatenating every item in order.
      *
      * <p>Each item's {@code text.content} member is read first and its {@code plain_text} member
-     * second. An absent property, a property carrying a container of another type and an empty item
-     * array each yield {@code null} — see docs/DECISION_LOG.md DL-090.
+     * second. Every item contributes, so a value the write side carried as consecutive items is
+     * reassembled exactly — {@link #textItems(String)} owns the matching split and DL-292 records the
+     * pair. An absent property, a property carrying a container of another type, an empty item array
+     * and an array whose items all carry no text each yield {@code null} — see docs/DECISION_LOG.md
+     * DL-090.
      *
      * @param properties   the page's property map; not {@code null}
      * @param propertyName the Notion property name; not {@code null}
      * @param containerKey {@link #KEY_TITLE} or {@link #KEY_RICH_TEXT}
-     * @return the literal text, or {@code null} when the property carries none
+     * @return the concatenated literal text, or {@code null} when the property carries none
      */
-    // DL-090 — see docs/DECISION_LOG.md
+    // DL-090, DL-292 — see docs/DECISION_LOG.md
     private static String readText(JsonNode properties, String propertyName, String containerKey) {
+        StringBuilder text = new StringBuilder();
         for (JsonNode item : properties.path(propertyName).path(containerKey)) {
             String content = readString(item.path(KEY_TEXT).path(KEY_CONTENT));
             if (!content.isEmpty()) {
-                return content;
+                text.append(content);
+                continue;
             }
-            String plainText = readString(item.path(KEY_PLAIN_TEXT));
-            if (!plainText.isEmpty()) {
-                return plainText;
-            }
+            text.append(readString(item.path(KEY_PLAIN_TEXT)));
         }
-        return null;
+        return text.isEmpty() ? null : text.toString();
     }
 
     /**

@@ -10,6 +10,8 @@ import jakarta.persistence.FetchType;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 import java.time.LocalDateTime;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 /**
  * JPA entity mapping the {@code responses} table and its five columns: {@code id} (the primary key),
@@ -28,11 +30,11 @@ import java.time.LocalDateTime;
  * <p>{@code is_approved} carries the approval flag a human reviewer reads
  * ({@code backend/app/db/models.py:L26}).
  *
- * <p>None of the five columns declares a not-null marker, a duplicate-value restriction or a width
- * bound, matching the source declarations. {@code content} declares
- * {@code columnDefinition = "varchar"}, the capacity-free character type the bare
- * {@code Column(String)} of backend/app/db/models.py:L24 renders — see docs/DECISION_LOG.md
- * DL-068.
+ * <p>None of the five columns declares a not-null marker, a duplicate-value restriction or a length
+ * facet, matching the source declarations. {@code content} carries
+ * {@code @JdbcTypeCode(SqlTypes.LONGVARCHAR)}, which each dialect renders as its widest character
+ * type that needs no declared capacity, for the bare {@code Column(String)} of
+ * backend/app/db/models.py:L24 — see docs/DECISION_LOG.md DL-068.
  */
 // Ported from backend/app/db/models.py:L20-28 (faithful port) — see docs/DECISION_LOG.md
 // Departures from the literal source declaration, each recorded in the decision log: the type keeps
@@ -53,9 +55,10 @@ public class Response {
     @Column(name = "id")
     private Integer id;
 
-    // backend/app/db/models.py:L24 — capacity-free character column — DL-068 — see
+    // backend/app/db/models.py:L24 — wide character column, no declared capacity — DL-068 — see
     // docs/DECISION_LOG.md
-    @Column(name = "content", columnDefinition = "varchar")
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
+    @Column(name = "content")
     private String content;
 
     // backend/app/db/models.py:L25

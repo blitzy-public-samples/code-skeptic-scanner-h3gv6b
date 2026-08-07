@@ -38,6 +38,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -53,7 +55,9 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
+import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import com.codeskeptic.scanner.config.ScannerProperties;
@@ -202,7 +206,7 @@ class NotionServiceTest {
 
     /**
      * Longest run of a guarded value a log record carries — the bound
-     * {@code util.LogSafe.logSafe(String)} applies to the provider-supplied rejection message.
+     * the rejection shape check applies to the provider-supplied rejection message.
      */
     private static final int GUARDED_VALUE_LIMIT = 64;
 
@@ -399,6 +403,98 @@ class NotionServiceTest {
         assertThat(content.has(KEY_TITLE)).isTrue();
         assertThat(content.has(KEY_RICH_TEXT)).isFalse();
         assertThat(textOf(content, KEY_TITLE)).isEqualTo(TWEET_CONTENT);
+    }
+
+    // Content longer than the provider's per-item ceiling is carried as consecutive items and is not
+    // refused, and concatenating them reproduces it exactly — DL-292 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {0} character(s) -> {1} item(s)")
+    @CsvSource({
+        "1, 1",
+        "1999, 1",
+        "2000, 1",
+        "2001, 2",
+        "4000, 2",
+        "4001, 3",
+        "6000, 3",
+        "12345, 7"
+    })
+    @DisplayName("carries a title longer than the provider's per-item ceiling as consecutive items "
+            + "that reproduce it exactly")
+    void carriesALongTitleAsConsecutiveItems(int characters, int expectedItems) {
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+        String body = bodyOfLength(characters);
+
+        service.storeTweet(tweetCarryingContent(body));
+
+        JsonNode items = storedProperty(PROPERTY_CONTENT).path(KEY_TITLE);
+        assertThat(items.size()).as("title items for %s character(s)", characters)
+                .isEqualTo(expectedItems);
+        for (JsonNode item : items) {
+            assertThat(item.path(KEY_TEXT).path(KEY_CONTENT).asText().length())
+                    .as("length of one title item").isBetween(1, 2_000);
+        }
+        assertThat(concatenatedText(items)).as("concatenated title text").isEqualTo(body);
+    }
+
+    // The reverse mapping concatenates every item, so a value the write side split is reassembled —
+    // DL-292 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reads a title split across items back as the whole value")
+    void readsATitleSplitAcrossItemsBackAsTheWholeValue() {
+        stubPost();
+        stubPageCreationReturning(createdPage(CREATED_PAGE_ID));
+        String body = bodyOfLength(5_000);
+        service.storeTweet(tweetCarryingContent(body));
+        JsonNode written = storedProperties();
+        assertThat(written.path(PROPERTY_CONTENT).path(KEY_TITLE).size())
+                .as("items the write side produced").isEqualTo(3);
+
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, written)));
+        List<TweetDto> mirrored = service.getTweets(LIMIT, START_CURSOR);
+
+        assertThat(mirrored).as("mirrored posts").hasSize(1);
+        assertThat(mirrored.get(0).content()).as("reassembled content").isEqualTo(body);
+    }
+
+    /**
+     * Builds deterministic text of an exact character length, whose every 2,000-character window
+     * differs, so a split that reordered or dropped a window is detected.
+     *
+     * @param characters the length to produce
+     * @return text of exactly {@code characters} characters
+     */
+    private static String bodyOfLength(int characters) {
+        StringBuilder text = new StringBuilder(characters);
+        for (int index = 0; index < characters; index++) {
+            text.append((char) ('a' + (index % 26)));
+        }
+        return text.toString();
+    }
+
+    /**
+     * Concatenates the literal text of every item of a title or rich-text array.
+     *
+     * @param items the item array
+     * @return the concatenated text
+     */
+    private static String concatenatedText(JsonNode items) {
+        StringBuilder text = new StringBuilder();
+        for (JsonNode item : items) {
+            text.append(item.path(KEY_TEXT).path(KEY_CONTENT).asText());
+        }
+        return text.toString();
+    }
+
+    /**
+     * Builds a post carrying the supplied content and the remaining fixture values.
+     *
+     * @param content value of {@link TweetDto#content()}
+     * @return the post
+     */
+    private static TweetDto tweetCarryingContent(String content) {
+        return new TweetDto(TWEET_ID, content, LIKE_COUNT, CREATED_AT, DOUBT_RATING, MEDIA,
+                QUOTED_TWEET_ID, USER_ID, AI_TOOLS_MENTIONED);
     }
 
     @Test
@@ -1288,18 +1384,51 @@ class NotionServiceTest {
     }
 
     @Test
-    @DisplayName("attempts a mirror write that failed without a status again")
-    void attemptsAMirrorWriteThatFailedWithoutAStatusAgain() {
+    @DisplayName("attempts a mirror write that failed in transport again")
+    void attemptsAMirrorWriteThatFailedInTransportAgain() {
         stubPost();
         stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, noProperties())));
         stubPageUpdate();
         when(pageUpdateResponse.toBodilessEntity())
-                .thenThrow(new IllegalStateException("the PATCH did not complete"))
+                .thenThrow(new ResourceAccessException("the connection was reset"))
                 .thenReturn(new ResponseEntity<Void>(HttpStatus.OK));
 
         serviceRetrying(DATABASE_ID, 1).updateTweetResponse(TWEET_ID, RESPONSE_TEXT);
 
         verify(pageUpdateResponse, times(2)).toBodilessEntity();
+    }
+
+    // A failure that is neither a status answer nor a transport failure is answered the same way by a
+    // later attempt, so it is propagated at once — DL-253 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {0}")
+    @MethodSource("localFailures")
+    @DisplayName("propagates a mirror-write failure that is neither a status answer nor a transport "
+            + "failure without attempting it again")
+    void propagatesALocalMirrorWriteFailureWithoutAnotherAttempt(String label,
+            RuntimeException failure) {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(MATCHED_PAGE_ID, noProperties())));
+        stubPageUpdate();
+        when(pageUpdateResponse.toBodilessEntity()).thenThrow(failure);
+
+        NotionService service = serviceRetrying(DATABASE_ID, 3);
+
+        assertThatThrownBy(() -> service.updateTweetResponse(TWEET_ID, RESPONSE_TEXT))
+                .as("failure raised for %s", label)
+                .isSameAs(failure);
+        verify(pageUpdateResponse, times(1)).toBodilessEntity();
+    }
+
+    private static Stream<Arguments> localFailures() {
+        return Stream.of(
+                Arguments.of("a malformed answer the client could not read",
+                        new RestClientException("the answer could not be read")),
+                Arguments.of("a programming failure",
+                        new IllegalStateException("the PATCH did not complete")),
+                Arguments.of("a missing reference",
+                        new NullPointerException("a required value was absent")),
+                Arguments.of("a rejected argument",
+                        new IllegalArgumentException("the identifier was not accepted")));
     }
 
     @ParameterizedTest(name = "a {0} answer is not attempted again")

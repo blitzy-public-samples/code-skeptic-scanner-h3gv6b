@@ -4,6 +4,8 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 /**
  * JPA entity mapping the {@code settings} table and its three columns:
@@ -14,10 +16,11 @@ import jakarta.persistence.Table;
  * generated. The table is created from these annotations by
  * {@code spring.jpa.hibernate.ddl-auto} — see docs/DECISION_LOG.md DL-026.
  *
- * <p>No column declares a not-null marker, a duplicate-value restriction or a width bound. All three
- * declare {@code columnDefinition = "varchar"}, the capacity-free character type the bare
- * {@code Column(String)} at backend/app/db/models.py:L42-44 renders; the primary key takes the same
- * capacity-free type — DL-068, DL-069 — see docs/DECISION_LOG.md.
+ * <p>No column declares a not-null marker, a duplicate-value restriction or a length facet.
+ * {@code value} and {@code description} carry {@code @JdbcTypeCode(SqlTypes.LONGVARCHAR)}, which each
+ * dialect renders as its widest character type that needs no declared capacity, for the bare
+ * {@code Column(String)} at backend/app/db/models.py:L43-44 — DL-068. {@code key} states no JDBC type
+ * code; it is the indexed primary key — DL-069 — see docs/DECISION_LOG.md.
  */
 // Ported from backend/app/db/models.py:L39-44 (faithful port) — see docs/DECISION_LOG.md
 // Departures from the literal source declaration, each recorded in the decision log: key and value
@@ -29,20 +32,22 @@ import jakarta.persistence.Table;
 @Table(name = "settings")
 public class Setting {
 
-    // backend/app/db/models.py:L42 — quoted identifier — DL-061; capacity-free character column —
-    // DL-069 — see docs/DECISION_LOG.md
+    // backend/app/db/models.py:L42 — quoted identifier — DL-061; indexed primary key, no JDBC type
+    // code — DL-069 — see docs/DECISION_LOG.md
     @Id
-    @Column(name = "\"key\"", columnDefinition = "varchar")
+    @Column(name = "\"key\"")
     private String key;
 
-    // backend/app/db/models.py:L43 — quoted identifier — DL-061; capacity-free character column —
-    // DL-068 — see docs/DECISION_LOG.md
-    @Column(name = "\"value\"", columnDefinition = "varchar")
+    // backend/app/db/models.py:L43 — quoted identifier — DL-061; wide character column, no declared
+    // capacity — DL-068 — see docs/DECISION_LOG.md
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
+    @Column(name = "\"value\"")
     private String value;
 
-    // backend/app/db/models.py:L44 — capacity-free character column — DL-068 — see
+    // backend/app/db/models.py:L44 — wide character column, no declared capacity — DL-068 — see
     // docs/DECISION_LOG.md
-    @Column(name = "description", columnDefinition = "varchar")
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
+    @Column(name = "description")
     private String description;
 
     /**

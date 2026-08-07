@@ -38,14 +38,14 @@ import org.springframework.transaction.annotation.Transactional;
  *       analyze route writes the one column it changes through
  *       {@link #updateDoubtRating(Integer, Double)} — see docs/DECISION_LOG.md DL-263.
  *   <li>{@code count()} returns the number of rows, which {@code TwitterService} reports as the
- *       {@code total} of a chunked page read — see docs/DECISION_LOG.md DL-249.
+ *       {@code total} of a page whose first row lies past the offset a paged query can express — see
+ *       docs/DECISION_LOG.md DL-225.
  * </ul>
  *
- * <p>Seven members are declared below: {@link #findByIdForUpdate(Integer)},
+ * <p>Six members are declared below: {@link #findByIdForUpdate(Integer)},
  * {@link #findUnansweredBatchAfter(Integer, Pageable)}, {@link #findAggregates()},
  * {@link #findDailyTrendsBetween(java.time.LocalDateTime, java.time.LocalDateTime)},
- * {@link #findChunk(Pageable)}, {@link #findAnalysisSubjectById(Integer)} and
- * {@link #updateDoubtRating(Integer, Double)}.
+ * {@link #findAnalysisSubjectById(Integer)} and {@link #updateDoubtRating(Integer, Double)}.
  *
  * <p>Spring Data supplies the implementation as a runtime proxy. Transaction boundaries are declared
  * on the {@code @Service} and {@code @Component} methods that call this interface, and the
@@ -102,26 +102,6 @@ public interface TweetRepository extends JpaRepository<Tweet, Integer> {
               and (:afterId is null or t.id > :afterId)
             """)
     List<Tweet> findUnansweredBatchAfter(@Param("afterId") Integer afterId, Pageable batch);
-
-    /**
-     * Returns one bounded chunk of the {@code tweets} table, positioned and ordered by {@code chunk}.
-     *
-     * <p>No predicate is applied: the chunk is a window over every row. The window's first row, its
-     * row bound and its order are those {@code chunk} carries, and no row count is issued.
-     *
-     * <p>{@code service.TwitterService} reads one page of {@code GET /tweets} as consecutive chunks
-     * of this shape when the requested {@code per_page} exceeds the chunk bound, so the rows one
-     * statement holds are bounded independently of {@code per_page} — see docs/DECISION_LOG.md
-     * DL-249.
-     *
-     * @param chunk the window's position, row bound and sort; never {@code null}
-     * @return the rows the window covers, in the requested order; an empty list when it covers none.
-     *         Never {@code null}
-     */
-    // Net-new (no Python counterpart: get_paginated_tweets at backend/app/api/tweets.py:L16 did not
-    // exist) — DL-249 — see docs/DECISION_LOG.md
-    @Query("select t from Tweet t")
-    List<Tweet> findChunk(Pageable chunk);
 
     // The per-tweet claim of service/ResponseService.generateResponseIfAbsent — DL-195 — see
     // docs/DECISION_LOG.md

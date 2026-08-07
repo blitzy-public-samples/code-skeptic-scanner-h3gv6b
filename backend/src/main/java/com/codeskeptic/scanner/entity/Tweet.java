@@ -13,6 +13,8 @@ import jakarta.persistence.Table;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 /**
  * JPA entity mapping the {@code tweets} table and its nine columns: {@code id} (the primary key),
@@ -32,10 +34,10 @@ import java.util.List;
  * mapped to {@code List<String>} attributes by {@link DelimitedStringListConverter}, which owns
  * their null and empty semantics — see docs/DECISION_LOG.md DL-024.
  *
- * <p>No column declares a not-null marker, a duplicate-value restriction or a width bound. The five
- * character columns declare {@code columnDefinition = "varchar"}, the capacity-free character type
- * the bare {@code Column(String)} of backend/app/db/models.py:L11,L15-18 renders — see
- * docs/DECISION_LOG.md DL-068.
+ * <p>No column declares a not-null marker, a duplicate-value restriction or a length facet. The five
+ * character columns carry {@code @JdbcTypeCode(SqlTypes.LONGVARCHAR)}, which each dialect renders as
+ * its widest character type that needs no declared capacity, for the bare {@code Column(String)} of
+ * backend/app/db/models.py:L11,L15-18 — see docs/DECISION_LOG.md DL-068.
  */
 // Ported from backend/app/db/models.py:L7-18 (faithful port) — see docs/DECISION_LOG.md
 // Departures from the literal source declaration, each recorded in the decision log: id declares
@@ -55,9 +57,10 @@ public class Tweet {
     @Column(name = "id")
     private Integer id;
 
-    // backend/app/db/models.py:L11 — capacity-free character column — DL-068 — see
+    // backend/app/db/models.py:L11 — wide character column, no declared capacity — DL-068 — see
     // docs/DECISION_LOG.md
-    @Column(name = "content", columnDefinition = "varchar")
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
+    @Column(name = "content")
     private String content;
 
     // backend/app/db/models.py:L12
@@ -74,28 +77,32 @@ public class Tweet {
 
     // backend/app/db/models.py:L15
     // Single delimited column value carried as a list — DL-024 — see docs/DECISION_LOG.md
-    // Capacity-free character column — DL-068 — see docs/DECISION_LOG.md
+    // Wide character column, no declared capacity — DL-068 — see docs/DECISION_LOG.md
     @Convert(converter = DelimitedStringListConverter.class)
-    @Column(name = "media", columnDefinition = "varchar")
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
+    @Column(name = "media")
     private List<String> media;
 
     // backend/app/db/models.py:L16
     // Sole Optional[str] field in the source (backend/app/schema/tweet.py:L12); may be null.
-    // Capacity-free character column — DL-068 — see docs/DECISION_LOG.md
-    @Column(name = "quoted_tweet_id", columnDefinition = "varchar")
+    // Wide character column, no declared capacity — DL-068 — see docs/DECISION_LOG.md
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
+    @Column(name = "quoted_tweet_id")
     private String quotedTweetId;
 
     // backend/app/db/models.py:L17
     // Identifier of the post author, held as a plain column value; there is no user table.
-    // Capacity-free character column — DL-068 — see docs/DECISION_LOG.md
-    @Column(name = "user_id", columnDefinition = "varchar")
+    // Wide character column, no declared capacity — DL-068 — see docs/DECISION_LOG.md
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
+    @Column(name = "user_id")
     private String userId;
 
     // backend/app/db/models.py:L18
     // Single delimited column value carried as a list — DL-024 — see docs/DECISION_LOG.md
-    // Capacity-free character column — DL-068 — see docs/DECISION_LOG.md
+    // Wide character column, no declared capacity — DL-068 — see docs/DECISION_LOG.md
     @Convert(converter = DelimitedStringListConverter.class)
-    @Column(name = "ai_tools_mentioned", columnDefinition = "varchar")
+    @JdbcTypeCode(SqlTypes.LONGVARCHAR)
+    @Column(name = "ai_tools_mentioned")
     private List<String> aiToolsMentioned;
 
     // Ported from backend/app/db/models.py:L30 (faithful port) — see docs/DECISION_LOG.md

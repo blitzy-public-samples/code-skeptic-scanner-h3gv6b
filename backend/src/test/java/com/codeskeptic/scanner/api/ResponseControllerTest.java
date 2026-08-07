@@ -787,7 +787,8 @@ class ResponseControllerTest {
                 Arguments.of("{\"content\":null,\"is_approved\":null}", true, null, true, null));
     }
 
-    // A carried member the addressed column cannot hold is refused while the body is bound — DL-231 —
+    // A carried member of any JSON type is bound and passed to the service, which is validation
+    // parity with the free-form request.json of backend/app/api/responses.py:L54 — DL-050, DL-231 —
     // see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] body={0}")
     @ValueSource(strings = {
@@ -804,30 +805,30 @@ class ResponseControllerTest {
         "{\"content\":\"valid\",\"is_approved\":\"true\"}",
         "{\"content\":123,\"is_approved\":true}"
     })
-    @DisplayName("answers 400 with the Bad request envelope when a carried member is unusable")
-    void answers400WithTheBadRequestEnvelopeWhenACarriedMemberIsUnusable(String body)
-            throws Exception {
+    @DisplayName("answers 200 and reaches the service for a carried member of any JSON type")
+    void answers200ForACarriedMemberOfAnyJsonType(String body) throws Exception {
+        when(responseService.updateResponse(eq(RESPONSE_ID), any())).thenReturn(response(false));
 
         mockMvc.perform(put("/responses/" + RESPONSE_ID).contentType(MediaType.APPLICATION_JSON)
                         .content(body)
                         .header(HttpHeaders.AUTHORIZATION, bearer()))
-                .andExpect(status().isBadRequest())
-                .andExpect(content().json(BAD_REQUEST, JsonCompareMode.STRICT))
-                .andExpect(jsonPath("$.*", hasSize(1)))
-                .andExpect(jsonPath("$.error").value("Bad request"));
+                .andExpect(status().isOk());
 
-        verifyNoInteractions(responseService);
+        verify(responseService).updateResponse(eq(RESPONSE_ID), any());
     }
 
-    // The refusal names no member on the wire — DL-231 — see docs/DECISION_LOG.md
+    // No submitted value is echoed on the wire — DL-231 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("names no offending member in the body it answers for an unusable carried value")
-    void namesNoOffendingMemberInTheBodyItAnswersForAnUnusableCarriedValue() throws Exception {
+    @DisplayName("echoes no submitted member name back for a carried value of a surprising type")
+    void echoesNoSubmittedMemberNameBackForASurprisingCarriedValue() throws Exception {
+        when(responseService.updateResponse(eq(RESPONSE_ID), any()))
+                .thenThrow(NotFoundException.responseNotFoundOrUpdateFailed());
+
         mockMvc.perform(put("/responses/" + RESPONSE_ID).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"content\":123}")
                         .header(HttpHeaders.AUTHORIZATION, bearer()))
-                .andExpect(status().isBadRequest())
-                .andExpect(bodyDoesNotContain("content", "is_approved", "JSON string",
+                .andExpect(status().isNotFound())
+                .andExpect(bodyDoesNotContain("is_approved", "JSON string",
                         "IllegalArgumentException"));
     }
 

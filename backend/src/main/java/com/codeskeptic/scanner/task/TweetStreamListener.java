@@ -23,7 +23,6 @@ import com.codeskeptic.scanner.service.ResponseService;
 import com.codeskeptic.scanner.service.SentimentAnalysisService;
 import com.codeskeptic.scanner.service.TwitterService;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
-import com.codeskeptic.scanner.util.LogSafe;
 import com.fasterxml.jackson.databind.JsonNode;
 
 // Ported from the TweetListener class at backend/app/tasks/tweet_monitoring.py:L8-34 (faithful port
@@ -277,8 +276,7 @@ public class TweetStreamListener {
 
         JsonNode data = payload.path(KEY_DATA);
         if (!data.isObject()) {
-            log.warn("Skipping a stream record: {}; record {}",
-                    REJECTED_NO_DATA_OBJECT, LogSafe.correlation(payload));
+            log.warn("Skipping a stream record: {}", REJECTED_NO_DATA_OBJECT);
             return true;
         }
 
@@ -326,7 +324,7 @@ public class TweetStreamListener {
             // service/SentimentAnalysisService owns the failure record — see
             // docs/DECISION_LOG.md DL-197
             log.debug("Skipping a stream record: obtaining its doubt rating failed with {}.",
-                    LogSafe.type(failure));
+                    failure.getClass().getSimpleName());
             return true;
         }
 
@@ -391,19 +389,16 @@ public class TweetStreamListener {
         } catch (RuntimeException failure) {
             // The only report of this condition — see docs/DECISION_LOG.md DL-224
             log.warn("Preparing the Notion mirror of tweet row {} failed with {}; the row is stored "
-                    + "and is not mirrored.", saved.getId(), LogSafe.type(failure));
+                    + "and is not mirrored.", saved.getId(), failure.getClass().getSimpleName());
             return;
         }
         try {
-            String pageId = notionService.storeTweet(mirrored);
-            // The Notion page identifier reaches the log only as a correlation token — DL-119 —
-            // see docs/DECISION_LOG.md
-            log.debug("Mirrored tweet row {} to the Notion database as page {}.",
-                    saved.getId(), LogSafe.correlation(pageId));
+            notionService.storeTweet(mirrored);
+            log.debug("Mirrored tweet row {} to the Notion database.", saved.getId());
         } catch (RuntimeException failure) {
             // service/NotionService owns the failure record — see docs/DECISION_LOG.md DL-197
             log.debug("Mirroring tweet row {} to the Notion database failed with {}.",
-                    saved.getId(), LogSafe.type(failure));
+                    saved.getId(), failure.getClass().getSimpleName());
         }
     }
 
@@ -444,7 +439,7 @@ public class TweetStreamListener {
             // The failing layer owns the ERROR record — DL-252 — see docs/DECISION_LOG.md
             log.debug("Triggering response generation for tweet row {} failed with {}; ingestion "
                     + "continues and the stored row carries no reply.",
-                    tweetId, LogSafe.type(failure));
+                    tweetId, failure.getClass().getSimpleName());
             return;
         }
         mirrorGeneratedResponse(tweetId, generated);
@@ -482,7 +477,7 @@ public class TweetStreamListener {
         } catch (RuntimeException failure) {
             // service/NotionService owns the failure record — see docs/DECISION_LOG.md DL-197
             log.debug("Mirroring response {} for tweet row {} to the Notion database failed with {}.",
-                    generated.id(), tweetId, LogSafe.type(failure));
+                    generated.id(), tweetId, failure.getClass().getSimpleName());
         }
     }
 

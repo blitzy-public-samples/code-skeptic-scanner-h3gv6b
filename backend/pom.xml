@@ -30,6 +30,9 @@
     <name>code-skeptic-scanner-backend</name>
     <description>Code Skeptic Scanner backend service (Java 21 / Spring Boot)</description>
 
+    <!-- The only property this file declares. Every coordinate the parent BOM manages takes the
+         version the BOM resolves; no version property overrides one - see docs/DECISION_LOG.md
+         DL-306 -->
     <properties>
         <java.version>21</java.version>
     </properties>

@@ -26,3 +26,6 @@ EXPOSE 5000
 
 # Replaces `CMD ["python", "app.py"]`, which named a file the repository never held.
 CMD ["java", "-jar", "app.jar"]
+
+# This file declares no ARG, ENV, USER, ENTRYPOINT or HEALTHCHECK. The process runs under the base
+# image's own identity, as the retired image did — DL-307 — see docs/DECISION_LOG.md

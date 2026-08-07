@@ -218,4 +218,29 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
 
         Long getApprovedResponseCount();
     }
+
+    // Net-new: one bounded window of a large page — DL-297 — see docs/DECISION_LOG.md
+    /**
+     * Reads the {@code responses} projections one window of a large page covers.
+     *
+     * <p>The window is expressed by {@code chunk}: its page index selects the window and its page size
+     * is the window's row bound. No row total is read, so the statement is a bounded window read and
+     * nothing more; {@link #count()} supplies the total the pagination block carries. The projection is
+     * the same one {@link #findAllRows(Pageable)} reads, so the parent identifier is taken from the
+     * foreign-key column without loading the parent row.
+     *
+     * @param chunk the window to read, must not be {@code null}
+     * @return the projections the window covers, in the requested order; an empty list when it covers
+     *         none. Never {@code null}
+     */
+    @Query("""
+            select r.id as id,
+                   r.content as content,
+                   r.generatedAt as generatedAt,
+                   r.isApproved as isApproved,
+                   r.tweet.id as tweetId
+            from Response r
+            """)
+    List<ResponseRow> findRowChunk(Pageable chunk);
+
 }

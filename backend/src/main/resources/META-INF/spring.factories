@@ -1,0 +1,10 @@
+# Startup diagnostics registered with SpringApplication before an application context exists.
+#
+# Spring Boot loads FailureAnalyzer implementations through SpringFactoriesLoader's default resource
+# location, which is this file: the AutoConfiguration.imports mechanism carries auto-configuration
+# classes only. A FailureAnalyzer therefore cannot be a bean, and is declared here.
+#
+# See backend/docs/DECISION_LOG.md DL-305 for the reasoning; the analyzer's own contract is documented
+# on the class.
+org.springframework.boot.diagnostics.FailureAnalyzer=\
+com.codeskeptic.scanner.config.DataSourceConfig$DatabaseStartupFailureAnalyzer

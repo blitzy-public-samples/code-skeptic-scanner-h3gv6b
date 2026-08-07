@@ -1,9 +1,13 @@
 package com.codeskeptic.scanner.service;
 
+import java.util.AbstractList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 
+import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
@@ -87,6 +91,13 @@ public class TwitterService {
     /** Order of every page read: {@code tweets.id} ascending. */
     private static final Sort PAGE_ORDER = Sort.by(Sort.Direction.ASC, "id");
 
+    /**
+     * Rows one window of a large page holds. A page of at most this many rows is read and converted by
+     * one statement; a larger page is read as consecutive windows of this bound, one resident at a
+     * time — DL-297 — see docs/DECISION_LOG.md.
+     */
+    private static final int PAGE_FETCH_CHUNK_ROWS = 500;
+
     private final TweetRepository tweetRepository;
 
     private final SettingRepository settingRepository;
@@ -158,8 +169,24 @@ public class TwitterService {
      * {@code page} whose first row lies beyond {@link Integer#MAX_VALUE} rows is answered the same
      * way, with the requested page number and page size restated — DL-225.
      *
-     * <p>The page is read by one paged query ordered by {@code tweets.id} ascending, the rows are
-     * converted inside this method's transaction, and the returned lists are unmodifiable.
+     * <p>A {@code page} whose first row lies beyond {@link Integer#MAX_VALUE} rows — that is, one for
+     * which {@code (page - 1) * perPage} exceeds that bound — is answered the same way: the empty list
+     * and the same populated block, with the requested page number and page size restated. No page
+     * size is reduced and no request is rejected — see docs/DECISION_LOG.md DL-225.
+     *
+     * <p>The returned lists are unmodifiable.
+     *
+     * <p>A page of at most {@value #PAGE_FETCH_CHUNK_ROWS} rows is read and converted by one statement
+     * inside this method's transaction. A larger page is returned as a view that reads and converts
+     * consecutive chunks of that bound on demand, holding one converted chunk at a time, so both the
+     * rows one statement returns and the rows resident while the page is rendered are bounded however
+     * large {@code per_page} is — see docs/DECISION_LOG.md DL-249 and DL-297. The chunks of such a page
+     * are therefore read where the view is consumed, after this method's transaction has ended, each
+     * chunk statement running in the repository's own transaction; the row total the pagination block
+     * carries is read inside this method's transaction, before the view is created. Rows are ordered by
+     * {@code tweets.id} ascending. The rows the page itself holds are bounded by the table, which is the
+     * wire contract this migration preserves — see docs/DECISION_LOG.md DL-123, DL-217, DL-249 and
+     * DL-297.
      *
      * @param page    the 1-based page number requested through the {@code page} query parameter; a
      *                value below {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}
@@ -193,10 +220,17 @@ public class TwitterService {
             // paged query — DL-225 — see docs/DECISION_LOG.md
             tweets = List.of();
             total = tweetRepository.count();
-        } else {
+        } else if (effectivePerPage <= PAGE_FETCH_CHUNK_ROWS) {
             Page<Tweet> tweetPage = tweetRepository.findAll(requested);
             tweets = tweetMapper.toDtoList(tweetPage.getContent());
             total = tweetPage.getTotalElements();
+        } else {
+            // A page larger than the chunk bound is read as consecutive bounded chunks, one chunk
+            // resident at a time, as the page is rendered — DL-249, DL-297 — see
+            // docs/DECISION_LOG.md
+            total = tweetRepository.count();
+            tweets = chunkedView(requested, PAGE_FETCH_CHUNK_ROWS, total,
+                    tweetRepository::findChunk, tweetMapper::toDtoList);
         }
 
         PaginationDto pagination = new PaginationDto(
@@ -296,8 +330,10 @@ public class TwitterService {
         TweetRepository.AnalysisSubject subject = tweetRepository
                 .findAnalysisSubjectById(identifier)
                 .orElseThrow(NotFoundException::tweetNotFound);
-        // dto/TweetDto declares content non-null — DL-080 — so the analyze route rejects a row that
-        // carries none in exactly the way the wire form does
+        // service/SentimentAnalysisService scores text and rejects none (DL-036), so a row whose
+        // nullable content column holds nothing cannot be scored and is refused here rather than one
+        // layer later; the doubt rating is left as the row carried it — DL-080 — see
+        // docs/DECISION_LOG.md
         String content = Objects.requireNonNull(subject.getContent(), "content must not be null.");
 
         double analysisResult = sentimentAnalysisService.analyzeSentiment(content);
@@ -539,6 +575,137 @@ public class TwitterService {
      */
     private static int totalPages(long total, int pageSize) {
         return (int) Math.ceil((double) total / (double) pageSize);
+    }
+
+
+    // Net-new: one bounded window of a large page is resident at a time — DL-297 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Returns the rows of one page as a list that reads and converts them one bounded window at a
+     * time.
+     *
+     * <p>{@link List#size()} is answered from {@code totalRows} without reading anything. A value is
+     * read the first time it is reached and the window holding it replaces the window held before, so
+     * one converted window is the whole of the residency this list adds. Windows are aligned to their
+     * own row bound, so the window carrying the page's first row may open before the page does; the
+     * rows of a window that lie before the page's offset are never reached.
+     *
+     * <p>The windows are read where the list is consumed, which is after the transaction that created
+     * it has ended, so each window statement runs in the repository's own transaction.
+     *
+     * @param requested the page the caller asked for, must not be {@code null}
+     * @param chunkRows rows one window may hold, must be at least one
+     * @param totalRows rows the table holds, must not be negative
+     * @param reader    reads the rows one window covers
+     * @param mapper    converts the rows of one window to their wire form
+     * @param <E>       stored row type
+     * @param <D>       wire row type
+     * @return the rows of the page, read on demand
+     */
+    private static <E, D> List<D> chunkedView(Pageable requested, int chunkRows, long totalRows,
+            Function<Pageable, List<E>> reader, Function<List<E>, List<D>> mapper) {
+        Objects.requireNonNull(requested, "requested must not be null.");
+        Objects.requireNonNull(reader, "reader must not be null.");
+        Objects.requireNonNull(mapper, "mapper must not be null.");
+        if (chunkRows < 1) {
+            throw new IllegalArgumentException("chunkRows must be at least 1; it is " + chunkRows
+                    + ".");
+        }
+        if (totalRows < 0) {
+            throw new IllegalArgumentException("totalRows must not be negative; it is " + totalRows
+                    + ".");
+        }
+        return new ChunkedPage<>(requested, chunkRows, totalRows, reader, mapper);
+    }
+
+    // One window of one page is resident at a time — DL-297 — see docs/DECISION_LOG.md
+    /**
+     * The rows of one page, read and converted one bounded window at a time.
+     *
+     * @param <E> stored row type
+     * @param <D> wire row type
+     */
+    private static final class ChunkedPage<E, D> extends AbstractList<D> {
+
+        private final long pageOffset;
+        private final int windowRows;
+        private final Sort sort;
+        private final Function<Pageable, List<E>> reader;
+        private final Function<List<E>, List<D>> mapper;
+        private final int rowsInPage;
+
+        private long heldWindowIndex = -1L;
+        private List<D> heldWindow = List.of();
+
+        private ChunkedPage(Pageable requested, int chunkRows, long totalRows,
+                Function<Pageable, List<E>> reader, Function<List<E>, List<D>> mapper) {
+            int pageSize = requested.getPageSize();
+            this.pageOffset = requested.getOffset();
+            this.windowRows = Math.min(pageSize, chunkRows);
+            this.sort = requested.getSort();
+            this.reader = reader;
+            this.mapper = mapper;
+            this.rowsInPage =
+                    (int) Math.max(0L, Math.min((long) pageSize, totalRows - this.pageOffset));
+        }
+
+        @Override
+        public int size() {
+            return rowsInPage;
+        }
+
+        @Override
+        public D get(int index) {
+            Objects.checkIndex(index, rowsInPage);
+            D value = valueAt(index);
+            if (value == null) {
+                throw new IndexOutOfBoundsException("Row " + index
+                        + " of the requested page is no longer present.");
+            }
+            return value;
+        }
+
+        @Override
+        public Iterator<D> iterator() {
+            return new Iterator<>() {
+                private int cursor;
+                private D readAhead;
+
+                @Override
+                public boolean hasNext() {
+                    if (readAhead == null && cursor < rowsInPage) {
+                        readAhead = valueAt(cursor);
+                    }
+                    return readAhead != null;
+                }
+
+                @Override
+                public D next() {
+                    if (!hasNext()) {
+                        throw new NoSuchElementException();
+                    }
+                    D next = readAhead;
+                    readAhead = null;
+                    cursor++;
+                    return next;
+                }
+            };
+        }
+
+        private D valueAt(int index) {
+            long absoluteRow = pageOffset + index;
+            long windowIndex = absoluteRow / windowRows;
+            if (windowIndex * (long) windowRows > Integer.MAX_VALUE) {
+                return null;
+            }
+            if (windowIndex != heldWindowIndex) {
+                List<E> read = reader.apply(PageRequest.of((int) windowIndex, windowRows, sort));
+                heldWindow = read.isEmpty() ? List.of() : List.copyOf(mapper.apply(read));
+                heldWindowIndex = windowIndex;
+            }
+            int positionInWindow = (int) (absoluteRow % windowRows);
+            return positionInWindow < heldWindow.size() ? heldWindow.get(positionInWindow) : null;
+        }
     }
 
 }

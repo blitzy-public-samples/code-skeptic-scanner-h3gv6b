@@ -9,12 +9,22 @@ import java.util.Objects;
  * fixed by an explicit {@link JsonProperty} and snake_case, with both identifiers typed as strings —
  * DL-022, DL-023.
  *
- * <p>Null policy — DL-080, DL-081. {@code backend/app/schema/response.py:L5-9} declares all five fields
- * required and none {@code Optional}, so the canonical constructor rejects a {@code null} for every
- * component. Being the wire form of a stored row, the {@code id} rejection additionally excludes an
- * unstored value: {@code service.LlmService} returns generated text, and only after persistence assigns
- * the identifier does {@code service.mapper.ResponseMapper} read the row and construct this record. The
- * {@code responses} columns stay nullable.
+ * <p>Null policy — see docs/DECISION_LOG.md DL-080 and DL-081. Every {@code responses} column except
+ * the primary key is nullable, and this record carries a {@code null} column value to the wire as
+ * JSON {@code null}, which is what {@code response.to_dict()} at
+ * {@code backend/app/api/responses.py:L18,L29} produced for a column holding {@code None}. The
+ * canonical constructor therefore rejects exactly one component, {@code id}, which is both the
+ * primary key a stored row always carries and the marker of an unstored value:
+ * {@code service.LlmService} returns generated text, and only after persistence assigns the
+ * identifier does {@code service.mapper.ResponseMapper} read the row and construct this record.
+ * {@code content}, {@code generatedAt}, {@code isApproved} and {@code tweetId} may each be
+ * {@code null}. A {@code null} {@code isApproved} is the state {@code GET /analytics/summary} counts
+ * as pending — see docs/DECISION_LOG.md DL-041. The {@code responses} columns stay nullable — see
+ * docs/DECISION_LOG.md DL-080.
+ *
+ * <p>A row that carries no approval flag and no association renders the same shape with those two
+ * members as JSON {@code null}:
+ * {@code {"id":"12","content":"...","generated_at":"2026-01-31T09:15:00","is_approved":null,"tweet_id":null}}
  *
  * <p>{@code is_approved} carries the approval flag a human reads
  * ({@code backend/app/db/models.py:L26}).
@@ -23,15 +33,19 @@ import java.util.Objects;
  * {"id":"12","content":"...","generated_at":"2026-01-31T09:15:00","is_approved":false,"tweet_id":"7"}
  * }</pre>
  *
- * @param id          {@code backend/app/schema/response.py:L5}
- * @param content     {@code :L6}
- * @param generatedAt {@code :L7}
- * @param isApproved  {@code :L8}
- * @param tweetId     {@code :L9}
+ * @param id          backend/app/schema/response.py:L5 - {@code id: str}; never {@code null}
+ * @param content     backend/app/schema/response.py:L6 - {@code content: str}; may be {@code null}
+ *                    when the column holds none
+ * @param generatedAt backend/app/schema/response.py:L7 - {@code generated_at: datetime}; may be
+ *                    {@code null} when the column holds none
+ * @param isApproved  backend/app/schema/response.py:L8 - {@code is_approved: bool}; may be
+ *                    {@code null}, which is the pending state of DL-041
+ * @param tweetId     backend/app/schema/response.py:L9 - {@code tweet_id: str}; may be {@code null}
+ *                    when the row carries no association
  */
 // Ported from backend/app/schema/response.py:L4-9 (faithful port) — see docs/DECISION_LOG.md
-// The required-versus-optional contract of AAP TR-6 and the stored-row identifier invariant are
-// recorded as DL-080 and DL-081 — see docs/DECISION_LOG.md
+// The null policy that carries an empty column to the wire as JSON null, and the stored-row
+// identifier invariant, are recorded as DL-080 and DL-081 — see docs/DECISION_LOG.md
 public record ResponseDto(
         @JsonProperty("id") String id,
         @JsonProperty("content") String content,
@@ -40,22 +54,18 @@ public record ResponseDto(
         @JsonProperty("tweet_id") String tweetId) {
 
     /**
-     * Rejects a {@code null} value for any of the five components the source schema declares
-     * required, which for {@code id} also rejects an unstored response carrying no assigned
+     * Rejects a {@code null} identifier, which is an unstored response carrying no assigned
      * identifier.
      *
-     * <p>No component is defaulted, trimmed or substituted.
+     * <p>{@code id} is the only rejected component; every other component is carried exactly as the
+     * column holds it, {@code null} included, and none is defaulted, trimmed or substituted — see
+     * docs/DECISION_LOG.md DL-080.
      *
-     * @throws NullPointerException if {@code id}, {@code content}, {@code generatedAt},
-     *     {@code isApproved} or {@code tweetId} is {@code null}
+     * @throws NullPointerException if {@code id} is {@code null}
      */
-    // The required fields of backend/app/schema/response.py:L5-9 — AAP TR-6, DL-080 — see
-    // docs/DECISION_LOG.md
+    // The wire form of a stored row, whose nullable columns carry through as JSON null — DL-080,
+    // DL-081 — see docs/DECISION_LOG.md
     public ResponseDto {
         Objects.requireNonNull(id, "id must not be null.");
-        Objects.requireNonNull(content, "content must not be null.");
-        Objects.requireNonNull(generatedAt, "generated_at must not be null.");
-        Objects.requireNonNull(isApproved, "is_approved must not be null.");
-        Objects.requireNonNull(tweetId, "tweet_id must not be null.");
     }
 }

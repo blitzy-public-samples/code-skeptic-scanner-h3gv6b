@@ -12,6 +12,21 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * {@link JpaRepository} surface alone, so {@code GET /settings} renders the unpaged
  * {@code findAll(Sort)} collection, sorted on the {@code key} property — DL-039.
  *
+ * <p>Consumers use the operations inherited from {@link JpaRepository}:
+ *
+ * <ul>
+ *   <li>{@code findAll(Sort)} returns every row as a {@code List<Setting>} in the requested
+ *       order, the unpaged collection rendered by {@code GET /settings}. The caller asks for
+ *       {@code key} ascending so the array is identical on every vendor — see
+ *       docs/DECISION_LOG.md DL-039.</li>
+ *   <li>{@code findById(String)} returns one row wrapped in an {@link java.util.Optional}, and an
+ *       empty {@code Optional} denotes a key that is not present.</li>
+ *   <li>{@code existsById(String)} reports the presence of a key without loading the row.</li>
+ *   <li>{@code save(Setting)} inserts a row whose key is absent and updates a row whose key is
+ *       already present.</li>
+ *   <li>{@code count()} returns the number of rows.</li>
+ * </ul>
+ *
  * <p>This interface declares no statement of its own, so the quoted {@code settings."key"} and
  * {@code settings."value"} column names of DL-061 are rendered by the persistence provider alone —
  * the {@code order by} clause of that sorted read included — and no native statement names them.

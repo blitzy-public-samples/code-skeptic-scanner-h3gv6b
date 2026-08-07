@@ -3,6 +3,7 @@ package com.codeskeptic.scanner.service;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -12,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import com.google.api.gax.retrying.RetrySettings;
+import com.google.api.gax.rpc.StatusCode;
 import com.google.api.gax.rpc.UnaryCallSettings;
 import com.google.cloud.language.v1.AnalyzeSentimentRequest;
 import com.google.cloud.language.v1.AnalyzeSentimentResponse;
@@ -64,15 +66,40 @@ public class SentimentAnalysisService {
 
     /**
      * Deadline applied to a single {@code AnalyzeSentiment} RPC attempt. An attempt that has not
-     * completed within this window fails with {@code DEADLINE_EXCEEDED}.
+     * completed within this window fails with {@code DEADLINE_EXCEEDED}. It leaves room for a first
+     * call's channel, handshake and credential work while still failing an unreachable provider
+     * quickly — DL-298 — see docs/DECISION_LOG.md.
      */
-    private static final Duration RPC_TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration RPC_TIMEOUT = Duration.ofSeconds(5);
 
     /**
      * Ceiling on the wall-clock time one {@link #analyzeSentiment(String)} call may occupy its
      * calling thread, retries included. No further attempt starts once this window has elapsed.
+     * Together with {@link #MAX_ATTEMPTS} and {@link #RETRYABLE_CODES} this is what bounds how long
+     * a degraded provider can hold a request thread — DL-298 — see docs/DECISION_LOG.md.
      */
-    private static final Duration TOTAL_TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration TOTAL_TIMEOUT = Duration.ofSeconds(10);
+
+    /**
+     * Attempts one {@link #analyzeSentiment(String)} call may make, the first included. The generated
+     * client sets no limit and relies on {@link #TOTAL_TIMEOUT} alone; stating the limit as well makes
+     * the bound explicit and stops a fast-failing provider from being re-attempted repeatedly inside
+     * that window — DL-298 — see docs/DECISION_LOG.md.
+     */
+    private static final int MAX_ATTEMPTS = 2;
+
+    /**
+     * Status codes one {@link #analyzeSentiment(String)} call re-attempts.
+     *
+     * <p>The generated client re-attempts {@code UNAVAILABLE} and {@code DEADLINE_EXCEEDED}. Only
+     * {@code UNAVAILABLE} is kept: it reports a provider that answered and declined, which a second
+     * attempt can plausibly clear. {@code DEADLINE_EXCEEDED} reports that this call already spent its
+     * whole attempt deadline, so re-attempting it spends another one on the same unreachable provider
+     * while a request thread waits — which is precisely how one call came to occupy a worker for the
+     * best part of half a minute — DL-298 — see docs/DECISION_LOG.md.
+     */
+    private static final Set<StatusCode.Code> RETRYABLE_CODES =
+            Set.of(StatusCode.Code.UNAVAILABLE);
 
     /**
      * Seconds {@link #closeLanguageClient()} waits for in-flight calls to return before releasing
@@ -129,9 +156,12 @@ public class SentimentAnalysisService {
      * reported as a failure and is never returned, and a finite score outside that range is returned
      * unchanged — DL-233.
      *
-     * <p>The call is bounded: one RPC attempt may take at most {@link #RPC_TIMEOUT} and the call as a
-     * whole at most {@link #TOTAL_TIMEOUT}, retries included; past that the call fails, the calling
-     * thread is released, and the failure is logged at {@code ERROR} and rethrown unchanged.
+     * <p>The call is bounded. One RPC attempt may take at most {@link #RPC_TIMEOUT}, the call as a
+     * whole at most {@link #TOTAL_TIMEOUT}, and it may make at most {@link #MAX_ATTEMPTS} attempts, of
+     * which a second is made only for {@link #RETRYABLE_CODES}; past those bounds the call fails and
+     * the calling thread is released. An unreachable provider therefore holds the thread for about one
+     * attempt deadline rather than for the whole window — DL-298. Such a failure is logged at
+     * {@code ERROR} and rethrown unchanged like any other.
      *
      * <p>The read lock of {@link #lifecycleLock} is held for the whole acquisition-and-call sequence,
      * so the client is not released mid-call. The destroyed flag is tested before the read lock is
@@ -280,10 +310,11 @@ public class SentimentAnalysisService {
      *
      * <p>The generated client defaults every {@code AnalyzeSentiment} timeout — initial RPC, maximum
      * RPC and total — to ten minutes and sets no attempt limit. This method replaces those three
-     * values with {@link #RPC_TIMEOUT} per attempt and {@link #TOTAL_TIMEOUT} across all attempts.
-     * Every other setting is left as the client declares it: the retryable status codes stay
-     * {@code DEADLINE_EXCEEDED} and {@code UNAVAILABLE} and the retry delays are unchanged. Only
-     * {@code AnalyzeSentiment} is narrowed; the settings of every other operation are untouched.
+     * values with {@link #RPC_TIMEOUT} per attempt and {@link #TOTAL_TIMEOUT} across all attempts,
+     * caps the attempts at {@link #MAX_ATTEMPTS}, and narrows the retryable status codes to
+     * {@link #RETRYABLE_CODES} so a deadline this call already exceeded is not spent again — DL-298.
+     * The retry delays are left as the client declares them. Only {@code AnalyzeSentiment} is
+     * narrowed; the settings of every other operation are untouched.
      *
      * <p>No credential is resolved here; that happens inside
      * {@link LanguageServiceClient#create(LanguageServiceSettings)}.
@@ -302,13 +333,18 @@ public class SentimentAnalysisService {
                 .setInitialRpcTimeoutDuration(RPC_TIMEOUT)
                 .setMaxRpcTimeoutDuration(RPC_TIMEOUT)
                 .setTotalTimeoutDuration(TOTAL_TIMEOUT)
+                .setMaxAttempts(MAX_ATTEMPTS)
                 .build();
         callSettings.setRetrySettings(boundedRetrySettings);
+        callSettings.setRetryableCodes(RETRYABLE_CODES);
 
         log.info(
-                "Natural Language client bounded to {} per AnalyzeSentiment attempt and {} in total",
+                "Natural Language client bounded to {} per AnalyzeSentiment attempt, {} in total, "
+                        + "at most {} attempt(s), re-attempting {}",
                 RPC_TIMEOUT,
-                TOTAL_TIMEOUT);
+                TOTAL_TIMEOUT,
+                MAX_ATTEMPTS,
+                RETRYABLE_CODES);
 
         return builder.build();
     }

@@ -78,6 +78,14 @@ import com.fasterxml.jackson.databind.JsonNode;
  * place of the {@code TwitterService()} and {@code SentimentAnalysis()} instantiation performed at
  * {@code backend/app/tasks/tweet_monitoring.py:L40-41}. This class is thread-safe and carries no
  * mutable state.
+ *
+ * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-049, DL-052,
+ * DL-080, DL-194, DL-195, DL-197, DL-199 and DL-302; construct-level provenance is recorded in
+ * {@code docs/TRACEABILITY_MATRIX.md}.
+ *
+ * @see TwitterService#meetsPopularityThreshold(Integer)
+ * @see SentimentAnalysisService#calculateDoubtRating(double)
+ * @see ResponseService#generateResponseIfAbsent(String)
  */
 @Component
 public class TweetStreamListener {
@@ -210,7 +218,10 @@ public class TweetStreamListener {
      * <p>Every handled outcome reports {@code true}, matching
      * {@code backend/app/tasks/tweet_monitoring.py:L34}. Invalid payloads and failures before storage
      * are logged and skipped. Mirror and generation failures are logged after the stored row commits.
-     * A persistence failure propagates to the caller.
+     * A persistence failure is logged and the record is skipped as well, so no single record the
+     * database refuses can leave this method by any path other than {@code true} — see
+     * docs/DECISION_LOG.md DL-302. The refusal a stored value's width can produce is the one named in
+     * docs/DECISION_LOG.md DL-068.
      *
      * @param payload one record of the filtered stream, may be {@code null}
      * @return {@code true} to continue streaming, {@code false} to stop, as documented at
@@ -323,7 +334,20 @@ public class TweetStreamListener {
         tweet.setAiToolsMentioned(readRuleTags(payload.path(KEY_MATCHING_RULES)));
 
         // No de-duplication — see docs/DECISION_LOG.md DL-049
-        Tweet saved = tweetRepository.save(tweet);
+        // A record the database refuses cannot be stored, so it is logged and skipped and the caller
+        // is told to keep streaming; nothing is mirrored and no reply is generated for it — DL-302 —
+        // see docs/DECISION_LOG.md
+        Tweet saved;
+        try {
+            saved = tweetRepository.save(tweet);
+        } catch (RuntimeException failure) {
+            // The record itself is never written to the log; its type and the count of characters
+            // the row would have carried are — DL-052, DL-197 — see docs/DECISION_LOG.md
+            log.warn("Skipping a stream record the database refused with {}: it carries {} content "
+                    + "character(s) and no row is stored for it.",
+                    failure.getClass().getSimpleName(), text.length());
+            return true;
+        }
         log.info("Stored ingested tweet row {} with like count {}.", saved.getId(), likeCount);
 
         mirrorToNotion(saved);
@@ -397,7 +421,7 @@ public class TweetStreamListener {
      * {@code DEBUG} and is not rethrown; the stored row is unaffected. This method writes no
      * {@code ERROR} record; the layer that raised the failure writes the single one —
      * {@code service.LlmService} for a provider failure, {@code service.ResponseService} for a
-     * repository or transaction failure — DL-252.
+     * repository or transaction failure — DL-197.
      *
      * @param saved the stored row, never {@code null}
      */
@@ -418,7 +442,7 @@ public class TweetStreamListener {
             log.info("Triggered response generation for tweet row {}; stored response {}.",
                     tweetId, generated.id());
         } catch (RuntimeException failure) {
-            // The failing layer owns the ERROR record — DL-252 — see docs/DECISION_LOG.md
+            // The failing layer owns the ERROR record — DL-197 — see docs/DECISION_LOG.md
             log.debug("Triggering response generation for tweet row {} failed with {}; ingestion "
                     + "continues and the stored row carries no reply.",
                     tweetId, failure.getClass().getSimpleName());
@@ -432,9 +456,11 @@ public class TweetStreamListener {
      *
      * <p>This is the same mirror step {@code task/ResponseGenerationScheduler} performs after its own
      * generation, so a reply reaches the Notion {@code Response} property by whichever path generated
-     * it. An absent reply is recorded at {@code WARN} and not mirrored; a reply that is present
-     * carries content, since {@code dto/ResponseDto} rejects a {@code null} value for it — see
-     * docs/DECISION_LOG.md DL-080.
+     * it. An absent reply is recorded at {@code WARN} and not mirrored; a reply that is present may
+     * carry a {@code null} content, because {@code responses.content} is nullable and
+     * {@code dto/ResponseDto} carries an empty column through as {@code null}, and
+     * {@link NotionService#updateTweetResponse(String, String)} writes such a reply as an empty
+     * string — see docs/DECISION_LOG.md DL-080.
      *
      * <p>A failure raised by the mirror write is recorded at {@code ERROR} and is not rethrown; the
      * stored reply is unaffected. The mirror is not re-attempted — see docs/DECISION_LOG.md DL-194.
@@ -452,8 +478,15 @@ public class TweetStreamListener {
                     tweetId);
             return;
         }
-        // dto/ResponseDto rejects a null content — DL-080 — see docs/DECISION_LOG.md
+        // responses.content is nullable and dto/ResponseDto carries an empty column through as null;
+        // a reply carrying no content is named and the mirror is skipped — DL-080 — see
+        // docs/DECISION_LOG.md
         String content = generated.content();
+        if (content == null) {
+            log.warn("The stored response {} for tweet row {} carries no content; the Notion mirror "
+                    + "is skipped.", generated.id(), tweetId);
+            return;
+        }
         try {
             notionService.updateTweetResponse(tweetId, content);
         } catch (RuntimeException failure) {

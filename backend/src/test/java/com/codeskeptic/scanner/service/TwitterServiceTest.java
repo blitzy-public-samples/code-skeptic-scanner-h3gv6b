@@ -22,6 +22,7 @@ import java.lang.reflect.Modifier;
 import java.lang.reflect.RecordComponent;
 import java.time.LocalDateTime;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
@@ -691,8 +692,10 @@ class TwitterServiceTest {
                 .hasMessage(TWEET_NOT_FOUND);
     }
 
+    // Unscorable text is refused before the provider call — DL-036, DL-080 — see
+    // docs/DECISION_LOG.md
     @Test
-    @DisplayName("rejects a row whose content column holds nothing, as the wire form does")
+    @DisplayName("rejects a row whose content column holds nothing, since there is no text to score")
     void rejectsARowWhoseContentColumnHoldsNothing() {
         when(tweetRepository.findAnalysisSubjectById(TWEET_ID))
                 .thenReturn(Optional.of(analysisSubject(TWEET_ID, null)));
@@ -768,10 +771,12 @@ class TwitterServiceTest {
     })
     @DisplayName("queries a page whose offset the paged query can express")
     void queriesAPageWhoseOffsetThePagedQueryCanExpress(int page, int perPage) {
-        stubEveryWindowRead(3L);
+        // Every one of these pages holds rows, so reaching its first value issues a window statement.
+        stubEveryWindowRead(Integer.MAX_VALUE + 10L);
 
         PaginatedTweetsDto envelope =
                 serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(page, perPage);
+        reachFirstValue(envelope.tweets());
 
         assertThat(pageRequestsIssued()).as("windows the page read asked for")
                 .isNotEmpty()
@@ -817,22 +822,24 @@ class TwitterServiceTest {
         assertThat(envelope.pagination().totalPages()).isZero();
     }
 
-    // No page size is reduced — DL-217 — see docs/DECISION_LOG.md
-    @ParameterizedTest(name = "a per_page of {0} is served unreduced")
-    @ValueSource(ints = {100, 101, 500, 1_000, 1_001, 10_000, Integer.MAX_VALUE})
-    @DisplayName("serves every per_page it is given without reducing it")
-    void servesEveryPerPageWithoutReducingIt(int perPage) {
-        stubEveryWindowRead(0L);
+    @ParameterizedTest(name = "a per_page of {0} is restated unreduced and read in bounded windows")
+    @ValueSource(ints = {100, 101, 500, 10_000, Integer.MAX_VALUE})
+    @DisplayName("applies no upper bound to per_page and reads it in bounded windows")
+    void appliesNoUpperBoundToPerPage(int perPage) {
+        stubEveryWindowRead(1L);
 
         PaginatedTweetsDto rendered =
                 serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+        reachFirstValue(rendered.tweets());
 
         assertThat(rendered.pagination().perPage())
                 .as("per_page the envelope restates").isEqualTo(perPage);
         assertThat(pageRequestsIssued()).as("windows the page read asked for")
                 .isNotEmpty()
                 .allSatisfy(window -> assertThat(window.getPageSize())
-                        .as("rows the statement was asked for").isEqualTo(perPage));
+                        .as("rows the statement was asked for")
+                        .isEqualTo(Math.min(perPage, declaredChunkBound())));
+        assertThatEveryWindowIsBounded();
     }
 
     @Test
@@ -916,10 +923,79 @@ class TwitterServiceTest {
         assertThat(rendered.pagination().totalPages()).as("total_pages the envelope reports").isZero();
     }
 
-    // One paged query answers a page of any size — DL-217 — see docs/DECISION_LOG.md
+    // One page larger than the chunk bound is read as consecutive bounded chunks — DL-249 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reads a page larger than the chunk bound as consecutive chunks that cover it once")
+    void readsAPageLargerThanTheChunkBoundAsConsecutiveChunks() {
+        int chunkBound = declaredChunkBound();
+        int perPage = chunkBound * 2;
+        List<Tweet> firstChunk = rowsNumbered(chunkBound);
+        List<Tweet> secondChunk = rowsNumbered(chunkBound / 2);
+        when(tweetRepository.findChunk(any(Pageable.class)))
+                .thenReturn(firstChunk)
+                .thenReturn(secondChunk);
+        when(tweetRepository.count()).thenReturn((long) chunkBound + secondChunk.size());
+        when(tweetMapper.toDtoList(anyList()))
+                .thenAnswer(invocation -> dtosFor(invocation.getArgument(0)));
+
+        PaginatedTweetsDto rendered =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+        // The page is a chunked view, so walking it is what issues the window statements — DL-297
+        List<TweetDto> walked = List.copyOf(rendered.tweets());
+
+        assertThat(walked).as("rows the page rendered")
+                .hasSize(chunkBound + secondChunk.size());
+        assertThat(rendered.pagination().perPage())
+                .as("per_page the envelope restates").isEqualTo(perPage);
+        assertThat(rendered.pagination().total()).as("total the envelope reports")
+                .isEqualTo((long) chunkBound + secondChunk.size());
+        assertThat(pageRequestsIssued()).as("windows the page read asked for").hasSize(2);
+        assertThat(pageRequestsIssued()).extracting(Pageable::getOffset)
+                .as("first row of each window").containsExactly(0L, (long) chunkBound);
+        verify(tweetMapper, times(2)).toDtoList(anyList());
+        verify(tweetRepository, never()).findAll(any(Pageable.class));
+        assertThatEveryWindowIsBounded();
+    }
+
+    // One chunk of a large page is resident at a time — DL-297 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("defers every window statement of a large page until the page is walked, holding "
+            + "one chunk at a time")
+    void defersEveryWindowStatementOfALargePageUntilItIsWalked() {
+        int chunkBound = declaredChunkBound();
+        int perPage = chunkBound * 4;
+        when(tweetRepository.findChunk(any(Pageable.class)))
+                .thenAnswer(invocation -> rowsNumbered(
+                        ((Pageable) invocation.getArgument(0)).getPageSize()));
+        when(tweetRepository.count()).thenReturn((long) perPage);
+        when(tweetMapper.toDtoList(anyList()))
+                .thenAnswer(invocation -> dtosFor(invocation.getArgument(0)));
+
+        PaginatedTweetsDto rendered =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+
+        assertThat(rendered.tweets().size()).as("rows the page reports").isEqualTo(perPage);
+        verify(tweetRepository, never()).findChunk(any(Pageable.class));
+        verify(tweetMapper, never()).toDtoList(anyList());
+
+        int walked = 0;
+        for (TweetDto ignored : rendered.tweets()) {
+            walked++;
+            // Only the windows covering the rows already walked have been read.
+            verify(tweetMapper, times((walked + chunkBound - 1) / chunkBound)).toDtoList(anyList());
+        }
+
+        assertThat(walked).as("rows the walk produced").isEqualTo(perPage);
+        assertThat(pageRequestsIssued()).as("windows the walk asked for").hasSize(4);
+        assertThatEveryWindowIsBounded();
+    }
+
+    // A page at or below the chunk bound is read by one statement — DL-249 — see
+    // docs/DECISION_LOG.md
     @ParameterizedTest(name = "a per_page of {0} is read by the single page statement")
-    @ValueSource(ints = {1, 10, 499, 500, 1_000, 5_000})
-    @DisplayName("reads a page of any size with one page statement and no row count")
+    @ValueSource(ints = {1, 10, 499, 500})
+    @DisplayName("reads a page at or below the chunk bound with one page statement and no row count")
     void readsAPageOfAnySizeWithOnePageStatement(int perPage) {
         when(tweetRepository.findAll(any(Pageable.class)))
                 .thenAnswer(invocation -> new PageImpl<>(List.of(), invocation.getArgument(0), 0L));
@@ -948,15 +1024,26 @@ class TwitterServiceTest {
                         .as("sort of one window").isEqualTo(Sort.by(Sort.Direction.ASC, "id")));
     }
 
-    // No upper bound is applied to per_page — DL-217 — see docs/DECISION_LOG.md
-    @ParameterizedTest(name = "per_page {0} reads a page of the same size")
-    @ValueSource(ints = {99, 100, 101, 1_000, 1_001, Integer.MAX_VALUE})
-    @DisplayName("reads every per_page unreduced")
-    void readsEveryPerPageUnreduced(int perPage) {
-        stubEveryWindowRead(0L);
+    // -----------------------------------------------------------------------
+    // getPaginatedTweets(int, int) — the envelope
+    // -----------------------------------------------------------------------
+
+    // No upper bound is applied to per_page — IR9 — see docs/DECISION_LOG.md DL-217
+    @ParameterizedTest(name = "per_page {0} reads page size {1}")
+    @CsvSource({
+            "99,99",
+            "100,100",
+            "101,101",
+            "1000,1000",
+            "2147483647,2147483647"
+    })
+    @DisplayName("reads a per_page above the former upper bound unreduced")
+    void readsAPerPageAboveTheUpperBoundAsTheUpperBound(int perPage, int expectedSize) {
+        stubEveryWindowRead(1L);
 
         PaginatedTweetsDto rendered =
                 serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+        reachFirstValue(rendered.tweets());
 
         assertThat(rendered.pagination().perPage())
                 .as("per_page the envelope restates").isEqualTo(perPage);
@@ -1081,12 +1168,13 @@ class TwitterServiceTest {
     // backend/app/api/tweets.py:L12-13 declares a default for an absent parameter; no maximum is
     // declared — DL-217 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("serves the page size a request names even when it is very large")
-    void servesThePageSizeARequestNamesEvenWhenItIsVeryLarge() {
-        stubEveryWindowRead(0L);
+    @DisplayName("serves the page size asked for, however large, applying no upper bound")
+    void requestsThePageSizeAskedForHoweverLarge() {
+        stubEveryWindowRead(1L);
 
         PaginatedTweetsDto rendered =
                 serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, 99999);
+        reachFirstValue(rendered.tweets());
 
         assertThat(rendered.pagination().page()).as("page the envelope restates").isEqualTo(1);
         assertThat(rendered.pagination().perPage()).as("per_page the envelope restates")
@@ -1096,7 +1184,28 @@ class TwitterServiceTest {
                 .allSatisfy(window -> assertThat(window.getOffset()).isZero());
     }
 
-    // The page size passed through to the paged query — DL-217 — see docs/DECISION_LOG.md
+    // No upper bound is applied to per_page — DL-217 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "a per_page of {0} reads a page of size {1}")
+    @CsvSource({
+            "99,99",
+            "100,100",
+            "101,101",
+            "250,250",
+            "2147483647,2147483647"
+    })
+    @DisplayName("passes the page size through with no upper bound")
+    void passesThePageSizeThroughWithNoUpperBound(int perPage, int expectedSize) {
+        stubEveryWindowRead(1L);
+
+        PaginatedTweetsDto rendered =
+                serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+        reachFirstValue(rendered.tweets());
+
+        assertThat(rendered.pagination().perPage()).isEqualTo(expectedSize);
+        assertThatEveryWindowIsBounded();
+    }
+
+    // No upper bound is applied to per_page — DL-217 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("reports the supplied page size in the pagination block it renders")
     void reportsTheSuppliedPageSizeInThePaginationBlockItRenders() {
@@ -1110,15 +1219,16 @@ class TwitterServiceTest {
         assertThat(rendered.pagination().perPage()).isEqualTo(500);
     }
 
-    // The page size the route serves for a requested one — DL-217 — see docs/DECISION_LOG.md
-    @ParameterizedTest(name = "per_page {0} is served as itself")
-    @ValueSource(ints = {1, 99, 100, 101, 1_000, 1_001, 10_000, Integer.MAX_VALUE})
-    @DisplayName("restates the page size it serves, which is the one the request named")
-    void restatesThePageSizeItServes(int perPage) {
-        stubEveryWindowRead(0L);
+    // The source applied no upper bound to per_page at backend/app/api/tweets.py:L13 — DL-123
+    @ParameterizedTest(name = "per_page {0} is requested as {0}")
+    @ValueSource(ints = {1, 99, 100, 101, 1_000, 10_000, Integer.MAX_VALUE})
+    @DisplayName("restates the page size it was given however large it is")
+    void requestsThePageSizeItWasGivenHoweverLargeItIs(int perPage) {
+        stubEveryWindowRead(1L);
 
         PaginatedTweetsDto rendered =
                 serviceWithConfiguredThreshold(CONFIGURED_THRESHOLD).getPaginatedTweets(1, perPage);
+        reachFirstValue(rendered.tweets());
 
         assertThat(rendered.pagination().perPage()).isEqualTo(perPage);
     }
@@ -1234,8 +1344,25 @@ class TwitterServiceTest {
     private void stubEveryWindowRead(long total) {
         lenient().when(tweetRepository.findAll(any(Pageable.class)))
                 .thenAnswer(invocation -> new PageImpl<>(List.of(), invocation.getArgument(0), total));
+        lenient().when(tweetRepository.findChunk(any(Pageable.class))).thenAnswer(invocation -> {
+            Pageable window = invocation.getArgument(0);
+            long remaining = total - window.getOffset();
+            return rowsNumbered((int) Math.max(0L, Math.min(window.getPageSize(), remaining)));
+        });
         lenient().when(tweetRepository.count()).thenReturn(total);
-        lenient().when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
+        lenient().when(tweetMapper.toDtoList(anyList()))
+                .thenAnswer(invocation -> dtosFor(invocation.getArgument(0)));
+    }
+
+    /**
+     * Reaches the first value of a rendered page, which is what issues the first window statement of a
+     * page read in chunks — DL-297.
+     *
+     * @param page the rendered page, never {@code null}
+     */
+    private static void reachFirstValue(List<?> page) {
+        assertThat(page.iterator()).as("iterator over the rendered page").isNotNull();
+        page.iterator().hasNext();
     }
 
     private List<Pageable> pageRequestsIssued() {
@@ -1265,4 +1392,58 @@ class TwitterServiceTest {
         return new ScannerProperties(
                 null, popularityThreshold, 0L, null, null, null, null, null, null, null, null);
     }
+
+    /**
+     * Asserts that no statement was asked for more rows than the declared chunk bound — DL-249.
+     */
+    private void assertThatEveryWindowIsBounded() {
+        assertThat(pageRequestsIssued()).as("windows the page read asked for")
+                .isNotEmpty()
+                .allSatisfy(window -> assertThat(window.getPageSize())
+                        .as("rows one statement was asked for")
+                        .isLessThanOrEqualTo(declaredChunkBound()));
+    }
+
+    /**
+     * Reads the chunk bound the service declares, so these assertions and the service cannot drift.
+     *
+     * @return the value of the service's declared chunk bound
+     */
+    private static int declaredChunkBound() {
+        try {
+            Field bound = TwitterService.class.getDeclaredField("PAGE_FETCH_CHUNK_ROWS");
+            bound.setAccessible(true);
+            return (int) bound.get(null);
+        } catch (ReflectiveOperationException absent) {
+            throw new AssertionError("TwitterService must declare PAGE_FETCH_CHUNK_ROWS.", absent);
+        }
+    }
+
+    /**
+     * Builds the requested number of {@code tweets} rows carrying consecutive identifiers.
+     *
+     * @param rows the number of rows to build
+     * @return the rows
+     */
+    private static List<Tweet> rowsNumbered(int rows) {
+        List<Tweet> built = new ArrayList<>(rows);
+        for (int row = 1; row <= rows; row++) {
+            built.add(tweetWithIdentifier(row));
+        }
+        return List.copyOf(built);
+    }
+
+    /**
+     * Builds one wire form per supplied row, as the mapper does.
+     *
+     * @param rows the rows to render
+     * @return one wire form per row
+     */
+    private static List<TweetDto> dtosFor(List<Tweet> rows) {
+        return rows.stream()
+                .map(row -> new TweetDto(String.valueOf(row.getId()), "content", 1,
+                        LocalDateTime.of(2026, 1, 1, 12, 0), 5.0, List.of(), null, "42", List.of()))
+                .toList();
+    }
+
 }

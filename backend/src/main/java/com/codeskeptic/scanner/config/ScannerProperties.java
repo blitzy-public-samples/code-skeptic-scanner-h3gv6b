@@ -498,7 +498,8 @@ public record ScannerProperties(
      * <p>{@code maxStreamRules} is the number of rules the account tier accepts; the composed term
      * collection is truncated to it — DL-254. {@code streamIdleTimeoutSeconds} is the span without
      * any byte from the filtered-stream connection after which the connection is treated as dead —
-     * DL-256.
+     * DL-256. It is the only idle bound any component reads, and {@code scanner.twitter} declares
+     * none — DL-256.
      *
      * <p>This group carries no credential. Its {@code toString()} is the compiler-generated one.
      *
@@ -508,8 +509,8 @@ public record ScannerProperties(
      * @param maxStreamRules value of {@code scanner.ingestion.max-stream-rules}, default {@code 25};
      *     read as {@code 1} when the bound value is below {@code 1}
      * @param streamIdleTimeoutSeconds value of
-     *     {@code scanner.ingestion.stream-idle-timeout-seconds}, default {@code 60}; read as
-     *     {@code 1} when the bound value is below {@code 1}
+     *     {@code scanner.ingestion.stream-idle-timeout-seconds}, default {@code 60}; a value below
+     *     {@value #MINIMUM_STREAM_IDLE_TIMEOUT_SECONDS} seconds is refused rather than substituted
      */
     public record Ingestion(
 
@@ -527,31 +528,41 @@ public record ScannerProperties(
         private static final int MINIMUM_MAX_STREAM_RULES = 1;
 
         /**
-         * Smallest accepted value of {@code scanner.ingestion.stream-idle-timeout-seconds} — DL-256.
+         * Smallest accepted value of {@code scanner.ingestion.stream-idle-timeout-seconds}. It is one
+         * second above the keep-alive cadence X documents, so the bound cannot fall to or below the
+         * period the provider itself sends on — DL-256.
          */
-        private static final long MINIMUM_STREAM_IDLE_TIMEOUT_SECONDS = 1L;
+        static final long MINIMUM_STREAM_IDLE_TIMEOUT_SECONDS = 21L;
 
         /**
-         * Normalises the bound sequence into an unmodifiable copy and both bounds into usable values
-         * — DL-044, DL-254, DL-256.
+         * Normalises the bound sequence into an unmodifiable copy, normalises the rule bound and
+         * range-checks the idle bound — DL-044, DL-254, DL-256.
          *
          * <p>A {@code null} sequence becomes an empty list. A bound sequence is copied element by
          * element, the copy tolerates {@code null} elements, and a later change to the source
          * sequence leaves this record unchanged.
          *
          * <p>A rule bound below {@value #MINIMUM_MAX_STREAM_RULES} is read as
-         * {@value #MINIMUM_MAX_STREAM_RULES}, and an idle bound below
-         * {@value #MINIMUM_STREAM_IDLE_TIMEOUT_SECONDS} seconds as
-         * {@value #MINIMUM_STREAM_IDLE_TIMEOUT_SECONDS} seconds, so a misconfiguration cannot
-         * suppress the rule set or reconnect the stream continuously.
+         * {@value #MINIMUM_MAX_STREAM_RULES}, so a misconfiguration cannot suppress the rule set. An
+         * idle bound below {@value #MINIMUM_STREAM_IDLE_TIMEOUT_SECONDS} seconds is refused rather
+         * than substituted, so a value that would reconnect a healthy stream continuously fails at
+         * startup naming its key instead of taking silent effect.
+         *
+         * @throws IllegalStateException when the idle bound is below
+         *     {@value #MINIMUM_STREAM_IDLE_TIMEOUT_SECONDS} seconds
          */
         public Ingestion {
             streamBaseKeywords = (streamBaseKeywords == null)
                     ? List.of()
                     : Collections.unmodifiableList(new ArrayList<>(streamBaseKeywords));
             maxStreamRules = Math.max(maxStreamRules, MINIMUM_MAX_STREAM_RULES);
-            streamIdleTimeoutSeconds =
-                    Math.max(streamIdleTimeoutSeconds, MINIMUM_STREAM_IDLE_TIMEOUT_SECONDS);
+            if (streamIdleTimeoutSeconds < MINIMUM_STREAM_IDLE_TIMEOUT_SECONDS) {
+                throw new IllegalStateException(
+                        "scanner.ingestion.stream-idle-timeout-seconds must be at least "
+                                + MINIMUM_STREAM_IDLE_TIMEOUT_SECONDS + " seconds, which is one "
+                                + "second above the 20 second keep-alive cadence the X filtered "
+                                + "stream sends on; it is " + streamIdleTimeoutSeconds + ".");
+            }
         }
     }
 

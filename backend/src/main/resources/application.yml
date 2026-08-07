@@ -36,6 +36,11 @@ spring:
   # Net-new (no Python counterpart) — DL-294 — see docs/DECISION_LOG.md
   # Ceiling on the graceful drain configured by server.shutdown above. A request still in flight at
   # this bound is abandoned and shutdown proceeds, so a stuck request cannot hold the process open.
+  # It bounds the web layer only. Three further shutdown waits are code constants and are not
+  # affected by this value: the task scheduler awaits a running pass for 30s (DL-251), the OpenAI
+  # adapter awaits a completion in flight for 30s (DL-266) and the Notion transport awaits its
+  # requests for 10s (DL-264). Lowering this key therefore shortens the request drain, not the
+  # process's total shutdown time.
   lifecycle:
     timeout-per-shutdown-phase: ${SHUTDOWN_GRACE_PERIOD:30s}
   # spring.datasource.* — not read; the connection identity comes from scanner.database-url and the
@@ -59,6 +64,14 @@ spring:
 
 scanner:
   # Ported from backend/app/core/config.py:L9 and backend/app/db/database.py:L7 (faithful port) — DL-027 — see docs/DECISION_LOG.md
+  # Accepted schemes: postgresql, postgres, mysql, mariadb and h2, each translated to the JDBC URL of a
+  # driver this artifact carries at runtime scope — DL-071, DL-242. Credentials belong in the user-info
+  # component, as scheme://user:password@host/database: a value already in jdbc: form is passed through
+  # unchanged and there is no other way to supply them, since spring.datasource.username and .password
+  # are refused, so a jdbc: value serves only a database that authenticates the process itself —
+  # DL-064, DL-072. The server product must be PostgreSQL, MySQL or H2: a mariadb value translates onto
+  # the MySQL vendor as the agreed scheme table requires, and the connection is refused once the server
+  # reports MariaDB — DL-187.
   database-url: ${DATABASE_URL}
 
   # Ported from backend/app/core/config.py:L10 and backend/app/services/twitter_service.py:L43,L46 (faithful port) — see docs/DECISION_LOG.md
@@ -82,6 +95,9 @@ scanner:
     # Bounds the app-only token exchange and the stream-rules calls. The filtered-stream
     # subscription is not bounded by it. A value below 1 is read as 1 second.
     request-timeout-seconds: ${TWITTER_REQUEST_TIMEOUT_SECONDS:10}
+    # The filtered-stream idle bound is scanner.ingestion.stream-idle-timeout-seconds below, which is
+    # the only key TWITTER_STREAM_IDLE_TIMEOUT_SECONDS feeds — DL-256 — see
+    # docs/DECISION_LOG.md
 
   notion:
     # Ported from backend/app/core/config.py:L7 and backend/app/services/notion_service.py:L8 (faithful port) — see docs/DECISION_LOG.md
@@ -168,7 +184,13 @@ scanner:
       - GPT-4
     # Number of stream rules the account tier accepts — DL-254 — see docs/DECISION_LOG.md
     max-stream-rules: ${TWITTER_MAX_STREAM_RULES:25}
-    # Span without any byte from the stream after which the connection is treated as dead — DL-256
+    # Net-new (no Python counterpart) — DL-256 — see docs/DECISION_LOG.md
+    # Span without any byte from the filtered-stream connection after which the connection is treated
+    # as dead and reconnected. Any byte resets it, the keep-alive newline X sends periodically
+    # included. Accepted range: 21 seconds or greater, because the bound must exceed the 20 second
+    # keep-alive cadence X documents; a lower value is refused at startup naming this key rather than
+    # accepted, so it cannot reconnect a healthy stream continuously. This is the only property
+    # TWITTER_STREAM_IDLE_TIMEOUT_SECONDS feeds — DL-256.
     stream-idle-timeout-seconds: ${TWITTER_STREAM_IDLE_TIMEOUT_SECONDS:60}
 
   background:

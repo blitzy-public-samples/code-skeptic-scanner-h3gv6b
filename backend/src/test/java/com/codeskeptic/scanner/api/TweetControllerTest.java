@@ -2,6 +2,7 @@ package com.codeskeptic.scanner.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.isA;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
@@ -205,6 +206,45 @@ class TweetControllerTest {
         assertThat(bodyAsMap(result)).containsOnlyKeys(ENVELOPE_KEYS);
     }
 
+    // A row carrying no doubt rating is answered as part of its page rather than making the whole page
+    // unanswerable — DL-080 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("GET /tweets answers 200 with a null doubt_rating for a row that carries no rating, "
+            + "and answers the rated rows of the same page alongside it")
+    void listAnswers200WithANullDoubtRatingForARowThatCarriesNoRating() throws Exception {
+        when(twitterService.getPaginatedTweets(anyInt(), anyInt()))
+                .thenReturn(page(List.of(unanalysedRow(), row()), DEFAULT_PAGE, DEFAULT_PER_PAGE, 2L, 1));
+
+        MvcResult result = mockMvc.perform(get(LIST_ROUTE)
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tweets", hasSize(2)))
+                .andExpect(jsonPath("$.tweets[0].doubt_rating").value(nullValue()))
+                .andExpect(jsonPath("$.tweets[0].content").value(ROW_CONTENT))
+                .andExpect(jsonPath("$.tweets[0].like_count").value(ROW_LIKE_COUNT))
+                .andExpect(jsonPath("$.tweets[1].doubt_rating").value(ROW_DOUBT_RATING))
+                .andExpect(jsonPath("$.pagination.total").value(2))
+                .andReturn();
+
+        assertThat(bodyAsMap(result)).containsOnlyKeys(ENVELOPE_KEYS);
+    }
+
+    // The same row on the detail route — DL-080 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("GET /tweets/{tweetId} answers 200 with a null doubt_rating for a row that carries "
+            + "no rating")
+    void detailAnswers200WithANullDoubtRatingForARowThatCarriesNoRating() throws Exception {
+        when(twitterService.getTweet(TWEET_ID)).thenReturn(unanalysedRow());
+
+        mockMvc.perform(get(LIST_ROUTE + "/" + TWEET_ID)
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(TWEET_ID))
+                .andExpect(jsonPath("$.doubt_rating").value(nullValue()))
+                .andExpect(jsonPath("$.content").value(ROW_CONTENT))
+                .andExpect(jsonPath("$.user_id").value(ROW_USER_ID));
+    }
+
     // Wire spelling per_page — backend/app/api/tweets.py:L13 — DL-059 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("GET /tweets reads the page and size the per_page spelling carries")
@@ -353,6 +393,44 @@ class TweetControllerTest {
         assertThat(row).containsKey("quoted_tweet_id");
         assertThat(row.get("quoted_tweet_id")).isNull();
         assertThat(result.getResponse().getContentAsString()).contains("\"quoted_tweet_id\":null");
+    }
+
+    // A row stored but not yet analysed renders its rating as JSON null — DL-080 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("GET /tweets answers 200 and carries a doubt_rating member holding null for a row "
+            + "that has not been analysed")
+    void listAnswers200AndCarriesANullDoubtRatingForAnUnanalysedRow() throws Exception {
+        when(twitterService.getPaginatedTweets(anyInt(), anyInt()))
+                .thenReturn(page(List.of(unanalysedRow()), DEFAULT_PAGE, DEFAULT_PER_PAGE, 1L, 1));
+
+        MvcResult result = mockMvc.perform(get(LIST_ROUTE).header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tweets[0].id").value(TWEET_ID))
+                .andExpect(jsonPath("$.tweets[0].doubt_rating").doesNotExist())
+                .andReturn();
+
+        Map<String, Object> row = rowAt(bodyAsMap(result));
+        assertThat(row).containsKey("doubt_rating");
+        assertThat(row.get("doubt_rating")).isNull();
+        assertThat(result.getResponse().getContentAsString()).contains("\"doubt_rating\":null");
+    }
+
+    // A row stored but not yet analysed renders its rating as JSON null — DL-080 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("GET /tweets/{tweetId} answers 200 and carries a doubt_rating member holding null "
+            + "for a row that has not been analysed")
+    void detailAnswers200AndCarriesANullDoubtRatingForAnUnanalysedRow() throws Exception {
+        when(twitterService.getTweet(TWEET_ID)).thenReturn(unanalysedRow());
+
+        MvcResult result = mockMvc.perform(get(LIST_ROUTE + "/" + TWEET_ID)
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(TWEET_ID))
+                .andReturn();
+
+        assertThat(result.getResponse().getContentAsString()).contains("\"doubt_rating\":null");
     }
 
     @Test
@@ -837,6 +915,27 @@ class TweetControllerTest {
                 ROW_MEDIA, null, ROW_USER_ID, ROW_AI_TOOLS_MENTIONED);
     }
 
+    /**
+     * Builds the wire form of a {@code tweets} row that has been stored but not yet analysed, so its
+     * nullable {@code doubt_rating} column holds nothing — see docs/DECISION_LOG.md DL-080.
+     *
+     * @return the row, whose {@code doubt_rating} and {@code quoted_tweet_id} are both {@code null}
+     */
+    private static TweetDto unanalysedRow() {
+        return new TweetDto(TWEET_ID, ROW_CONTENT, ROW_LIKE_COUNT, ROW_CREATED_AT, null,
+                ROW_MEDIA, null, ROW_USER_ID, ROW_AI_TOOLS_MENTIONED);
+    }
+
+    /**
+     * Builds an envelope carrying the supplied rows and counters.
+     *
+     * @param rows       the rows the {@code tweets} member carries
+     * @param page       the 1-based page number the envelope reports
+     * @param perPage    the page size the envelope reports
+     * @param total      the matching row count the envelope reports
+     * @param totalPages the page count the envelope reports
+     * @return the envelope
+     */
     private static PaginatedTweetsDto page(List<TweetDto> rows, int page, int perPage, long total,
             int totalPages) {
         return new PaginatedTweetsDto(rows, new PaginationDto(page, perPage, total, totalPages));

@@ -10,6 +10,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -25,6 +26,7 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -41,6 +43,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationListener;
+import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.scheduling.annotation.Async;
@@ -112,6 +117,15 @@ class ResponseGenerationSchedulerTest {
 
     /** Candidate ceiling no case of this class reaches — DL-282. */
     private static final int UNREACHABLE_CEILING = 100_000;
+
+    /**
+     * Consecutive failures after which the pass sets a candidate aside instead of reaching the
+     * generator for it — DL-300 — see docs/DECISION_LOG.md.
+     */
+    private static final int CANDIDATE_FAILURE_LIMIT = 3;
+
+    /** Rows one candidate statement returns, mirroring {@code CANDIDATE_BATCH_ROWS} — DL-248. */
+    private static final int CANDIDATE_BATCH_ROWS = 100;
 
     @Mock
     private TweetRepository tweetRepository;
@@ -481,8 +495,8 @@ class ResponseGenerationSchedulerTest {
 
             assertThat(passSummary(recorded))
                     .isEqualTo("Response generation pass finished: 2 attempted, 2 succeeded "
-                            + "(1 stored without a Notion mirror), 0 skipped, 0 failed over "
-                            + "1 batch(es)");
+                            + "(1 stored without a Notion mirror), 0 skipped, 0 failed, 0 set aside "
+                            + "after 3 consecutive failures, over 1 batch(es)");
         } finally {
             detachAppender(recorded);
         }
@@ -507,8 +521,8 @@ class ResponseGenerationSchedulerTest {
 
             assertThat(passSummary(recorded))
                     .isEqualTo("Response generation pass finished: 1 attempted, 1 succeeded "
-                            + "(0 stored without a Notion mirror), 0 skipped, 0 failed over "
-                            + "1 batch(es)");
+                            + "(0 stored without a Notion mirror), 0 skipped, 0 failed, 0 set aside "
+                            + "after 3 consecutive failures, over 1 batch(es)");
         } finally {
             detachAppender(recorded);
         }
@@ -529,8 +543,8 @@ class ResponseGenerationSchedulerTest {
 
             assertThat(passSummary(recorded))
                     .isEqualTo("Response generation pass finished: 1 attempted, 0 succeeded "
-                            + "(0 stored without a Notion mirror), 1 skipped, 0 failed over "
-                            + "1 batch(es)");
+                            + "(0 stored without a Notion mirror), 1 skipped, 0 failed, 0 set aside "
+                            + "after 3 consecutive failures, over 1 batch(es)");
         } finally {
             detachAppender(recorded);
         }
@@ -538,15 +552,33 @@ class ResponseGenerationSchedulerTest {
         verifyNoInteractions(notionService);
     }
 
-    // dto/ResponseDto rejects a null content — DL-080 — see docs/DECISION_LOG.md
+    // dto/ResponseDto carries a null content, so a pass handed one counts the candidate as succeeded,
+    // reports a zero length and skips the mirror rather than failing — DL-080 — see
+    // docs/DECISION_LOG.md
     @Test
-    @DisplayName("cannot be handed a generated reply that carries no content")
-    void cannotBeHandedAGeneratedReplyThatCarriesNoContent() {
-        assertThatNullPointerException()
-                .isThrownBy(() -> reply(FIRST_REPLY_ID, null, FIRST_CANDIDATE_ID_TEXT))
-                .withMessage("content must not be null.");
+    @DisplayName("counts a generated reply that carries no content as stored and reports no length")
+    void countsAGeneratedReplyThatCarriesNoContentAsStored() {
+        Tweet only = candidate(FIRST_CANDIDATE_ID);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(List.of(only));
+        when(responseService.generateResponseIfAbsentFor(only))
+                .thenReturn(Optional.of(reply(FIRST_REPLY_ID, null, FIRST_CANDIDATE_ID_TEXT)));
 
-        verifyNoInteractions(tweetRepository, responseService, notionService);
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            scheduler.generatePendingResponses();
+
+            assertThat(passSummary(recorded))
+                    .isEqualTo("Response generation pass finished: 1 attempted, 1 succeeded "
+                            + "(0 stored without a Notion mirror), 0 skipped, 0 failed, 0 set aside "
+                            + "after 3 consecutive failures, over 1 batch(es)");
+            assertThat(recorded.list).as("the stored-reply record")
+                    .anySatisfy(event -> assertThat(event.getFormattedMessage())
+                            .contains("Stored response " + FIRST_REPLY_ID)
+                            .contains("(0 character(s))"));
+        } finally {
+            detachAppender(recorded);
+        }
     }
 
     // One pass drains the whole backlog in consecutive bounded batches — DL-248 — see
@@ -693,6 +725,387 @@ class ResponseGenerationSchedulerTest {
                 .detachAppender(appender);
     }
 
+    // -------------------------------------------------------------------------
+    // A candidate failing for a reason that will not change stops consuming a provider call on every
+    // pass — DL-300
+    // -------------------------------------------------------------------------
+
+    // A candidate whose handling keeps raising is attempted on three consecutive passes and passed
+    // over on every later pass, so the generator is reached exactly three times — DL-300
+    @Test
+    @DisplayName("stops reaching the generator for a candidate that failed on three consecutive "
+            + "passes")
+    void stopsReachingTheGeneratorForACandidateThatFailedOnThreeConsecutivePasses() {
+        Tweet only = candidate(FIRST_CANDIDATE_ID);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(List.of(only));
+        when(responseService.generateResponseIfAbsentFor(only))
+                .thenThrow(new IllegalStateException("the stored row cannot be written"));
+
+        for (int pass = 0; pass < 8; pass++) {
+            scheduler.generatePendingResponses();
+        }
+
+        verify(responseService, times(CANDIDATE_FAILURE_LIMIT))
+                .generateResponseIfAbsentFor(only);
+        verifyNoInteractions(notionService);
+    }
+
+    // The pass that first reaches the bound records it once at WARN, naming the candidate and the
+    // number of consecutive failures — DL-300
+    @Test
+    @DisplayName("records once that a candidate is set aside, naming it and the failure count")
+    void recordsOnceThatACandidateIsSetAside() {
+        Tweet only = candidate(FIRST_CANDIDATE_ID);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(List.of(only));
+        when(responseService.generateResponseIfAbsentFor(only))
+                .thenThrow(new IllegalStateException("the stored row cannot be written"));
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            for (int pass = 0; pass < 5; pass++) {
+                scheduler.generatePendingResponses();
+            }
+
+            List<ILoggingEvent> setAside = recorded.list.stream()
+                    .filter(event -> event.getFormattedMessage().contains("is set aside"))
+                    .filter(event -> event.getLevel() == Level.WARN)
+                    .toList();
+
+            assertThat(setAside).as("records naming the candidate as set aside").hasSize(1);
+            assertThat(setAside.get(0).getFormattedMessage())
+                    .contains(FIRST_CANDIDATE_ID_TEXT)
+                    .contains("failed generation on " + CANDIDATE_FAILURE_LIMIT
+                            + " consecutive passes");
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
+    // A set-aside candidate is counted separately from an attempted one, and the summary states the
+    // count — DL-300
+    @Test
+    @DisplayName("counts a set-aside candidate in the pass summary and not as attempted")
+    void countsASetAsideCandidateInThePassSummaryAndNotAsAttempted() {
+        Tweet only = candidate(FIRST_CANDIDATE_ID);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(List.of(only));
+        when(responseService.generateResponseIfAbsentFor(only))
+                .thenThrow(new IllegalStateException("the stored row cannot be written"));
+
+        for (int pass = 0; pass < CANDIDATE_FAILURE_LIMIT; pass++) {
+            scheduler.generatePendingResponses();
+        }
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            scheduler.generatePendingResponses();
+
+            assertThat(passSummary(recorded))
+                    .isEqualTo("Response generation pass finished: 0 attempted, 0 succeeded "
+                            + "(0 stored without a Notion mirror), 0 skipped, 0 failed, 1 set aside "
+                            + "after " + CANDIDATE_FAILURE_LIMIT
+                            + " consecutive failures, over 1 batch(es)");
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
+    // A candidate that fails and then succeeds carries no count into the next pass, so a transient
+    // failure never accumulates towards the bound — DL-300
+    @Test
+    @DisplayName("forgets a candidate's failures once it is handled without raising")
+    void forgetsACandidateFailuresOnceItIsHandledWithoutRaising() {
+        Tweet only = candidate(FIRST_CANDIDATE_ID);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(List.of(only));
+        when(responseService.generateResponseIfAbsentFor(only))
+                .thenThrow(new IllegalStateException("a transient refusal"))
+                .thenThrow(new IllegalStateException("a transient refusal"))
+                .thenReturn(Optional.of(reply(FIRST_REPLY_ID, FIRST_REPLY_TEXT,
+                        FIRST_CANDIDATE_ID_TEXT)))
+                .thenThrow(new IllegalStateException("a transient refusal"))
+                .thenThrow(new IllegalStateException("a transient refusal"))
+                .thenThrow(new IllegalStateException("a transient refusal"));
+
+        for (int pass = 0; pass < 8; pass++) {
+            scheduler.generatePendingResponses();
+        }
+
+        // Two failures, a success that clears the count, then three more failures reaching the bound
+        verify(responseService, times(6)).generateResponseIfAbsentFor(only);
+    }
+
+    // A candidate another path answered clears the count too: it did not raise — DL-195, DL-300
+    @Test
+    @DisplayName("forgets a candidate's failures when another path answered it")
+    void forgetsACandidateFailuresWhenAnotherPathAnsweredIt() {
+        Tweet only = candidate(FIRST_CANDIDATE_ID);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(List.of(only));
+        when(responseService.generateResponseIfAbsentFor(only))
+                .thenThrow(new IllegalStateException("a transient refusal"))
+                .thenThrow(new IllegalStateException("a transient refusal"))
+                .thenReturn(Optional.empty())
+                .thenThrow(new IllegalStateException("a transient refusal"))
+                .thenThrow(new IllegalStateException("a transient refusal"))
+                .thenThrow(new IllegalStateException("a transient refusal"));
+
+        for (int pass = 0; pass < 8; pass++) {
+            scheduler.generatePendingResponses();
+        }
+
+        verify(responseService, times(6)).generateResponseIfAbsentFor(only);
+    }
+
+    // Setting one candidate aside leaves every other candidate of the same batch attempted — DL-300
+    @Test
+    @DisplayName("keeps attempting the other candidates of a batch while one is set aside")
+    void keepsAttemptingTheOtherCandidatesOfABatchWhileOneIsSetAside() {
+        Tweet failing = candidate(FIRST_CANDIDATE_ID);
+        Tweet healthy = candidate(SECOND_CANDIDATE_ID);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(List.of(failing, healthy));
+        when(responseService.generateResponseIfAbsentFor(failing))
+                .thenThrow(new IllegalStateException("the stored row cannot be written"));
+        when(responseService.generateResponseIfAbsentFor(healthy))
+                .thenReturn(Optional.of(reply(SECOND_REPLY_ID, SECOND_REPLY_TEXT,
+                        SECOND_CANDIDATE_ID_TEXT)));
+
+        for (int pass = 0; pass < 5; pass++) {
+            scheduler.generatePendingResponses();
+        }
+
+        verify(responseService, times(CANDIDATE_FAILURE_LIMIT))
+                .generateResponseIfAbsentFor(failing);
+        verify(responseService, times(5)).generateResponseIfAbsentFor(healthy);
+        verify(notionService, times(5))
+                .updateTweetResponse(SECOND_CANDIDATE_ID_TEXT, SECOND_REPLY_TEXT);
+    }
+
+    // A pass whose only candidates are set aside still closes with a summary rather than reporting an
+    // empty backlog, so the set-aside count is never invisible — DL-300
+    @Test
+    @DisplayName("closes with a summary when every candidate of the pass is set aside")
+    void closesWithASummaryWhenEveryCandidateOfThePassIsSetAside() {
+        Tweet first = candidate(FIRST_CANDIDATE_ID);
+        Tweet second = candidate(SECOND_CANDIDATE_ID);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(List.of(first, second));
+        when(responseService.generateResponseIfAbsentFor(any(Tweet.class)))
+                .thenThrow(new IllegalStateException("the stored row cannot be written"));
+
+        for (int pass = 0; pass < CANDIDATE_FAILURE_LIMIT; pass++) {
+            scheduler.generatePendingResponses();
+        }
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            scheduler.generatePendingResponses();
+
+            assertThat(passSummary(recorded))
+                    .contains("0 attempted")
+                    .contains("2 set aside after " + CANDIDATE_FAILURE_LIMIT
+                            + " consecutive failures");
+        } finally {
+            detachAppender(recorded);
+        }
+        verifyNoInteractions(notionService);
+    }
+
+    // The bookkeeping holds identifiers and counts only: no tweet or reply data, and no read is
+    // served from it — DL-300
+    @Test
+    @DisplayName("holds nothing but candidate identifiers and their failure counts")
+    void holdsNothingButCandidateIdentifiersAndTheirFailureCounts() {
+        List<Field> retained = Arrays.stream(ResponseGenerationScheduler.class.getDeclaredFields())
+                .filter(field -> !field.isSynthetic())
+                .filter(field -> !Modifier.isStatic(field.getModifiers()))
+                .filter(field -> Map.class.isAssignableFrom(field.getType()))
+                .toList();
+
+        assertThat(retained).as("map-typed instance fields").singleElement()
+                .satisfies(field -> {
+                    assertThat(field.getGenericType().getTypeName())
+                            .as("what the failure bookkeeping holds")
+                            .isEqualTo("java.util.Map<java.lang.Integer, java.lang.Integer>");
+                    assertThat(Modifier.isFinal(field.getModifiers()))
+                            .as("the bookkeeping reference is final").isTrue();
+                });
+    }
+
+    // -------------------------------------------------------------------------
+    // A pass in flight abandons its remainder once the context begins to close — DL-282
+    // -------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("declares the context close notification as the stop signal it listens for")
+    void declaresTheContextCloseNotificationAsTheStopSignalItListensFor() {
+        assertThat(ApplicationListener.class)
+                .as("the stop signal the class subscribes to")
+                .isAssignableFrom(ResponseGenerationScheduler.class);
+        assertThat(Arrays.stream(ResponseGenerationScheduler.class.getGenericInterfaces())
+                .map(java.lang.reflect.Type::getTypeName)
+                .toList())
+                .contains("org.springframework.context.ApplicationListener<"
+                        + "org.springframework.context.event.ContextClosedEvent>");
+    }
+
+    @Test
+    @DisplayName("reads no candidate batch at all when the context has already begun to close")
+    void readsNoCandidateBatchAtAllWhenTheContextHasAlreadyBegunToClose() {
+        beginContextClose();
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            scheduler.generatePendingResponses();
+
+            assertThat(abandonedSummary(recorded))
+                    .contains("0 attempted")
+                    .contains("over 0 batch(es)");
+        } finally {
+            detachAppender(recorded);
+        }
+        verifyNoInteractions(tweetRepository, responseService, notionService);
+    }
+
+    @Test
+    @DisplayName("stops between two candidates once the context begins to close, leaving the rest "
+            + "unanswered")
+    void stopsBetweenTwoCandidatesOnceTheContextBeginsToClose() {
+        Tweet first = candidate(FIRST_CANDIDATE_ID);
+        Tweet second = candidate(SECOND_CANDIDATE_ID);
+        Tweet third = candidate(THIRD_CANDIDATE_ID);
+        when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
+                .thenReturn(List.of(first, second, third));
+        when(responseService.generateResponseIfAbsentFor(any(Tweet.class))).thenAnswer(invocation -> {
+            beginContextClose();
+            return Optional.of(reply(FIRST_REPLY_ID, FIRST_REPLY_TEXT, FIRST_CANDIDATE_ID_TEXT));
+        });
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            scheduler.generatePendingResponses();
+
+            assertThat(abandonedSummary(recorded))
+                    .as("the candidate in flight completed and none behind it was started")
+                    .contains("1 attempted")
+                    .contains("1 succeeded");
+        } finally {
+            detachAppender(recorded);
+        }
+        // The candidate in flight is completed and mirrored; the two behind it are never reached
+        verify(responseService, times(1)).generateResponseIfAbsentFor(any(Tweet.class));
+        verify(notionService, times(1)).updateTweetResponse(anyString(), anyString());
+    }
+
+    @Test
+    @DisplayName("reads no further batch once the context begins to close during a full one")
+    void readsNoFurtherBatchOnceTheContextBeginsToCloseDuringAFullOne() {
+        List<Tweet> fullBatch = new ArrayList<>(CANDIDATE_BATCH_ROWS);
+        for (int index = 0; index < CANDIDATE_BATCH_ROWS; index++) {
+            fullBatch.add(candidate(FIRST_CANDIDATE_ID + index));
+        }
+        when(tweetRepository.findUnansweredBatchAfter(any(), any(Pageable.class)))
+                .thenReturn(fullBatch);
+        when(responseService.generateResponseIfAbsentFor(any(Tweet.class))).thenAnswer(invocation -> {
+            beginContextClose();
+            return Optional.of(reply(FIRST_REPLY_ID, FIRST_REPLY_TEXT, FIRST_CANDIDATE_ID_TEXT));
+        });
+
+        scheduler.generatePendingResponses();
+
+        // A full batch would otherwise be followed by a second keyset read
+        verify(tweetRepository, times(1)).findUnansweredBatchAfter(any(), any(Pageable.class));
+        verify(responseService, times(1)).generateResponseIfAbsentFor(any(Tweet.class));
+    }
+
+    @Test
+    @DisplayName("honours the calling thread's interrupt status without clearing it")
+    void honoursTheCallingThreadsInterruptStatusWithoutClearingIt() {
+        Thread.currentThread().interrupt();
+        try {
+            scheduler.generatePendingResponses();
+
+            assertThat(Thread.currentThread().isInterrupted())
+                    .as("the interrupt status is read and left in place")
+                    .isTrue();
+        } finally {
+            Thread.interrupted();
+        }
+        verifyNoInteractions(tweetRepository, responseService, notionService);
+    }
+
+    @Test
+    @DisplayName("records no closing summary of a completed pass when it abandoned one")
+    void recordsNoClosingSummaryOfACompletedPassWhenItAbandonedOne() {
+        beginContextClose();
+
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            scheduler.generatePendingResponses();
+
+            assertThat(recorded.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .filter(message -> message.startsWith("Response generation pass finished:"))
+                    .toList())
+                    .as("a pass that stopped early does not report itself as finished")
+                    .isEmpty();
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
+    @Test
+    @DisplayName("records the context close it observed once, and starts no pass afterwards")
+    void recordsTheContextCloseItObservedOnce() {
+        ListAppender<ILoggingEvent> recorded = attachAppender();
+        try {
+            beginContextClose();
+
+            assertThat(recorded.list.stream()
+                    .filter(event -> event.getLevel() == Level.INFO)
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .filter(message -> message.startsWith("Context close observed"))
+                    .toList())
+                    .hasSize(1);
+        } finally {
+            detachAppender(recorded);
+        }
+    }
+
+    /**
+     * Raises the stop signal by handing the unit the notification the context publishes first.
+     */
+    private void beginContextClose() {
+        scheduler.onApplicationEvent(new ContextClosedEvent(mock(ApplicationContext.class)));
+    }
+
+    /**
+     * Returns the single abandonment summary the pass recorded.
+     *
+     * @param appender the appender that recorded the pass
+     * @return the formatted summary message
+     */
+    private static String abandonedSummary(ListAppender<ILoggingEvent> appender) {
+        List<String> summaries = appender.list.stream()
+                .filter(event -> event.getLevel() == Level.INFO)
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.startsWith(
+                        "Response generation pass abandoned because the context is closing:"))
+                .toList();
+
+        assertThat(summaries).hasSize(1);
+        return summaries.get(0);
+    }
+
+    /**
+     * Returns the single closing summary the pass recorded.
+     *
+     * @param appender the appender that recorded the pass
+     * @return the formatted summary message
+     */
     private static String passSummary(ListAppender<ILoggingEvent> appender) {
         List<String> summaries = appender.list.stream()
                 .filter(event -> event.getLevel() == Level.INFO)

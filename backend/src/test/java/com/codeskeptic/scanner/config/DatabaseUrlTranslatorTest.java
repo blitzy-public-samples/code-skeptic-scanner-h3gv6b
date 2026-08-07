@@ -1,9 +1,11 @@
 package com.codeskeptic.scanner.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.codeskeptic.scanner.config.DatabaseUrlTranslator.TranslatedDatabaseUrl;
+import java.sql.DriverManager;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Modifier;
@@ -99,6 +101,26 @@ class DatabaseUrlTranslatorTest {
         assertThat(translated.jdbcUrl()).doesNotContain("mariadb");
     }
 
+    // Every advertised scheme translates onto a URL one of the three runtime-scope drivers accepts —
+    // DL-071, DL-187, DL-304 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {0}")
+    @ValueSource(strings = {
+        "postgresql://127.0.0.1:5432/scanner",
+        "postgres://127.0.0.1:5432/scanner",
+        "mysql://127.0.0.1:3306/scanner",
+        "mariadb://127.0.0.1:3306/scanner",
+        "h2://127.0.0.1:9092/scanner",
+    })
+    @DisplayName("translates every advertised scheme onto a url a shipped driver accepts")
+    void translatesEveryAdvertisedSchemeOntoAUrlAShippedDriverAccepts(String databaseUrl) {
+        String jdbcUrl = DatabaseUrlTranslator.translate(databaseUrl).jdbcUrl();
+
+        assertThatCode(() -> assertThat(DriverManager.getDriver(jdbcUrl))
+                .as("driver accepting %s", jdbcUrl)
+                .isNotNull())
+                .doesNotThrowAnyException();
+    }
+
     @Test
     @DisplayName("takes the credentials out of a mariadb url and keeps them out of the jdbc url")
     void takesTheCredentialsOutOfAMariadbUrl() {
@@ -127,13 +149,48 @@ class DatabaseUrlTranslatorTest {
                 .hasMessageContaining("mariadb");
     }
 
+    // Every advertised scheme resolves a driver the packaged artifact carries — DL-071, DL-242 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("advertises exactly the five schemes whose drivers this artifact carries")
+    void advertisesExactlyTheFiveSchemesWhoseDriversThisArtifactCarries() {
+        assertThatThrownBy(() -> DatabaseUrlTranslator.translate("oracle://h/db"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageEndingWith(
+                        "supported schemes are postgresql, postgres, mysql, mariadb, h2.");
+    }
+
+    // A driver is resolvable for each advertised scheme, so no accepted value dies on "No suitable
+    // driver" — DL-242 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] {0} resolves a driver")
+    @CsvSource(delimiter = '|', value = {
+        "postgresql://host:5432/db | org.postgresql.Driver",
+        "postgres://host:5432/db   | org.postgresql.Driver",
+        "mysql://host:3306/db      | com.mysql.cj.jdbc.Driver",
+        "mariadb://host:3306/db    | com.mysql.cj.jdbc.Driver",
+        "h2://host:9092/db         | org.h2.Driver"
+    })
+    @DisplayName("translates each advertised scheme onto a URL a loadable driver accepts")
+    void translatesEachAdvertisedSchemeOntoAUrlALoadableDriverAccepts(String configured,
+            String driverClass) throws Exception {
+
+        String jdbcUrl = DatabaseUrlTranslator.translate(configured).jdbcUrl();
+        java.sql.Driver driver = (java.sql.Driver) Class.forName(driverClass)
+                .getDeclaredConstructor()
+                .newInstance();
+
+        assertThat(driver.acceptsURL(jdbcUrl))
+                .as("%s accepts %s", driverClass, jdbcUrl)
+                .isTrue();
+    }
+
     @Test
     @DisplayName("translates an h2 scheme onto the h2 vendor")
     void translatesAnH2Scheme() {
         TranslatedDatabaseUrl translated =
                 DatabaseUrlTranslator.translate("h2://db.internal:9092/codeskeptic");
 
-        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:h2://db.internal:9092/codeskeptic");
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:h2:tcp://db.internal:9092/codeskeptic");
         assertThat(translated.username()).isNull();
         assertThat(translated.password()).isNull();
     }
@@ -144,7 +201,7 @@ class DatabaseUrlTranslatorTest {
         TranslatedDatabaseUrl translated =
                 DatabaseUrlTranslator.translate("h2://sa:s3cret@localhost/scanner");
 
-        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:h2://localhost/scanner");
+        assertThat(translated.jdbcUrl()).isEqualTo("jdbc:h2:tcp://localhost/scanner");
         assertThat(translated.username()).isEqualTo("sa");
         assertThat(translated.password()).isEqualTo("s3cret");
     }
@@ -755,4 +812,43 @@ class DatabaseUrlTranslatorTest {
         assertThat(constructors).hasSize(1);
         assertThat(Modifier.isPrivate(constructors[0].getModifiers())).isTrue();
     }
+
+    // The server product behind a MySQL-vendor URL is verified before the persistence layer starts —
+    // DL-304 — see docs/DECISION_LOG.md. The predicate lives on config/DataSourceConfig and is
+    // exercised here because the frozen test inventory declares one test class for this package.
+    @ParameterizedTest(name = "[{index}] name={0} version={1}")
+    @CsvSource({
+        "MySQL,11.8.8-MariaDB-ubu2404",
+        "MariaDB,11.8.8",
+        "mysql,10.11.9-mariadb",
+        "MySQL,5.5.5-10.6.4-MariaDB",
+    })
+    @DisplayName("reports a mariadb server behind a mysql-vendor url as unservable")
+    void reportsAMariadbServerBehindAMysqlVendorUrlAsUnservable(String name, String version) {
+        assertThat(DataSourceConfig.reportsUnservableServerProduct(name, version))
+                .as("verdict on product '%s' version '%s'", name, version)
+                .isTrue();
+    }
+
+    // A genuine MySQL server is served — DL-304 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] name={0} version={1}")
+    @CsvSource({
+        "MySQL,8.4.11",
+        "MySQL,9.1.0",
+    })
+    @DisplayName("reports a mysql server behind a mysql-vendor url as servable")
+    void reportsAMysqlServerBehindAMysqlVendorUrlAsServable(String name, String version) {
+        assertThat(DataSourceConfig.reportsUnservableServerProduct(name, version))
+                .as("verdict on product '%s' version '%s'", name, version)
+                .isFalse();
+    }
+
+    // Unreadable metadata is not a refusal — DL-304 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reports metadata that names nothing as servable rather than refusing")
+    void reportsMetadataThatNamesNothingAsServable() {
+        assertThat(DataSourceConfig.reportsUnservableServerProduct(null, null))
+                .as("verdict when the connection published neither member").isFalse();
+    }
+
 }

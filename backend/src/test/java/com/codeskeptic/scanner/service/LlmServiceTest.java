@@ -26,6 +26,7 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.Supplier;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -46,7 +47,6 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -1191,6 +1191,115 @@ class LlmServiceTest {
     }
 
     // A refusal is reported only when no usable content accompanies it — DL-083 — see
+    // -------------------------------------------------------------------------
+    // A reply may carry the one code point no character column can store — DL-299
+    // -------------------------------------------------------------------------
+
+    @ParameterizedTest(name = "a reply carrying {1} unstorable code point(s) is returned without them")
+    @MethodSource("repliesCarryingUnstorableCodePoints")
+    @DisplayName("removes every unstorable code point from a reply and returns the rest")
+    void removesEveryUnstorableCodePointFromAReply(String reply, int carried, String expected) {
+        stubGeneratedText(reply);
+
+        String generatedText = service.generateResponse(tweet());
+
+        assertThat(generatedText).as("reply carrying %d unstorable code point(s)", carried)
+                .isEqualTo(expected).doesNotContain("\u0000");
+    }
+
+    /**
+     * Replies carrying the unstorable code point, paired with how many they carry and what must be
+     * returned once it is removed and the remainder trimmed.
+     *
+     * @return one argument triple per reply shape
+     */
+    private static java.util.stream.Stream<Arguments> repliesCarryingUnstorableCodePoints() {
+        return java.util.stream.Stream.of(
+                Arguments.of("\u0000leading", 1, "leading"),
+                Arguments.of("trailing\u0000", 1, "trailing"),
+                Arguments.of("in\u0000side", 1, "inside"),
+                Arguments.of("two\u0000of\u0000them", 2, "twoofthem"),
+                Arguments.of("\u0000\u0000\u0000run\u0000\u0000", 5, "run"),
+                Arguments.of(" \u0000 padded \u0000 ", 2, "padded"),
+                Arguments.of("kept\ttab\nand\rreturn\u0000", 1, "kept\ttab\nand\rreturn"));
+    }
+
+    // A reply that is blank only once the unstorable code points are removed takes the existing
+    // unusable-output path rather than being stored — DL-299
+    @ParameterizedTest(name = "a reply of only unstorable code points and {0} is BLANK_TEXT")
+    @ValueSource(strings = {"\u0000", "\u0000\u0000\u0000", " \u0000 ", "\u0000\t\u0000\n"})
+    @DisplayName("reports BLANK_TEXT when a reply is blank once the unstorable code points are gone")
+    void reportsBlankTextWhenAReplyIsBlankOnceTheUnstorableCodePointsAreGone(String reply) {
+        stubGeneratedText(reply);
+
+        Throwable thrown = catchThrowable(() -> service.generateResponse(tweet()));
+
+        assertThat(thrown).isInstanceOf(IllegalStateException.class);
+        assertThat(thrown).hasMessage("BLANK_TEXT");
+    }
+
+    // A reply carrying none of them is returned exactly as the source's choices[0].text.strip() did,
+    // with no copy taken — DL-299
+    @Test
+    @DisplayName("returns a reply carrying no unstorable code point unchanged")
+    void returnsAReplyCarryingNoUnstorableCodePointUnchanged() {
+        String reply = "An ordinary reply with a tab\t, a newline\n and an ellipsis …";
+        stubGeneratedText(reply);
+
+        String generatedText = service.generateResponse(tweet());
+
+        assertThat(generatedText).isEqualTo(reply.trim());
+    }
+
+    // Only the count is recorded; no part of the reply reaches the log — DL-149, DL-299
+    @Test
+    @DisplayName("records how many unstorable code points were removed and no part of the reply")
+    void recordsHowManyUnstorableCodePointsWereRemovedAndNoPartOfTheReply() {
+        stubGeneratedText("secret\u0000text\u0000here");
+
+        ListAppender<ILoggingEvent> recorded = attachLogRecorder();
+        try {
+            String generatedText = service.generateResponse(tweet());
+
+            assertThat(generatedText).isEqualTo("secrettexthere");
+            assertThat(recorded.list)
+                    .as("records naming the removal")
+                    .anySatisfy(event -> assertThat(event.getFormattedMessage())
+                            .contains("2 code point(s) no character column can store")
+                            .contains("14 character(s)")
+                            .doesNotContain("secret")
+                            .doesNotContain("text")
+                            .doesNotContain("here"));
+            assertThat(recorded.list)
+                    .as("level of the record naming the removal")
+                    .filteredOn(event -> event.getFormattedMessage()
+                            .contains("no character column can store"))
+                    .allSatisfy(event -> assertThat(event.getLevel()).isEqualTo(Level.WARN));
+        } finally {
+            detachLogRecorder(recorded);
+        }
+    }
+
+    // A reply carrying none of them produces no record at all — DL-299
+    @Test
+    @DisplayName("records nothing about removal when a reply carries no unstorable code point")
+    void recordsNothingAboutRemovalWhenAReplyCarriesNoUnstorableCodePoint() {
+        stubGeneratedText("an ordinary reply");
+
+        ListAppender<ILoggingEvent> recorded = attachLogRecorder();
+        try {
+            service.generateResponse(tweet());
+
+            assertThat(recorded.list)
+                    .as("records naming a removal")
+                    .noneSatisfy(event -> assertThat(event.getFormattedMessage())
+                            .contains("no character column can store"));
+        } finally {
+            detachLogRecorder(recorded);
+        }
+    }
+
+    // A refusal is reported only when no usable content accompanies it — DL-243 — see
     // docs/DECISION_LOG.md
     @ParameterizedTest(name = "refusal {0} is reported as REFUSAL")
     @MethodSource("nonBlankRefusals")
@@ -1453,65 +1562,104 @@ class LlmServiceTest {
                 .withMessage("id must not be null.");
     }
 
-    // The required fields of backend/app/schema/response.py:L5-9 — AAP TR-6, DL-080 — see
-    // docs/DECISION_LOG.md
+    // A nullable column reaches the wire as JSON null — DL-080 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] {0}")
     @MethodSource("unsetReplyComponents")
-    @DisplayName("rejects a reply record that carries no value for a source-required component")
-    void rejectsAReplyRecordThatCarriesNoValueForASourceRequiredComponent(String wireKey,
-            ThrowingCallable construction) {
-        assertThatNullPointerException()
-                .isThrownBy(construction)
-                .withMessage(wireKey + " must not be null.");
+    @DisplayName("carries a reply record whose nullable column holds nothing")
+    void carriesAReplyRecordWhoseNullableColumnHoldsNothing(String wireKey,
+            Supplier<ResponseDto> construction) {
+
+        ResponseDto carried = construction.get();
+
+        assertThat(carried).as("wire record for a row whose %s column holds nothing", wireKey)
+                .isNotNull();
+        assertThat(carried.id()).as("identifier of the stored row").isEqualTo("12");
     }
 
+    /**
+     * Names one construction per nullable component of {@code dto/ResponseDto}, each leaving that
+     * component unset.
+     *
+     * @return the wire key and the record that omits it
+     */
     private static List<Arguments> unsetReplyComponents() {
         LocalDateTime generatedAt = LocalDateTime.of(2026, 1, 31, 9, 15);
         return List.of(
-                Arguments.of("id", (ThrowingCallable) () -> new ResponseDto(
-                        null, TRIMMED_GENERATED_TEXT, generatedAt, false, TWEET_ID)),
-                Arguments.of("content", (ThrowingCallable) () -> new ResponseDto(
+                Arguments.of("content", (Supplier<ResponseDto>) () -> new ResponseDto(
                         "12", null, generatedAt, false, TWEET_ID)),
-                Arguments.of("generated_at", (ThrowingCallable) () -> new ResponseDto(
+                Arguments.of("generated_at", (Supplier<ResponseDto>) () -> new ResponseDto(
                         "12", TRIMMED_GENERATED_TEXT, null, false, TWEET_ID)),
-                Arguments.of("is_approved", (ThrowingCallable) () -> new ResponseDto(
+                Arguments.of("is_approved", (Supplier<ResponseDto>) () -> new ResponseDto(
                         "12", TRIMMED_GENERATED_TEXT, generatedAt, null, TWEET_ID)),
-                Arguments.of("tweet_id", (ThrowingCallable) () -> new ResponseDto(
+                Arguments.of("tweet_id", (Supplier<ResponseDto>) () -> new ResponseDto(
                         "12", TRIMMED_GENERATED_TEXT, generatedAt, false, null)));
     }
 
-    // The required fields of backend/app/schema/tweet.py:L6-14 — AAP TR-6, DL-080 — see
-    // docs/DECISION_LOG.md
+    // A nullable column reaches the wire as JSON null — DL-080 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] {0}")
     @MethodSource("unsetPostComponents")
-    @DisplayName("rejects a post record that carries no value for a source-required component")
-    void rejectsAPostRecordThatCarriesNoValueForASourceRequiredComponent(String wireKey,
-            ThrowingCallable construction) {
-        assertThatNullPointerException()
-                .isThrownBy(construction)
-                .withMessage(wireKey + " must not be null.");
+    @DisplayName("carries a post record whose nullable column holds nothing")
+    void carriesAPostRecordWhoseNullableColumnHoldsNothing(String wireKey,
+            Supplier<TweetDto> construction) {
+
+        TweetDto carried = construction.get();
+
+        assertThat(carried).as("wire record for a row whose %s column holds nothing", wireKey)
+                .isNotNull();
+        assertThat(carried.id()).as("identifier of the stored row").isEqualTo(TWEET_ID);
     }
 
+    /**
+     * Names one construction per nullable component of {@code dto/TweetDto}, each leaving that
+     * component unset.
+     *
+     * @return the wire key and the record that omits it
+     */
     private static List<Arguments> unsetPostComponents() {
         return List.of(
-                Arguments.of("id", (ThrowingCallable) () -> new TweetDto(
-                        null, TWEET_CONTENT, LIKE_COUNT, CREATED_AT, DOUBT_RATING, MEDIA, null,
-                        USER_ID, AI_TOOLS_MENTIONED)),
-                Arguments.of("content", (ThrowingCallable) () -> new TweetDto(
+                Arguments.of("content", (Supplier<TweetDto>) () -> new TweetDto(
                         TWEET_ID, null, LIKE_COUNT, CREATED_AT, DOUBT_RATING, MEDIA, null,
                         USER_ID, AI_TOOLS_MENTIONED)),
-                Arguments.of("like_count", (ThrowingCallable) () -> new TweetDto(
+                Arguments.of("like_count", (Supplier<TweetDto>) () -> new TweetDto(
                         TWEET_ID, TWEET_CONTENT, null, CREATED_AT, DOUBT_RATING, MEDIA, null,
                         USER_ID, AI_TOOLS_MENTIONED)),
-                Arguments.of("created_at", (ThrowingCallable) () -> new TweetDto(
+                Arguments.of("created_at", (Supplier<TweetDto>) () -> new TweetDto(
                         TWEET_ID, TWEET_CONTENT, LIKE_COUNT, null, DOUBT_RATING, MEDIA, null,
                         USER_ID, AI_TOOLS_MENTIONED)),
-                Arguments.of("doubt_rating", (ThrowingCallable) () -> new TweetDto(
+                Arguments.of("doubt_rating", (Supplier<TweetDto>) () -> new TweetDto(
                         TWEET_ID, TWEET_CONTENT, LIKE_COUNT, CREATED_AT, null, MEDIA, null,
                         USER_ID, AI_TOOLS_MENTIONED)),
-                Arguments.of("user_id", (ThrowingCallable) () -> new TweetDto(
+                Arguments.of("user_id", (Supplier<TweetDto>) () -> new TweetDto(
                         TWEET_ID, TWEET_CONTENT, LIKE_COUNT, CREATED_AT, DOUBT_RATING, MEDIA, null,
                         null, AI_TOOLS_MENTIONED)));
+    }
+
+    // A row carrying nothing but its key is still a record, which is what keeps one such row from
+    // making a whole page unanswerable — DL-080
+    @Test
+    @DisplayName("reports a null for every post component the column holds no value for")
+    void reportsANullForEveryPostComponentTheColumnHoldsNoValueFor() {
+        TweetDto empty = new TweetDto(TWEET_ID, null, null, null, null, null, null, null, null);
+
+        assertThat(empty.content()).as("content").isNull();
+        assertThat(empty.likeCount()).as("like_count").isNull();
+        assertThat(empty.createdAt()).as("created_at").isNull();
+        assertThat(empty.doubtRating()).as("doubt_rating").isNull();
+        assertThat(empty.quotedTweetId()).as("quoted_tweet_id").isNull();
+        assertThat(empty.userId()).as("user_id").isNull();
+        assertThat(empty.media()).as("media").isEmpty();
+        assertThat(empty.aiToolsMentioned()).as("ai_tools_mentioned").isEmpty();
+        assertThat(empty.id()).as("id").isEqualTo(TWEET_ID);
+    }
+
+    // A record still cannot be built without its identity — DL-023, DL-080
+    @Test
+    @DisplayName("rejects a post record that carries no identifier")
+    void rejectsAPostRecordThatCarriesNoIdentifier() {
+        assertThatNullPointerException()
+                .isThrownBy(() -> new TweetDto(null, TWEET_CONTENT, LIKE_COUNT, CREATED_AT,
+                        DOUBT_RATING, MEDIA, null, USER_ID, AI_TOOLS_MENTIONED))
+                .withMessage("id must not be null.");
     }
 
     // backend/app/schema/tweet.py:L12 is the sole Optional[str] field — AAP TR-6, DL-080 — see
@@ -1523,6 +1671,16 @@ class LlmServiceTest {
                 DOUBT_RATING, MEDIA, null, USER_ID, AI_TOOLS_MENTIONED);
 
         assertThat(withoutAQuote.quotedTweetId()).isNull();
+    }
+
+    // The identifier a stored row always carries — DL-081 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("rejects a wire record for an unstored post that carries no identifier")
+    void rejectsAWireRecordForAnUnstoredPostThatCarriesNoIdentifier() {
+        assertThatNullPointerException()
+                .isThrownBy(() -> new TweetDto(null, TWEET_CONTENT, LIKE_COUNT, CREATED_AT,
+                        DOUBT_RATING, MEDIA, null, USER_ID, AI_TOOLS_MENTIONED))
+                .withMessage("id must not be null.");
     }
 
     @Test

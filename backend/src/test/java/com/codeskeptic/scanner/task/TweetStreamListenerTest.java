@@ -32,6 +32,7 @@ import org.mockito.InOrder;
 import org.junit.jupiter.api.BeforeEach;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.slf4j.LoggerFactory;
 
 import com.codeskeptic.scanner.dto.ResponseDto;
@@ -422,6 +423,58 @@ class TweetStreamListenerTest {
             verifyNoInteractions(tweetRepository, responseService, notionService, tweetMapper);
         }
 
+        // A record the database refuses is logged, skipped and does not leave onStatus — DL-302 —
+        // see docs/DECISION_LOG.md
+        @Test
+        @DisplayName("returns true, stores nothing and neither mirrors nor generates when the "
+                + "database refuses the row")
+        void returnsTrueAndSkipsWhenTheDatabaseRefusesTheRow() {
+            stubGateAccepts();
+            stubSentiment();
+            when(tweetRepository.save(any(Tweet.class))).thenThrow(
+                    new DataIntegrityViolationException("value too long for column"));
+            ListAppender<ILoggingEvent> recorded = attachRecordingAppender();
+            try {
+                assertThat(listener.onStatus(popularRecord())).isTrue();
+
+                List<String> warnings = recorded.list.stream()
+                        .filter(event -> event.getLevel() == Level.WARN)
+                        .map(ILoggingEvent::getFormattedMessage)
+                        .filter(message -> message.startsWith("Skipping a stream record the database"))
+                        .toList();
+                assertThat(warnings).as("the single containment record").hasSize(1);
+                assertThat(warnings.get(0))
+                        .contains("DataIntegrityViolationException")
+                        .contains(String.valueOf(POST_TEXT.length()))
+                        .doesNotContain(POST_TEXT)
+                        .doesNotContain("value too long for column");
+            } finally {
+                detachRecordingAppender(recorded);
+            }
+
+            verify(tweetRepository).save(any(Tweet.class));
+            verifyNoInteractions(notionService, responseService, tweetMapper);
+        }
+
+        // A record the database refuses does not stop the records that follow it — DL-302 — see
+        // docs/DECISION_LOG.md
+        @Test
+        @DisplayName("stores the next record after the database refused the previous one")
+        void storesTheNextRecordAfterTheDatabaseRefusedThePreviousOne() {
+            stubGateAccepts();
+            stubSentiment();
+            Tweet stored = new Tweet();
+            stored.setId(STORED_ID);
+            when(tweetRepository.save(any(Tweet.class)))
+                    .thenThrow(new DataIntegrityViolationException("value too long for column"))
+                    .thenReturn(stored);
+
+            assertThat(listener.onStatus(popularRecord())).isTrue();
+            assertThat(listener.onStatus(popularRecord())).isTrue();
+
+            verify(tweetRepository, times(2)).save(any(Tweet.class));
+        }
+
         // Ingestion matches no delivered identifier against the table — see docs/DECISION_LOG.md
         // DL-049
         @Test
@@ -675,7 +728,7 @@ class TweetStreamListenerTest {
             verify(notionService, never()).updateTweetResponse(anyString(), anyString());
         }
 
-        // The failing layer owns the ERROR record — DL-252 — see docs/DECISION_LOG.md
+        // The failing layer owns the ERROR record — DL-197 — see docs/DECISION_LOG.md
         @Test
         @DisplayName("records a failed generation trigger at DEBUG and never at ERROR")
         void recordsAFailedGenerationTriggerAtDebugAndNeverAtError() {
@@ -734,16 +787,31 @@ class TweetStreamListenerTest {
             verify(notionService).updateTweetResponse(String.valueOf(STORED_ID), GENERATED_CONTENT);
         }
 
-        // dto/ResponseDto rejects a null content — AAP TR-6, DL-080 — see docs/DECISION_LOG.md
+        // dto/ResponseDto carries a null content, so the mirror is named as skipped at WARN rather
+        // than the record failing to be built — AAP TR-6, DL-080, DL-080 — see docs/DECISION_LOG.md
         @Test
-        @DisplayName("cannot be handed a generated reply that carries no content")
-        void cannotBeHandedAGeneratedReplyThatCarriesNoContent() {
-            assertThatNullPointerException()
-                    .isThrownBy(() -> new ResponseDto(GENERATED_ID, null, GENERATED_AT,
-                            Boolean.FALSE, String.valueOf(STORED_ID)))
-                    .withMessage("content must not be null.");
+        @DisplayName("skips the mirror and names it when the generated reply carries no content")
+        void skipsTheMirrorWhenTheGeneratedReplyCarriesNoContent() {
+            stubGateAccepts();
+            stubSentiment();
+            stubSave();
+            when(responseService.generateResponseIfAbsent(String.valueOf(STORED_ID)))
+                    .thenReturn(Optional.of(new ResponseDto(GENERATED_ID, null, GENERATED_AT,
+                            Boolean.FALSE, String.valueOf(STORED_ID))));
 
-            verifyNoInteractions(notionService);
+            ListAppender<ILoggingEvent> recorded = attachRecordingAppender();
+            try {
+                assertThat(listener.onStatus(popularRecord())).isTrue();
+
+                assertThat(recorded.list).as("the skipped-mirror record")
+                        .anySatisfy(event -> assertThat(event.getFormattedMessage())
+                                .contains("carries no content")
+                                .contains("the Notion mirror is skipped"));
+            } finally {
+                detachRecordingAppender(recorded);
+            }
+
+            verify(notionService, never()).updateTweetResponse(anyString(), anyString());
         }
 
         // Mirror-preparation failures are reported here — see docs/DECISION_LOG.md DL-224

@@ -111,7 +111,11 @@ public class NotionService {
      */
     private static final String PAGES_PATH = "/v1/pages";
 
-    /** Page update path. The page identifier is supplied as the {@code pageId} URI variable. */
+    /**
+     * Page update path. The page identifier is supplied as the {@code pageId} URI variable, and
+     * {@link #requirePageIdentifier(String)} holds that value to a single path segment before it is
+     * expanded — DL-303.
+     */
     private static final String PAGE_PATH = "/v1/pages/{pageId}";
 
     /**
@@ -241,6 +245,15 @@ public class NotionService {
      * and no provider value can forge a record boundary — DL-119.
      */
     private static final Pattern REQUEST_ID_SHAPE = Pattern.compile("[A-Za-z0-9_.\\-\\[\\]]{1,64}");
+
+    /**
+     * Accepted shape of a page identifier expanded into {@link #PAGE_PATH}: one path segment of
+     * unreserved characters, which admits Notion's hyphenated and unhyphenated page identifiers and
+     * excludes every character that could end the segment or re-point the request — the solidus, the
+     * reverse solidus, the full stop, the percent sign, the question mark, the number sign, the
+     * semicolon, the colon and every whitespace and control character — DL-303.
+     */
+    private static final Pattern PAGE_ID_SHAPE = Pattern.compile("[A-Za-z0-9_~\\-]{1,128}");
 
     /** Response header carrying Notion's own identifier for the answered request. */
     private static final String HEADER_REQUEST_ID = "x-request-id";
@@ -423,7 +436,8 @@ public class NotionService {
      * <p>Two conditions produce a warning and a normal return, leaving Notion untouched: a
      * {@code null} or blank post identifier, and a query that matches no page. A structurally invalid
      * query response, and a matching page that carries no identifier, are each reported as a failure —
-     * DL-089.
+     * DL-089. A matching page whose identifier is not a single path segment is reported as a failure
+     * too, and no update request is issued for it — DL-303.
      *
      * <p>A failure the provider could answer differently later — {@code 429}, any {@code 5xx} and a
      * transport failure — is attempted again up to {@code scanner.notion.mirror-max-retries} times,
@@ -436,7 +450,8 @@ public class NotionService {
      *     leaves Notion untouched
      * @param responseText the generated reply to write; {@code null} is written as an empty string
      * @throws IllegalStateException if {@code scanner.notion.database-id} is unset or blank, if the
-     *     query response is structurally invalid, or if the matched page carries no identifier
+     *     query response is structurally invalid, or if the matched page carries no identifier or one
+     *     that is not a single path segment
      * @throws org.springframework.web.client.RestClientException if either request fails or Notion
      *     answers with a client or server error status
      */
@@ -720,10 +735,15 @@ public class NotionService {
      * Returns the identifier of the first page whose {@code Tweet Id} property equals the supplied
      * post identifier.
      *
+     * <p>The returned identifier has passed {@link #requirePageIdentifier(String)}, so it is one path
+     * segment and cannot alter the request line it is expanded into — DL-303.
+     *
      * @param databaseId the target database identifier; neither {@code null} nor blank
      * @param tweetId    the post identifier to match; neither {@code null} nor blank
      * @return the matching page's identifier, or {@code null} when the query matched no page or the
      *     matched pages carry no identifier
+     * @throws IllegalStateException if the matched page carries an identifier that is not a single
+     *     path segment
      */
     private String findPageIdByTweetId(String databaseId, String tweetId) {
         Map<String, Object> request = new LinkedHashMap<>();
@@ -745,11 +765,37 @@ public class NotionService {
         for (JsonNode page : results) {
             String pageId = readString(page.path(KEY_ID));
             if (!pageId.isEmpty()) {
-                return pageId;
+                return requirePageIdentifier(pageId);
             }
         }
         throw new IllegalStateException(
                 "The Notion database query matched a page that carried no page identifier.");
+    }
+
+    /**
+     * Returns the supplied page identifier once it is known to be a single path segment.
+     *
+     * <p>The value reaching this method is whatever the provider wrote into the {@code id} member of
+     * its query answer, and {@link #PAGE_PATH} expands it into a request path where the solidus and the
+     * full stop are legal characters that no template expansion escapes. An identifier carrying either
+     * would therefore extend or re-point the path rather than name a page. This method accepts only
+     * {@link #PAGE_ID_SHAPE} and rejects everything else, so the identifier addresses one page of the
+     * {@code /v1/pages/} collection and nothing else — DL-303.
+     *
+     * @param pageId the identifier the provider answered with; neither {@code null} nor empty
+     * @return the identifier unchanged
+     * @throws IllegalStateException if the identifier is not a single path segment; the message carries
+     *     its length only, never the value — DL-052, DL-149
+     */
+    // Net-new (no Python counterpart: backend/app/services/notion_service.py issued no page update)
+    // — see docs/DECISION_LOG.md DL-303
+    private static String requirePageIdentifier(String pageId) {
+        if (PAGE_ID_SHAPE.matcher(pageId).matches()) {
+            return pageId;
+        }
+        throw new IllegalStateException("The Notion database query matched a page whose identifier of "
+                + pageId.length() + " character(s) is not a single path segment, so it cannot address a "
+                + "page of the Notion pages collection.");
     }
 
     /**
@@ -904,7 +950,7 @@ public class NotionService {
      * docs/DECISION_LOG.md DL-089.
      *
      * <p>A page {@link #toTweetDto(JsonNode)} does not recognise as a mirrored post, and a page that
-     * carries no value for a component the wire record declares required, are each counted and
+     * carries no value for one of the mirrored source-required properties, are each counted and
      * reported once at {@code WARN} and left out of the list — see docs/DECISION_LOG.md DL-219.
      *
      * @param response the parsed query response, or {@code null} when the body was empty
@@ -968,14 +1014,15 @@ public class NotionService {
      * {@code Tweet Id} carries no text falls back to the Notion page identifier — see
      * docs/DECISION_LOG.md DL-090.
      *
-     * <p>{@link TweetDto} rejects a {@code null} value for the six components
-     * {@code backend/app/schema/tweet.py:L6-14} declares required, so a page that does not carry all
-     * five mirrored required properties has no wire form and is skipped: no value is substituted for it
-     * and no failure is raised — see docs/DECISION_LOG.md DL-219.
+     * <p>A mirrored page that does not carry all five mirrored source-required properties is skipped
+     * rather than substituted or raised: this adapter reads back only what {@link #buildProperties}
+     * wrote, so a page missing one of them is not a mirrored post of this service. The skip is this
+     * adapter's own policy and no longer a consequence of the wire record, which now carries an empty
+     * column through as JSON {@code null} — see docs/DECISION_LOG.md DL-219 and DL-080.
      *
      * @param page one element of a query response's {@code results} array; not {@code null}
      * @return the mapped post, or {@code null} when the page carries no identifier at all or carries
-     *         no value for a component the wire record declares required
+     *         no value for one of the mirrored source-required properties
      */
     // Replaces the reconstruction at backend/app/services/notion_service.py:L44-50, which indexed
     // [0] directly and read four properties fed from fields the source model never declared —
@@ -997,8 +1044,8 @@ public class NotionService {
         Double doubtRating = readNumber(properties, PROPERTY_DOUBT_RATING);
         String userId = readText(properties, PROPERTY_AUTHOR, KEY_RICH_TEXT);
 
-        // The required fields of backend/app/schema/tweet.py:L6-14 — DL-080, DL-219 — see
-        // docs/DECISION_LOG.md
+        // A page carrying none of a mirrored source-required property is not a mirrored post of
+        // this service — DL-219 — see docs/DECISION_LOG.md
         if (content == null || likeCount == null || createdAt == null || doubtRating == null
                 || userId == null) {
             return null;

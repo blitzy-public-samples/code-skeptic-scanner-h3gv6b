@@ -100,6 +100,13 @@ public class LlmService {
     /** Code for a first choice whose text is absent, or blank once trimmed. */
     private static final String BLANK_TEXT = "BLANK_TEXT";
 
+    /**
+     * The one code point a reply may carry that no supported relational vendor can store in a
+     * character column. It is removed from the reply before the reply is returned — DL-299 — see
+     * docs/DECISION_LOG.md.
+     */
+    private static final char NUL_CHARACTER = '\u0000';
+
     /** Configuration key of the reasoning effort, named by the failure message it can raise. */
     private static final String REASONING_EFFORT_KEY = "scanner.openai.reasoning-effort";
 
@@ -618,7 +625,9 @@ public class LlmService {
      *
      * <p>Content decides. Non-blank content of the first choice is returned whatever finish reason
      * accompanies it, including a reply the model cut short at the token cap, matching the source's
-     * {@code choices[0].text.strip()}. A finish reason other than {@code stop} accompanying accepted
+     * {@code choices[0].text.strip()}. Before that decision is taken, every {@code U+0000} code point
+     * is removed by {@link #withoutNulCharacters(String)}, because no character column on the
+     * supported vendors can store one — DL-299.
      * content is recorded once at {@code WARN} under {@value #INCOMPLETE_PREFIX} followed by that
      * reason, which is an enumerated provider token rendered through {@link #guarded(Optional)} —
      * DL-197, DL-202.
@@ -632,7 +641,8 @@ public class LlmService {
      *   <li>{@value #REFUSAL} — the first choice carries no usable content and carries a non-blank
      *       refusal. The refusal text is model output and is never logged.</li>
      *   <li>{@value #BLANK_TEXT} — the first choice carries no content, or content that is blank once
-     *       trimmed, and carries no refusal.</li>
+     *       the unstorable code points are removed and the remainder trimmed, and carries no
+     *       refusal.</li>
      * </ul>
      *
      * @param completion the Chat Completions response; must not be {@code null}
@@ -651,7 +661,7 @@ public class LlmService {
         ChatCompletion.Choice choice = choices.get(0);
 
         String content = choice.message().content().orElse(null);
-        String trimmed = (content == null) ? "" : content.trim();
+        String trimmed = (content == null) ? "" : withoutNulCharacters(content).trim();
 
         if (!trimmed.isEmpty()) {
             reportIncompleteFinish(choice.finishReason());
@@ -667,6 +677,52 @@ public class LlmService {
             throw unusableOutput(BLANK_TEXT, "the first choice carried no content");
         }
         throw unusableOutput(BLANK_TEXT, "the first choice carried blank content");
+    }
+
+    /**
+     * Removes every {@value #NUL_CHARACTER} code point from a reply.
+     *
+     * <p>A reply is model output and may carry any code point the model emits, but a character column
+     * on the supported relational vendors cannot hold {@code U+0000}: PostgreSQL refuses the whole
+     * statement, so a reply carrying one could neither be stored nor discarded and the candidate it
+     * was generated for was re-attempted on every later pass. Removing the code point here — at the
+     * boundary the provider reply enters the application through, before any persistence decision is
+     * taken — leaves the reply either storable or recognisably blank, and a reply that is blank only
+     * once the code point is gone takes the existing {@value #BLANK_TEXT} path.
+     *
+     * <p>Nothing but that one code point is altered. Every other control character is storable and is
+     * carried through unchanged, so this is a removal of the one unstorable value rather than a
+     * cleaning pass over model output — see docs/DECISION_LOG.md DL-299.
+     *
+     * <p>Only how many code points were removed is recorded, never any part of the reply — DL-149.
+     *
+     * @param content the reply text as the provider returned it; must not be {@code null}
+     * @return the reply with every {@value #NUL_CHARACTER} removed, unchanged when it carried none
+     */
+    // Net-new (no Python counterpart; the source returned choices[0].text.strip() verbatim) —
+    // DL-299 — see docs/DECISION_LOG.md
+    private String withoutNulCharacters(String content) {
+        int firstNul = content.indexOf(NUL_CHARACTER);
+        if (firstNul < 0) {
+            return content;
+        }
+
+        StringBuilder retained = new StringBuilder(content.length());
+        retained.append(content, 0, firstNul);
+        int removed = 1;
+        for (int index = firstNul + 1; index < content.length(); index++) {
+            char character = content.charAt(index);
+            if (character == NUL_CHARACTER) {
+                removed++;
+            } else {
+                retained.append(character);
+            }
+        }
+
+        log.warn("The Chat Completions reply carried {} code point(s) no character column can store; "
+                + "they were removed and the remaining {} character(s) kept", removed,
+                retained.length());
+        return retained.toString();
     }
 
     /**

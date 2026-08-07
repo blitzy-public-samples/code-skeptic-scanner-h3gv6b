@@ -8,6 +8,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mockingDetails;
@@ -26,6 +27,7 @@ import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -953,6 +955,24 @@ class ResponseServiceTest {
         assertThat(written.getIsApproved()).isTrue();
     }
 
+    // Content far longer than the width the previous mapping imposed is written whole; no length is
+    // checked on this path — DL-050, DL-068 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] content of {0} characters")
+    @ValueSource(ints = {256, 1_000, 10_000, 60_000})
+    @DisplayName("writes content far longer than a width bound would allow")
+    void writesContentFarLongerThanAWidthBoundWouldAllow(int length) {
+        String longContent = "c".repeat(length);
+        Response existing = storedRowCarryingApproval(true);
+        stubTheUpdateOf(existing);
+
+        service.updateResponse(RESPONSE_ID,
+                new UpdateResponseRequest(TextNode.valueOf(longContent), null));
+
+        Response written = theRowSubmittedForUpdate(existing);
+        assertThat(written.getContent()).as("content submitted for update")
+                .hasSize(length).isEqualTo(longContent);
+    }
+
     // backend/app/api/responses.py:L60,L62-63
     @Test
     @DisplayName("writes only the approval flag when the body carries approval alone")
@@ -1106,39 +1126,46 @@ class ResponseServiceTest {
         verify(responseRepository, never()).save(any(Response.class));
     }
 
-    // dto/ResponseDto declares both members required — DL-080, DL-244 — see docs/DECISION_LOG.md
+    // A carried JSON null clears the nullable column — DL-080, DL-244 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("reports an update that would empty the content with the update-failed literal")
-    void reportsAnUpdateThatWouldEmptyTheContentWithTheUpdateFailedLiteral() {
+    @DisplayName("clears the content column when the body carries an explicit null for it")
+    void clearsTheContentColumnWhenTheBodyCarriesAnExplicitNullForIt() {
         Response existing = storedRowCarryingApproval(false);
-        when(responseRepository.findByIdForUpdate(RESPONSE_KEY))
-                .thenReturn(Optional.of(existing));
+        stubTheUpdateOf(existing);
 
-        assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID,
-                new UpdateResponseRequest(NullNode.getInstance(), null)))
-                .isInstanceOf(NotFoundException.class)
-                .hasMessage("Response not found or update failed");
+        service.updateResponse(RESPONSE_ID,
+                new UpdateResponseRequest(NullNode.getInstance(), null));
 
-        verify(responseRepository, never()).save(any(Response.class));
-        verifyNoInteractions(responseMapper);
+        assertThat(theRowSubmittedForUpdate(existing).getContent()).isNull();
+        assertThat(theRowSubmittedForUpdate(existing).getIsApproved()).isFalse();
     }
 
-    // dto/ResponseDto declares both members required — DL-080, DL-244 — see docs/DECISION_LOG.md
+    // A carried JSON null clears the nullable column — DL-080, DL-244 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("reports an update that would empty the approval flag with the update-failed "
-            + "literal")
-    void reportsAnUpdateThatWouldEmptyTheApprovalFlagWithTheUpdateFailedLiteral() {
-        Response existing = storedRowCarryingApproval(false);
-        when(responseRepository.findByIdForUpdate(RESPONSE_KEY))
-                .thenReturn(Optional.of(existing));
+    @DisplayName("clears the approval flag when the body carries an explicit null for it")
+    void clearsTheApprovalFlagWhenTheBodyCarriesAnExplicitNullForIt() {
+        Response existing = storedRowCarryingApproval(true);
+        stubTheUpdateOf(existing);
 
-        assertThatThrownBy(() -> service.updateResponse(RESPONSE_ID,
-                new UpdateResponseRequest(null, NullNode.getInstance())))
-                .isInstanceOf(NotFoundException.class)
-                .hasMessage("Response not found or update failed");
+        service.updateResponse(RESPONSE_ID,
+                new UpdateResponseRequest(null, NullNode.getInstance()));
 
-        verify(responseRepository, never()).save(any(Response.class));
-        verifyNoInteractions(responseMapper);
+        assertThat(theRowSubmittedForUpdate(existing).getIsApproved()).isNull();
+        assertThat(theRowSubmittedForUpdate(existing).getContent()).isEqualTo(STORED_CONTENT);
+    }
+
+    // A row that already carries no approval flag is still updatable — DL-080 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("updates a stored row that already carries no approval flag")
+    void updatesAStoredRowThatAlreadyCarriesNoApprovalFlag() {
+        Response existing = storedRowCarryingApproval(null);
+        stubTheUpdateOf(existing);
+
+        service.updateResponse(RESPONSE_ID, contentOnly());
+
+        assertThat(theRowSubmittedForUpdate(existing).getContent()).isEqualTo(REVISED_CONTENT);
+        assertThat(theRowSubmittedForUpdate(existing).getIsApproved()).isNull();
     }
 
     // A usable carried value, an explicit JSON null included, is a write — DL-050, DL-082, DL-244 —
@@ -1281,17 +1308,19 @@ class ResponseServiceTest {
         verify(responseRepository).save(existing);
     }
 
+    // A row whose foreign key is null converts to a record naming a null parent rather than raising,
+    // because the column is nullable — DL-080 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("reports the required tweet_id when a response has no tweet association")
-    void reportsTheRequiredTweetIdWhenAResponseHasNoTweetAssociation() {
+    @DisplayName("names a null tweet_id when a response has no tweet association")
+    void namesANullTweetIdWhenAResponseHasNoTweetAssociation() {
         Response withoutTweet = storedRowCarryingApproval(false);
         withoutTweet.setTweet(null);
 
-        Throwable thrown = catchThrowable(() -> new ResponseMapper().toDto(withoutTweet));
+        ResponseDto converted = new ResponseMapper().toDto(withoutTweet);
 
-        assertThat(thrown)
-                .isInstanceOf(NullPointerException.class)
-                .hasMessage("tweet_id must not be null.");
+        assertThat(converted.tweetId()).as("parent identifier on the wire").isNull();
+        assertThat(converted.id()).as("identifier on the wire").isEqualTo(RESPONSE_ID);
+        assertThat(converted.content()).as("content on the wire").isEqualTo(STORED_CONTENT);
     }
 
     // backend/app/db/models.py:L26 with backend/app/api/responses.py:L60
@@ -1383,27 +1412,97 @@ class ResponseServiceTest {
         assertThat(requested.getPageSize()).isEqualTo(10);
     }
 
-    // No page size is reduced — DL-217 — see docs/DECISION_LOG.md
-    @ParameterizedTest(name = "a per_page of {0} is served unreduced")
-    @ValueSource(ints = {100, 101, 500, 1_000, 1_001, 10_000, Integer.MAX_VALUE})
-    @DisplayName("serves every per_page it is given without reducing it")
-    void servesEveryPerPageWithoutReducingIt(int perPage) {
-        stubEveryWindowRead(0L);
+    // backend/app/api/responses.py:L11-12 declares defaults and no bound — DL-123
+    @ParameterizedTest(name = "a per_page of {0} is restated unreduced and read in bounded windows")
+    @ValueSource(ints = {100, 101, 500, 10_000, Integer.MAX_VALUE})
+    @DisplayName("applies no upper bound to per_page and reads it in bounded windows")
+    void appliesNoUpperBoundToPerPage(int perPage) {
+        stubEveryWindowRead(1L);
 
         PaginatedResponsesDto envelope = service.getPaginatedResponses(1, perPage);
+        reachFirstValue(envelope.responses());
 
         assertThat(envelope.pagination().perPage())
                 .as("per_page the envelope restates").isEqualTo(perPage);
         assertThat(pageRequestsIssued()).as("windows the page read asked for")
                 .isNotEmpty()
                 .allSatisfy(window -> assertThat(window.getPageSize())
-                        .as("rows the statement was asked for").isEqualTo(perPage));
+                        .as("rows the statement was asked for")
+                        .isEqualTo(Math.min(perPage, declaredChunkBound())));
+        assertThatEveryWindowIsBounded();
     }
 
-    // One paged query answers a page of any size — DL-217 — see docs/DECISION_LOG.md
+    // One page larger than the chunk bound is read as consecutive bounded chunks — DL-249 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reads a page larger than the chunk bound as consecutive chunks that cover it once")
+    void readsAPageLargerThanTheChunkBoundAsConsecutiveChunks() {
+        int chunkBound = declaredChunkBound();
+        int perPage = chunkBound * 2;
+        List<ResponseRow> firstChunk = projectedRows(chunkBound);
+        List<ResponseRow> secondChunk = projectedRows(3);
+        when(responseRepository.findRowChunk(any(Pageable.class)))
+                .thenReturn(firstChunk)
+                .thenReturn(secondChunk);
+        when(responseRepository.count()).thenReturn((long) chunkBound + secondChunk.size());
+        when(responseMapper.toDtoRowList(anyList()))
+                .thenAnswer(invocation -> dtosFor(invocation.getArgument(0)));
+
+        PaginatedResponsesDto envelope = service.getPaginatedResponses(1, perPage);
+        // The page is a chunked view, so walking it is what issues the window statements — DL-297
+        List<ResponseDto> walked = List.copyOf(envelope.responses());
+
+        assertThat(walked).as("rows the page rendered")
+                .hasSize(chunkBound + secondChunk.size());
+        assertThat(envelope.pagination().perPage())
+                .as("per_page the envelope restates").isEqualTo(perPage);
+        assertThat(envelope.pagination().total()).as("total the envelope reports")
+                .isEqualTo((long) chunkBound + secondChunk.size());
+        assertThat(pageRequestsIssued()).as("windows the page read asked for").hasSize(2);
+        assertThat(pageRequestsIssued()).extracting(Pageable::getOffset)
+                .as("first row of each window").containsExactly(0L, (long) chunkBound);
+        verify(responseMapper, times(2)).toDtoRowList(anyList());
+        verify(responseRepository, never()).findAllRows(any(Pageable.class));
+        assertThatEveryWindowIsBounded();
+    }
+
+    // One chunk of a large page is resident at a time — DL-297 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("defers every window statement of a large page until the page is walked, holding "
+            + "one chunk at a time")
+    void defersEveryWindowStatementOfALargePageUntilItIsWalked() {
+        int chunkBound = declaredChunkBound();
+        int perPage = chunkBound * 3;
+        when(responseRepository.findRowChunk(any(Pageable.class))).thenAnswer(invocation ->
+                projectedRows(((Pageable) invocation.getArgument(0)).getPageSize()));
+        when(responseRepository.count()).thenReturn((long) perPage);
+        when(responseMapper.toDtoRowList(anyList()))
+                .thenAnswer(invocation -> dtosFor(invocation.getArgument(0)));
+
+        PaginatedResponsesDto envelope = service.getPaginatedResponses(1, perPage);
+
+        assertThat(envelope.responses().size()).as("rows the page reports").isEqualTo(perPage);
+        verify(responseRepository, never()).findRowChunk(any(Pageable.class));
+        verify(responseMapper, never()).toDtoRowList(anyList());
+
+        int walked = 0;
+        for (ResponseDto ignored : envelope.responses()) {
+            walked++;
+            // Only the windows covering the rows already walked have been read.
+            verify(responseMapper, times((walked + chunkBound - 1) / chunkBound))
+                    .toDtoRowList(anyList());
+        }
+
+        assertThat(walked).as("rows the walk produced").isEqualTo(perPage);
+        assertThat(pageRequestsIssued()).as("windows the walk asked for").hasSize(3);
+        assertThatEveryWindowIsBounded();
+    }
+
+    // A page at or below the chunk bound is read by one statement — DL-249 — see
+    // docs/DECISION_LOG.md
     @ParameterizedTest(name = "a per_page of {0} is read by the single page statement")
-    @ValueSource(ints = {1, 10, 499, 500, 1_000, 5_000})
-    @DisplayName("reads a page of any size with one page statement and no row count")
+    @ValueSource(ints = {1, 10, 499, 500})
+    @DisplayName("reads a page at or below the chunk bound with one page statement and no row count")
     void readsAPageOfAnySizeWithOnePageStatement(int perPage) {
         when(responseRepository.findAllRows(any(Pageable.class))).thenAnswer(invocation ->
                 new PageImpl<>(List.of(), invocation.<Pageable>getArgument(0), 0L));
@@ -1505,14 +1604,21 @@ class ResponseServiceTest {
         assertThat(envelope.pagination().page()).isEqualTo(3);
     }
 
-    // No upper bound is applied to per_page — DL-217 — see docs/DECISION_LOG.md
-    @ParameterizedTest(name = "a per_page of {0} reads a page of the same size")
-    @ValueSource(ints = {99, 100, 101, 250, 1_000, 1_001, Integer.MAX_VALUE})
-    @DisplayName("passes every page size through unreduced")
-    void passesEveryPageSizeThroughUnreduced(int perPage) {
-        stubEveryWindowRead(0L);
+    // No upper bound is applied to per_page — IR9 — see docs/DECISION_LOG.md DL-217
+    @ParameterizedTest(name = "a per_page of {0} reads a page of size {0}")
+    @CsvSource({
+            "99,99",
+            "100,100",
+            "101,101",
+            "250,250",
+            "2147483647,2147483647"
+    })
+    @DisplayName("passes the page size through with no upper bound")
+    void passesThePageSizeThroughWithNoUpperBound(int perPage, int expectedSize) {
+        stubEveryWindowRead(1L);
 
         PaginatedResponsesDto envelope = service.getPaginatedResponses(1, perPage);
+        reachFirstValue(envelope.responses());
 
         assertThat(envelope.pagination().perPage()).isEqualTo(perPage);
     }
@@ -1566,9 +1672,11 @@ class ResponseServiceTest {
     })
     @DisplayName("queries a page whose offset the paged query can express")
     void queriesAPageWhoseOffsetThePagedQueryCanExpress(int page, int perPage) {
-        stubEveryWindowRead(2L);
+        // Every one of these pages holds rows, so reaching its first value issues a window statement.
+        stubEveryWindowRead(Integer.MAX_VALUE + 10L);
 
         PaginatedResponsesDto envelope = service.getPaginatedResponses(page, perPage);
+        reachFirstValue(envelope.responses());
 
         assertThat(pageRequestsIssued()).as("windows the page read asked for")
                 .isNotEmpty()
@@ -1923,7 +2031,7 @@ class ResponseServiceTest {
         return requested.getValue();
     }
 
-    // One diagnostic owner per failing layer — DL-252 — see docs/DECISION_LOG.md
+    // One diagnostic owner per failing layer — DL-197 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("records a provider failure at DEBUG only, leaving the ERROR record to the adapter")
     void recordsAProviderFailureAtDebugOnlyLeavingTheErrorRecordToTheAdapter() {
@@ -1946,7 +2054,7 @@ class ResponseServiceTest {
                         .doesNotContain("BLANK_TEXT"));
     }
 
-    // One diagnostic owner per failing layer — DL-252 — see docs/DECISION_LOG.md
+    // One diagnostic owner per failing layer — DL-197 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("records a repository failure on the route path once at ERROR, naming no statement")
     void recordsARepositoryFailureOnTheRoutePathOnceAtErrorNamingNoStatement() {
@@ -1972,7 +2080,7 @@ class ResponseServiceTest {
                         .doesNotContain("could not execute statement"));
     }
 
-    // One diagnostic owner per failing layer — DL-252 — see docs/DECISION_LOG.md
+    // One diagnostic owner per failing layer — DL-197 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("records a provider failure on the background path at DEBUG and never at ERROR")
     void recordsAProviderFailureOnTheBackgroundPathAtDebugAndNeverAtError() {
@@ -1994,7 +2102,7 @@ class ResponseServiceTest {
                         .doesNotContain("REFUSAL"));
     }
 
-    // One diagnostic owner per failing layer — DL-252 — see docs/DECISION_LOG.md
+    // One diagnostic owner per failing layer — DL-197 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("records a repository failure on the background path once at ERROR")
     void recordsARepositoryFailureOnTheBackgroundPathOnceAtError() {
@@ -2041,9 +2149,32 @@ class ResponseServiceTest {
     private void stubEveryWindowRead(long total) {
         lenient().when(responseRepository.findAllRows(any(Pageable.class))).thenAnswer(invocation ->
                 new PageImpl<>(List.of(), invocation.<Pageable>getArgument(0), total));
+        lenient().when(responseRepository.findRowChunk(any(Pageable.class))).thenAnswer(invocation -> {
+            Pageable window = invocation.getArgument(0);
+            long remaining = total - window.getOffset();
+            return projectedRows((int) Math.max(0L, Math.min(window.getPageSize(), remaining)));
+        });
+        lenient().when(responseMapper.toDtoRowList(anyList()))
+                .thenAnswer(invocation -> dtosFor(invocation.getArgument(0)));
         lenient().when(responseRepository.count()).thenReturn(total);
     }
 
+    /**
+     * Reaches the first value of a rendered page, which is what issues the first window statement of a
+     * page read in chunks — DL-297.
+     *
+     * @param page the rendered page, never {@code null}
+     */
+    private static void reachFirstValue(List<?> page) {
+        assertThat(page.iterator()).as("iterator over the rendered page").isNotNull();
+        page.iterator().hasNext();
+    }
+
+    /**
+     * Collects every {@link Pageable} the service handed to the repository during this test.
+     *
+     * @return the windows asked for, in call order
+     */
     private List<Pageable> pageRequestsIssued() {
         return mockingDetails(responseRepository).getInvocations().stream()
                 .flatMap(invocation -> Arrays.stream(invocation.getArguments()))
@@ -2084,4 +2215,55 @@ class ResponseServiceTest {
     private static List<String> renderedRecords(ListAppender<ILoggingEvent> records) {
         return records.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
     }
+
+    /**
+     * Asserts that no statement was asked for more rows than the declared chunk bound — DL-249.
+     */
+    private void assertThatEveryWindowIsBounded() {
+        assertThat(pageRequestsIssued()).as("windows the page read asked for")
+                .isNotEmpty()
+                .allSatisfy(window -> assertThat(window.getPageSize())
+                        .as("rows one statement was asked for")
+                        .isLessThanOrEqualTo(declaredChunkBound()));
+    }
+
+    /**
+     * Reads the chunk bound the service declares, so these assertions and the service cannot drift.
+     *
+     * @return the value of the service's declared chunk bound
+     */
+    private static int declaredChunkBound() {
+        try {
+            Field bound = ResponseService.class.getDeclaredField("PAGE_FETCH_CHUNK_ROWS");
+            bound.setAccessible(true);
+            return (int) bound.get(null);
+        } catch (ReflectiveOperationException absent) {
+            throw new AssertionError("ResponseService must declare PAGE_FETCH_CHUNK_ROWS.", absent);
+        }
+    }
+
+    /**
+     * Builds the requested number of projected page rows.
+     *
+     * @param rows the number of rows to build
+     * @return the rows
+     */
+    private static List<ResponseRow> projectedRows(int rows) {
+        List<ResponseRow> built = new ArrayList<>(rows);
+        for (int row = 0; row < rows; row++) {
+            built.add(projectedRow());
+        }
+        return List.copyOf(built);
+    }
+
+    /**
+     * Builds one wire form per supplied projected row, as the mapper does.
+     *
+     * @param rows the rows to render
+     * @return one wire form per row
+     */
+    private static List<ResponseDto> dtosFor(List<ResponseRow> rows) {
+        return rows.stream().map(row -> storedDto()).toList();
+    }
+
 }

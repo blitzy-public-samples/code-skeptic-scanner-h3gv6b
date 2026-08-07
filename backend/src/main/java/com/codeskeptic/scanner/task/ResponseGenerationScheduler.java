@@ -7,12 +7,17 @@ import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.NotionService;
 import com.codeskeptic.scanner.service.ResponseService;
 
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationListener;
+import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
@@ -49,6 +54,16 @@ import org.springframework.stereotype.Component;
  * untouched backlog to the following pass — DL-282. No allowance, window, attempt counter or failure
  * circuit stands between a candidate and its provider call.
  *
+ *
+ * <p>A candidate that fails on {@value #CANDIDATE_FAILURE_LIMIT} consecutive passes is set aside and
+ * passed over on later passes until it succeeds or the process restarts, so a candidate failing for a
+ * reason that will not change stops consuming one provider call per pass forever — it stays
+ * unanswered, and therefore stays selected, so without this bound the pass would re-attempt it
+ * indefinitely. The count is per candidate identifier, is cleared the moment the candidate is handled
+ * without raising, is held for at most {@value #TRACKED_FAILING_CANDIDATES} candidates, and lives
+ * only in memory: no column, table or dependency records it. It holds no tweet or reply data, serves
+ * no read, and paces nothing — see docs/DECISION_LOG.md DL-300.
+ *
  * <p>This pass does not own ingestion's replies. It reaches
  * {@link ResponseService#generateResponseIfAbsentFor(Tweet)}, the entity-shaped signature of the one
  * claim-aware operation both background paths reach — {@code task.TweetStreamListener} reaches its
@@ -66,12 +81,34 @@ import org.springframework.stereotype.Component;
  * <p>No code path here publishes anything to X. The class reaches no HTTP client, and it does not
  * read, set or branch on the {@code responses.is_approved} flag of
  * {@code backend/app/db/models.py:L26}, which a human reads.
+ *
+ * <p>No transaction is declared on the pass: the candidate query and every write inside
+ * {@link ResponseService} run within the boundaries those components declare, and the calls to
+ * OpenAI and Notion run with no transaction open.
+ *
+ * <p>A pass in flight abandons its remainder when the application context begins to close. This class
+ * listens for {@link ContextClosedEvent} — the first step of the close, published before any lifecycle
+ * bean is stopped and before any singleton is destroyed — and raises a flag the pass reads between two
+ * candidates and before each batch read. The pass then reports what it completed and returns, so the
+ * bounded wait {@code config/AsyncSchedulingConfig} places on a running pass is a backstop rather than
+ * the thing that decides how long a shutdown takes, and no candidate is handled after the resources it
+ * needs have been closed. Nothing is cancelled, interrupted or rolled back: whatever a candidate
+ * already committed stays committed, and the candidates the pass did not reach stay unanswered and are
+ * therefore selected again by the first pass after the next start — DL-301.
+ *
+ * <p>A selected row is handed to {@link ResponseService} as it was selected, so no candidate is read a
+ * second time: the candidate query already carries every column the generator reads — DL-226.
+ * {@link Tweet#getResponses()} is lazy and {@code spring.jpa.open-in-view} is {@code false}; the
+ * collection is never traversed here.
+ *
+ * @see ResponseService#generateResponseIfAbsentFor(Tweet)
+ * @see NotionService#updateTweetResponse(String, String)
  */
 // Fixed-delay intent ported from schedule_response_generation at
 // backend/app/tasks/response_generation.py:L35-50, absorbing the task body at :L10-33 (faithful port
 // of intent) — see docs/DECISION_LOG.md DL-047
 @Component
-public class ResponseGenerationScheduler {
+public class ResponseGenerationScheduler implements ApplicationListener<ContextClosedEvent> {
 
     private static final Logger log = LoggerFactory.getLogger(ResponseGenerationScheduler.class);
 
@@ -86,6 +123,37 @@ public class ResponseGenerationScheduler {
     private static final Pageable CANDIDATE_BATCH =
             PageRequest.of(0, CANDIDATE_BATCH_ROWS, Sort.by(Sort.Direction.ASC, "id"));
 
+    /**
+     * Consecutive failures after which a candidate is passed over instead of attempted again. A
+     * candidate that fails for a reason that will not change — its own stored column values, or a
+     * reply the provider keeps producing that cannot be stored — otherwise consumes one provider call
+     * on every later pass forever, because it stays unanswered and so stays selected. Three attempts
+     * still absorb a transient provider or database outage spanning several passes — DL-300 — see
+     * docs/DECISION_LOG.md.
+     */
+    private static final int CANDIDATE_FAILURE_LIMIT = 3;
+
+    /**
+     * Most failing candidates whose consecutive-failure count is held at once. Past this many the
+     * least recently failing candidate is dropped, which bounds the memory this bookkeeping occupies
+     * regardless of backlog size and simply grants the dropped candidate fresh attempts — DL-300 —
+     * see docs/DECISION_LOG.md.
+     */
+    private static final int TRACKED_FAILING_CANDIDATES = 1_000;
+
+    /**
+     * Raised once the application context has begun to close.
+     *
+     * <p>Written by {@link #onApplicationEvent(ContextClosedEvent)} on the thread that closes the
+     * context and read by {@link #generatePendingResponses()} on a scheduler pool thread, so the field
+     * is {@code volatile}: the write must be visible to the pass without any lock between them. It is
+     * never lowered again, because a closed context is not reopened — DL-301 — see
+     * docs/DECISION_LOG.md.
+     */
+    // Net-new cooperative stop signal (the source loop had no stop path at all:
+    // backend/app/tasks/response_generation.py:L41 is `while True`) — DL-301
+    private volatile boolean contextClosing;
+
     private final TweetRepository tweetRepository;
 
     private final ResponseService responseService;
@@ -94,6 +162,27 @@ public class ResponseGenerationScheduler {
 
     /** Supplies the per-pass candidate ceiling — DL-282. */
     private final ScannerProperties properties;
+
+    /**
+     * Consecutive failures per candidate identifier, most recently failing last.
+     *
+     * <p>Insertion order is refreshed on every recorded failure — the entry is removed and re-inserted
+     * — so the iteration order is least-recently-failing first and the eviction that keeps the map
+     * within {@value #TRACKED_FAILING_CANDIDATES} entries drops the candidate whose last failure is
+     * oldest. An entry is removed the moment its candidate is handled without raising.
+     *
+     * <p>This is in-memory bookkeeping and nothing else: no {@code tweets} column records it, no table
+     * is added, and a restart clears it, which is what grants a candidate set aside during a long
+     * outage its attempts back — DL-300 — see docs/DECISION_LOG.md.
+     *
+     * <p>Passes never overlap, because pacing is a fixed delay measured from the end of one pass, so
+     * this map is reached by one thread at a time; every access is nonetheless taken under the map's
+     * own monitor so that a pass running on a different pool thread than the previous one observes
+     * what that pass recorded.
+     */
+    // Net-new (no Python counterpart; the source re-selected a failing candidate on every loop
+    // iteration) — DL-300 — see docs/DECISION_LOG.md
+    private final Map<Integer, Integer> consecutiveFailures = new LinkedHashMap<>();
 
     /**
      * Binds the three collaborators one pass uses.
@@ -125,14 +214,21 @@ public class ResponseGenerationScheduler {
     /**
      * Runs one generation pass over every {@code tweets} row that has no {@code responses} row.
      *
-     * <p>Candidates are read in consecutive batches of at most {@value #CANDIDATE_BATCH_ROWS} rows,
-     * each batch taken from the rows whose identifier exceeds the last candidate handled, so no
-     * candidate is read twice and none is skipped; the sweep ends with the first batch that comes back
-     * short of that bound. For each candidate the pass generates and stores a reply and mirrors it to
-     * Notion. A candidate another path already answered stores nothing and is counted as skipped; a
-     * candidate whose handling raises is recorded and skipped, and the pass continues. The pass closes
-     * with a summary of the attempted, succeeded, unmirrored, skipped and failed counts and the number
-     * of batches read — DL-248, DL-253.
+     * <p>The pass reads its candidates in consecutive batches of at most
+     * {@value #CANDIDATE_BATCH_ROWS} rows, and for each candidate of each batch generates and stores a
+     * reply and mirrors it to Notion. The next batch is taken from the rows whose identifier exceeds
+     * the last candidate handled, so no candidate is read twice and none is skipped, and the sweep ends
+     * with the first batch that comes back short of that bound. A candidate another path already
+     * answered stores nothing and is counted as skipped. A candidate whose handling raises is recorded
+     * and skipped, and the pass continues with the next candidate; one more consecutive failure is
+     * counted against it, and once it has failed on {@value #CANDIDATE_FAILURE_LIMIT} consecutive
+     * passes it is passed over without reaching the generator and counted as set aside — DL-300. The
+     * pass closes with a summary of the attempted, succeeded, unmirrored, skipped, failed and set-aside
+     * counts and the number of batches it read — see docs/DECISION_LOG.md DL-248, DL-253 and DL-300.
+     *
+     * <p>One ceiling bounds one pass: it attempts at most
+     * {@code scanner.background.max-candidates-per-pass} candidates, whatever the backlog holds,
+     * and leaves the untouched backlog to the following pass — DL-282.
      *
      * <p>A candidate ingested after the pass began is answered by this pass when its identifier lies
      * past the cursor at the time the next batch is read, and by the following pass otherwise.
@@ -170,14 +266,23 @@ public class ResponseGenerationScheduler {
             int unmirrored = 0;
             int skipped = 0;
             int failed = 0;
+            int setAside = 0;
             int batches = 0;
             int candidateCeiling = maxCandidatesPerPass();
             boolean ceilingReached = false;
             // Keyset cursor over tweets.id; null opens the sweep — DL-248 — see
             // docs/DECISION_LOG.md
             Integer afterId = null;
+            boolean abandoned = false;
 
             while (true) {
+                // No further batch is read once the context has begun to close — DL-301 — see
+                // docs/DECISION_LOG.md
+                if (shouldAbandonPass()) {
+                    abandoned = true;
+                    break;
+                }
+
                 List<Tweet> batch = tweetRepository.findUnansweredBatchAfter(afterId, CANDIDATE_BATCH);
 
                 if (batch.isEmpty()) {
@@ -191,15 +296,35 @@ public class ResponseGenerationScheduler {
                 }
 
                 for (Tweet candidate : batch) {
+                    // Observed between two candidates, so the candidate in flight completes and the
+                    // remainder is left to the next start — DL-301 — see docs/DECISION_LOG.md
+                    if (shouldAbandonPass()) {
+                        abandoned = true;
+                        break;
+                    }
                     // Per-pass candidate ceiling — DL-282 — see docs/DECISION_LOG.md
                     if (attempted >= candidateCeiling) {
                         ceilingReached = true;
                         break;
                     }
-                    String tweetId = String.valueOf(candidate.getId());
+
+                    Integer candidateId = candidate.getId();
+                    String tweetId = String.valueOf(candidateId);
                     // The cursor advances before the candidate is handled; a candidate that fails is
                     // not revisited in this pass — DL-248 — see docs/DECISION_LOG.md
-                    afterId = candidate.getId();
+                    afterId = candidateId;
+
+                    // A candidate that has failed on this many consecutive passes is passed over
+                    // without reaching the generator, so it consumes no provider call — DL-300 —
+                    // see docs/DECISION_LOG.md
+                    if (hasReachedFailureLimit(candidateId)) {
+                        setAside++;
+                        log.debug("Tweet {} is set aside after {} consecutive failures; this pass "
+                                + "attempts no generation for it", tweetId,
+                                CANDIDATE_FAILURE_LIMIT);
+                        continue;
+                    }
+
                     attempted++;
                     try {
                         // The mirror outcome is counted separately from the stored reply — DL-253 —
@@ -212,20 +337,31 @@ public class ResponseGenerationScheduler {
                             }
                             case SKIPPED -> skipped++;
                         }
+                        // Handled without raising, so the candidate carries no consecutive-failure
+                        // count into the next pass — DL-300 — see docs/DECISION_LOG.md
+                        forgetFailures(candidateId);
 
                     } catch (RuntimeException e) {
                         failed++;
+                        recordFailure(candidateId);
                         log.error("Scheduled response generation failed for tweet {}: {}",
                                 tweetId, e.getClass().getSimpleName());
                     }
                 }
 
-                if (ceilingReached) {
+                if (ceilingReached || abandoned || batch.size() < CANDIDATE_BATCH_ROWS) {
                     break;
                 }
-                if (batch.size() < CANDIDATE_BATCH_ROWS) {
-                    break;
-                }
+            }
+
+            if (abandoned) {
+                log.info("Response generation pass abandoned because the context is closing: {} "
+                                + "attempted, {} succeeded ({} stored without a Notion mirror), {} "
+                                + "skipped, {} failed, {} set aside, over {} batch(es); every "
+                                + "candidate it did not reach stays unanswered and is selected again "
+                                + "by the first pass after the next start",
+                        attempted, succeeded, unmirrored, skipped, failed, setAside, batches);
+                return;
             }
 
             if (ceilingReached) {
@@ -233,14 +369,16 @@ public class ResponseGenerationScheduler {
                         + "remaining backlog is left to the following pass", candidateCeiling);
             }
 
-            if (attempted == 0) {
+            if (attempted == 0 && setAside == 0) {
                 log.debug("Response generation pass found no tweet awaiting a response");
                 return;
             }
 
             log.info("Response generation pass finished: {} attempted, {} succeeded ({} stored "
-                            + "without a Notion mirror), {} skipped, {} failed over {} batch(es)",
-                    attempted, succeeded, unmirrored, skipped, failed, batches);
+                            + "without a Notion mirror), {} skipped, {} failed, {} set aside after "
+                            + "{} consecutive failures, over {} batch(es)",
+                    attempted, succeeded, unmirrored, skipped, failed, setAside,
+                    CANDIDATE_FAILURE_LIMIT, batches);
         } catch (RuntimeException e) {
             // Sanitized record: operation and exception class only — DL-084 — see
             // docs/DECISION_LOG.md
@@ -281,10 +419,12 @@ public class ResponseGenerationScheduler {
      * <p>The row is handed on as the candidate query selected it, so the generator reads no row of its
      * own — see docs/DECISION_LOG.md DL-226. Nothing is stored and nothing is mirrored when
      * {@link ResponseService#generateResponseIfAbsentFor(Tweet)} reports an empty result, which means the
-     * row was answered elsewhere — see docs/DECISION_LOG.md DL-195. A stored reply always carries
-     * content: {@code dto/ResponseDto} rejects a {@code null} value for it (DL-080). A mirror
-     * rejection is recorded without failing the candidate, the stored reply is left in place in every
-     * case, and the mirror is not re-attempted — see docs/DECISION_LOG.md DL-194.
+     * row was answered elsewhere — see docs/DECISION_LOG.md DL-195. {@code responses.content} is
+     * nullable and {@code dto/ResponseDto} carries an empty column through as {@code null} (DL-080),
+     * so the reported character count reads the value defensively and a {@code null} reply is mirrored
+     * as an empty string. A mirror rejection is recorded without failing the candidate, the stored
+     * reply is left in place in every case, and the mirror is not re-attempted — see
+     * docs/DECISION_LOG.md DL-194.
      *
      * @param candidate the {@code tweets} row to reply to, carrying its assigned identifier; never
      *     {@code null}
@@ -316,13 +456,14 @@ public class ResponseGenerationScheduler {
         }
 
         ResponseDto generated = result.get();
-        // dto/ResponseDto rejects a null content — DL-080 — see docs/DECISION_LOG.md
+        // responses.content is nullable and dto/ResponseDto carries an empty column through as null,
+        // so the length is read defensively — DL-080 — see docs/DECISION_LOG.md
         String content = generated.content();
 
         // Identifier and length only; the generated text is not recorded — see
         // docs/DECISION_LOG.md DL-052
         log.info("Stored response {} for tweet {} ({} character(s))",
-                generated.id(), tweetId, content.length());
+                generated.id(), tweetId, content == null ? 0 : content.length());
 
         // Closes the call to the absent NotionService.update_tweet_response at
         // backend/app/tasks/response_generation.py:L30, which the documented step "Update Notion
@@ -339,6 +480,103 @@ public class ResponseGenerationScheduler {
             return CandidateOutcome.STORED_UNMIRRORED;
         }
         return CandidateOutcome.STORED_AND_MIRRORED;
+    }
+
+    /**
+     * Raises the stop signal the moment the application context begins to close.
+     *
+     * <p>{@link ContextClosedEvent} is published as the first step of the close, before any
+     * {@code SmartLifecycle} bean is stopped and before any singleton is destroyed, which is why it is
+     * the hook this class uses: a pass reading the flag between two candidates therefore stops before
+     * the scheduler pool, the entity manager factory and the connection pool are taken away from it.
+     * The method performs no work of its own and never raises — DL-301.
+     *
+     * @param event the close notification, never {@code null}
+     */
+    // Net-new (no source construct: the source loop could not be stopped) — DL-301 — see
+    // docs/DECISION_LOG.md
+    @Override
+    public void onApplicationEvent(ContextClosedEvent event) {
+        contextClosing = true;
+        log.info("Context close observed; no further response generation batch or candidate is "
+                + "started");
+    }
+
+    /**
+     * Reports whether the pass must stop where it is.
+     *
+     * <p>Two signals are honoured. The flag {@link #onApplicationEvent(ContextClosedEvent)} raises is
+     * the one an orderly shutdown uses. The calling thread's interrupt status is honoured as well, so a
+     * pool that is shut down with cancellation rather than awaited also stops the pass; the status is
+     * read and not cleared, so whatever the pool does with it afterwards is unaffected — DL-301.
+     *
+     * @return {@code true} when neither another candidate nor another batch may be started
+     */
+    // Net-new — DL-301 — see docs/DECISION_LOG.md
+    private boolean shouldAbandonPass() {
+        return contextClosing || Thread.currentThread().isInterrupted();
+    }
+
+    /**
+     * Reports whether a candidate has failed on {@value #CANDIDATE_FAILURE_LIMIT} consecutive passes.
+     *
+     * @param candidateId identifier of the {@code tweets} row; never {@code null}
+     * @return {@code true} when the candidate is to be passed over without reaching the generator
+     */
+    // Net-new (no Python counterpart) — DL-300 — see docs/DECISION_LOG.md
+    private boolean hasReachedFailureLimit(Integer candidateId) {
+        synchronized (consecutiveFailures) {
+            Integer failures = consecutiveFailures.get(candidateId);
+            return failures != null && failures >= CANDIDATE_FAILURE_LIMIT;
+        }
+    }
+
+    /**
+     * Counts one more consecutive failure against a candidate.
+     *
+     * <p>The entry is removed and re-inserted so that it becomes the most recent, and the map is then
+     * trimmed to {@value #TRACKED_FAILING_CANDIDATES} entries from the least recent end. Reaching
+     * {@value #CANDIDATE_FAILURE_LIMIT} is recorded once at {@code WARN}, because from that point the
+     * candidate stays unanswered until something about it changes.
+     *
+     * @param candidateId identifier of the {@code tweets} row; never {@code null}
+     */
+    // Net-new (no Python counterpart) — DL-300 — see docs/DECISION_LOG.md
+    private void recordFailure(Integer candidateId) {
+        int failures;
+        int tracked;
+        synchronized (consecutiveFailures) {
+            Integer previous = consecutiveFailures.remove(candidateId);
+            failures = (previous == null) ? 1 : previous + 1;
+            consecutiveFailures.put(candidateId, failures);
+
+            Iterator<Integer> leastRecentFirst = consecutiveFailures.keySet().iterator();
+            while (consecutiveFailures.size() > TRACKED_FAILING_CANDIDATES
+                    && leastRecentFirst.hasNext()) {
+                leastRecentFirst.next();
+                leastRecentFirst.remove();
+            }
+            tracked = consecutiveFailures.size();
+        }
+
+        if (failures == CANDIDATE_FAILURE_LIMIT) {
+            log.warn("Tweet {} has failed generation on {} consecutive passes and is set aside; no "
+                            + "further generation is attempted for it while this process runs and it "
+                            + "keeps failing ({} candidate(s) tracked)",
+                    candidateId, failures, tracked);
+        }
+    }
+
+    /**
+     * Drops any consecutive-failure count held against a candidate.
+     *
+     * @param candidateId identifier of the {@code tweets} row; never {@code null}
+     */
+    // Net-new (no Python counterpart) — DL-300 — see docs/DECISION_LOG.md
+    private void forgetFailures(Integer candidateId) {
+        synchronized (consecutiveFailures) {
+            consecutiveFailures.remove(candidateId);
+        }
     }
 
     // The mirror outcome is reported separately from the stored reply — DL-253 — see

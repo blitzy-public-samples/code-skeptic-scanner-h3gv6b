@@ -27,8 +27,20 @@ import com.codeskeptic.scanner.repository.ResponseRepository.ResponseRow;
  * empty fails in the record's constructor and not here. An absent {@code tweet} association yields a
  * {@code null} {@code tweet_id} and is not dereferenced.
  *
- * <p>Conversion runs in one direction: no entity-producing operation, no persistence access and no
- * outbound call. Instances hold no state and are thread-safe.
+ * <p>The remaining three components are copied verbatim.
+ *
+ * <p>Null policy — see docs/DECISION_LOG.md DL-080. Every one of the five
+ * {@code responses} columns is declared without {@code nullable=false}, so a stored row may carry
+ * {@code null} in any of them, and this class carries a {@code null} column value through as a
+ * {@code null} component. No conversion here unboxes a column value, defaults a component,
+ * substitutes a neutral value or rejects a column value, and {@link ResponseDto} rejects only a
+ * {@code null} {@code id} — the primary key a stored row always carries — so every other empty column
+ * reaches the wire as JSON {@code null}, which is what {@code response.to_dict()} produced at
+ * {@code backend/app/api/responses.py:L18,L29}. An absent {@code tweet} association yields a
+ * {@code null} {@code tweet_id} rather than dereferencing the association.
+ *
+ * <p>Conversion runs in one direction: this mapper declares no entity-producing operation and
+ * performs no persistence access and no outbound call. Instances hold no state and are thread-safe.
  */
 @Component
 public final class ResponseMapper {

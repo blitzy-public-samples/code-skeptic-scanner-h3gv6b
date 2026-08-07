@@ -17,6 +17,7 @@ import jakarta.annotation.PreDestroy;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -38,9 +39,14 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import com.google.api.gax.retrying.RetrySettings;
+import com.google.api.gax.rpc.StatusCode;
+import com.google.api.gax.rpc.UnaryCallSettings;
+import com.google.cloud.language.v1.AnalyzeSentimentRequest;
 import com.google.cloud.language.v1.AnalyzeSentimentResponse;
 import com.google.cloud.language.v1.Document;
 import com.google.cloud.language.v1.LanguageServiceClient;
+import com.google.cloud.language.v1.LanguageServiceSettings;
 import com.google.cloud.language.v1.Sentiment;
 
 // Faithful-port coverage: the plain-text english document and document-sentiment score read at
@@ -83,6 +89,14 @@ class SentimentAnalysisServiceTest {
 
     private static final String PROVIDER_FAILURE_MESSAGE = "the provider rejected the request";
 
+    /**
+     * Window one analyze request was measured occupying a request thread against an unreachable
+     * provider before the call was bounded. The delivered total deadline is asserted well inside it
+     * — DL-298 — see docs/DECISION_LOG.md.
+     */
+    private static final Duration MEASURED_PARKED_WINDOW = Duration.ofSeconds(30L);
+
+    /** Operation names no method of the service may carry. */
     private static final String[] PUBLISHING_NAMES = { "publish", "post", "send", "tweet", "reply" };
 
     @Mock
@@ -566,6 +580,88 @@ class SentimentAnalysisServiceTest {
                         .containsAnyOf(PUBLISHING_NAMES));
     }
 
+    // ---------------------------------------------------------------------
+    // Bounded provider deadlines and retry policy — DL-298
+    // ---------------------------------------------------------------------
+
+    @Test
+    @DisplayName("bounds one AnalyzeSentiment attempt and the whole call, and caps the attempts")
+    void boundsOneAnalyzeSentimentAttemptAndTheWholeCall() throws Exception {
+        RetrySettings bounded = analyzeSentimentSettings().getRetrySettings();
+
+        assertThat(bounded.getInitialRpcTimeoutDuration()).isEqualTo(Duration.ofSeconds(5L));
+        assertThat(bounded.getMaxRpcTimeoutDuration()).isEqualTo(Duration.ofSeconds(5L));
+        assertThat(bounded.getTotalTimeoutDuration()).isEqualTo(Duration.ofSeconds(10L));
+        assertThat(bounded.getMaxAttempts()).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("re-attempts an unavailable provider and does not re-attempt an exceeded deadline")
+    void reAttemptsAnUnavailableProviderAndNotAnExceededDeadline() throws Exception {
+        assertThat(analyzeSentimentSettings().getRetryableCodes())
+                .containsExactly(StatusCode.Code.UNAVAILABLE)
+                .doesNotContain(StatusCode.Code.DEADLINE_EXCEEDED);
+    }
+
+    @Test
+    @DisplayName("cannot occupy its calling thread for the window an unbounded call occupied")
+    void cannotOccupyItsCallingThreadForTheWindowAnUnboundedCallOccupied() throws Exception {
+        RetrySettings bounded = analyzeSentimentSettings().getRetrySettings();
+
+        assertThat(bounded.getTotalTimeoutDuration())
+                .as("the whole call stays well inside the window that parked a request thread")
+                .isLessThanOrEqualTo(MEASURED_PARKED_WINDOW.dividedBy(3L));
+        assertThat(bounded.getMaxRpcTimeoutDuration().multipliedBy(bounded.getMaxAttempts()))
+                .as("every attempt the cap allows fits inside the total")
+                .isLessThanOrEqualTo(bounded.getTotalTimeoutDuration());
+    }
+
+    @Test
+    @DisplayName("narrows AnalyzeSentiment alone and leaves another operation's settings in place")
+    void narrowsAnalyzeSentimentAloneAndLeavesAnotherOperationsSettingsInPlace() throws Exception {
+        LanguageServiceSettings settings = languageServiceSettings();
+
+        assertThat(settings.analyzeEntitiesSettings().getRetrySettings().getTotalTimeoutDuration())
+                .as("another operation keeps the generated client's own total timeout")
+                .isNotEqualTo(settings.analyzeSentimentSettings().getRetrySettings()
+                        .getTotalTimeoutDuration());
+    }
+
+    // ---------------------------------------------------------------------
+    // Fixtures
+    // ---------------------------------------------------------------------
+    /**
+     * Builds the client settings the service applies, reaching its private factory reflectively so the
+     * delivered settings object is asserted rather than the constants behind it — DL-298.
+     *
+     * @return the settings the service builds, never {@code null}
+     * @throws ReflectiveOperationException if the factory cannot be reached or fails
+     */
+    private static LanguageServiceSettings languageServiceSettings()
+            throws ReflectiveOperationException {
+        Method factory = SentimentAnalysisService.class.getDeclaredMethod("languageServiceSettings");
+        factory.setAccessible(true);
+        return (LanguageServiceSettings) factory.invoke(new SentimentAnalysisService());
+    }
+
+    /**
+     * The {@code AnalyzeSentiment} call settings of {@link #languageServiceSettings()}.
+     *
+     * @return the settings of the one operation this service narrows, never {@code null}
+     * @throws ReflectiveOperationException if the factory cannot be reached or fails
+     */
+    private static UnaryCallSettings<AnalyzeSentimentRequest, AnalyzeSentimentResponse>
+            analyzeSentimentSettings() throws ReflectiveOperationException {
+        return languageServiceSettings().analyzeSentimentSettings();
+    }
+
+
+    /**
+     * Makes the stubbed client answer any {@link Document} with a response whose
+     * document sentiment carries {@code score}.
+     *
+     * @param score the document sentiment score the stubbed client reports
+     */
     private void stubDocumentSentimentScore(float score) {
         AnalyzeSentimentResponse response = AnalyzeSentimentResponse.newBuilder()
                 .setDocumentSentiment(Sentiment.newBuilder().setScore(score).build())

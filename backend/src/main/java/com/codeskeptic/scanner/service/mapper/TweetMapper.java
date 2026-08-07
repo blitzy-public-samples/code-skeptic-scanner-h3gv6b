@@ -24,12 +24,12 @@ import com.codeskeptic.scanner.entity.Tweet;
  * columns is declared without {@code nullable=false}, so a stored row may carry {@code null} in any of
  * them, and this class carries a {@code null} column value through as a {@code null} component. No
  * conversion here unboxes a column value, defaults a component, substitutes a neutral value or
- * rejects a column value; the requirement is declared in exactly one place, {@link TweetDto}, which
- * rejects a {@code null} for each component the wire contract of
- * {@code backend/app/schema/tweet.py:L6-14} declares required. Converting a row that leaves such a
- * column empty fails in the record's constructor, not here. {@link TweetDto} also
- * normalises the two list components, so those two are the only components that are never
- * {@code null}. The entity's {@code responses} association is not read.
+ * rejects a column value, and {@link TweetDto} rejects only a {@code null} {@code id} — the primary
+ * key a stored row always carries — so every other empty column reaches the wire as JSON
+ * {@code null}, which is what {@code tweet.to_dict()} produced at
+ * {@code backend/app/api/tweets.py:L19,L30}. {@link TweetDto} normalises the two list components, so
+ * those two are the only components that are never {@code null}. The entity's {@code responses}
+ * association is not read.
  *
  * <p>Conversion runs in one direction: this mapper declares no entity-producing operation and
  * performs no persistence access and no outbound call. Instances hold no state and are thread-safe.

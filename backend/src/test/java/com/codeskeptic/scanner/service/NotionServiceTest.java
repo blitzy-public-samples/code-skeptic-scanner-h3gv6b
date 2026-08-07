@@ -117,6 +117,14 @@ class NotionServiceTest {
 
     private static final String MATCHED_PAGE_ID = "8f14e45f-ea1a-4b2c-8d3e-000000000002";
 
+    /** Longest page identifier the update path expands into its URI template — DL-303. */
+    private static final int MAXIMUM_PAGE_ID_LENGTH = 128;
+
+    // -------------------------------------------------------------------------
+    // Post handed to storeTweet(TweetDto)
+    // -------------------------------------------------------------------------
+
+    /** {@link TweetDto#id()} of the post the tests mirror. */
     private static final String TWEET_ID = "1793355680000000001";
 
     private static final String TWEET_CONTENT = "Every AI coding tool review reads like an advert";
@@ -766,8 +774,8 @@ class NotionServiceTest {
                 .containsExactly(MATCHED_PAGE_ID, TWEET_ID);
     }
 
-    // A page carrying no value for a source-required component has no wire form — DL-080, DL-219 —
-    // see docs/DECISION_LOG.md
+    // A page carrying none of a mirrored source-required property is not a mirrored post of this
+    // adapter — DL-219 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] {0}")
     @ValueSource(strings = {PROPERTY_CONTENT, PROPERTY_AUTHOR, PROPERTY_TIMESTAMP,
             PROPERTY_DOUBT_RATING, PROPERTY_ENGAGEMENT})
@@ -1167,6 +1175,78 @@ class NotionServiceTest {
 
         verify(restClient, never()).patch();
         verifyNoInteractions(patchSpec, pageUpdateSpec, pageUpdateResponse);
+    }
+
+    // Net-new — DL-303 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] page id {0}")
+    @ValueSource(strings = {
+        "../../v1/databases/notion-db-1234/query",
+        "page/qa",
+        "page.qa",
+        "page%2Fqa",
+        "page?filter=all",
+        "page qa",
+        "page\u0007qa"
+    })
+    @DisplayName("reports a failure and issues no page update when the matched page identifier is not "
+            + "one path segment")
+    void reportsAFailureAndIssuesNoPageUpdateWhenTheIdentifierIsNotOnePathSegment(String unsafeId) {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(unsafeId, noProperties())));
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> service.updateTweetResponse(TWEET_ID, RESPONSE_TEXT))
+                .withMessageContaining("not a single path segment")
+                .withMessageContaining(unsafeId.length() + " character(s)")
+                .withMessageNotContaining(unsafeId);
+
+        verify(restClient, never()).patch();
+        verifyNoInteractions(patchSpec, pageUpdateSpec, pageUpdateResponse);
+    }
+
+    // Net-new — DL-303 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] page id {0}")
+    @ValueSource(strings = {
+        "8f14e45f-ea1a-4b2c-8d3e-000000000002",
+        "8f14e45fea1a4b2c8d3e000000000002",
+        "page-qa-0001",
+        "Page_id~1"
+    })
+    @DisplayName("updates the page named by every identifier shape Notion answers with")
+    void updatesThePageNamedByEveryIdentifierShapeNotionAnswersWith(String acceptedId) {
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(acceptedId, noProperties())));
+        stubPageUpdate();
+
+        service.updateTweetResponse(TWEET_ID, RESPONSE_TEXT);
+
+        verify(restClient).patch();
+        assertThat(capturedUriTemplate(patchSpec)).isEqualTo(PAGE_PATH);
+        assertThat(capturedUriVariable(patchSpec)).isEqualTo(acceptedId);
+    }
+
+    // Net-new — DL-303 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("accepts a page identifier at the length ceiling and refuses one beyond it")
+    void acceptsAPageIdentifierAtTheLengthCeilingAndRefusesOneBeyondIt() {
+        String atCeiling = "a".repeat(MAXIMUM_PAGE_ID_LENGTH);
+        String beyondCeiling = "a".repeat(MAXIMUM_PAGE_ID_LENGTH + 1);
+        stubPost();
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(atCeiling, noProperties())));
+        stubPageUpdate();
+
+        service.updateTweetResponse(TWEET_ID, RESPONSE_TEXT);
+
+        assertThat(capturedUriVariable(patchSpec)).isEqualTo(atCeiling);
+
+        stubDatabaseQueryReturning(queryResultCarrying(pageCarrying(beyondCeiling, noProperties())));
+
+        assertThatIllegalStateException()
+                .isThrownBy(() -> service.updateTweetResponse(TWEET_ID, RESPONSE_TEXT))
+                .withMessageContaining("not a single path segment")
+                .withMessageContaining((MAXIMUM_PAGE_ID_LENGTH + 1) + " character(s)");
+
+        verify(restClient, times(1)).patch();
     }
 
     @Test

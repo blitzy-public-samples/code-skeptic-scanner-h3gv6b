@@ -2,12 +2,16 @@ package com.codeskeptic.scanner.service;
 
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.AbstractList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import java.util.function.Function;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
@@ -118,6 +122,13 @@ public class ResponseService {
     private static final Sort PAGE_ORDER = Sort.by(Sort.Direction.ASC, "id");
 
     /**
+     * Rows one window of a large page holds. A page of at most this many rows is read and converted by
+     * one statement; a larger page is read as consecutive windows of this bound, one resident at a
+     * time — DL-297 — see docs/DECISION_LOG.md.
+     */
+    private static final int PAGE_FETCH_CHUNK_ROWS = 500;
+
+    /**
      * Bound on a transaction that takes a pessimistic row lock, in seconds. It matches the statement
      * bound {@link ResponseRepository#LOCK_WAIT_MILLIS} declares — see docs/DECISION_LOG.md DL-246.
      */
@@ -219,14 +230,23 @@ public class ResponseService {
      * {@code per_page} as its size, {@code total} as the number of rows in the table and
      * {@code total_pages} as the number of pages that size divides the table into — DL-038.
      *
-     * <p>A {@code page} beyond the last one yields an empty {@code responses} list and a populated
-     * pagination block. A {@code page} whose first row lies at an offset beyond
-     * {@link Integer#MAX_VALUE}, the largest offset the paged query can express, is answered the same
-     * way from a row count alone, with the requested {@code page} and {@code per_page} restated —
-     * DL-225.
+     * <p>A {@code page} whose first row lies at an offset beyond {@link Integer#MAX_VALUE}, the
+     * largest offset the paged query can express, is answered from a row count alone: an empty
+     * {@code responses} list with the requested {@code page} and {@code per_page} restated and the
+     * whole-table counters unchanged — see docs/DECISION_LOG.md DL-225. No pagination argument is
+     * answered with an error status.
      *
-     * <p>The page is read by one paged query ordered by {@code responses.id} ascending, and the rows
-     * are converted inside this method's transaction.
+     * <p>A page of at most {@value #PAGE_FETCH_CHUNK_ROWS} rows is read and converted by one statement
+     * inside this method's transaction. A larger page is returned as a view that reads and converts
+     * consecutive chunks of that bound on demand, holding one converted chunk at a time, so both the
+     * rows one statement returns and the rows resident while the page is rendered are bounded however
+     * large {@code per_page} is — see docs/DECISION_LOG.md DL-249 and DL-297. The chunks of such a page
+     * are therefore read where the view is consumed, after this method's transaction has ended, each
+     * chunk statement running in the repository's own transaction; the row total the pagination block
+     * carries is read inside this method's transaction, before the view is created. Rows are ordered by
+     * {@code responses.id} ascending. The rows the page itself holds are bounded by the table, which is
+     * the wire contract this migration preserves — see docs/DECISION_LOG.md DL-123, DL-217, DL-249 and
+     * DL-297.
      *
      * @param page    the 1-based page number to return; a value below {@value #DEFAULT_PAGE} is read
      *                as {@value #DEFAULT_PAGE}
@@ -258,10 +278,17 @@ public class ResponseService {
             // paged query — DL-225 — see docs/DECISION_LOG.md
             responses = List.of();
             total = responseRepository.count();
-        } else {
+        } else if (requestedPerPage <= PAGE_FETCH_CHUNK_ROWS) {
             Page<ResponseRow> found = responseRepository.findAllRows(requested);
             responses = responseMapper.toDtoRowList(found.getContent());
             total = found.getTotalElements();
+        } else {
+            // A page larger than the chunk bound is read as consecutive bounded chunks, one chunk
+            // resident at a time, as the page is rendered — DL-249, DL-297 — see
+            // docs/DECISION_LOG.md
+            total = responseRepository.count();
+            responses = chunkedView(requested, PAGE_FETCH_CHUNK_ROWS, total,
+                    responseRepository::findRowChunk, responseMapper::toDtoRowList);
         }
 
         PaginationDto pagination = new PaginationDto(
@@ -370,7 +397,7 @@ public class ResponseService {
             log.info("Stored response {} awaiting review.", stored.id());
             return stored;
         } catch (ResponseGenerationException e) {
-            // Already recorded by the layer that raised it — DL-252 — see docs/DECISION_LOG.md
+            // Already recorded by the layer that raised it — DL-197 — see docs/DECISION_LOG.md
             throw e;
         } catch (RuntimeException e) {
             // The one ERROR record a failure with no owning layer receives, written ahead of the
@@ -545,10 +572,10 @@ public class ResponseService {
             log.info("Stored response {} for tweet '{}' awaiting review.", stored.id(), identifier);
             return Optional.of(stored);
         } catch (ResponseGenerationException e) {
-            // Already recorded by the layer that raised it — DL-252 — see docs/DECISION_LOG.md
+            // Already recorded by the layer that raised it — DL-197 — see docs/DECISION_LOG.md
             throw e;
         } catch (RuntimeException e) {
-            // The one ERROR record this failure receives, ahead of the fixed translation — DL-252 —
+            // The one ERROR record this failure receives, ahead of the fixed translation — DL-197 —
             // see docs/DECISION_LOG.md
             log.error("Response generation failed for tweet '{}': {}.", identifier,
                     e.getClass().getSimpleName());
@@ -565,7 +592,7 @@ public class ResponseService {
      * <p>{@code service.LlmService} records every failure it raises: a rejected request and a transport
      * failure at {@code ERROR}, an unusable reply at {@code WARN}. This method records the failure at
      * {@code DEBUG} only and never at {@code ERROR}. Exactly one {@code ERROR} record exists for a
-     * provider failure, and the adapter writes it — DL-252.
+     * provider failure, and the adapter writes it — DL-197.
      *
      * <p>A failure already carrying the wire literal of {@code backend/app/api/responses.py:L49}
      * passes through unchanged; every other failure is wrapped so it carries that literal. The record
@@ -737,14 +764,24 @@ public class ResponseService {
      * with the literal of {@code :L65}, a different string from the one
      * {@link #getResponseById(String)} reports.
      *
-     * <p>Two columns are writable, and each is written exactly when the request body carried its key:
-     * an omitted key leaves its column untouched, and a key carrying a JSON {@code null} writes
-     * {@code null} to its nullable column — DL-082, DL-244. A key carrying a value its column cannot
-     * hold never reaches this method — DL-231. Both members are declared required by the wire contract
-     * of {@code backend/app/schema/response.py:L6,L8} (DL-080), so a write that leaves either empty is
-     * reported with the literal of {@code :L65} and rolls this transaction back. {@code id},
-     * {@code generated_at} and {@code tweet_id} are not written, no value is trimmed or normalised, and
-     * {@code is_approved} is the flag a human reviewer reads.
+     * <p>{@link UpdateResponseRequest} rejects no body: every carried value reaches this method,
+     * a JSON {@code null} included — see docs/DECISION_LOG.md DL-082 and DL-244.
+     *
+     * <p>{@code responseId} arrives as the raw path segment. An identifier carrying no number, a
+     * {@code null} identifier and an identifier naming no row are all reported with the literal of
+     * {@code :L65}, which is a different string from the one {@link #getResponseById(String)} reports.
+     *
+     * <p>Two columns are writable here, and each is written exactly when the request body carried its
+     * key: presence decides whether the column is written, and the carried value decides what is
+     * stored. A key the body omits leaves its column untouched; a key carrying a JSON {@code null}
+     * writes {@code null} to its nullable column — see docs/DECISION_LOG.md DL-082 and DL-244. Both
+     * columns are nullable and {@code dto/ResponseDto} renders an empty one as JSON {@code null}
+     * (DL-080), so a cleared column is stored and returned rather than refused, and no constraint the
+     * source route never expressed is added here. {@code id}, {@code generated_at} and
+     * {@code tweet_id} are not written by this method, and no value is trimmed or normalised on the
+     * way in.
+     *
+     * <p>{@code is_approved} is the flag a human reviewer reads.
      *
      * <p>The row is read through {@link ResponseRepository#findByIdForUpdate(Integer)}, which holds a
      * pessimistic write lock on it for the remainder of this method's transaction, so two requests
@@ -759,9 +796,9 @@ public class ResponseService {
      * @throws BadRequestException when {@code request} is {@code null} or carries neither updatable
      *                             member, carrying the wire literal of
      *                             {@code backend/app/api/responses.py:L57}
-     * @throws NotFoundException   when {@code responseId} names no row, and when the update leaves
-     *                             {@code content} or {@code is_approved} empty; both carry the
-     *                             wire literal of {@code backend/app/api/responses.py:L65}
+     * @throws NotFoundException   when {@code responseId} names no row and when the row stays locked
+     *                             by another writer for the whole bound; both carry the wire literal
+     *                             of {@code backend/app/api/responses.py:L65}
      */
     @Transactional(timeout = LOCK_WAIT_SECONDS)
     public ResponseDto updateResponse(String responseId, UpdateResponseRequest request) {
@@ -799,16 +836,9 @@ public class ResponseService {
             response.setIsApproved(request.approvalValue());
         }
 
-        // The two writable columns are nullable, and dto/ResponseDto declares both members required
-        // — DL-080. A write that leaves either empty is reported with the wire literal of
-        // backend/app/api/responses.py:L65 and this transaction rolls back, so no row is left in a
-        // state the wire contract cannot render — DL-244 — see docs/DECISION_LOG.md
-        if (response.getContent() == null || response.getIsApproved() == null) {
-            log.warn("Rejected a response update: the update leaves a member the wire contract "
-                    + "declares required empty.");
-            throw NotFoundException.responseNotFoundOrUpdateFailed();
-        }
-
+        // Both writable columns are nullable and dto/ResponseDto renders an empty one as JSON null,
+        // so a carried JSON null clears the column exactly as DL-244 states and no further guard
+        // stands between the request and the row — DL-080, DL-244 — see docs/DECISION_LOG.md
         ResponseDto stored = responseMapper.toDto(responseRepository.save(response));
 
         log.info("Updated response {}: content {}, approval {}.",
@@ -912,6 +942,137 @@ public class ResponseService {
      */
     private static int totalPages(long total, int pageSize) {
         return (int) Math.ceil((double) total / (double) pageSize);
+    }
+
+
+    // Net-new: one bounded window of a large page is resident at a time — DL-297 — see
+    // docs/DECISION_LOG.md
+    /**
+     * Returns the rows of one page as a list that reads and converts them one bounded window at a
+     * time.
+     *
+     * <p>{@link List#size()} is answered from {@code totalRows} without reading anything. A value is
+     * read the first time it is reached and the window holding it replaces the window held before, so
+     * one converted window is the whole of the residency this list adds. Windows are aligned to their
+     * own row bound, so the window carrying the page's first row may open before the page does; the
+     * rows of a window that lie before the page's offset are never reached.
+     *
+     * <p>The windows are read where the list is consumed, which is after the transaction that created
+     * it has ended, so each window statement runs in the repository's own transaction.
+     *
+     * @param requested the page the caller asked for, must not be {@code null}
+     * @param chunkRows rows one window may hold, must be at least one
+     * @param totalRows rows the table holds, must not be negative
+     * @param reader    reads the rows one window covers
+     * @param mapper    converts the rows of one window to their wire form
+     * @param <E>       stored row type
+     * @param <D>       wire row type
+     * @return the rows of the page, read on demand
+     */
+    private static <E, D> List<D> chunkedView(Pageable requested, int chunkRows, long totalRows,
+            Function<Pageable, List<E>> reader, Function<List<E>, List<D>> mapper) {
+        Objects.requireNonNull(requested, "requested must not be null.");
+        Objects.requireNonNull(reader, "reader must not be null.");
+        Objects.requireNonNull(mapper, "mapper must not be null.");
+        if (chunkRows < 1) {
+            throw new IllegalArgumentException("chunkRows must be at least 1; it is " + chunkRows
+                    + ".");
+        }
+        if (totalRows < 0) {
+            throw new IllegalArgumentException("totalRows must not be negative; it is " + totalRows
+                    + ".");
+        }
+        return new ChunkedPage<>(requested, chunkRows, totalRows, reader, mapper);
+    }
+
+    // One window of one page is resident at a time — DL-297 — see docs/DECISION_LOG.md
+    /**
+     * The rows of one page, read and converted one bounded window at a time.
+     *
+     * @param <E> stored row type
+     * @param <D> wire row type
+     */
+    private static final class ChunkedPage<E, D> extends AbstractList<D> {
+
+        private final long pageOffset;
+        private final int windowRows;
+        private final Sort sort;
+        private final Function<Pageable, List<E>> reader;
+        private final Function<List<E>, List<D>> mapper;
+        private final int rowsInPage;
+
+        private long heldWindowIndex = -1L;
+        private List<D> heldWindow = List.of();
+
+        private ChunkedPage(Pageable requested, int chunkRows, long totalRows,
+                Function<Pageable, List<E>> reader, Function<List<E>, List<D>> mapper) {
+            int pageSize = requested.getPageSize();
+            this.pageOffset = requested.getOffset();
+            this.windowRows = Math.min(pageSize, chunkRows);
+            this.sort = requested.getSort();
+            this.reader = reader;
+            this.mapper = mapper;
+            this.rowsInPage =
+                    (int) Math.max(0L, Math.min((long) pageSize, totalRows - this.pageOffset));
+        }
+
+        @Override
+        public int size() {
+            return rowsInPage;
+        }
+
+        @Override
+        public D get(int index) {
+            Objects.checkIndex(index, rowsInPage);
+            D value = valueAt(index);
+            if (value == null) {
+                throw new IndexOutOfBoundsException("Row " + index
+                        + " of the requested page is no longer present.");
+            }
+            return value;
+        }
+
+        @Override
+        public Iterator<D> iterator() {
+            return new Iterator<>() {
+                private int cursor;
+                private D readAhead;
+
+                @Override
+                public boolean hasNext() {
+                    if (readAhead == null && cursor < rowsInPage) {
+                        readAhead = valueAt(cursor);
+                    }
+                    return readAhead != null;
+                }
+
+                @Override
+                public D next() {
+                    if (!hasNext()) {
+                        throw new NoSuchElementException();
+                    }
+                    D next = readAhead;
+                    readAhead = null;
+                    cursor++;
+                    return next;
+                }
+            };
+        }
+
+        private D valueAt(int index) {
+            long absoluteRow = pageOffset + index;
+            long windowIndex = absoluteRow / windowRows;
+            if (windowIndex * (long) windowRows > Integer.MAX_VALUE) {
+                return null;
+            }
+            if (windowIndex != heldWindowIndex) {
+                List<E> read = reader.apply(PageRequest.of((int) windowIndex, windowRows, sort));
+                heldWindow = read.isEmpty() ? List.of() : List.copyOf(mapper.apply(read));
+                heldWindowIndex = windowIndex;
+            }
+            int positionInWindow = (int) (absoluteRow % windowRows);
+            return positionInWindow < heldWindow.size() ? heldWindow.get(positionInWindow) : null;
+        }
     }
 
 }

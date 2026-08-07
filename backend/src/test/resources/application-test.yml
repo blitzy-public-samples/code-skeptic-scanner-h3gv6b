@@ -140,6 +140,8 @@ scanner:
     # DL-254 — see docs/DECISION_LOG.md
     max-stream-rules: 25
     # DL-256 — see docs/DECISION_LOG.md
+    # The one idle bound the filtered-stream subscription carries. Declared explicitly at the
+    # production default; the build reaches no X host, so it bounds no call the test profile makes.
     stream-idle-timeout-seconds: 60
 
   background:

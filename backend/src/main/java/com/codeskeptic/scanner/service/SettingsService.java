@@ -159,8 +159,15 @@ public class SettingsService {
     }
 
     // Call site backend/app/api/settings.py:L10 — see docs/DECISION_LOG.md DL-039
+    // The order is requested here rather than left to the database — DL-039 — see
+    // docs/DECISION_LOG.md
     /**
      * Returns every row of the {@code settings} table, ordered by {@code key} ascending.
+     *
+     * <p>The order is requested of the database through {@link #BY_KEY} rather than left to
+     * whatever sequence an unordered scan happens to return, so the same table renders the same
+     * array on every vendor and on every call. Because {@code key} is the primary key of the table
+     * the order is total, and no two elements can compare equal.
      *
      * <p>Each element carries the {@code key}, {@code value} and {@code description} of one row
      * unchanged, and a {@code null} column is carried through as a {@code null} component. The rows

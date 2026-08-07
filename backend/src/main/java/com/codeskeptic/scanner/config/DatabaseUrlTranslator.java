@@ -45,11 +45,61 @@ import org.slf4j.LoggerFactory;
  * credential property names; every other property is retained verbatim, in its original order and
  * with its preceding separator, a vendor property naming a driver secret included — DL-072.
  *
+<<<<<<< HEAD
  * <p>Scheme map: {@code postgresql} and {@code postgres} onto {@code jdbc:postgresql://},
- * {@code mysql} and {@code mariadb} onto {@code jdbc:mysql://}, {@code h2} onto {@code jdbc:h2://} —
- * one entry per runtime-scope driver — DL-009, DL-028, DL-071. Verified server products are
+ * {@code mysql} and {@code mariadb} onto {@code jdbc:mysql://}, {@code h2} onto
+ * {@code jdbc:h2:tcp://}, the connection mode the H2 driver accepts for a server URL — one entry per
+ * runtime-scope driver — DL-009, DL-028, DL-071. Verified server products are
  * PostgreSQL 16 and MySQL 8.4; a {@code mariadb} value translates onto the MySQL vendor and records a
- * warning naming that unverified combination — DL-187.
+ * warning naming that unverified combination — DL-187. {@code config/DataSourceConfig} then refuses the
+ * connection once the server behind any MySQL-vendor URL reports MariaDB, so the scheme the agreed
+ * table requires cannot end in an unexplained dialect failure — DL-304.
+=======
+ * <p>Extraction and detection read one grammar — DL-072:
+ * <ul>
+ *   <li><b>Extraction</b>, on the parse path, splits the query component on {@code '&'} and
+ *       {@code ';'} alike. A credential property is removed under either separator and fills whichever
+ *       credential the user-info component left unset. Every other property is retained verbatim, in
+ *       its original order, and with the separator that preceded it in the supplied value; a retained
+ *       property that becomes the first one carries no separator. A query whose every property is a
+ *       credential leaves no {@code ?} segment at all.</li>
+ *   <li><b>Detection</b> splits on {@code '?'}, {@code '&'} and {@code ';'} alike and runs over the
+ *       reassembled URL, so it is a check on the outcome rather than a second grammar. On the parse
+ *       path extraction has already removed every credential property, so detection finds none. On
+ *       the {@code jdbc:} pass-through path nothing is extracted, so a value carrying a credential
+ *       property under any of the three separators is <em>rejected</em> and never altered.</li>
+ * </ul>
+ *
+ * <p>Supported schemes and the JDBC authority prefix each maps to: {@code postgresql} and
+ * {@code postgres} map to {@code jdbc:postgresql://}; {@code mysql} and {@code mariadb} map to
+ * {@code jdbc:mysql://} — DL-187 — see docs/DECISION_LOG.md; {@code h2} maps to
+ * {@code jdbc:h2:tcp://} — DL-071 — see docs/DECISION_LOG.md. The set matches the JDBC drivers
+ * backend/pom.xml declares at {@code runtime} scope, so every accepted scheme resolves a driver in the
+ * packaged artifact as well as in the build: {@code org.postgresql:postgresql},
+ * {@code com.mysql:mysql-connector-j} and {@code com.h2database:h2} — DL-242 — see
+ * docs/DECISION_LOG.md.
+ *
+ * <p>Server products this service supports: PostgreSQL 16, MySQL 8.4 and H2 2.3. The accepted scheme
+ * set is wider than that, because {@code mariadb} translates onto the MySQL vendor as the agreed
+ * scheme table requires; this class records a warning naming that unverified combination whenever the
+ * scheme is declared, and {@code config/DataSourceConfig} refuses the connection once the server
+ * behind any MySQL-vendor URL reports MariaDB — DL-187 — see docs/DECISION_LOG.md.
+ *
+ * <p>Examples, in which {@code USERNAME} and {@code PASSWORD} stand for the configured credentials:
+ * <pre>{@code
+ * var translated = DatabaseUrlTranslator.translate(
+ *         "postgresql://USERNAME:PASSWORD@db.internal:5432/codeskeptic");
+ * translated.jdbcUrl();   // jdbc:postgresql://db.internal:5432/codeskeptic
+ * translated.username();  // USERNAME
+ * translated.password();  // PASSWORD
+ *
+ * DatabaseUrlTranslator.translate("mariadb://db.internal:3306/codeskeptic")
+ *         .jdbcUrl();     // jdbc:mysql://db.internal:3306/codeskeptic
+ *
+ * DatabaseUrlTranslator.translate("h2://db.internal:9092/codeskeptic")
+ *         .jdbcUrl();     // jdbc:h2:tcp://db.internal:9092/codeskeptic
+ * }</pre>
+>>>>>>> blitzy-496d1eaa-4245-471b-b86c-5cec99882476-w-027
  */
 public final class DatabaseUrlTranslator {
 
@@ -97,13 +147,6 @@ public final class DatabaseUrlTranslator {
     private static final String SUPPORTED_SCHEMES = String.join(", ", VENDOR_BY_SCHEME.keySet());
 
     /**
-     * Scheme whose translation is accompanied by a warning: it resolves onto a vendor whose driver
-     * this service ships, against a server product the service is not verified against — DL-187 —
-     * see docs/DECISION_LOG.md.
-     */
-    private static final String UNVERIFIED_SERVER_SCHEME = "mariadb";
-
-    /**
      * The JDBC property names treated as credential material wherever they appear in a URL. Matched
      * case-insensitively against the text before a property's {@code '='} — DL-072 — see
      * docs/DECISION_LOG.md.
@@ -137,7 +180,9 @@ public final class DatabaseUrlTranslator {
 
         POSTGRESQL("postgresql", "jdbc:postgresql://"),
         MYSQL("mysql", "jdbc:mysql://"),
-        H2("h2", "jdbc:h2://");
+        // The tcp: connection mode is what the H2 driver accepts for a server URL — DL-071 — see
+        // docs/DECISION_LOG.md
+        H2("h2", "jdbc:h2:tcp://");
 
         private final String token;
         private final String jdbcAuthorityPrefix;
@@ -390,8 +435,8 @@ public final class DatabaseUrlTranslator {
     /**
      * Discards any {@code +driver} suffix and matches the remaining scheme case-insensitively.
      *
-     * <p>{@value #UNVERIFIED_SERVER_SCHEME} resolves onto the MySQL vendor and records a warning
-     * naming the unverified server product — DL-187 — see docs/DECISION_LOG.md.
+     * <p>Every scheme in the supported set resolves onto a vendor whose driver this module ships, so
+     * no scheme resolves onto a driver that cannot serve it — DL-187 — see docs/DECISION_LOG.md.
      *
      * @throws IllegalStateException if the scheme is absent or unsupported
      */
@@ -405,14 +450,6 @@ public final class DatabaseUrlTranslator {
         final int driverSuffix = rawScheme.indexOf(DRIVER_SUFFIX_MARKER);
         final String scheme = (driverSuffix < 0 ? rawScheme : rawScheme.substring(0, driverSuffix))
                 .toLowerCase(Locale.ROOT);
-
-        if (UNVERIFIED_SERVER_SCHEME.equals(scheme)) {
-            LOG.warn("DATABASE_URL declares the '{}' scheme, which translates onto the MySQL vendor "
-                    + "served by com.mysql:mysql-connector-j. A MariaDB server is not one of the "
-                    + "server products this service is verified against; dialect resolution can fail "
-                    + "after the connection pool is created. See backend/docs/DECISION_LOG.md DL-187.",
-                    UNVERIFIED_SERVER_SCHEME);
-        }
 
         final Vendor vendor = VENDOR_BY_SCHEME.get(scheme);
         if (vendor == null) {

@@ -83,10 +83,13 @@ import reactor.util.retry.Retry;
  * is sent as consecutive requests of at most {@value #MAX_RULES_PER_REQUEST} rules — DL-254. A
  * registered rule whose tag differs from the wanted one is replaced — DL-261.
  *
- * <p>At most {@value #STREAM_DISPATCH_PREFETCH} record and {@value #STREAM_CHUNK_PREFETCH} body chunk
- * are queued ahead of the work in progress, so the memory a connection holds is bounded however long a
- * provider or a database call takes — DL-258. A dropped record is counted and reported at most once per
- * {@value #DROPPED_RECORD_REPORT_INTERVAL} — DL-260. The body carries a signal-idle bound of
+ * <p>At most {@value #STREAM_DISPATCH_CONCURRENCY} records are dispatched at the same time, and at most
+ * {@value #STREAM_DISPATCH_PREFETCH} record and {@value #STREAM_CHUNK_PREFETCH} body chunk are queued
+ * ahead of the work in progress, so the memory a connection holds is bounded however long a provider or
+ * a database call takes — DL-258. A dropped record is counted and reported at most once per
+ * {@value #DROPPED_RECORD_REPORT_INTERVAL} — DL-260.
+ *
+ * <p>The body carries a signal-idle bound of
  * {@code scanner.ingestion.stream-idle-timeout-seconds}: any chunk resets it, the keep-alive chunk
  * included, so a silent half-open connection fails and reconnects — DL-256.
  *
@@ -290,6 +293,17 @@ public class TweetStreamClient implements SmartLifecycle {
     // Bounded queueing between the connection and the dispatch worker — DL-258 — see
     // docs/DECISION_LOG.md
     private static final int STREAM_DISPATCH_PREFETCH = 1;
+
+    /**
+     * Records that may be dispatched at the same time.
+     *
+     * <p>Chosen against the pool ceiling {@code scanner.datasource.pool.maximum-size} defaults to, so
+     * ingestion can hold at most this many connections at once and the rest stay available to serve
+     * requests — DL-258.
+     */
+    private static final int STREAM_DISPATCH_CONCURRENCY = 4;
+
+    /** Body chunks requested ahead of the one being drained. */
 
     private static final int STREAM_CHUNK_PREFETCH = 1;
 
@@ -1210,13 +1224,19 @@ public class TweetStreamClient implements SmartLifecycle {
      *
      * <p>Records are handed to {@link #dispatchRecord(String, int)} on
      * {@link Schedulers#boundedElastic()}, not on the thread the response body is emitted on, so the
-     * listener's persistence and external calls never run on a connection thread. Delivery stays in
-     * arrival order on a single worker, and the connection thread is free to keep reading while a
-     * record is being handled.
+     * listener's persistence and external calls never run on a connection thread, and the connection
+     * thread is free to keep reading while a record is being handled.
      *
-     * <p>The hand-over requests {@value #STREAM_DISPATCH_PREFETCH} record at a time, so at most that
-     * many records are queued between the connection and the dispatch worker however long a provider or
-     * a database call takes — DL-258.
+     * <p>At most {@value #STREAM_DISPATCH_CONCURRENCY} records are dispatched at the same time, each
+     * requesting {@value #STREAM_DISPATCH_PREFETCH} record at a time, so the number in flight and the
+     * number queued behind them are both bounded however long a provider or a database call takes. One
+     * record that waits on a degraded provider therefore holds up only its own dispatch rather than
+     * every record behind it — DL-258.
+     *
+     * <p>Because dispatches overlap, records are no longer completed in arrival order. Nothing in the
+     * ingestion path depends on that order: each record is an independent row, the popularity gate and
+     * the doubt rating are computed from the record alone, and concurrent generation for one identifier
+     * is already excluded by the claim {@code ResponseService} holds — DL-195, DL-258.
      *
      * @param token the app-only bearer token, must not be {@code null}
      * @param popularityThreshold the popularity threshold resolved for this cycle — DL-255
@@ -1227,10 +1247,14 @@ public class TweetStreamClient implements SmartLifecycle {
     // docs/DECISION_LOG.md DL-220
     private Mono<Void> consumeStream(String token, int popularityThreshold) {
         return streamRecords(token)
-                // Bounded queueing between the connection and the dispatch worker — DL-258 — see
-                // docs/DECISION_LOG.md
-                .publishOn(Schedulers.boundedElastic(), STREAM_DISPATCH_PREFETCH)
-                .map(record -> dispatchRecord(record, popularityThreshold))
+                // Bounded concurrency and bounded queueing between the connection and the dispatch
+                // workers — DL-258 — see docs/DECISION_LOG.md
+                .flatMap(
+                        record -> Mono.fromCallable(
+                                        () -> dispatchRecord(record, popularityThreshold))
+                                .subscribeOn(Schedulers.boundedElastic()),
+                        STREAM_DISPATCH_CONCURRENCY,
+                        STREAM_DISPATCH_PREFETCH)
                 .takeWhile(Boolean::booleanValue)
                 .then(Mono.defer(() -> stopRequested
                         ? Mono.<Void>empty()

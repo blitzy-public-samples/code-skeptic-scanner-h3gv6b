@@ -1,6 +1,7 @@
 package com.codeskeptic.scanner.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.mockito.ArgumentMatchers.any;
@@ -231,6 +232,42 @@ class ResponseControllerTest {
                 .andExpect(jsonPath("$.data").doesNotExist())
                 .andExpect(jsonPath("$.items").doesNotExist())
                 .andExpect(jsonPath("$.content").doesNotExist());
+    }
+
+    // A row carrying no approval flag and no association renders both as JSON null — DL-080, DL-041
+    // — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("renders a listed row that carries no approval flag and no association with both "
+            + "members holding null")
+    void rendersAListedRowCarryingNoApprovalFlagAndNoAssociationAsNull() throws Exception {
+        when(responseService.getPaginatedResponses(anyInt(), anyInt()))
+                .thenReturn(new PaginatedResponsesDto(List.of(sparseResponse()),
+                        new PaginationDto(1, 10, 1L, 1)));
+
+        mockMvc.perform(get("/responses").header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.responses", hasSize(1)))
+                .andExpect(jsonPath("$.responses[0].id").value(RESPONSE_ID))
+                .andExpect(jsonPath("$.responses[0].is_approved").doesNotExist())
+                .andExpect(jsonPath("$.responses[0].tweet_id").doesNotExist())
+                .andExpect(content().string(containsString("\"is_approved\":null")))
+                .andExpect(content().string(containsString("\"tweet_id\":null")));
+    }
+
+    // A row carrying no approval flag and no association renders both as JSON null — DL-080, DL-041
+    // — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("renders an addressed row that carries no approval flag and no association with "
+            + "both members holding null")
+    void rendersAnAddressedRowCarryingNoApprovalFlagAndNoAssociationAsNull() throws Exception {
+        when(responseService.getResponseById(RESPONSE_ID)).thenReturn(sparseResponse());
+
+        mockMvc.perform(get("/responses/" + RESPONSE_ID)
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(RESPONSE_ID))
+                .andExpect(content().string(containsString("\"is_approved\":null")))
+                .andExpect(content().string(containsString("\"tweet_id\":null")));
     }
 
     // Pagination member names — DL-038 — see docs/DECISION_LOG.md
@@ -673,6 +710,30 @@ class ResponseControllerTest {
                 .containsExactly("content", "isApproved");
     }
 
+    // A reply longer than the width the previous mapping imposed is forwarded whole and answered
+    // whole; no length is checked anywhere on this path — DL-050, DL-068 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] a body of {0} characters")
+    @ValueSource(ints = {256, 1_000, 10_000, 60_000})
+    @DisplayName("answers 200 and forwards content far longer than a width bound would allow")
+    void answers200AndForwardsContentFarLongerThanAWidthBoundWouldAllow(int length)
+            throws Exception {
+
+        String longContent = "c".repeat(length);
+        when(responseService.updateResponse(eq(RESPONSE_ID), any()))
+                .thenReturn(new ResponseDto(RESPONSE_ID, longContent,
+                        LocalDateTime.of(2026, 1, 31, 9, 15, 30), false, TWEET_ID));
+
+        mockMvc.perform(put("/responses/" + RESPONSE_ID).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"content\":\"" + longContent + "\"}")
+                        .header(HttpHeaders.AUTHORIZATION, bearer()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content").value(longContent));
+
+        UpdateResponseRequest written = capturedUpdate();
+        assertThat(written.contentValue()).as("content forwarded to the service")
+                .hasSize(length).isEqualTo(longContent);
+    }
+
     // backend/app/api/responses.py:L54 — a member the body omits is not written
     @Test
     @DisplayName("forwards no approval value when the body carries content alone")
@@ -1012,6 +1073,23 @@ class ResponseControllerTest {
                 LocalDateTime.of(2026, 1, 31, 9, 15, 30), approved, TWEET_ID);
     }
 
+    /**
+     * Builds the wire form of a {@code responses} row whose nullable {@code is_approved} and
+     * {@code tweet_id} columns both hold nothing — see docs/DECISION_LOG.md DL-080. A {@code null}
+     * approval flag is the pending state {@code GET /analytics/summary} counts (DL-041).
+     *
+     * @return the row
+     */
+    private static ResponseDto sparseResponse() {
+        return new ResponseDto(RESPONSE_ID, CONTENT,
+                LocalDateTime.of(2026, 1, 31, 9, 15, 30), null, null);
+    }
+
+    /**
+     * Builds a page carrying one unapproved row and the counters that describe it.
+     *
+     * @return the envelope
+     */
     private static PaginatedResponsesDto onePage() {
         return new PaginatedResponsesDto(List.of(response(false)),
                 new PaginationDto(1, 10, 1L, 1));

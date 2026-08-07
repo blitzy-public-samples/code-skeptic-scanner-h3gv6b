@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -32,7 +33,8 @@ import com.codeskeptic.scanner.service.mapper.SettingMapper;
  * Reads and updates the rows of the {@code settings} table, and seeds its default rows.
  *
  * <p>{@link #getAllSettings()} renders every row as a {@link SettingDto} carrying the three columns
- * the table declares at {@code backend/app/db/models.py:L42-44} — DL-039.
+ * the table declares at {@code backend/app/db/models.py:L42-44}, ordered by {@code key} ascending —
+ * DL-039.
  * {@link #updateSetting(String, String)} replaces the {@code value} of any row that already exists.
  * No key is reserved: every row is rendered and every stored row is writable — DL-284. Both answer
  * the call sites {@code backend/app/api/settings.py:L10} and {@code :L20} declared statically on the
@@ -114,6 +116,15 @@ public class SettingsService {
      */
     private static final String STREAM_KEYWORDS_SEED_VALUE = "";
 
+    /**
+     * Order every row of the {@code settings} table is read in: {@code settings.key} ascending —
+     * DL-039 — see docs/DECISION_LOG.md.
+     *
+     * <p>The sort names the {@code key} property of {@link Setting}, so the persistence provider
+     * renders the quoted column name of DL-061 and this class still declares no statement of its own.
+     */
+    private static final Sort TABLE_ORDER = Sort.by(Sort.Direction.ASC, "key");
+
     private final SettingRepository settingRepository;
 
     private final SettingMapper settingMapper;
@@ -149,20 +160,24 @@ public class SettingsService {
 
     // Call site backend/app/api/settings.py:L10 — see docs/DECISION_LOG.md DL-039
     /**
-     * Returns every row of the {@code settings} table in the order the repository reports.
+     * Returns every row of the {@code settings} table, ordered by {@code key} ascending.
      *
      * <p>Each element carries the {@code key}, {@code value} and {@code description} of one row
      * unchanged, and a {@code null} column is carried through as a {@code null} component. The rows
      * are converted inside this method's transaction.
      *
+     * <p>The order is the one {@link #TABLE_ORDER} declares and is the same on every read and on
+     * every vendor: it does not depend on the order rows were inserted in, and an
+     * {@link #updateSetting(String, String)} call does not move the row it writes — DL-039.
+     *
      * <p>An empty table yields an empty list, and the list returned is unmodifiable.
      *
-     * @return one {@link SettingDto} per row of the {@code settings} table, empty when the table
-     *         holds no row, never {@code null}
+     * @return one {@link SettingDto} per row of the {@code settings} table, ordered by {@code key}
+     *         ascending, empty when the table holds no row, never {@code null}
      */
     @Transactional(readOnly = true)
     public List<SettingDto> getAllSettings() {
-        List<SettingDto> settings = settingMapper.toDtoList(settingRepository.findAll());
+        List<SettingDto> settings = settingMapper.toDtoList(settingRepository.findAll(TABLE_ORDER));
         log.debug("Rendering {} setting row(s).", settings.size());
         return settings;
     }

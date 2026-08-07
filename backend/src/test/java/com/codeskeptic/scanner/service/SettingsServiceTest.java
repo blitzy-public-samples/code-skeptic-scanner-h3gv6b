@@ -54,6 +54,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Sort;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.TransactionStatus;
@@ -104,6 +105,13 @@ class SettingsServiceTest {
             TWEET_POPULARITY_THRESHOLD_KEY,
             RESPONSE_GENERATION_DELAY_KEY,
             STREAM_KEYWORDS_KEY);
+
+    /**
+     * Order {@link SettingsService#getAllSettings()} reads the table in — DL-039. Every stub of the
+     * read in this class declares this exact {@link Sort}, so a read that asked for a different one,
+     * or for none, leaves its stub unmatched.
+     */
+    private static final Sort EXPECTED_TABLE_ORDER = Sort.by(Sort.Direction.ASC, "key");
 
     /**
      * Configured popularity threshold supplied to the service. The value declared at
@@ -322,7 +330,7 @@ class SettingsServiceTest {
                 new Setting(TWEET_POPULARITY_THRESHOLD_KEY, STORED_VALUE, STORED_DESCRIPTION),
                 new Setting(RESPONSE_GENERATION_DELAY_KEY, "90", "Sweep spacing."),
                 new Setting(STREAM_KEYWORDS_KEY, CONFIGURED_KEYWORDS_VALUE, "Tracked terms."));
-        when(settingRepository.findAll()).thenReturn(rows);
+        when(settingRepository.findAll(EXPECTED_TABLE_ORDER)).thenReturn(rows);
         stubMapperToConvertEveryRow();
 
         List<SettingDto> rendered = service.getAllSettings();
@@ -336,7 +344,7 @@ class SettingsServiceTest {
     @Test
     @DisplayName("returns a key a value and a description for every stored setting")
     void returnsAKeyAValueAndADescriptionForEveryStoredSetting() {
-        when(settingRepository.findAll()).thenReturn(threeStoredRows());
+        when(settingRepository.findAll(EXPECTED_TABLE_ORDER)).thenReturn(threeStoredRows());
         stubMapperToConvertEveryRow();
 
         List<SettingDto> rendered = service.getAllSettings();
@@ -349,9 +357,10 @@ class SettingsServiceTest {
     }
 
     @Test
-    @DisplayName("returns the settings in the order the repository reports them")
-    void returnsTheSettingsInTheOrderTheRepositoryReportsThem() {
-        when(settingRepository.findAll()).thenReturn(threeStoredRows());
+    @DisplayName("returns the settings in the order the sorted read reported, adding no ordering of "
+            + "its own")
+    void returnsTheSettingsInTheOrderTheSortedReadReported() {
+        when(settingRepository.findAll(EXPECTED_TABLE_ORDER)).thenReturn(threeStoredRows());
         stubMapperToConvertEveryRow();
 
         List<SettingDto> rendered = service.getAllSettings();
@@ -359,10 +368,32 @@ class SettingsServiceTest {
         assertThat(rendered).extracting(SettingDto::key).containsExactlyElementsOf(SEEDED_KEYS);
     }
 
+    // The array order is asked of the database, not of the scan — DL-039 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("reads the settings table ordered by key ascending")
+    void readsTheSettingsTableOrderedByKeyAscending() {
+        when(settingRepository.findAll(EXPECTED_TABLE_ORDER)).thenReturn(threeStoredRows());
+        stubMapperToConvertEveryRow();
+
+        service.getAllSettings();
+
+        ArgumentCaptor<Sort> requested = ArgumentCaptor.captor();
+        verify(settingRepository).findAll(requested.capture());
+        assertThat(requested.getValue()).as("order the settings read requested")
+                .containsExactly(Sort.Order.asc("key"));
+        assertThat(requested.getValue().getOrderFor("key")).isNotNull()
+                .satisfies(order -> {
+                    assertThat(order.getDirection()).as("direction of the settings order")
+                            .isEqualTo(Sort.Direction.ASC);
+                    assertThat(order.getProperty()).as("property the settings order names")
+                            .isEqualTo("key");
+                });
+    }
+
     @Test
     @DisplayName("returns an empty list when no setting is stored")
     void returnsAnEmptyListWhenNoSettingIsStored() {
-        when(settingRepository.findAll()).thenReturn(List.of());
+        when(settingRepository.findAll(EXPECTED_TABLE_ORDER)).thenReturn(List.of());
         stubMapperToConvertEveryRow();
 
         List<SettingDto> rendered = service.getAllSettings();
@@ -373,7 +404,7 @@ class SettingsServiceTest {
     @Test
     @DisplayName("carries a stored setting that has no value or description through unchanged")
     void carriesAStoredSettingThatHasNoValueOrDescriptionThroughUnchanged() {
-        when(settingRepository.findAll())
+        when(settingRepository.findAll(EXPECTED_TABLE_ORDER))
                 .thenReturn(List.of(new Setting(TWEET_POPULARITY_THRESHOLD_KEY, null, null)));
         stubMapperToConvertEveryRow();
 
@@ -386,12 +417,12 @@ class SettingsServiceTest {
     @Test
     @DisplayName("reads the setting rows once and reads no configured value")
     void readsTheSettingRowsOnceAndReadsNoConfiguredValue() {
-        when(settingRepository.findAll()).thenReturn(threeStoredRows());
+        when(settingRepository.findAll(EXPECTED_TABLE_ORDER)).thenReturn(threeStoredRows());
         stubMapperToConvertEveryRow();
 
         service.getAllSettings();
 
-        verify(settingRepository).findAll();
+        verify(settingRepository).findAll(EXPECTED_TABLE_ORDER);
         verifyNoMoreInteractions(settingRepository);
         verifyNoInteractions(properties);
     }
@@ -400,7 +431,7 @@ class SettingsServiceTest {
     @DisplayName("renders the rows it read through the mapper")
     void rendersTheRowsItReadThroughTheMapper() {
         List<Setting> rows = threeStoredRows();
-        when(settingRepository.findAll()).thenReturn(rows);
+        when(settingRepository.findAll(EXPECTED_TABLE_ORDER)).thenReturn(rows);
         stubMapperToConvertEveryRow();
 
         service.getAllSettings();
@@ -606,7 +637,7 @@ class SettingsServiceTest {
     @DisplayName("reports an updated value on a subsequent read")
     void reportsAnUpdatedValueOnASubsequentRead() {
         Setting stored = stubStoredRow(TWEET_POPULARITY_THRESHOLD_KEY);
-        when(settingRepository.findAll()).thenReturn(List.of(stored));
+        when(settingRepository.findAll(EXPECTED_TABLE_ORDER)).thenReturn(List.of(stored));
         stubMapperToConvertEveryRow();
 
         service.updateSetting(TWEET_POPULARITY_THRESHOLD_KEY, REPLACEMENT_VALUE);
@@ -951,7 +982,7 @@ class SettingsServiceTest {
         List<Setting> storedRows = new ArrayList<>(List.of(storedRow));
         stubConfiguredSeedValues();
         stubRepositoryBackedBy(storedRows);
-        when(settingRepository.findAll()).thenReturn(storedRows);
+        when(settingRepository.findAll(EXPECTED_TABLE_ORDER)).thenReturn(storedRows);
         stubMapperToConvertEveryRow();
 
         service.seedDefaultSettings();

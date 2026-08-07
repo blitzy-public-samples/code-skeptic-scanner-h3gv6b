@@ -1241,6 +1241,39 @@ class JpaMappingIntegrationTest {
         assertThat(settingRepository.count()).as("stored settings row count").isEqualTo(2L);
     }
 
+    // The order GET /settings renders, asked of the database on the quoted key column — DL-039,
+    // DL-061 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("the settings table is readable ordered by its quoted key column, ascending")
+    void settingsTableIsReadableOrderedByItsQuotedKeyColumn() {
+        settingRepository.save(new Setting("tweet_popularity_threshold", "100",
+                "Minimum like count for ingestion"));
+        settingRepository.save(new Setting("stream_keywords", "AI coding tool",
+                "Streaming rule terms"));
+        settingRepository.save(new Setting("response_generation_delay", "60",
+                "Seconds between response generation runs"));
+        entityManager.flush();
+        entityManager.clear();
+
+        assertThat(settingRepository.findAll(Sort.by(Sort.Direction.ASC, "key")))
+                .extracting(Setting::getKey)
+                .as("keys of every stored settings row, ordered ascending")
+                .containsExactly("response_generation_delay", "stream_keywords",
+                        "tweet_popularity_threshold");
+
+        Setting relocated = settingRepository.findById("response_generation_delay").orElseThrow();
+        relocated.setValue("90");
+        settingRepository.save(relocated);
+        entityManager.flush();
+        entityManager.clear();
+
+        assertThat(settingRepository.findAll(Sort.by(Sort.Direction.ASC, "key")))
+                .extracting(Setting::getKey)
+                .as("keys of every stored settings row after a value was rewritten")
+                .containsExactly("response_generation_delay", "stream_keywords",
+                        "tweet_popularity_threshold");
+    }
+
     // Ported from backend/app/db/models.py:L10,L23,L35 (faithful port) — DL-049 and DL-070 — see
     // docs/DECISION_LOG.md
     @Test

@@ -440,8 +440,7 @@ public class TweetStreamClient implements SmartLifecycle {
         // Only the designated background worker streams — DL-250 — see docs/DECISION_LOG.md
         if (!isAutoStartup()) {
             log.info("X filtered stream ingestion not started in this process: {} and {} must both "
-                    + "hold and the background-ownership lease must be held",
-                    BACKGROUND_ENABLED_PROPERTY, STREAM_ENABLED_PROPERTY);
+                    + "hold", BACKGROUND_ENABLED_PROPERTY, STREAM_ENABLED_PROPERTY);
             return;
         }
 

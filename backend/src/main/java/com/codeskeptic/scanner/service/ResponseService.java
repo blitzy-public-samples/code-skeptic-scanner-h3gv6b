@@ -336,7 +336,9 @@ public class ResponseService {
      * generated row are separate units of work and the call to
      * {@link LlmService#generateResponse(TweetDto)} runs between them with no transaction open —
      * DL-086. The subject row is read again inside the storing unit, so a row deleted while the model
-     * was answering is reported as the literal of {@code :L49}.
+     * was answering is reported as the literal of {@code :L49}, and so is a subject row another
+     * writer holds for the whole {@value #LOCK_WAIT_SECONDS}-second bound — this route stores nothing
+     * for it and answers no other status — DL-246.
      *
      * @param tweetId the raw identifier of the {@code tweets} row to reply to; must be neither
      *                {@code null} nor empty
@@ -345,7 +347,9 @@ public class ResponseService {
      *                                      wire literal of {@code backend/app/api/responses.py:L41}
      * @throws ResponseGenerationException  when {@code tweetId} carries no number, when it names no
      *                                      {@code tweets} row, or when generating or storing the row
-     *                                      fails, carrying the wire literal of
+     *                                      fails — a parent row that stayed locked for the whole
+     *                                      {@value #LOCK_WAIT_SECONDS}-second bound included —
+     *                                      carrying the wire literal of
      *                                      {@code backend/app/api/responses.py:L49}
      */
     public ResponseDto generateResponse(String tweetId) {
@@ -369,11 +373,13 @@ public class ResponseService {
             // Already recorded by the layer that raised it — DL-252 — see docs/DECISION_LOG.md
             throw e;
         } catch (RuntimeException e) {
-            // The one ERROR record a failure with no adapter owner receives, written ahead of the
-            // fixed translation. A provider failure arrives as a ResponseGenerationException the
-            // clause above rethrows unrecorded, so exactly one ERROR exists per failure. The record
-            // carries the failure's class only — never a statement, a SQL state or a message — see
-            // docs/DECISION_LOG.md DL-052, DL-252
+            // The one ERROR record a failure with no owning layer receives, written ahead of the
+            // fixed translation. A failure the layer that raised it already recorded arrives as a
+            // ResponseGenerationException the clause above rethrows unrecorded — a provider failure
+            // is recorded there at ERROR and a contended parent row at WARN — so exactly one record
+            // exists per failure and no ERROR names a contended row. The record carries the
+            // failure's class only — never a statement, a SQL state or a message — see
+            // docs/DECISION_LOG.md DL-052, DL-246, DL-252
             log.error("Generating a response for the requested tweet failed: {}; responding with "
                     + "the wire literal of backend/app/api/responses.py:L49.",
                     e.getClass().getSimpleName());
@@ -407,8 +413,11 @@ public class ResponseService {
      * the storage transaction are three separate boundaries — DL-252. Both callers of this operation
      * run only in the process that {@code scanner.background.enabled} designates — DL-250.
      *
-     * <p>An empty result means nothing was stored: the row already carried a reply, or another caller
-     * held the claim. Both outcomes are recorded at {@code DEBUG}. {@code POST /responses} does not
+     * <p>An empty result means nothing was stored: the row already carried a reply, another caller
+     * held the claim, or the parent row stayed locked for the whole
+     * {@value #LOCK_WAIT_SECONDS}-second bound and this pass left it to the writer holding it —
+     * DL-246. Every one of those outcomes is recorded at {@code DEBUG}, and the contended one at
+     * {@code WARN} as well. {@code POST /responses} does not
      * come through here: it calls {@link #generateResponse(String)} directly, so its documented
      * outcomes are unchanged — DL-195.
      *
@@ -523,9 +532,13 @@ public class ResponseService {
             String generatedText = generateText(subject);
             ResponseDto stored = store(identifier, generatedText, true);
 
+            // The storing transaction stores nothing when the row acquired a response while one was
+            // being generated, and when its parent row stayed locked for the whole bound — DL-195,
+            // DL-246 — see docs/DECISION_LOG.md
             if (stored == null) {
-                log.debug("Tweet '{}' acquired a response while one was being generated; nothing was "
-                        + "stored.", identifier);
+                log.debug("Tweet '{}' acquired a response while one was being generated, or its "
+                        + "parent row stayed locked for the whole bound; nothing was stored.",
+                        identifier);
                 return Optional.empty();
             }
 
@@ -621,13 +634,25 @@ public class ResponseService {
      * reply stores nothing and returns {@code null}. The lock, check and optional insert share one
      * transaction — see docs/DECISION_LOG.md DL-195.
      *
+     * <p>A parent row another writer holds for the whole {@value #LOCK_WAIT_SECONDS}-second bound
+     * stores nothing, and the outcome is reported once at {@code WARN} and then answered in the way
+     * the calling path can express: a background pass, which passes {@code onlyWhenAbsent}, receives
+     * {@code null} and stores this row on a later pass; {@code POST /responses}, which does not,
+     * receives {@link ResponseGenerationException} and so reports the wire literal of
+     * {@code backend/app/api/responses.py:L49} — DL-246. {@code null} is therefore returned only when
+     * {@code onlyWhenAbsent} is set.
+     *
      * @param identifier the parsed identifier of the parent row
      * @param generatedText the text to store; neither {@code null} nor blank
      * @param onlyWhenAbsent {@code true} to store nothing when the parent row already carries a reply
      * @return the stored row in its wire form, or {@code null} when {@code onlyWhenAbsent} is set and
-     *         the parent row already carries a reply
-     * @throws ResponseGenerationException when {@code identifier} names no row at this point,
-     *                                     carrying the wire literal of
+     *         either the parent row already carries a reply or it stayed locked for the whole
+     *         {@value #LOCK_WAIT_SECONDS}-second bound; never {@code null} otherwise
+     * @throws ResponseGenerationException when {@code identifier} names no row at this point, and
+     *                                     when {@code onlyWhenAbsent} is clear and the parent row
+     *                                     stayed locked for the whole
+     *                                     {@value #LOCK_WAIT_SECONDS}-second bound; both carry the
+     *                                     wire literal of
      *                                     {@code backend/app/api/responses.py:L49}
      */
     // Replaces response.save() at backend/app/tasks/response_generation.py:L25-26 — DL-086 — see
@@ -638,10 +663,19 @@ public class ResponseService {
         try {
             return storeInTransaction(identifier, generatedText, onlyWhenAbsent);
         } catch (PessimisticLockingFailureException | QueryTimeoutException contended) {
-            // A parent row another writer holds for the whole bound is left to that writer — DL-246
+            // A parent row another writer holds for the whole bound is left to that writer, and this
+            // is the one record the outcome receives on either path — DL-246 — see
+            // docs/DECISION_LOG.md
             log.warn("Tweet {} stayed locked by another writer for the whole {}s bound ({}); nothing "
                     + "was stored.", identifier, LOCK_WAIT_SECONDS,
                     contended.getClass().getSimpleName());
+
+            // The route path is answered with the wire literal of
+            // backend/app/api/responses.py:L49; the background path is answered with a null row —
+            // DL-076, DL-246 — see docs/DECISION_LOG.md
+            if (!onlyWhenAbsent) {
+                throw new ResponseGenerationException(contended);
+            }
             return null;
         }
     }
@@ -653,7 +687,8 @@ public class ResponseService {
      * @param identifier     the parsed parent identifier, or {@code null}
      * @param generatedText  the text to store
      * @param onlyWhenAbsent whether an existing reply suppresses the insert
-     * @return the stored row in its wire form, or {@code null} when nothing was stored
+     * @return the stored row in its wire form, or {@code null} when {@code onlyWhenAbsent} is set and
+     *         the parent row already carries a reply
      * @throws ResponseGenerationException when {@code identifier} names no {@code tweets} row
      */
     private ResponseDto storeInTransaction(Integer identifier, String generatedText,

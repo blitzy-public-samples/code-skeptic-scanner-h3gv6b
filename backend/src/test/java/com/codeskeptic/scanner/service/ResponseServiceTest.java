@@ -1039,6 +1039,57 @@ class ResponseServiceTest {
 
     // Bounded lock wait with an explicit contention outcome — DL-246 — see docs/DECISION_LOG.md
     @Test
+    @DisplayName("reports a contended parent row on the route path with the generation-failed literal")
+    void reportsAContendedParentRowOnTheRoutePathWithTheGenerationFailedLiteral() {
+        Tweet subject = tweetCarryingTheKey();
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY))
+                .thenThrow(new PessimisticLockingFailureException("parent locked"));
+
+        assertThatThrownBy(() -> service.generateResponse(TWEET_ID))
+                .isInstanceOf(ResponseGenerationException.class)
+                .hasMessage("Failed to generate response");
+
+        verify(responseRepository, never()).save(any(Response.class));
+        verifyNoInteractions(responseMapper);
+    }
+
+    // The contended outcome keeps the WARN severity of the layer that raised it — DL-246, DL-252 —
+    // see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("records a contended parent row on the route path at WARN alone, naming no "
+            + "NullPointerException")
+    void recordsAContendedParentRowOnTheRoutePathAtWarnAloneNamingNoNullPointerException() {
+        Tweet subject = tweetCarryingTheKey();
+        when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
+        when(tweetMapper.toDto(subject)).thenReturn(tweetDto());
+        when(llmService.generateResponse(any(TweetDto.class))).thenReturn(GENERATED_TEXT);
+        when(tweetRepository.findByIdForUpdate(TWEET_KEY))
+                .thenThrow(new QueryTimeoutException("statement bound reached"));
+
+        List<ILoggingEvent> records =
+                recordsOf(() -> catchThrowable(() -> service.generateResponse(TWEET_ID)));
+
+        assertThat(records)
+                .filteredOn(record -> record.getLevel() == Level.WARN)
+                .hasSize(1)
+                .allSatisfy(record -> assertThat(record.getFormattedMessage())
+                        .contains("stayed locked by another writer for the whole")
+                        .contains(QueryTimeoutException.class.getSimpleName())
+                        .doesNotContain("statement bound reached"));
+        assertThat(records)
+                .as("a contended parent row is a benign outcome and receives no ERROR record")
+                .noneMatch(record -> record.getLevel() == Level.ERROR);
+        assertThat(records).extracting(ILoggingEvent::getFormattedMessage)
+                .as("no record names a NullPointerException")
+                .noneMatch(message -> message.contains(
+                        NullPointerException.class.getSimpleName()));
+    }
+
+    // Bounded lock wait with an explicit contention outcome — DL-246 — see docs/DECISION_LOG.md
+    @Test
     @DisplayName("stores nothing when the parent row of a background generation stays contended")
     void storesNothingWhenTheParentRowOfABackgroundGenerationStaysContended() {
         Tweet subject = new Tweet();

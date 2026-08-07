@@ -63,9 +63,9 @@ import reactor.util.retry.Retry;
  *       the popularity threshold this cycle resolved once — DL-255.</li>
  * </ol>
  *
- * <p>The whole cycle runs again on every reconnection. An edit to the {@code stream_keywords}
- * {@code settings} row and a new {@code ai_tools} row both take effect on the next connection, with
- * no redeployment.
+ * <p>The whole cycle runs again on every reconnection, so an edit to the {@code stream_keywords}
+ * {@code settings} row and a new {@code ai_tools} row both take effect on the next connection with no
+ * redeployment.
  *
  * <p>This class reaches exactly four X paths: {@code POST /oauth2/token},
  * {@code GET /2/tweets/search/stream/rules}, {@code POST /2/tweets/search/stream/rules} and
@@ -74,33 +74,27 @@ import reactor.util.retry.Retry;
  * {@code documentation/Software Requirements Specifications (SRS).md:L235-237} is not implemented
  * here or anywhere else in this module.
  *
- * <p>The composed term collection is never empty when a connection is opened. When it resolves to
+ * <p>The composed term collection is never empty when a connection is opened: when it resolves to
  * nothing the cycle records the condition at {@code ERROR}, opens no connection and leaves
- * {@link #isRunning()} reporting {@code false}.
- *
- * <p>Every term is held to the one shared grammar of the rule grammar of {@link #isUsableTerm(String)} before it is rendered as
- * a rule expression: a term outside that allowlist is dropped, and no term value is written to the
- * log — DL-257. The
- * collection is bounded by {@code scanner.ingestion.max-stream-rules}, only {@code ai_tools.name} is
- * selected, and each mutation is sent as consecutive requests of at most
- * {@value #MAX_RULES_PER_REQUEST} rules — DL-254. A registered rule whose tag differs from the wanted
- * one is replaced — see docs/DECISION_LOG.md DL-261.
+ * {@link #isRunning()} reporting {@code false}. Every term is held to the shared grammar of
+ * {@link #isUsableTerm(String)} before it is rendered as a rule expression — a term outside that
+ * allowlist is dropped and no term value is written to the log — DL-257. The collection is bounded by
+ * {@code scanner.ingestion.max-stream-rules}, only {@code ai_tools.name} is selected, and each mutation
+ * is sent as consecutive requests of at most {@value #MAX_RULES_PER_REQUEST} rules — DL-254. A
+ * registered rule whose tag differs from the wanted one is replaced — DL-261.
  *
  * <p>At most {@value #STREAM_DISPATCH_PREFETCH} record and {@value #STREAM_CHUNK_PREFETCH} body chunk
  * are queued ahead of the work in progress, so the memory a connection holds is bounded however long a
  * provider or a database call takes — DL-258. A dropped record is counted and reported at most once per
- * {@value #DROPPED_RECORD_REPORT_INTERVAL} — DL-260.
- *
- * <p>The body carries a signal-idle bound of
+ * {@value #DROPPED_RECORD_REPORT_INTERVAL} — DL-260. The body carries a signal-idle bound of
  * {@code scanner.ingestion.stream-idle-timeout-seconds}: any chunk resets it, the keep-alive chunk
- * included, so a silent half-open connection fails and reconnects; it does not go on appearing
- * healthy — DL-256.
+ * included, so a silent half-open connection fails and reconnects — DL-256.
  *
  * <p>{@link #start()} schedules the cycle on {@link Schedulers#boundedElastic()} and returns without
  * blocking, issuing no request on the calling thread and raising nothing. Every delivered record is
  * handed to the listener on {@link Schedulers#boundedElastic()} as well, so no work the listener
- * performs runs on a connection thread. Every failure inside the cycle is recorded and confined to the
- * reactive chain. {@link #stop()} waits up to {@value #SHUTDOWN_DRAIN_MILLIS} milliseconds for a
+ * performs runs on a connection thread, and every failure inside the cycle is recorded and confined to
+ * the reactive chain. {@link #stop()} waits up to {@value #SHUTDOWN_DRAIN_MILLIS} milliseconds for a
  * record already handed to the listener and then disposes the subscription, which closes the
  * connection; {@link #stop(Runnable)} reports that transition to the container. {@link #start()} and
  * {@link #stop()} hold one lock for the whole transition, so the subscription handle is published and
@@ -108,12 +102,10 @@ import reactor.util.retry.Retry;
  *
  * <p>{@link #start()} opens no connection at all, and {@link #isAutoStartup()} reports
  * {@code false}, when {@code scanner.background.enabled} or {@code scanner.background.stream-enabled}
- * is {@code false}: only the process designated as the background worker streams — see
- * docs/DECISION_LOG.md DL-250.
- *
- * <p>{@link #start()} opens no connection at all when {@code scanner.twitter.consumer-key} or
- * {@code scanner.twitter.consumer-secret} is unset or blank; it records the condition at
- * {@code WARN} and leaves {@link #isRunning()} reporting {@code false}.
+ * is {@code false}: only the process designated as the background worker streams — DL-250. It opens no
+ * connection either when {@code scanner.twitter.consumer-key} or
+ * {@code scanner.twitter.consumer-secret} is unset or blank; it records the condition at {@code WARN}
+ * and leaves {@link #isRunning()} reporting {@code false}.
  *
  * <p>Reconnection is unbounded, matching the {@code "This function runs indefinitely"} contract
  * documented for the retired {@code start_tweet_stream} at
@@ -132,12 +124,7 @@ import reactor.util.retry.Retry;
  * the four dropped-record counters are the only mutable state and each is {@code volatile} or atomic.
  * The lifecycle operations are safe to call from any thread and are serialised against one another.
  *
- * <p>No credential, no term value and no whole record body is written to the log. Decisions covering
- * this file are recorded in {@code docs/DECISION_LOG.md} DL-012, DL-044, DL-045, DL-046, DL-052,
- * DL-250 and DL-254 through DL-261; construct-level provenance is recorded in
- * {@code docs/TRACEABILITY_MATRIX.md}.
- *
- * @see TweetStreamListener#onStatus(JsonNode, int)
+ * <p>No credential, no term value and no whole record body is written to the log.
  */
 // Ported from start_tweet_stream() at backend/app/tasks/tweet_monitoring.py:L36-55 and
 // stream_tweets() at backend/app/services/twitter_service.py:L16-23 (faithful port of intent) — see
@@ -152,45 +139,34 @@ import reactor.util.retry.Retry;
 public class TweetStreamClient implements SmartLifecycle {
 
     // Logging baseline — DL-052 — see docs/DECISION_LOG.md
-    /** Records the lifecycle, each reconciliation, each reconnection and each skipped record. */
     private static final Logger log = LoggerFactory.getLogger(TweetStreamClient.class);
 
-    /** Reads one complete newline-delimited record into a tree. */
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     // X API v2 filtered stream — see docs/DECISION_LOG.md DL-045
     /** Path of the OAuth 2 client-credentials exchange, relative to the X API host root. */
     private static final String TOKEN_PATH = "/oauth2/token";
 
-    /** Path that lists and mutates the registered filtered-stream rules. */
     private static final String STREAM_RULES_PATH = "/2/tweets/search/stream/rules";
 
-    /** Path of the filtered stream itself. */
     private static final String STREAM_PATH = "/2/tweets/search/stream";
 
     // App-only bearer token — see docs/DECISION_LOG.md DL-046
-    /** Form field name of the grant type. */
     private static final String GRANT_TYPE_PARAM = "grant_type";
 
-    /** Grant type of the app-only exchange. */
     private static final String CLIENT_CREDENTIALS_GRANT = "client_credentials";
 
-    /** Authorization scheme of the token exchange request. */
     private static final String BASIC_SCHEME = "Basic ";
 
-    /** Authorization scheme of every request that carries the app-only token. */
     private static final String BEARER_SCHEME = "Bearer ";
 
     /** Only accepted value of the {@value #KEY_TOKEN_TYPE} member, compared without letter case. */
     private static final String BEARER_TOKEN_TYPE = "bearer";
 
-    /** Token-exchange response member naming the kind of token returned. */
     private static final String KEY_TOKEN_TYPE = "token_type";
 
-    /** Token-exchange response member carrying the token. */
     private static final String KEY_ACCESS_TOKEN = "access_token";
 
-    /** Query parameter naming the post fields the listener reads. */
     private static final String TWEET_FIELDS_PARAM = "tweet.fields";
 
     /**
@@ -209,7 +185,6 @@ public class TweetStreamClient implements SmartLifecycle {
     /** {@code settings} row whose value replaces the whole composed term collection. */
     private static final String STREAM_KEYWORDS_SETTING_KEY = "stream_keywords";
 
-
     /** Property naming the base terms, reported when the composed collection resolves to nothing. */
     private static final String STREAM_BASE_KEYWORDS_PROPERTY =
             "scanner.ingestion.stream-base-keywords";
@@ -226,10 +201,8 @@ public class TweetStreamClient implements SmartLifecycle {
     /** Property governing this background path — DL-250. */
     private static final String STREAM_ENABLED_PROPERTY = "scanner.background.stream-enabled";
 
-    /** Rules-response member carrying the registered rule array. */
     private static final String RULES_KEY_DATA = "data";
 
-    /** Registered-rule member carrying the identifier a deletion names. */
     private static final String RULES_KEY_ID = "id";
 
     /** Rule member carrying the match expression, on which reconciliation compares. */
@@ -238,21 +211,16 @@ public class TweetStreamClient implements SmartLifecycle {
     /** Rule member carrying the term {@link TweetStreamListener} reads from a matched rule. */
     private static final String RULES_KEY_TAG = "tag";
 
-    /** Rules-request member carrying the rules to register. */
     private static final String RULES_KEY_ADD = "add";
 
-    /** Rules-request member carrying the deletion instruction. */
     private static final String RULES_KEY_DELETE = "delete";
 
-    /** Deletion member carrying the identifiers to remove. */
     private static final String RULES_KEY_IDS = "ids";
 
     // Rules-mutation outcome members read to surface a refused rule — DL-275 — see
     // docs/DECISION_LOG.md
-    /** Rules-response member carrying one entry per refused rule. */
     private static final String RULES_KEY_ERRORS = "errors";
 
-    /** Rules-response member carrying the outcome summary. */
     private static final String RULES_KEY_META = "meta";
 
     /** {@value #RULES_KEY_META} member carrying the per-outcome counts. */
@@ -321,24 +289,20 @@ public class TweetStreamClient implements SmartLifecycle {
 
     // Bounded queueing between the connection and the dispatch worker — DL-258 — see
     // docs/DECISION_LOG.md
-    /** Records the dispatch worker may hold ahead of the one it is handling. */
     private static final int STREAM_DISPATCH_PREFETCH = 1;
 
-    /** Body chunks requested ahead of the one being drained. */
     private static final int STREAM_CHUNK_PREFETCH = 1;
 
     // Bounded lifecycle transitions and dispatch drain — DL-259 — see docs/DECISION_LOG.md
     /** Longest {@link #stop(Runnable)} waits for a record being dispatched, in milliseconds. */
     private static final long SHUTDOWN_DRAIN_MILLIS = 5_000L;
 
-    /** Interval between two checks of the in-flight dispatch count, in milliseconds. */
     private static final long DRAIN_POLL_MILLIS = 10L;
 
     // Bounded reporting of dropped records — DL-260 — see docs/DECISION_LOG.md
     /** Shortest interval between two records of the same dropped-record condition. */
     private static final Duration DROPPED_RECORD_REPORT_INTERVAL = Duration.ofMinutes(1L);
 
-    /** Byte on which the response body is split into records. */
     private static final byte LINE_FEED = (byte) '\n';
 
     // Bound on the bytes held for one record — see docs/DECISION_LOG.md DL-222
@@ -350,13 +314,10 @@ public class TweetStreamClient implements SmartLifecycle {
      */
     private static final int MAX_RECORD_BYTES = 1_048_576;
 
-    /** Shortest delay applied before a reconnection. */
     private static final Duration MIN_RECONNECT_BACKOFF = Duration.ofSeconds(5L);
 
-    /** Longest delay the computed backoff reaches. */
     private static final Duration MAX_RECONNECT_BACKOFF = Duration.ofMinutes(5L);
 
-    /** Highest doubling applied to {@link #MIN_RECONNECT_BACKOFF}. */
     private static final int MAX_BACKOFF_EXPONENT = 8;
 
     /** Fraction of the computed backoff the applied delay varies by, in either direction. */
@@ -375,31 +336,22 @@ public class TweetStreamClient implements SmartLifecycle {
      */
     private static final long MINIMUM_REQUEST_TIMEOUT_SECONDS = 1L;
 
-    /** Transport for the four X paths, published by {@code config/WebClientConfig}. */
     private final WebClient webClient;
 
-    /** Source of the app-only credentials and of the configured base terms. */
     private final ScannerProperties properties;
 
-    /** Supplies the {@code ai_tools} rows whose names join the composed term collection. */
     private final AiToolRepository aiToolRepository;
 
-    /** Supplies the {@value #STREAM_KEYWORDS_SETTING_KEY} row that overrides the composition. */
     private final SettingRepository settingRepository;
 
-    /** Handles one delivered record. */
     private final TweetStreamListener tweetStreamListener;
 
-    /** Reports whether {@link #start()} has taken effect and the cycle has not yet terminated. */
     private final AtomicBoolean running = new AtomicBoolean(false);
 
-    /** Handle of the subscribed cycle, {@code null} until {@link #start()} subscribes. */
     private volatile Disposable subscription;
 
-    /** App-only bearer token held between requests, {@code null} when none is held. */
     private volatile String bearerToken;
 
-    /** Set when {@link #stop()} runs or the listener reports that streaming should stop. */
     private volatile boolean stopRequested;
 
     /**
@@ -717,27 +669,23 @@ public class TweetStreamClient implements SmartLifecycle {
      *
      * <ol>
      *   <li>The {@value #STREAM_KEYWORDS_SETTING_KEY} {@code settings} row, when it is present and
-     *       holds a non-blank value, is split on {@value #TERM_DELIMITER} and
-     *       replaces the whole collection. An absent row and a blank value both fall through to the
-     *       next step.</li>
+     *       holds a non-blank value, is split on {@value #TERM_DELIMITER} and replaces the whole
+     *       collection. An absent row and a blank value both fall through to the next step.</li>
      *   <li>Otherwise the configured {@value #STREAM_BASE_KEYWORDS_PROPERTY} terms are joined with
      *       the {@code name} of every {@code ai_tools} row.</li>
      *   <li>A collection that still resolves to nothing yields the configured base terms.</li>
      * </ol>
      *
      * <p>Every step trims each term, drops a {@code null} or blank term, drops a term that
-     * {@link #isUsableTerm(String)} refuses, and removes a repeat without regard to letter
-     * case while keeping the order in which terms were first seen and the letter case of the first
-     * occurrence.
+     * {@link #isUsableTerm(String)} refuses, and removes a repeat without regard to letter case while
+     * keeping the order in which terms were first seen and the letter case of the first occurrence.
      *
      * <p>The {@code ai_tools} names are read a page at a time and filtered as each page is merged, so
      * a blank, refused or repeated name consumes none of the budget and a usable name that follows one
      * is still reached. Only the collected terms are bounded by the rule cap, never the rows read —
-     * DL-291.
-     *
-     * <p>The result holds at most {@code scanner.ingestion.max-stream-rules} terms. A composition that
-     * yields more is truncated to the first that many and the two counts are recorded at {@code WARN},
-     * so a term collection can never exceed the rule cap of the account tier — DL-254.
+     * DL-291. The result holds at most {@code scanner.ingestion.max-stream-rules} terms; a composition
+     * that yields more is truncated to the first that many and the two counts are recorded at
+     * {@code WARN} — DL-254.
      *
      * <p>The two repository reads block. This method runs only on
      * {@link Schedulers#boundedElastic()}.
@@ -1296,9 +1244,9 @@ public class TweetStreamClient implements SmartLifecycle {
      *
      * <p>The response body is chunked newline-delimited JSON and a chunk boundary does not fall on a
      * record boundary. Bytes are accumulated across chunks and a record is emitted only once its
-     * terminating line feed has arrived. A record split across two or more chunks arrives whole, and a
-     * multi-byte character straddling a chunk boundary stays intact. One accumulator is created per
-     * subscription. A reconnection carries no partial record forward.
+     * terminating line feed has arrived, so a record split across two or more chunks arrives whole and
+     * a multi-byte character straddling a chunk boundary stays intact. One accumulator is created per
+     * subscription, and a reconnection carries no partial record forward.
      *
      * <p>The accumulator holds at most {@value #MAX_RECORD_BYTES} bytes for one record. A record that
      * grows past that without a terminating line feed is discarded, recorded at {@code WARN} once, and
@@ -1308,15 +1256,11 @@ public class TweetStreamClient implements SmartLifecycle {
      * <p>The request carries no response timeout, no read timeout and no reduced codec buffer limit: a
      * filtered-stream connection is long-lived and the bound of
      * {@code scanner.twitter.request-timeout-seconds} applies only to the token exchange and the
-     * stream-rules calls — DL-230.
-     *
-     * <p>The body does carry a signal-idle bound of
+     * stream-rules calls — DL-230. The body does carry a signal-idle bound of
      * {@code scanner.ingestion.stream-idle-timeout-seconds}: any chunk resets it, the periodic
      * keep-alive chunk included, and a connection that delivers no byte at all for that span fails with
-     * a timeout and reconnects; it does not go on appearing healthy — DL-256.
-     *
-     * <p>At most {@value #STREAM_CHUNK_PREFETCH} chunk is requested ahead of the one being drained, so
-     * no unreleased buffer is queued — DL-258.
+     * a timeout and reconnects — DL-256. At most {@value #STREAM_CHUNK_PREFETCH} chunk is requested
+     * ahead of the one being drained, so no unreleased buffer is queued — DL-258.
      *
      * @param token the app-only bearer token, must not be {@code null}
      * @return the complete records the connection delivers, including the blank keep-alive records X
@@ -1752,16 +1696,9 @@ public class TweetStreamClient implements SmartLifecycle {
         return List.of(value.split(TERM_DELIMITER, MAX_TERM_SEGMENTS));
     }
 
-    /**
-     * Reports whether a value is absent or holds only whitespace.
-     *
-     * @param value the value to inspect, may be {@code null}
-     * @return {@code true} when {@code value} is {@code null}, empty or entirely whitespace
-     */
     private static boolean isBlank(String value) {
         return value == null || value.isBlank();
     }
-
 
     // Every failure rendering passes the log guard below — DL-197 — see docs/DECISION_LOG.md
     /**

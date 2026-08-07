@@ -20,56 +20,36 @@ import org.springframework.data.repository.query.Param;
  * table.
  *
  * <p>The identifier type is {@link Integer}, matching the generated {@code @Id} field of
- * {@link Response} — see docs/DECISION_LOG.md DL-025 and DL-049. An identifier reaches this
- * interface already parsed; it is carried as a {@link String} only at the wire boundary — see
- * docs/DECISION_LOG.md DL-023 and DL-048.
+ * {@link Response} — DL-025, DL-049. An identifier reaches this interface already parsed; it is
+ * carried as a {@link String} only at the wire boundary — DL-023, DL-048.
  *
  * <p>Five members are declared below — {@link #findAllRows(Pageable)},
  * {@link #findApprovalCounts()}, {@link #existsByTweetId(Integer)},
- * {@link #findByIdForUpdate(Integer)} and the {@link ResponseRow} projection they share. Every other
- * operation the consumers perform is inherited from {@link JpaRepository}:
+ * {@link #findByIdForUpdate(Integer)} and the {@link ResponseRow} projection they share.
+ * {@link #findAllRows(Pageable)} returns one page of projected rows as a {@link Page}, which
+ * {@code ResponseService} renders as the {@code responses} and {@code pagination} envelope of
+ * {@code GET /responses} ({@code backend/app/api/responses.py:L15-20}); the caller constructs the
+ * {@link Pageable} and converts the 1-based wire {@code page} ({@code :L11-12}) to the 0-based index
+ * this operation takes — DL-038.
  *
- * <ul>
- *   <li>{@link #findAllRows(Pageable)} returns one page of projected {@code responses} rows as a
- *       {@link Page}, which {@code ResponseService} renders as the {@code responses} and
- *       {@code pagination} envelope of {@code GET /responses}
- *       ({@code backend/app/api/responses.py:L15-20}). The caller constructs the {@link Pageable} and
- *       converts the 1-based wire {@code page} ({@code backend/app/api/responses.py:L11-12}) to the
- *       0-based index this operation takes — see docs/DECISION_LOG.md DL-038.
- *   <li>{@code findById(Integer)} returns one row wrapped in an {@link java.util.Optional}. An empty
- *       {@link java.util.Optional} denotes an identifier that is not present, which
- *       {@code ResponseService} translates into the 404 bodies at
- *       {@code backend/app/api/responses.py:L31} and {@code :L65}.
- *   <li>{@code save(Response)} inserts a row whose identifier is {@code null} and updates a row
- *       whose identifier is already assigned, serving {@code POST /responses}
- *       ({@code backend/app/api/responses.py:L44}) and {@code PUT /responses/{responseId}}
- *       ({@code backend/app/api/responses.py:L60}). It replaces the {@code response.save()} call at
- *       {@code backend/app/tasks/response_generation.py:L26}. The caller assigns {@code content},
- *       {@code generated_at} and {@code is_approved} before the call.
- *   <li>{@code count()} issues a row count against {@code responses} and {@code AnalyticsService}
- *       reports it as {@code total_responses}, the metric named at
- *       {@code backend/tests/test_api.py:L51} — see docs/DECISION_LOG.md DL-041.
- * </ul>
+ * <p>Every other operation the consumers perform is inherited from {@link JpaRepository}. An empty
+ * {@link java.util.Optional} from {@code findById(Integer)} denotes an identifier that is not present,
+ * which {@code ResponseService} translates into the 404 bodies at
+ * {@code backend/app/api/responses.py:L31} and {@code :L65}. {@code save(Response)} serves
+ * {@code POST /responses} ({@code :L44}) and {@code PUT /responses/{responseId}} ({@code :L60}) and
+ * replaces the {@code response.save()} call at
+ * {@code backend/app/tasks/response_generation.py:L26}, with {@code content}, {@code generated_at} and
+ * {@code is_approved} assigned by the caller before the call. {@code count()} is reported by
+ * {@code AnalyticsService} as {@code total_responses}, the metric named at
+ * {@code backend/tests/test_api.py:L51} — DL-041.
  *
  * <p>Spring Data supplies the implementation as a runtime proxy. Transaction boundaries are declared
  * on the {@code @Service} methods that call this interface, and a {@link Response} is mapped to its
  * wire representation inside that same boundary. The {@code responses} table is created from the
- * annotations on {@link Response} by {@code spring.jpa.hibernate.ddl-auto} — see docs/DECISION_LOG.md
- * DL-026.
+ * annotations on {@link Response} by {@code spring.jpa.hibernate.ddl-auto} — DL-026.
  *
  * <p>{@code responses.is_approved} carries the approval flag a human reviewer reads
  * ({@code backend/app/db/models.py:L26}).
- *
- * <p>Usage:
- *
- * <pre>{@code
- * Page<ResponseRow> page = responseRepository.findAllRows(PageRequest.of(wirePage - 1, perPage));
- * ApprovalCounts totals = responseRepository.findApprovalCounts();
- * boolean answered = responseRepository.existsByTweetId(tweetId);
- * Optional<Response> locked = responseRepository.findByIdForUpdate(responseId);
- * }</pre>
- *
- * @see Response
  */
 // Ported from backend/app/db/database.py:L10-13 (faithful port) — see docs/DECISION_LOG.md
 // The analytics aggregate has no source counterpart: backend/app/api/analytics.py:L3 imported an
@@ -173,26 +153,23 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
      *
      * <p>{@link LockModeType#PESSIMISTIC_WRITE} makes the read issue a locking select — {@code for
      * update} on PostgreSQL, MySQL and H2 alike — so a second transaction reading the same row through
-     * this operation waits until the first commits. Every column of the row is read, mutated and
-     * written with no other writer observing the intermediate state, and the two independently
-     * writable columns {@code content} and {@code is_approved} do not overwrite one another when two
+     * this operation waits until the first commits, and the two independently writable columns
+     * {@code content} and {@code is_approved} do not overwrite one another when two
      * {@code PUT /responses/{responseId}} requests are served at the same moment — DL-122.
      *
      * <p>The wait is bounded: {@link #LOCK_WAIT_HINT} caps the statement at
      * {@link #LOCK_WAIT_MILLIS} milliseconds, after which the provider reports the contention and
-     * does not wait further — see docs/DECISION_LOG.md DL-246.
+     * does not wait further — DL-246.
      *
-     * <p>The lock is acquired for the duration of the caller's transaction, so this operation must be
+     * <p>The lock is held for the duration of the caller's transaction, so this operation must be
      * called from inside one; {@code ResponseService.updateResponse} declares
      * {@link org.springframework.transaction.annotation.Transactional}. It is not called on the read
      * path, where {@code findById} is used and no lock is taken.
      *
-     * <p>The row content, order and identifier semantics are those of {@code findById(Integer)}: an
-     * empty {@link java.util.Optional} denotes an identifier that is not present, which the caller
-     * reports with the wire literal of {@code backend/app/api/responses.py:L65}.
-     *
      * @param id the parsed identifier of the row to lock and read
-     * @return the row, or an empty {@link java.util.Optional} when the identifier is not present
+     * @return the row, or an empty {@link java.util.Optional} when the identifier is not present,
+     *         which the caller reports with the wire literal of
+     *         {@code backend/app/api/responses.py:L65}
      */
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @QueryHints(@QueryHint(name = LOCK_WAIT_HINT, value = LOCK_WAIT_MILLIS))
@@ -208,46 +185,21 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
      * rendering the two identifiers as strings — see docs/DECISION_LOG.md DL-023 and DL-245.
      *
      * <p>Every accessor may report {@code null}: none of the five columns declares a not-null marker
-     * — see docs/DECISION_LOG.md DL-068 and DL-080.
+     * — DL-068, DL-080. {@code getIsApproved()} carries the flag a human reviewer reads
+     * ({@code backend/app/db/models.py:L26}).
      */
     // Net-new (no Python counterpart; the five members of dto/ResponseDto) — DL-245 — see
     // docs/DECISION_LOG.md
     interface ResponseRow {
 
-        /**
-         * Returns the {@code responses.id} value of this row.
-         *
-         * @return the primary key, or {@code null} when the column holds none
-         */
         Integer getId();
 
-        /**
-         * Returns the {@code responses.content} value of this row.
-         *
-         * @return the stored reply text, or {@code null} when the column holds none
-         */
         String getContent();
 
-        /**
-         * Returns the {@code responses.generated_at} value of this row.
-         *
-         * @return the generation instant, or {@code null} when the column holds none
-         */
         LocalDateTime getGeneratedAt();
 
-        /**
-         * Returns the {@code responses.is_approved} value of this row, the flag a human reviewer
-         * reads ({@code backend/app/db/models.py:L26}).
-         *
-         * @return the approval flag, or {@code null} when the column holds none
-         */
         Boolean getIsApproved();
 
-        /**
-         * Returns the {@code responses.tweet_id} value of this row.
-         *
-         * @return the parent identifier, or {@code null} when the column holds none
-         */
         Integer getTweetId();
     }
 
@@ -256,25 +208,14 @@ public interface ResponseRepository extends JpaRepository<Response, Integer> {
      * {@link ResponseRepository#findApprovalCounts()}.
      *
      * <p>A closed projection over the {@code responses} table. Spring Data binds each accessor to the
-     * select alias of the same name — see docs/DECISION_LOG.md DL-180.
+     * select alias of the same name — DL-180. Both counts are never {@code null} and never negative.
      */
     // Net-new (no Python counterpart; two members of dto/SummaryDto) — DL-180 — see
     // docs/DECISION_LOG.md
     interface ApprovalCounts {
 
-        /**
-         * Returns the number of {@code responses} rows.
-         *
-         * @return the row count, never {@code null} and never negative
-         */
         Long getResponseCount();
 
-        /**
-         * Returns the number of {@code responses} rows whose {@code is_approved} column holds
-         * {@code true}.
-         *
-         * @return the approved row count, never {@code null} and never negative
-         */
         Long getApprovedResponseCount();
     }
 }

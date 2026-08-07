@@ -24,7 +24,6 @@ import org.junit.jupiter.params.provider.ValueSource;
  * <p>Net-new (no Python counterpart) - see docs/DECISION_LOG.md DL-027, DL-071, DL-072 and DL-187.
  */
 class DatabaseUrlTranslatorTest {
-
     @Test
     @DisplayName("translates a postgresql url and omits the credentials from the reassembled url")
     void translatesAPostgresqlUrl() {
@@ -128,8 +127,6 @@ class DatabaseUrlTranslatorTest {
                 .hasMessageContaining("mariadb");
     }
 
-    // The scheme set is the matrix of AAP 0.6.5.1, one entry per runtime-scope driver, H2 included —
-    // DL-071, DL-187, DL-242 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("translates an h2 scheme onto the h2 vendor")
     void translatesAnH2Scheme() {
@@ -218,11 +215,6 @@ class DatabaseUrlTranslatorTest {
         assertThat(translated.jdbcUrl())
                 .isEqualTo("jdbc:postgresql://db.internal:5432/codeskeptic$%7Bx%7D");
     }
-
-    // -----------------------------------------------------------------------
-    // The jdbc: pass-through is credential-free: a value carrying credential material is rejected,
-    // never altered — DL-072 — see docs/DECISION_LOG.md
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("passes through a credential-free jdbc url unchanged")
@@ -317,10 +309,6 @@ class DatabaseUrlTranslatorTest {
                         + ", username=***REDACTED***, password=***REDACTED***]");
     }
 
-    // -----------------------------------------------------------------------
-    // Credentials carried in the query string
-    // -----------------------------------------------------------------------
-
     @Test
     @DisplayName("extracts the credentials from the query string and retains the remaining properties")
     void extractsCredentialsFromTheQueryStringAndRetainsTheRemainingProperties() {
@@ -354,10 +342,6 @@ class DatabaseUrlTranslatorTest {
         assertThat(translated.jdbcUrl()).isEqualTo("jdbc:mysql://host/db");
         assertThat(translated.password()).isEqualTo("a");
     }
-
-    // -----------------------------------------------------------------------
-    // The user-info component
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("decodes the percent-escapes of the user-info component")
@@ -407,10 +391,6 @@ class DatabaseUrlTranslatorTest {
         assertThat(translated.username()).isEqualTo("scanner");
         assertThat(translated.password()).isEmpty();
     }
-
-    // -----------------------------------------------------------------------
-    // Scheme, host and port
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("accepts a scheme written in upper case")
@@ -486,10 +466,6 @@ class DatabaseUrlTranslatorTest {
                 .hasMessageContaining("not a parseable URL");
     }
 
-    // -----------------------------------------------------------------------
-    // The reassembled query and fragment
-    // -----------------------------------------------------------------------
-
     @Test
     @DisplayName("appends no question mark when the query is empty")
     void appendsNoQuestionMarkWhenTheQueryIsEmpty() {
@@ -503,10 +479,6 @@ class DatabaseUrlTranslatorTest {
         assertThat(DatabaseUrlTranslator.translate("postgresql://host/db#frag").jdbcUrl())
                 .isEqualTo("jdbc:postgresql://host/db");
     }
-
-    // -----------------------------------------------------------------------
-    // One property-separator grammar: '&' and ';' both extract — DL-072
-    // -----------------------------------------------------------------------
 
     // A ';' separated credential property is extracted, exactly as an '&' separated one is — DL-072 —
     // see docs/DECISION_LOG.md
@@ -592,10 +564,6 @@ class DatabaseUrlTranslatorTest {
         assertThat(translated.password()).isNull();
     }
 
-    // -----------------------------------------------------------------------
-    // Padding: classification trims, translation does not — DL-072, DL-186
-    // -----------------------------------------------------------------------
-
     // The unset check trims before classifying, so a padded placeholder is still unset —
     // DL-186 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] \"{0}\"")
@@ -628,10 +596,6 @@ class DatabaseUrlTranslatorTest {
                 .isInstanceOf(IllegalStateException.class);
     }
 
-    // -----------------------------------------------------------------------
-    // The returned record
-    // -----------------------------------------------------------------------
-
     @Test
     @DisplayName("redacts the url the username and the password in its string form")
     void redactsEveryComponentInItsStringForm() {
@@ -651,10 +615,6 @@ class DatabaseUrlTranslatorTest {
         assertThatThrownBy(() -> new TranslatedDatabaseUrl(null, null, null))
                 .isInstanceOf(IllegalArgumentException.class);
     }
-
-    // -----------------------------------------------------------------------
-    // Vendor properties: the query is reassembled as supplied — AAP 0.6.5.1, DL-072
-    // -----------------------------------------------------------------------
 
     @ParameterizedTest(name = "[{index}] {0}")
     @ValueSource(strings = {
@@ -768,7 +728,6 @@ class DatabaseUrlTranslatorTest {
     @DisplayName("reads every identity property name as the username half of the pair")
     void readsEveryIdentityPropertyNameAsTheUsernameHalfOfThePair(String databaseUrl,
             String expectedUsername) {
-
         TranslatedDatabaseUrl translated = DatabaseUrlTranslator.translate(databaseUrl.strip());
 
         assertThat(translated.username()).isEqualTo(expectedUsername.strip());

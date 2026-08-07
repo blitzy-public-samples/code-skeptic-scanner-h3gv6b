@@ -51,10 +51,6 @@ import jakarta.annotation.PreDestroy;
  * carried when it is not blank. The {@code stop=None} argument at {@code :L24} is expressed by setting
  * no stop parameter.
  *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-011, DL-032,
- * DL-033, DL-034, DL-035, DL-052, DL-081, DL-083, DL-084, DL-085, DL-145, DL-200 and DL-202;
- * construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
- *
  * <p>This is a singleton bean and every member declared here is safe for concurrent use. The client
  * field is written only inside a {@code synchronized (this)} block and read through a
  * {@code volatile} field access, so at most one client exists.
@@ -68,10 +64,8 @@ public class LlmService {
     // Prompt segments transcribed from backend/app/services/llm_service.py:L16 (faithful port) —
     // see docs/DECISION_LOG.md DL-035
 
-    /** Opens the prompt and the quoted post body. Source text precedes {@code {tweet.content}}. */
     private static final String PROMPT_PREFIX = "Generate a response to the following tweet: '";
 
-    /** Closes the quoted post body and opens the context clause. */
     private static final String PROMPT_CONTEXT_SEPARATOR = "'\n\nContext: ";
 
     /** Closes the prompt. Carries no trailing whitespace, matching the source literal. */
@@ -80,16 +74,12 @@ public class LlmService {
     // The Context: value replaces {tweet.context}, an attribute the source model never declared
     // (backend/app/schema/tweet.py:L5-14) — see docs/DECISION_LOG.md DL-035
 
-    /** Opens the context clause, ahead of the AI tool names. */
     private static final String CONTEXT_TOOLS_PREFIX = "AI tools mentioned: ";
 
-    /** Separates the AI tool names from the doubt rating. */
     private static final String CONTEXT_RATING_PREFIX = "; doubt rating: ";
 
-    /** Joins two AI tool names. */
     private static final String AI_TOOL_DELIMITER = ", ";
 
-    /** Stands in for the AI tool names when the post names none. */
     private static final String NO_AI_TOOLS = "none";
 
     /** Stands in for the doubt rating when the value is absent or is not a finite number. */
@@ -97,10 +87,8 @@ public class LlmService {
 
     // The four fixed unusable-output codes — see docs/DECISION_LOG.md DL-145
 
-    /** Code for a response carrying no choice at all. */
     private static final String NO_CHOICE = "NO_CHOICE";
 
-    /** Code for a first choice carrying a non-blank refusal. */
     private static final String REFUSAL = "REFUSAL";
 
     /**
@@ -134,12 +122,10 @@ public class LlmService {
                     ReasoningEffort.Value.XHIGH,
                     ReasoningEffort.Value.MAX));
 
-    /** {@link #ACCEPTED_REASONING_EFFORT_VALUES} rendered for a failure message, in enum order. */
     private static final String ACCEPTED_REASONING_EFFORTS =
             ACCEPTED_REASONING_EFFORT_VALUES.stream()
                     .map(value -> value.name().toLowerCase(Locale.ROOT))
                     .collect(Collectors.joining(", "));
-
 
     /** Appended to the joined AI tool names when they are cut to {@value #PROMPT_CONTEXT_LIMIT}. */
     private static final String BODY_TRUNCATION_MARK = "…";
@@ -160,7 +146,6 @@ public class LlmService {
     /** Highest accepted value of {@code scanner.openai.temperature}. */
     private static final double MAXIMUM_TEMPERATURE = 2.0d;
 
-    /** Reported in place of an absent OpenAI error component. */
     private static final String ABSENT = "absent";
 
     /**
@@ -229,20 +214,16 @@ public class LlmService {
      * {@code scanner.openai.max-completion-tokens}, {@code scanner.openai.temperature} and
      * {@code scanner.openai.n}. No stop parameter is set. The reasoning effort of
      * {@code scanner.openai.reasoning-effort} is added by {@link #resolveReasoningEffort()}, which
-     * omits the parameter when the configured value is blank — see docs/DECISION_LOG.md DL-145. The
-     * first choice's message content is trimmed, matching the {@code .strip()} at
-     * {@code backend/app/services/llm_service.py:L29}.
-     *
-     * <p>The return value is the generated text; storing it happens outside this class — see
-     * docs/DECISION_LOG.md DL-081.
+     * omits the parameter when the configured value is blank — DL-145. The first choice's message
+     * content is trimmed, matching the {@code .strip()} at
+     * {@code backend/app/services/llm_service.py:L29}, and storing it happens outside this class —
+     * DL-081.
      *
      * <p>Only a complete, non-blank reply is returned. {@link #firstChoiceContent(ChatCompletion)}
      * reports every other outcome under a fixed unusable-output code as an
      * {@link IllegalStateException}, which the caller renders as the wire literal of
-     * {@code backend/app/api/responses.py:L49} — see docs/DECISION_LOG.md DL-083 and DL-145.
-     *
-     * <p>A failure raised by the OpenAI client is recorded here under the sanitized adapter policy
-     * and propagates unchanged — see docs/DECISION_LOG.md DL-084.
+     * {@code backend/app/api/responses.py:L49} — DL-083, DL-145. A failure raised by the OpenAI client
+     * is recorded here under the sanitized adapter policy and propagates unchanged — DL-084.
      *
      * @param tweet the post to reply to; must not be {@code null}
      * @return the trimmed generated text, never {@code null} and never blank
@@ -637,14 +618,14 @@ public class LlmService {
      *
      * <p>Content decides. Non-blank content of the first choice is returned whatever finish reason
      * accompanies it, including a reply the model cut short at the token cap, matching the source's
-     * {@code choices[0].text.strip()}. A finish reason other than
-     * {@code stop} accompanying accepted content is recorded once at {@code WARN} under
-     * {@value #INCOMPLETE_PREFIX} followed by that reason, which is an enumerated provider token
-     * rendered through {@link #guarded(Optional)} — DL-197, DL-202.
+     * {@code choices[0].text.strip()}. A finish reason other than {@code stop} accompanying accepted
+     * content is recorded once at {@code WARN} under {@value #INCOMPLETE_PREFIX} followed by that
+     * reason, which is an enumerated provider token rendered through {@link #guarded(Optional)} —
+     * DL-197, DL-202.
      *
      * <p>Three outcomes carry no usable content. Each is reported at {@code WARN} under a fixed
-     * unusable-output code and raised as an {@link IllegalStateException} whose message is that code
-     * — see docs/DECISION_LOG.md DL-083 and DL-202:
+     * unusable-output code and raised as an {@link IllegalStateException} whose message is that code —
+     * DL-083, DL-202:
      *
      * <ul>
      *   <li>{@value #NO_CHOICE} — the response carries no choice.</li>

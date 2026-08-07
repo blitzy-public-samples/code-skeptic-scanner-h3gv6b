@@ -38,7 +38,7 @@ import com.codeskeptic.scanner.service.mapper.ResponseMapper;
 import com.codeskeptic.scanner.service.mapper.TweetMapper;
 
 // Net-new (no Python module existed; signatures dictated by
-// backend/app/api/responses.py:L15,L26,L44,L60) — see docs/DECISION_LOG.md
+// backend/app/api/responses.py:L15,L26,L44,L60) — see docs/DECISION_LOG.md DL-076
 /**
  * Reads, generates and updates the rows of the {@code responses} table.
  *
@@ -49,63 +49,43 @@ import com.codeskeptic.scanner.service.mapper.TweetMapper;
  * {@link #updateResponse(String, UpdateResponseRequest)} for {@code PUT /responses/{responseId}}.
  * Each signature is fixed by the call site the blueprint already declared, at
  * {@code backend/app/api/responses.py:L15}, {@code :L26}, {@code :L44} and {@code :L60}; the module
- * those call sites imported at {@code :L3} defined none of them.
- *
- * <p>The source constructed the service once per request, at
- * {@code backend/app/api/responses.py:L14}, {@code :L25}, {@code :L43} and {@code :L59}. This is one
- * singleton bean holding its six collaborators in final fields — DL-211.
+ * those call sites imported at {@code :L3} defined none of them. The source constructed the service
+ * once per request, at {@code :L14}, {@code :L25}, {@code :L43} and {@code :L59}; this is one singleton
+ * bean holding its six collaborators in final fields — DL-211.
  *
  * <p>The set of client-visible messages this class can produce is closed at five, each a wire literal
- * of the source:
+ * of the source, each held as a constant on its exception type and reached through that type's factory
+ * with no identifier, driver text or stack detail appended:
  *
  * <ul>
- *   <li>{@code Tweet ID is required} — {@code backend/app/api/responses.py:L41}, carried by
+ *   <li>{@code Tweet ID is required} — {@code backend/app/api/responses.py:L41},
  *       {@link BadRequestException#tweetIdRequired()}, rendered as 400.
- *   <li>{@code Response not found} — {@code :L31}, carried by
- *       {@link NotFoundException#responseNotFound()}, rendered as 404.
- *   <li>{@code Failed to generate response} — {@code :L49}, carried by
- *       {@link ResponseGenerationException}, rendered as 500.
- *   <li>{@code Update data is required} — {@code :L57}, carried by
+ *   <li>{@code Response not found} — {@code :L31}, {@link NotFoundException#responseNotFound()},
+ *       rendered as 404.
+ *   <li>{@code Failed to generate response} — {@code :L49}, {@link ResponseGenerationException},
+ *       rendered as 500.
+ *   <li>{@code Update data is required} — {@code :L57},
  *       {@link BadRequestException#updateDataRequired()}, rendered as 400.
- *   <li>{@code Response not found or update failed} — {@code :L65}, carried by
+ *   <li>{@code Response not found or update failed} — {@code :L65},
  *       {@link NotFoundException#responseNotFoundOrUpdateFailed()}, rendered as 404.
  * </ul>
  *
- * <p>Each literal is held as a constant on its exception type and reached through that type's factory;
- * no identifier, driver text or stack detail is appended to any of them. This class selects no HTTP
- * status; {@code api.GlobalExceptionHandler} does — DL-076.
- *
- * <p>The two 404 messages are different strings: {@code GET /responses/{responseId}} carries the
- * literal of {@code :L31} and {@code PUT /responses/{responseId}} the literal of {@code :L65} —
- * DL-076.
- *
- * <p>{@code POST /responses} reports the two outcomes of {@code :L46-49}: a stored draft, or the
- * single 500 literal, which covers an identifier that parses to no number, an identifier naming no
- * {@code tweets} row, a generation failure and a persistence failure alike — DL-076.
+ * <p>The two 404 messages are different strings. This class selects no HTTP status;
+ * {@code api.GlobalExceptionHandler} does — DL-076.
  *
  * <p>Every entity is converted to its wire form inside the transaction that loaded it;
- * {@code spring.jpa.open-in-view} is {@code false}.
- *
- * <p>A generated reply is stored with {@code is_approved} {@code false}.
- * {@link #updateResponse(String, UpdateResponseRequest)} writes that flag on request and a human
- * reviewer reads it.
- *
- * <p>Rows are the only thing this class adds; it contributes no column, table, index or constraint.
- * The {@code tweets}-to-{@code responses} association declared at
- * {@code backend/app/db/models.py:L27-28,L30} is the only association it writes.
- *
- * <p>The {@code responses} and {@code tweets} tables are reached through {@link ResponseRepository}
- * and {@link TweetRepository} only.
- *
- * <p>Text generation is delegated to {@link LlmService}, which returns the generated text — DL-081.
- *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md}; construct-level
- * provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * {@code spring.jpa.open-in-view} is {@code false}. A generated reply is stored with
+ * {@code is_approved} {@code false}, which
+ * {@link #updateResponse(String, UpdateResponseRequest)} writes on request and a human reviewer reads.
+ * Rows are the only thing this class adds — it contributes no column, table, index or constraint — and
+ * the {@code tweets}-to-{@code responses} association declared at
+ * {@code backend/app/db/models.py:L27-28,L30} is the only association it writes. Text generation is
+ * delegated to {@link LlmService} — DL-081.
  *
  * <p>This is a singleton bean and its six collaborators are themselves singletons. Its only mutable
  * state is a concurrent set of integer tweet identifiers claimed by background generation in this
- * application instance. Database row locks coordinate the storage step across instances. Every member
- * declared here is safe for concurrent use — DL-195.
+ * application instance, and database row locks coordinate the storage step across instances. Every
+ * member declared here is safe for concurrent use — DL-195.
  */
 @Service
 public class ResponseService {
@@ -113,7 +93,6 @@ public class ResponseService {
     // Logging baseline — DL-052 — see docs/DECISION_LOG.md
     private static final Logger log = LoggerFactory.getLogger(ResponseService.class);
 
-    /** Difference between a 1-based wire page number and the 0-based repository index — DL-038. */
     /**
      * Page number read when {@code page} lies below it, transcribing the default of
      * {@code request.args.get('page', 1, type=int)} at backend/app/api/responses.py:L11.
@@ -144,19 +123,14 @@ public class ResponseService {
      */
     private static final int LOCK_WAIT_SECONDS = 5;
 
-    /** Data access for the {@code responses} table. */
     private final ResponseRepository responseRepository;
 
-    /** Data access for the {@code tweets} table, read to resolve the association of a new row. */
     private final TweetRepository tweetRepository;
 
-    /** Generates the reply text of a new {@code responses} row. */
     private final LlmService llmService;
 
-    /** Converts a {@link Response} into its {@link ResponseDto} wire form. */
     private final ResponseMapper responseMapper;
 
-    /** Converts a {@link Tweet} into the {@link TweetDto} the generator reads. */
     private final TweetMapper tweetMapper;
 
     /**
@@ -239,27 +213,20 @@ public class ResponseService {
      * is, and is converted to the 0-based index {@code findAll(Pageable)} takes. A {@code page} below
      * {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE} and a {@code perPage} below {@code 1} is
      * read as {@value #DEFAULT_PER_PAGE}; no upper bound is applied to {@code perPage}, neither value
-     * is rejected, and the pagination block restates the size served. A {@code page} beyond the last
-     * one yields an empty {@code responses} list and a populated pagination block.
-     *
-     * <p>A {@code page} whose first row lies beyond {@link Integer#MAX_VALUE} rows — that is, one for
-     * which {@code (page - 1) * perPage} exceeds that bound — is answered the same way: the empty list
-     * and the same populated block, with the requested page number and page size restated. No page
-     * size is reduced and no request is rejected — see docs/DECISION_LOG.md DL-225.
+     * is rejected, and no pagination argument is answered with an error status.
      *
      * <p>The pagination block carries {@code page} as the 1-based number of the page returned,
      * {@code per_page} as its size, {@code total} as the number of rows in the table and
-     * {@code total_pages} as the number of pages that size divides the table into — DL-038. The rows
+     * {@code total_pages} as the number of pages that size divides the table into — DL-038.
+     *
+     * <p>A {@code page} beyond the last one yields an empty {@code responses} list and a populated
+     * pagination block. A {@code page} whose first row lies at an offset beyond
+     * {@link Integer#MAX_VALUE}, the largest offset the paged query can express, is answered the same
+     * way from a row count alone, with the requested {@code page} and {@code per_page} restated —
+     * DL-225.
+     *
+     * <p>The page is read by one paged query ordered by {@code responses.id} ascending, and the rows
      * are converted inside this method's transaction.
-     *
-     * <p>A {@code page} whose first row lies at an offset beyond {@link Integer#MAX_VALUE}, the
-     * largest offset the paged query can express, is answered from a row count alone: an empty
-     * {@code responses} list with the requested {@code page} and {@code per_page} restated and the
-     * whole-table counters unchanged — see docs/DECISION_LOG.md DL-225. No pagination argument is
-     * answered with an error status.
-     *
-     * <p>The page is read by one paged query. Rows are ordered by {@code responses.id} ascending, and
-     * the rows one response carries are bounded by the requested page size and by the table.
      *
      * @param page    the 1-based page number to return; a value below {@value #DEFAULT_PAGE} is read
      *                as {@value #DEFAULT_PAGE}
@@ -347,7 +314,7 @@ public class ResponseService {
      * Generates a reply to the {@code tweets} row identified by {@code tweetId}, stores it as a new
      * {@code responses} row, and returns the stored row.
      *
-     * <p>{@code tweetId} is rejected when it is {@code null} and when it is the empty string. A
+     * <p>{@code tweetId} is rejected when it is {@code null} and when it is the empty string; a
      * whitespace-only value passes. {@code api/ResponseController} reads the request body through
      * {@code dto/CreateResponseRequest.usableTweetId()}, which reports {@code null} for every value the
      * {@code if not tweet_id} guard at {@code backend/app/api/responses.py:L40} read as false, so this
@@ -356,21 +323,20 @@ public class ResponseService {
      * <p>Past the guard this method reports the two outcomes of {@code :L46-49}: the stored row, or the
      * single literal of {@code :L49}, which covers a {@code tweetId} carrying no number, a
      * {@code tweetId} naming no {@code tweets} row, a failure raised by
-     * {@link LlmService#generateResponse(TweetDto)} and a failure raised while storing the row — see
-     * docs/DECISION_LOG.md DL-076.
+     * {@link LlmService#generateResponse(TweetDto)} and a failure raised while storing the row —
+     * DL-076.
      *
      * <p>The stored row carries the generated text as {@code content}, {@code is_approved}
      * {@code false}, {@code generated_at} as the current local time, and the loaded {@link Tweet} as
-     * its association. Its {@code id} is assigned by the database on insert and is read back from the
+     * its association. Its {@code id} is assigned by the database on insert and read back from the
      * stored row, replacing the {@code response.save()} call at
-     * {@code backend/app/tasks/response_generation.py:L25-26}. The row is converted inside this
-     * method's transaction.
+     * {@code backend/app/tasks/response_generation.py:L25-26}.
      *
-     * <p>No database transaction spans the generation request. Reading the subject row and storing the
+     * <p>No database transaction spans the generation request: reading the subject row and storing the
      * generated row are separate units of work and the call to
-     * {@link LlmService#generateResponse(TweetDto)} runs between them with no transaction open — see
-     * docs/DECISION_LOG.md DL-086. The subject row is read again inside the storing unit, so a row
-     * deleted while the model was answering is reported as the literal of {@code :L49}.
+     * {@link LlmService#generateResponse(TweetDto)} runs between them with no transaction open —
+     * DL-086. The subject row is read again inside the storing unit, so a row deleted while the model
+     * was answering is reported as the literal of {@code :L49}.
      *
      * @param tweetId the raw identifier of the {@code tweets} row to reply to; must be neither
      *                {@code null} nor empty
@@ -423,7 +389,7 @@ public class ResponseService {
      *
      * <p>This is the one operation {@code task.TweetStreamListener} and
      * {@code task.ResponseGenerationScheduler} call, so at most one automatic {@code responses} row
-     * is stored per {@code tweets} row. Two protections combine:
+     * is stored per {@code tweets} row. Three protections combine:
      *
      * <ul>
      *   <li>an in-process claim on the parsed integer identifier, held for the whole generation,
@@ -439,15 +405,12 @@ public class ResponseService {
      *
      * <p>No database connection is held across the language-model call: the pre-call read, the call and
      * the storage transaction are three separate boundaries — DL-252. Both callers of this operation
-     * run only in the process that {@code scanner.background.enabled} designates, so two processes do
-     * not generate for one row concurrently — DL-250.
+     * run only in the process that {@code scanner.background.enabled} designates — DL-250.
      *
      * <p>An empty result means nothing was stored: the row already carried a reply, or another caller
-     * held the claim. Both outcomes are recorded at {@code DEBUG}.
-     *
-     * <p>{@code POST /responses} does not come through here: it calls
-     * {@link #generateResponse(String)} directly, so its documented outcomes are unchanged — see
-     * docs/DECISION_LOG.md DL-195.
+     * held the claim. Both outcomes are recorded at {@code DEBUG}. {@code POST /responses} does not
+     * come through here: it calls {@link #generateResponse(String)} directly, so its documented
+     * outcomes are unchanged — DL-195.
      *
      * @param tweetId the raw identifier of the {@code tweets} row to reply to; must be neither
      *                {@code null} nor empty
@@ -478,16 +441,14 @@ public class ResponseService {
      * already carries one, and reports what was stored.
      *
      * <p>This method and {@link #generateResponseIfAbsent(String)} carry distinct names; the two are
-     * not overloads of one name — DL-226.
-     *
-     * <p>Behaves exactly as {@link #generateResponseIfAbsent(String)} in every respect except one: the
-     * subject's column values are taken from the supplied entity and are not selected, so the only
-     * {@code tweets} statement this path issues is the pre-provider existence read — see
-     * docs/DECISION_LOG.md DL-226 and DL-252. The in-process claim on the
-     * row's identifier, the transaction-scoped
+     * not overloads of one name — DL-226. Behaviour matches
+     * {@link #generateResponseIfAbsent(String)} in every respect except one: the subject's column
+     * values are taken from the supplied entity and are not selected, so the only {@code tweets}
+     * statement this path issues is the pre-provider existence read — DL-226, DL-252. The in-process
+     * claim on the row's identifier, the transaction-scoped
      * {@link ResponseRepository#existsByTweetId(Integer)} guard, the stored column values and every
      * client-visible message are the same ones {@link #generateResponseIfAbsent(String)} produces —
-     * see docs/DECISION_LOG.md DL-195, DL-226.
+     * DL-195, DL-226.
      *
      * <p>Only the identifier and the columns {@code dto/TweetDto} carries are read from
      * {@code subject}; its {@code responses} association is never traversed. The entity may be
@@ -583,7 +544,6 @@ public class ResponseService {
             claimed.remove(identifier);
         }
     }
-
 
     // The provider adapter owns its own diagnostic record — DL-252 — see docs/DECISION_LOG.md
     /**
@@ -736,34 +696,25 @@ public class ResponseService {
      *
      * <p>The request is rejected when it is {@code null} and when it carries neither the
      * {@code content} key nor the {@code is_approved} key, matching the {@code if not update_data}
-     * guard at {@code backend/app/api/responses.py:L56}. The request is tested before the row is read,
-     * in the order of {@code :L56-60}.
+     * guard at {@code backend/app/api/responses.py:L56}, and it is tested before the row is read, in
+     * the order of {@code :L56-60}. {@code responseId} arrives as the raw path segment: an identifier
+     * carrying no number, a {@code null} identifier and an identifier naming no row are all reported
+     * with the literal of {@code :L65}, a different string from the one
+     * {@link #getResponseById(String)} reports.
      *
-     * <p>{@link UpdateResponseRequest} admits an explicit JSON {@code null} on either key, so a
-     * {@code null} reaches this method as a write — see docs/DECISION_LOG.md DL-082 and DL-244.
-     *
-     * <p>{@code responseId} arrives as the raw path segment. An identifier carrying no number, a
-     * {@code null} identifier and an identifier naming no row are all reported with the literal of
-     * {@code :L65}, which is a different string from the one {@link #getResponseById(String)} reports.
-     *
-     * <p>Two columns are writable here, and each is written exactly when the request body carried its
-     * key: presence decides whether the column is written, and the carried value decides what is
-     * stored. A key the body omits leaves its column untouched; a key carrying a JSON {@code null}
-     * writes {@code null} to its nullable column — see docs/DECISION_LOG.md DL-082 and DL-244. A key
-     * carrying a value its column cannot hold never reaches this method: {@code dto.UpdateResponseRequest}
-     * refuses it while the body is being bound — see docs/DECISION_LOG.md DL-231. Both
-     * members are declared required by the wire contract of {@code backend/app/schema/response.py:L6,L8}
-     * (DL-080), so a write that leaves either of them empty is reported with the literal of
-     * {@code :L65} and rolls this transaction back, leaving the row as it was. {@code id},
-     * {@code generated_at} and {@code tweet_id} are not written by this method, and no value is trimmed
-     * or normalised on the way in.
-     *
-     * <p>{@code is_approved} is the flag a human reviewer reads.
+     * <p>Two columns are writable, and each is written exactly when the request body carried its key:
+     * an omitted key leaves its column untouched, and a key carrying a JSON {@code null} writes
+     * {@code null} to its nullable column — DL-082, DL-244. A key carrying a value its column cannot
+     * hold never reaches this method — DL-231. Both members are declared required by the wire contract
+     * of {@code backend/app/schema/response.py:L6,L8} (DL-080), so a write that leaves either empty is
+     * reported with the literal of {@code :L65} and rolls this transaction back. {@code id},
+     * {@code generated_at} and {@code tweet_id} are not written, no value is trimmed or normalised, and
+     * {@code is_approved} is the flag a human reviewer reads.
      *
      * <p>The row is read through {@link ResponseRepository#findByIdForUpdate(Integer)}, which holds a
      * pessimistic write lock on it for the remainder of this method's transaction, so two requests
-     * writing the two different columns at the same moment cannot overwrite one another's column — see
-     * docs/DECISION_LOG.md DL-122.
+     * writing the two different columns at the same moment cannot overwrite one another's column —
+     * DL-122.
      *
      * @param responseId the raw path segment identifying the row; an unparseable and a {@code null}
      *                   value are both reported as absent

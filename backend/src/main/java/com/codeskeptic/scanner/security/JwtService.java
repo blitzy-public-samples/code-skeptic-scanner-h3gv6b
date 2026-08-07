@@ -32,133 +32,76 @@ import io.jsonwebtoken.security.Keys;
 /**
  * Mints and parses the compact JWS this service issues to its own clients.
  *
- * <p>{@link #generateToken(String)} emits HS256 tokens carrying {@code sub}, {@code iat} and
- * {@code exp}. The extraction methods verify the signature, algorithm and required claims and return
- * {@link Optional#empty()} for an invalid token. Configuration validation occurs in the constructor.
- *
- * <p>Every minted token carries exactly three claims — {@code sub}, {@code iat} and {@code exp} —
- * and is signed with HS256 — DL-015, DL-018. The signing key is derived once, at construction, from
- * {@code scanner.jwt.secret}.
- *
- * <p>Verification accepts HS256 and nothing else — DL-108. The parser is built once, with its
- * signature-algorithm registry reduced to HS256, and every verified token's {@code alg} header is
- * additionally compared against {@value #REQUIRED_ALGORITHM}.
- *
- * <p>A verified token is accepted only when its claim set is exactly {@code sub}, {@code iat} and
- * {@code exp}, its {@code sub} is non-blank and its {@code exp} lies strictly after its
- * {@code iat} — DL-109.
- *
- * <p>{@code scanner.jwt.secret} carries the key material as text, which is the contract of the
- * {@code encode(..., settings.SECRET_KEY, ...)} call at {@code backend/app/core/security.py:L11}: the
- * configured value's UTF-8 bytes are the key material, and it is those bytes that must number at
- * least {@value #MINIMUM_SECRET_BYTES} — the floor {@value #REQUIRED_ALGORITHM} requires — before they
- * reach {@link Keys#hmacShaKeyFor(byte[])} — DL-186.
- *
- * <p>Construction fails with {@link IllegalStateException} when {@code scanner.jwt.secret} carries
- * nothing — it is absent, blank, or still holds the unresolved {@code ${SECRET_KEY}} placeholder
- * text an unset environment variable leaves behind — DL-016, DL-185, DL-186 — when its UTF-8 bytes
- * number fewer than the {@value #MINIMUM_SECRET_BYTES} {@value #REQUIRED_ALGORITHM} requires —
- * DL-186 — when {@code scanner.jwt.algorithm} names anything other than
- * {@code scanner.jwt.expiration-minutes} lies outside
- * {@value #MINIMUM_EXPIRATION_MINUTES}..{@value #MAXIMUM_EXPIRATION_MINUTES} — DL-110. Every one of
- * those messages names the property at fault together with the environment variable that supplies
- * it, and none reproduces the configured value — DL-186.
+ * <p>A minted token carries exactly {@code sub}, {@code iat} and {@code exp}, signed with
+ * {@value #REQUIRED_ALGORITHM}; {@code exp} is {@code iat} advanced by the configured lifetime —
+ * DL-015, DL-018.
  *
  * <p>A presented token is accepted only when its signature verifies, its {@code alg} header names
- * HS256, and it carries a non-blank {@code sub}, an {@code iat} and an {@code exp} that is later
- * than that {@code iat} — DL-109. Any other token is rejected.
+ * {@value #REQUIRED_ALGORITHM}, its claim set is exactly those three names, its {@code sub} is
+ * non-blank and its {@code exp} lies strictly after its {@code iat} — DL-108, DL-109. Anything else
+ * yields {@link Optional#empty()}: no jjwt type appears in a signature here and no jjwt exception
+ * leaves this class.
  *
- * <p>No jjwt type appears in any signature here and no jjwt exception leaves this class: both
- * extraction methods answer {@link Optional#empty()} for every token they cannot accept. Neither the
- * secret, the derived key, any token value, any claim value nor any parser failure message is
- * written to the log — DL-111.
+ * <p>Neither the secret, the derived key, a token value, a claim value nor a parser failure message
+ * is written to the log — DL-111.
  *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-014 … DL-018 and
- * DL-108 … DL-111; construct-level provenance is recorded in
- * {@code docs/TRACEABILITY_MATRIX.md}.
- *
- * <p>This is a singleton bean and is thread-safe. All three fields are {@code final} and hold
- * immutable or thread-safe state.
+ * <p>Singleton bean, thread-safe: all three fields are {@code final} and hold immutable or
+ * thread-safe state.
  */
 @Service
 public class JwtService {
 
-    /**
-     * Shape of a Spring property placeholder that resolved to nothing. Binding leaves such a
-     * placeholder in place as literal text when the environment variable behind it is absent — DL-186.
-     */
+    /** Binding leaves an unresolved placeholder in place as literal text — DL-186. */
     private static final Pattern UNRESOLVED_PLACEHOLDER =
             Pattern.compile("^\\$\\{.*}$", Pattern.DOTALL);
 
     private static final Logger log = LoggerFactory.getLogger(JwtService.class);
 
-    /**
-     * The one algorithm {@code scanner.jwt.algorithm} may name, the one algorithm this service signs
-     * with and the one algorithm its parser verifies — DL-108.
-     */
     private static final String REQUIRED_ALGORITHM = "HS256";
 
-    /** Smallest accepted value of {@code scanner.jwt.expiration-minutes} — DL-110. */
     private static final long MINIMUM_EXPIRATION_MINUTES = 1L;
 
-    /** Largest accepted value of {@code scanner.jwt.expiration-minutes} — DL-110. */
     private static final long MAXIMUM_EXPIRATION_MINUTES = 60L;
 
-
-    /** Multiplier applied by {@link #getExpirationSeconds()} to the configured lifetime in minutes. */
     private static final long SECONDS_PER_MINUTE = 60L;
 
-    /**
-     * Shortest accepted {@code scanner.jwt.secret}, in UTF-8 bytes of the configured text — DL-186.
-     */
+    /** Floor applied to the UTF-8 bytes of the configured text, not to any decoded form — DL-186. */
     private static final int MINIMUM_SECRET_BYTES = 32;
 
-    /** Bits per byte used in secret-length diagnostics — DL-186. */
     private static final int BITS_PER_BYTE = 8;
 
     private static final String MISSING_SECRET_MESSAGE =
             "scanner.jwt.secret is not configured; supply it through the SECRET_KEY environment "
                     + "variable. It has no default value.";
 
-    /** Names of the only claims a token this service accepts may carry — DL-109. */
     private static final Set<String> REQUIRED_CLAIM_NAMES = Set.of(
             Claims.SUBJECT, Claims.ISSUED_AT, Claims.EXPIRATION);
 
-    /**
-     * HMAC-SHA key derived from {@code scanner.jwt.secret}, used to sign every minted token and to
-     * verify every presented one.
-     */
     private final SecretKey signingKey;
 
     /**
-     * Parser built once at construction. Its signature-algorithm registry holds
-     * {@value #REQUIRED_ALGORITHM} only; a token whose header names any other algorithm is rejected
-     * before its signature is checked — DL-108.
+     * Registry reduced to {@value #REQUIRED_ALGORITHM}, so another algorithm is rejected before the
+     * signature is checked — DL-108.
      */
     private final JwtParser parser;
 
-    /**
-     * Validated token lifetime from {@code scanner.jwt.expiration-minutes}.
-     */
     private final long expirationMinutes;
 
     /**
      * Resolves the signing key, the parser and the token lifetime from configuration.
      *
-     * <p>The signing key is the decoded {@code scanner.jwt.secret}. All three are resolved once here,
-     * replacing the per-call {@code get_settings()} at
-     * {@code backend/app/core/config.py:L17-18} that the source invoked at
+     * <p>The signing key is the trimmed {@code scanner.jwt.secret} read as raw UTF-8 bytes, with no
+     * decoding step of any kind — DL-186. All three are resolved once here, replacing the per-call
+     * {@code get_settings()} at {@code backend/app/core/config.py:L17-18} that the source invoked at
      * {@code backend/app/core/security.py:L7}.
      *
      * @param properties the bound configuration root; its {@code scanner.jwt} group supplies the
      *     secret, the algorithm name and the lifetime
      * @throws NullPointerException if {@code properties} is {@code null}
      * @throws IllegalStateException if {@code scanner.jwt.secret} is absent, blank or an unresolved
-     *     {@code ${SECRET_KEY}} placeholder, if it is not a Base64 or Base64URL encoding, if it
-     *     carries fewer than {@value #MINIMUM_SECRET_BYTES} UTF-8 bytes, if
-     *     {@code scanner.jwt.algorithm} names anything
-     *     other than {@value #REQUIRED_ALGORITHM}, or if
-     *     {@code scanner.jwt.expiration-minutes} lies outside
+     *     {@code ${SECRET_KEY}} placeholder; if its UTF-8 bytes number fewer than
+     *     {@value #MINIMUM_SECRET_BYTES}; if {@code scanner.jwt.algorithm} names anything other than
+     *     {@value #REQUIRED_ALGORITHM}; or if {@code scanner.jwt.expiration-minutes} lies outside
      *     {@value #MINIMUM_EXPIRATION_MINUTES}..{@value #MAXIMUM_EXPIRATION_MINUTES}
      */
     public JwtService(ScannerProperties properties) {
@@ -184,12 +127,10 @@ public class JwtService {
     /**
      * Mints a signed token for the given principal name.
      *
-     * <p>The token carries exactly the {@code sub}, {@code iat} and {@code exp} claims, in place of
-     * the caller-supplied dictionary copied into the claim set at
-     * {@code backend/app/core/security.py:L8} — DL-018. {@code exp} is {@code iat} advanced by the
-     * configured lifetime, reproducing {@code datetime.utcnow() + expires_delta} at
-     * {@code backend/app/core/security.py:L9-10}. {@link Instant#now()} is read once and both claims
-     * derive from that single instant.
+     * <p>The three claims replace the caller-supplied dictionary copied into the claim set at
+     * {@code backend/app/core/security.py:L8} — DL-018 — and reproduce
+     * {@code datetime.utcnow() + expires_delta} at {@code :L9-10}. {@link Instant#now()} is read once,
+     * so both time claims derive from a single instant.
      *
      * @param username the principal name to carry in the {@code sub} claim; must be neither
      *     {@code null} nor blank
@@ -255,14 +196,12 @@ public class JwtService {
     }
 
     /**
-     * Verifies a token once and returns its claim set only when the token satisfies every policy
-     * this service enforces.
+     * Verifies a token once and returns its claim set only when the token satisfies every policy this
+     * service enforces.
      *
-     * <p>This is the single parsing path behind {@link #extractUsername(String)} and
-     * {@link #extractExpiration(String)}: a token is parsed exactly once per call. Verification
-     * covers the signature, the {@code alg} header, the claim set and the claim values, in that
-     * order — DL-108, DL-109. Every failure is answered with {@link Optional#empty()}; no jjwt
-     * exception type escapes this class.
+     * <p>The single parsing path behind {@link #extractUsername(String)} and
+     * {@link #extractExpiration(String)}, so a token is parsed exactly once per call. Checks run in
+     * the order signature, {@code alg} header, claim set, claim values — DL-108, DL-109.
      *
      * @param token the compact JWS to verify, which may be {@code null}
      * @return the accepted claim set, or {@link Optional#empty()} otherwise
@@ -309,21 +248,13 @@ public class JwtService {
     }
 
     /**
-     * Reads a configured secret as the key material HS256 signs and verifies with.
+     * Reads a configured secret as the key material {@value #REQUIRED_ALGORITHM} signs and verifies
+     * with.
      *
-     * <p>{@code null}, a blank value and an unresolved {@code ${SECRET_KEY}} placeholder are all read
-     * as an unsupplied secret and raise the same message — DL-186.
-     *
-     * <p>The configured value carries the key material as text, which is the contract of
-     * {@code backend/app/core/security.py:L11}, where PyJWT signed with {@code settings.SECRET_KEY}
-     * exactly as configured. Its UTF-8 bytes, once surrounding whitespace is discarded, are the key
-     * material. Material of fewer than {@value #MINIMUM_SECRET_BYTES} bytes is rejected before it
-     * reaches {@link Keys#hmacShaKeyFor(byte[])}, which is the floor
-     * {@value #REQUIRED_ALGORITHM} requires — DL-186. No encoding is applied and none is expected: any
-     * character a configuration value can carry is accepted.
-     *
-     * <p>No failure message reproduces any part of the configured value, and no message states its
-     * length — DL-111, DL-186.
+     * <p>The trimmed value's own UTF-8 bytes are the key material: no encoding is applied and none is
+     * expected, so any character a configuration value can carry is accepted — DL-186. {@code null},
+     * a blank value and an unresolved {@code ${SECRET_KEY}} placeholder all raise the same message.
+     * No failure message reproduces any part of the value or states its length — DL-111.
      *
      * @param configuredSecret value of {@code scanner.jwt.secret}, which may be {@code null}
      * @return the key material, at least {@value #MINIMUM_SECRET_BYTES} bytes long
@@ -351,7 +282,6 @@ public class JwtService {
         }
         return keyMaterial;
     }
-
 
     /**
      * Confirms that a configured algorithm name is {@value #REQUIRED_ALGORITHM}.
@@ -396,10 +326,9 @@ public class JwtService {
     /**
      * Reports whether a bound configuration value carries no usable configuration.
      *
-     * <p>A {@code null} value, a blank value and an unresolved {@code ${...}} placeholder are all
-     * treated as unset. Configuration binding leaves an unresolved placeholder in place as literal
-     * text when the environment variable behind it is absent, so the bound value is neither
-     * {@code null} nor blank — DL-186.
+     * <p>Binding leaves an unresolved {@code ${...}} placeholder in place as literal text when the
+     * environment variable behind it is absent, so such a value is neither {@code null} nor blank and
+     * is treated as unset here — DL-186.
      *
      * @param value the bound value, possibly {@code null}
      * @return {@code true} when the value is {@code null}, blank, or an unresolved placeholder

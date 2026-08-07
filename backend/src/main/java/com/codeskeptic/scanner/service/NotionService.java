@@ -27,32 +27,29 @@ import com.fasterxml.jackson.databind.JsonNode;
 // Ported from backend/app/services/notion_service.py:L5-53 (faithful port) — see docs/DECISION_LOG.md
 // DL-013, DL-050, DL-052.
 /**
- * Adapter for the Notion API and the single home of the Notion mirror.
+ * Adapter for the Notion API and the single home of the Notion mirror. Notion is a secondary mirror;
+ * the relational store remains the system of record.
  *
  * <p>Three operations are exposed. {@link #storeTweet(TweetDto)} replaces {@code store_tweet} at
  * {@code backend/app/services/notion_service.py:L12-28}. {@link #getTweets(int, String)} replaces
- * {@code get_tweets} at {@code backend/app/services/notion_service.py:L32-53}.
- * {@link #updateTweetResponse(String, String)} is net-new: no counterpart exists on the source
- * class, and {@code backend/app/tasks/response_generation.py:L30} calls it.
+ * {@code get_tweets} at {@code :L32-53}. {@link #updateTweetResponse(String, String)} is net-new: no
+ * counterpart exists on the source class, and {@code backend/app/tasks/response_generation.py:L30}
+ * calls it.
  *
  * <p>Transport is the {@link RestClient} bean published by
- * {@code config/RestClientConfig#notionRestClient}, which replaces the {@code notion_client.Client}
- * constructed at {@code backend/app/services/notion_service.py:L8}. That bean already carries the
- * Notion API host, the {@code Notion-Version} header and the {@code Authorization} header holding
- * {@code scanner.notion.api-key}; none of the three is set here. Every request path declared below
+ * {@code config/RestClientConfig#notionRestClient}, which already carries the Notion API host, the
+ * {@code Notion-Version} header and the {@code Authorization} header holding
+ * {@code scanner.notion.api-key}; none of the three is set here, and every request path declared below
  * is relative to that base URL. {@code scanner.notion.database-id} is read here and reaches each
  * request as a payload or URI value, replacing the two reads at
- * {@code backend/app/services/notion_service.py:L24} and
- * {@code backend/app/services/notion_service.py:L35}, neither of which the source ever declared
- * ({@code backend/app/core/config.py:L4-11}).
+ * {@code backend/app/services/notion_service.py:L24} and {@code :L35}, neither of which the source
+ * ever declared ({@code backend/app/core/config.py:L4-11}).
  *
- * <p>The property map written to Notion is rebuilt. The source map at
- * {@code backend/app/services/notion_service.py:L14-20} read {@code tweet.content} together with
- * {@code tweet.author}, {@code tweet.timestamp}, {@code tweet.sentiment} and
- * {@code tweet.engagement}; the last four name no field of the source model
- * ({@code backend/app/schema/tweet.py:L5-14}) and no component of {@link TweetDto}. The map written
- * here carries the seven properties below, which is fewer than one per component of
- * {@link TweetDto} — DL-088:
+ * <p>The property map written to Notion is rebuilt: the source map at
+ * {@code backend/app/services/notion_service.py:L14-20} read {@code tweet.author},
+ * {@code tweet.timestamp}, {@code tweet.sentiment} and {@code tweet.engagement}, which name no field
+ * of {@code backend/app/schema/tweet.py:L5-14} and no component of {@link TweetDto}. Exactly these
+ * seven properties are written and no others — DL-088:
  *
  * <table border="1">
  *   <caption>Notion properties written by {@link #storeTweet(TweetDto)}</caption>
@@ -67,40 +64,28 @@ import com.fasterxml.jackson.databind.JsonNode;
  *       <td>{@link #updateTweetResponse(String, String)} only</td></tr>
  * </table>
  *
- * <p>The mirror carries exactly those seven properties and no others. {@link TweetDto#media()},
- * {@link TweetDto#aiToolsMentioned()} and {@link TweetDto#quotedTweetId()} are not mirrored: no
- * property is written for them, no property name is declared for them, and a read leaves
- * {@code media} and {@code aiToolsMentioned} empty and {@code quotedTweetId} {@code null} — DL-088,
- * DL-090. No value written or read here passes through
- * {@code util/DelimitedStringListConverter}, whose one reader is {@code entity/Tweet} — DL-164.
+ * <p>{@code Doubt Rating} replaces the {@code Sentiment} select of {@code :L18}; {@code Tweet Id} and
+ * {@code Response} are additions — DL-088. {@link TweetDto#media()},
+ * {@link TweetDto#aiToolsMentioned()} and {@link TweetDto#quotedTweetId()} are not mirrored at all, so
+ * a read leaves the first two empty and the third {@code null} — DL-088, DL-090, and no value written
+ * or read here passes through {@code util/DelimitedStringListConverter} — DL-164. Notion answers HTTP
+ * 400 {@code validation_error} for any page write naming a property the target database does not
+ * define, so a write beyond this set fails the whole request.
  *
- * <p>Notion answers HTTP 400 {@code validation_error} for any page write naming a property the target
- * database does not define, so a write beyond this set fails the whole request.
+ * <p>A read returns what the page carries: an absent property yields a {@code null} component, and a
+ * page carrying no {@code Tweet Id} text falls back to the Notion page identifier, so a mirrored page
+ * is never dropped for want of that one property — DL-090. A structurally invalid successful response —
+ * an empty body, an absent {@code results} array, or a created page carrying no identifier — is
+ * reported as a failure and is not read as an empty result — DL-089. The source indexed {@code [0]}
+ * directly at {@code :L45-49}.
  *
- * <p>{@code Doubt Rating} replaces the {@code Sentiment} select of
- * {@code backend/app/services/notion_service.py:L18}; {@code Tweet Id} and {@code Response} are
- * additions — DL-088. Notion is a secondary mirror; the relational store remains the system of
- * record.
- *
- * <p>A read returns what the page carries: an absent property yields a {@code null} component, and an
- * absent delimited property yields an empty list — DL-090. When a page carries no {@code Tweet Id}
- * text, {@link TweetDto#id()} falls back to the Notion page identifier, so a mirrored page is never
- * dropped for want of that one property. A structurally invalid successful response — an empty body,
- * an absent {@code results} array, or a created page carrying no identifier — is reported as a
- * failure and is not read as an empty result — DL-089. The source indexed {@code [0]} directly at
- * {@code backend/app/services/notion_service.py:L45-49}.
- *
- * <p>This adapter carries no request pacing and no cache. Exactly one operation retries: the mirror
- * write of {@link #updateTweetResponse}, which re-attempts an HTTP 429, any 5xx and a transport
- * failure up to {@code scanner.notion.mirror-max-retries} times, waiting
- * {@code scanner.notion.mirror-retry-backoff-millis} before the first retry and doubling that wait
- * once per earlier retry up to a thirty-second ceiling — DL-253. Every other operation issues
- * one HTTP request. A request Notion rejects — including HTTP 429 {@code rate_limited} against
- * Notion's published request ceiling — is logged with the provider status, error {@code code},
- * request id and the length of the provider explanation, never its text — DL-269 — then raised to the
- * caller as an {@link IllegalStateException}. Re-attempting a rejected read or create is the caller's
- * responsibility. The relational row is committed before any Notion call, so a rejected mirror never
- * costs data — see docs/DECISION_LOG.md DL-190.
+ * <p>This adapter carries no request pacing and no cache, and exactly one operation retries: the
+ * mirror write of {@link #updateTweetResponse}, whose bounded budget is documented on that method —
+ * DL-253. Every other operation issues one HTTP request, and a request Notion rejects is logged with
+ * the provider status, error {@code code}, request id and the length of the provider explanation,
+ * never its text — DL-269 — then raised as an {@link IllegalStateException}. Re-attempting a rejected
+ * read or create is the caller's responsibility, and the relational row is committed before any Notion
+ * call — DL-190.
  *
  * <p>This class reaches no repository and holds no entity. No credential is read at construction and
  * no request is issued there, so the application context loads with {@code NOTION_API_KEY} and
@@ -108,15 +93,8 @@ import com.fasterxml.jackson.databind.JsonNode;
  * each method as an {@link IllegalStateException}. No credential or key material is logged at any
  * level — DL-052.
  *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-013, DL-050, DL-052,
- * DL-088, DL-089 and DL-090; construct-level provenance is recorded in
- * {@code docs/TRACEABILITY_MATRIX.md}.
- *
- * <p>This is a singleton bean. Both fields are {@code final}, every remaining member is a constant or a
- * stateless method, and the injected {@link RestClient} is safe for concurrent use, so every operation
- * declared here is safe for concurrent use.
- *
- * @see ScannerProperties.Notion
+ * <p>This is a singleton bean whose two fields are {@code final} and whose injected {@link RestClient}
+ * is safe for concurrent use, so every operation declared here is safe for concurrent use.
  */
 @Service
 public class NotionService {
@@ -170,23 +148,17 @@ public class NotionService {
      * Addition — see docs/DECISION_LOG.md. */
     private static final String PROPERTY_TWEET_ID = "Tweet Id";
 
-
-
-
     /** Rich-text property, carrying the generated reply. Addition — see docs/DECISION_LOG.md. */
     private static final String PROPERTY_RESPONSE = "Response";
-
 
     // Notion JSON member names, transcribed from the payload shapes at
     // backend/app/services/notion_service.py:L14-20 and :L34-38.
 
-    /** Container of a title property's text items. */
     private static final String KEY_TITLE = "title";
 
     /** Container of a rich-text property's text items, and of the rich-text filter condition. */
     private static final String KEY_RICH_TEXT = "rich_text";
 
-    /** Text object of a single title or rich-text item. */
     private static final String KEY_TEXT = "text";
 
     /** Literal text carried by a {@link #KEY_TEXT} object. */
@@ -195,43 +167,30 @@ public class NotionService {
     /** Flattened text of a single title or rich-text item, read when {@link #KEY_TEXT} is absent. */
     private static final String KEY_PLAIN_TEXT = "plain_text";
 
-    /** Container of a date property's endpoints. */
     private static final String KEY_DATE = "date";
 
-    /** Start endpoint of a date property. */
     private static final String KEY_START = "start";
 
-    /** Value of a number property. */
     private static final String KEY_NUMBER = "number";
 
-    /** Parent reference of a page creation request. */
     private static final String KEY_PARENT = "parent";
 
-    /** Target database of a page creation request. */
     private static final String KEY_DATABASE_ID = "database_id";
 
-    /** Property map of a page creation, page update or page read. */
     private static final String KEY_PROPERTIES = "properties";
 
-    /** Identifier of a Notion page. */
     private static final String KEY_ID = "id";
 
-    /** Page array of a database query response. */
     private static final String KEY_RESULTS = "results";
 
-    /** Page-size argument of a database query request. */
     private static final String KEY_PAGE_SIZE = "page_size";
 
-    /** Opaque pagination cursor of a database query request. */
     private static final String KEY_START_CURSOR = "start_cursor";
 
-    /** Filter of a database query request. */
     private static final String KEY_FILTER = "filter";
 
-    /** Filtered property name of a database query filter. */
     private static final String KEY_PROPERTY = "property";
 
-    /** Equality condition of a database query filter. */
     private static final String KEY_EQUALS = "equals";
 
     /**
@@ -259,10 +218,8 @@ public class NotionService {
     // Net-new item split — DL-292 — see docs/DECISION_LOG.md
     private static final int MAXIMUM_TEXT_ITEM_CHARS = 2_000;
 
-    /** Notion error-body member naming the error. */
     private static final String KEY_CODE = "code";
 
-    /** Notion error-body member carrying the human-readable explanation. */
     private static final String KEY_MESSAGE = "message";
 
     /**
@@ -271,7 +228,6 @@ public class NotionService {
      */
     private static final int ABSENT_MESSAGE_LENGTH = -1;
 
-    /** Reported in place of an absent Notion error component. */
     private static final String ABSENT = "absent";
 
     /** Accepted shape of the {@code code} member of a Notion error body. */
@@ -292,7 +248,6 @@ public class NotionService {
     /** Page size of the correlation query issued by {@link #updateTweetResponse(String, String)}. */
     private static final int SINGLE_PAGE = 1;
 
-    /** Returned in place of a title, rich-text or identifier value that is absent. */
     private static final String EMPTY_TEXT = "";
 
     /** Status Notion answers when a request exceeded its rate limit — DL-253. */
@@ -462,22 +417,20 @@ public class NotionService {
      *
      * <p>The page is located by a database query filtered on the {@code Tweet Id} rich-text property,
      * and the first matching page's {@code Response} rich-text property is then replaced. A
-     * {@code null} reply is written as an empty string.
+     * {@code null} reply is written as an empty string. This operation writes to Notion only and
+     * reaches no repository.
      *
      * <p>Two conditions produce a warning and a normal return, leaving Notion untouched: a
      * {@code null} or blank post identifier, and a query that matches no page. A structurally invalid
      * query response, and a matching page that carries no identifier, are each reported as a failure —
      * DL-089.
      *
-     * <p>This operation writes to Notion only and reaches no repository.
-     *
      * <p>A failure the provider could answer differently later — {@code 429}, any {@code 5xx} and a
      * transport failure — is attempted again up to {@code scanner.notion.mirror-max-retries} times,
      * waiting {@code scanner.notion.mirror-retry-backoff-millis} before the first retry and doubling
      * that wait before each later one, bounded at {@value #MAXIMUM_RETRY_BACKOFF_MILLIS} milliseconds.
      * Every other status is not retried. The calling thread waits during a backoff, and an interrupt
-     * while it waits ends the attempts and restores the interrupt status — see docs/DECISION_LOG.md
-     * DL-253.
+     * while it waits ends the attempts and restores the interrupt status — DL-253.
      *
      * @param tweetId identifier of the post whose page is updated; a {@code null} or blank value
      *     leaves Notion untouched
@@ -487,8 +440,8 @@ public class NotionService {
      * @throws org.springframework.web.client.RestClientException if either request fails or Notion
      *     answers with a client or server error status
      */
-    // Net-new (no Python counterpart) — called at backend/app/tasks/response_generation.py:L30 —
-    // see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — called at backend/app/tasks/response_generation.py:L30, the
+    // A12 mapping of docs/TRACEABILITY_MATRIX.md — see docs/DECISION_LOG.md DL-088, DL-157, DL-253
     public void updateTweetResponse(String tweetId, String responseText) {
         if (tweetId == null || tweetId.isBlank()) {
             log.warn("No tweet identifier was supplied; no Notion page is updated");
@@ -829,8 +782,6 @@ public class NotionService {
         return properties;
     }
 
-
-
     /**
      * Adds one property to the map, skipping a {@code null} value.
      *
@@ -1064,7 +1015,6 @@ public class NotionService {
                 userId,
                 List.of());
     }
-
 
     /**
      * Reads the literal text of a title or rich-text property, concatenating every item in order.

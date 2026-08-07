@@ -56,7 +56,8 @@ import com.codeskeptic.scanner.service.TwitterService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-// Ported from backend/tests/test_api.py (faithful port) — see docs/DECISION_LOG.md
+// Replaces backend/tests/test_api.py, whose source antecedent drove a Flask application through
+// fastapi.testclient at :L2 and could not be executed — see docs/DECISION_LOG.md DL-239
 /**
  * Exercises the three routes {@link TweetController} serves, behind the application's servlet
  * security chain.
@@ -99,8 +100,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @EnableConfigurationProperties(ScannerProperties.class)
 @DisplayName("TweetController")
 class TweetControllerTest {
-
-    /** Principal named by {@code scanner.auth.username} under the {@code test} profile. */
     private static final String PRINCIPAL = "admin";
 
     /** Route of {@code backend/app/api/tweets.py:L9}. */
@@ -109,7 +108,6 @@ class TweetControllerTest {
     /** Route of {@code backend/app/api/tweets.py:L9} carrying the frontend's {@code /api} prefix. */
     private static final String PREFIXED_LIST_ROUTE = "/api/tweets";
 
-    /** Identifier the addressed routes carry in most tests. */
     private static final String TWEET_ID = "7";
 
     /** Wire literal of {@code backend/app/api/tweets.py:L32,L43}. */
@@ -121,7 +119,6 @@ class TweetControllerTest {
     /** Wire literal of {@code backend/app/main.py:L37}. */
     private static final String INTERNAL_SERVER_ERROR = "{\"error\":\"Internal server error\"}";
 
-    /** Single key of the envelope {@code dto.ErrorResponse} declares. */
     private static final String ERROR_KEY = "error";
 
     /** Page number {@code backend/app/api/tweets.py:L12} declares as the default. */
@@ -130,17 +127,12 @@ class TweetControllerTest {
     /** Page size {@code backend/app/api/tweets.py:L13} declares as the default. */
     private static final int DEFAULT_PER_PAGE = 10;
 
-    // ---------------------------------------------------------------------
-    // One fully populated row — backend/app/schema/tweet.py:L5-14
-    // ---------------------------------------------------------------------
-
     private static final String ROW_CONTENT = "AI coding tools still cannot get this right";
 
     private static final int ROW_LIKE_COUNT = 120;
 
     private static final LocalDateTime ROW_CREATED_AT = LocalDateTime.of(2026, 8, 1, 12, 30, 45);
 
-    /** {@link #ROW_CREATED_AT} in the form Jackson puts on the wire. */
     private static final String ROW_CREATED_AT_ON_THE_WIRE = "2026-08-01T12:30:45";
 
     private static final double ROW_DOUBT_RATING = 6.5d;
@@ -152,12 +144,7 @@ class TweetControllerTest {
 
     private static final List<String> ROW_AI_TOOLS_MENTIONED = List.of("GPT-4", "AI code assistant");
 
-    /** Document sentiment score {@code service.TwitterService.analyzeTweet} returns. */
     private static final double SENTIMENT_SCORE = -0.25d;
-
-    // ---------------------------------------------------------------------
-    // Wire key sets
-    // ---------------------------------------------------------------------
 
     /** The two keys of {@code backend/app/api/tweets.py:L18-21}. */
     private static final String[] ENVELOPE_KEYS = { "tweets", "pagination" };
@@ -183,10 +170,8 @@ class TweetControllerTest {
     /** Member names asserted absent from {@code analysis_result} — DL-037. */
     private static final String[] COMPOSITE_ANALYSIS_KEYS = { "score", "doubt_rating", "sentiment" };
 
-    /** A path segment of 2048 characters. */
     private static final String OVERLONG_ID = "9".repeat(2048);
 
-    /** A path segment holding characters outside the decimal digits. */
     private static final String UNUSUAL_ID = "~id_2026.08.05-x";
 
     @Autowired
@@ -402,7 +387,6 @@ class TweetControllerTest {
     @DisplayName("GET /tweets answers 200 and passes an out-of-range page through unchanged")
     void listAnswers200AndPassesAnOutOfRangePageThroughUnchanged(int page, int perPage)
             throws Exception {
-
         when(twitterService.getPaginatedTweets(page, perPage)).thenReturn(emptyPage(page, perPage));
 
         mockMvc.perform(get(LIST_ROUTE)
@@ -421,7 +405,6 @@ class TweetControllerTest {
     @DisplayName("GET /tweets answers 200 with the declared default when page holds no whole number")
     void listAnswers200WithTheDeclaredDefaultWhenPageHoldsNoWholeNumber(String page)
             throws Exception {
-
         when(twitterService.getPaginatedTweets(DEFAULT_PAGE, DEFAULT_PER_PAGE))
                 .thenReturn(emptyPage(DEFAULT_PAGE, DEFAULT_PER_PAGE));
 
@@ -437,7 +420,6 @@ class TweetControllerTest {
     @DisplayName("GET /tweets answers 200 with the declared default when per_page holds no whole number")
     void listAnswers200WithTheDeclaredDefaultWhenPerPageHoldsNoWholeNumber(String perPage)
             throws Exception {
-
         when(twitterService.getPaginatedTweets(DEFAULT_PAGE, DEFAULT_PER_PAGE))
                 .thenReturn(emptyPage(DEFAULT_PAGE, DEFAULT_PER_PAGE));
 
@@ -646,7 +628,6 @@ class TweetControllerTest {
         verify(twitterService, never()).getTweet(any());
         verify(twitterService, never()).updateTweetAnalysis(any(), anyDouble());
 
-        // No route reached from here publishes to X — AAP IR7
         verifyNoMoreInteractions(twitterService);
     }
 
@@ -829,15 +810,6 @@ class TweetControllerTest {
         verifyNoInteractions(twitterService);
     }
 
-    // =====================================================================
-    // Fixtures and assertion helpers
-    // =====================================================================
-
-    /**
-     * Mints a bearer credential for the configured principal.
-     *
-     * @return the value of an {@code Authorization} header the filter chain accepts
-     */
     private String bearer() {
         return "Bearer " + jwtService.generateToken(PRINCIPAL);
     }
@@ -865,63 +837,26 @@ class TweetControllerTest {
                 ROW_MEDIA, null, ROW_USER_ID, ROW_AI_TOOLS_MENTIONED);
     }
 
-    /**
-     * Builds an envelope carrying the supplied rows and counters.
-     *
-     * @param rows       the rows the {@code tweets} member carries
-     * @param page       the 1-based page number the envelope reports
-     * @param perPage    the page size the envelope reports
-     * @param total      the matching row count the envelope reports
-     * @param totalPages the page count the envelope reports
-     * @return the envelope
-     */
     private static PaginatedTweetsDto page(List<TweetDto> rows, int page, int perPage, long total,
             int totalPages) {
         return new PaginatedTweetsDto(rows, new PaginationDto(page, perPage, total, totalPages));
     }
 
-    /**
-     * Builds an envelope carrying no row and the supplied counters.
-     *
-     * @param page    the 1-based page number the envelope reports
-     * @param perPage the page size the envelope reports
-     * @return the envelope
-     */
     private static PaginatedTweetsDto emptyPage(int page, int perPage) {
         return page(List.of(), page, perPage, 0L, 0);
     }
 
-    /**
-     * Reads the response body as a member map.
-     *
-     * @param result the completed exchange
-     * @return the top-level members of the body, keyed by their wire name
-     * @throws Exception if the body cannot be read or does not hold a JSON object
-     */
     private Map<String, Object> bodyAsMap(MvcResult result) throws Exception {
         return objectMapper.readValue(result.getResponse().getContentAsString(),
                 new TypeReference<Map<String, Object>>() { });
     }
 
-    /**
-     * Returns the nested object member the supplied key names.
-     *
-     * @param body the body read by {@link #bodyAsMap(MvcResult)}
-     * @param key  the wire name of the member to return
-     * @return the members of that object, keyed by their wire name
-     */
     @SuppressWarnings("unchecked")
     private static Map<String, Object> nestedMap(Map<String, Object> body, String key) {
         assertThat(body.get(key)).isInstanceOf(Map.class);
         return (Map<String, Object>) body.get(key);
     }
 
-    /**
-     * Returns the first element of the {@code tweets} member.
-     *
-     * @param body the body read by {@link #bodyAsMap(MvcResult)}
-     * @return the members of that element, keyed by their wire name
-     */
     @SuppressWarnings("unchecked")
     private static Map<String, Object> rowAt(Map<String, Object> body) {
         assertThat(body.get("tweets")).isInstanceOf(List.class);
@@ -931,12 +866,6 @@ class TweetControllerTest {
         return (Map<String, Object>) rows.get(0);
     }
 
-    /**
-     * Builds the matchers asserting the nine members of one serialised row.
-     *
-     * @param path the JSON path of the row, {@code $} when it is rendered unwrapped
-     * @return one matcher per asserted member
-     */
     private static ResultMatcher[] rowMatchers(String path) {
         return new ResultMatcher[] {
                 jsonPath(path + ".id").value(TWEET_ID),
@@ -952,13 +881,6 @@ class TweetControllerTest {
         };
     }
 
-    /**
-     * Builds the matchers asserting that no member of the supplied set is serialised.
-     *
-     * @param path the JSON path of the object to inspect
-     * @param keys the member names that must not be present
-     * @return one matcher per name
-     */
     private static ResultMatcher[] absent(String path, String[] keys) {
         ResultMatcher[] matchers = new ResultMatcher[keys.length];
         for (int index = 0; index < keys.length; index++) {
@@ -967,12 +889,6 @@ class TweetControllerTest {
         return matchers;
     }
 
-    /**
-     * Asserts that the exchange was answered with 401, an empty body and no error member.
-     *
-     * @param result the completed exchange
-     * @throws Exception if the body cannot be read
-     */
     private static void assertBare401(MvcResult result) throws Exception {
         int observed = result.getResponse().getStatus();
         assertThat(observed).isEqualTo(HttpStatus.UNAUTHORIZED.value());

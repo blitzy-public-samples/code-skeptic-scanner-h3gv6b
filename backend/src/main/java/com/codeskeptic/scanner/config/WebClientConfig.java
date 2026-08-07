@@ -11,15 +11,13 @@ import org.springframework.web.reactive.function.client.WebClient;
 /**
  * Transport for the X (Twitter) integration.
  *
- * <p>This class supplies transport only. It carries no {@code Authorization} header: its single
- * consumer, {@code task.TweetStreamClient}, sets that header per request from the app-only bearer
- * token it holds at runtime — see docs/DECISION_LOG.md DL-046.
+ * <p>Transport only: no {@code Authorization} header is carried here. The single consumer,
+ * {@code task.TweetStreamClient}, sets that header per request from the app-only bearer token it
+ * holds at runtime — DL-046.
  *
- * <p>No response timeout, no read timeout and no codec buffer limit are configured on the client, so
- * the framework defaults apply and the long-lived chunked stream body is neither cut short nor
- * buffered whole. The two short request/response calls that share this client — the app-only token
- * exchange and the stream-rules calls — are bounded per request by {@code task.TweetStreamClient} from
- * {@code scanner.twitter.request-timeout-seconds} — see docs/DECISION_LOG.md DL-230.
+ * <p>No response timeout, read timeout or codec buffer limit is configured, so the long-lived chunked
+ * stream body is neither cut short nor buffered whole. The two short request/response calls sharing
+ * this client are bounded per request by {@code task.TweetStreamClient} — DL-230.
  */
 // Replaces the tweepy.Stream construction at backend/app/tasks/tweet_monitoring.py:L45-51. The
 // transport itself is net-new: the source targeted the retired v1.1 statuses/filter API over the

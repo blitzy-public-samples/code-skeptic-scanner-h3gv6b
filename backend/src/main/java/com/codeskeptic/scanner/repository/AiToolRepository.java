@@ -11,31 +11,20 @@ import com.codeskeptic.scanner.entity.AiTool;
 /**
  * Spring Data JPA repository for the {@link AiTool} entity, which maps the {@code ai_tools} table.
  *
- * <p>The identifier type is {@link Integer}, matching the {@code @Id} field of {@link AiTool} — see
- * docs/DECISION_LOG.md DL-070. The {@code ai_tools} table declares no association. Both consumers
- * call the inherited surface:
+ * <p>The identifier type is {@link Integer}, matching the {@code @Id} field of {@link AiTool} —
+ * DL-070. The {@code ai_tools} table declares no association, and both consumers reach it here:
  *
  * <ul>
  *   <li>{@link #findNames(Pageable)} selects the {@code name} column alone, bounded by the supplied
- *       page, and {@code TweetStreamClient} takes those values into the streaming rule set — see
- *       docs/DECISION_LOG.md DL-044 and DL-254.
+ *       page, and {@code TweetStreamClient} takes those values into the streaming rule set — DL-044,
+ *       DL-254.
  *   <li>{@code count()} issues a row count against {@code ai_tools} and {@code AnalyticsService}
- *       reports it as {@code tracked_ai_tools} — see docs/DECISION_LOG.md DL-041.
+ *       reports it as {@code tracked_ai_tools} — DL-041.
  * </ul>
  *
  * <p>Spring Data supplies the implementation as a runtime proxy. Transaction boundaries are declared
  * on the {@code @Service} methods that call this interface, and the {@code ai_tools} table is created
- * from the {@link AiTool} annotations by {@code spring.jpa.hibernate.ddl-auto} — see
- * docs/DECISION_LOG.md DL-026.
- *
- * <p>Usage:
- *
- * <pre>{@code
- * List<String> firstPage = aiToolRepository.findNames(PageRequest.of(0, 100));
- * long trackedAiTools = aiToolRepository.count();
- * }</pre>
- *
- * @see AiTool
+ * from the {@link AiTool} annotations by {@code spring.jpa.hibernate.ddl-auto} — DL-026.
  */
 // Ported from backend/app/db/database.py:L10-13 (faithful port) — see docs/DECISION_LOG.md
 // The identifier type parameter is Integer, matching ai_tools.id — DL-070 — see

@@ -122,7 +122,6 @@ import ch.qos.logback.core.read.ListAppender;
 @ExtendWith(MockitoExtension.class)
 @DisplayName("ResponseService")
 class ResponseServiceTest {
-
     private static final String TWEET_ID = "4711";
 
     private static final int TWEET_KEY = 4711;
@@ -379,14 +378,10 @@ class ResponseServiceTest {
                 responseMapper);
     }
 
-    // No log record names a caller-supplied identifier, which is the
-    // failure-wrapping record included — DL-208 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("bounds a caller-supplied identifier on the failure-wrapping path as well as on the "
             + "success path")
     void boundsACallerSuppliedIdentifierOnTheFailureWrappingPath() {
-        // Integer.valueOf accepts leading zeros, so this 404-character caller-supplied value names the
-        // same row as TWEET_ID and still reaches the failure-wrapping record verbatim.
         String unboundedIdentifier = "0".repeat(400) + TWEET_ID;
         Tweet subject = tweetCarryingTheKey();
         when(tweetRepository.findById(TWEET_KEY)).thenReturn(Optional.of(subject));
@@ -416,11 +411,6 @@ class ResponseServiceTest {
         }
     }
 
-    /**
-     * Attaches a recording appender to the {@link ResponseService} logger.
-     *
-     * @return the attached appender, already started
-     */
     private static ListAppender<ILoggingEvent> attachAppender() {
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
@@ -430,11 +420,6 @@ class ResponseServiceTest {
         return appender;
     }
 
-    /**
-     * Detaches a recording appender from the {@link ResponseService} logger.
-     *
-     * @param appender the appender to detach
-     */
     private static void detachAppender(ListAppender<ILoggingEvent> appender) {
         Logger logger = (Logger) LoggerFactory.getLogger(ResponseService.class);
         logger.detachAppender(appender);
@@ -760,13 +745,11 @@ class ResponseServiceTest {
 
         verify(responseRepository).existsByTweetId(TWEET_KEY);
         verify(responseRepository, never()).save(any(Response.class));
-        // Neither the subject read, nor the mapping, nor the model, nor the parent lock is reached
         verify(tweetRepository, never()).findById(TWEET_KEY);
         verify(tweetRepository, never()).findByIdForUpdate(TWEET_KEY);
         verifyNoInteractions(tweetMapper, llmService, responseMapper);
     }
 
-    // The claim the two automatic paths share — see docs/DECISION_LOG.md
     @Test
     @DisplayName("stores nothing when the row is taken between the model request and the insert")
     void storesNothingWhenTheRowIsTakenDuringGeneration() {
@@ -787,7 +770,6 @@ class ResponseServiceTest {
         verifyNoInteractions(responseMapper);
     }
 
-    // The claim the two automatic paths share — see docs/DECISION_LOG.md
     @Test
     @DisplayName("stores the reply when the row still carries none at the insert")
     void storesTheReplyWhenTheRowCarriesNone() {
@@ -1115,7 +1097,6 @@ class ResponseServiceTest {
     @DisplayName("builds a request from any usable carried value and reports it as a write")
     void buildsARequestFromAnyUsableCarriedValueAndReportsItAsAWrite(
             JsonNode content, JsonNode isApproved) {
-
         UpdateResponseRequest request = new UpdateResponseRequest(content, isApproved);
 
         assertThat(request.carriesNoUpdatableMember()).isFalse();
@@ -1125,11 +1106,6 @@ class ResponseServiceTest {
         verifyNoInteractions(responseRepository, responseMapper);
     }
 
-    /**
-     * The component pairs whose carried values the two addressed columns can hold.
-     *
-     * @return one argument pair per carried body
-     */
     private static Stream<Arguments> usableUpdateBodies() {
         return Stream.of(
                 Arguments.of(NullNode.getInstance(), null),
@@ -1148,7 +1124,6 @@ class ResponseServiceTest {
     @DisplayName("accepts a carried value of any JSON type and reads the value the column stores")
     void acceptsACarriedValueOfAnyJsonType(JsonNode content, JsonNode isApproved,
             String expectedContent, Boolean expectedApproval) {
-
         UpdateResponseRequest request = new UpdateResponseRequest(content, isApproved);
 
         assertThat(request.contentValue()).as("value the content column stores")
@@ -1158,11 +1133,6 @@ class ResponseServiceTest {
         verifyNoInteractions(responseRepository, responseMapper);
     }
 
-    /**
-     * One case per JSON type a carried member may hold, with the value each column stores for it.
-     *
-     * @return the carried pair and the two stored values
-     */
     private static Stream<Arguments> carriedValuesOfEveryJsonType() {
         ObjectNode object = JsonNodeFactory.instance.objectNode();
         object.put("x", 1);
@@ -1191,7 +1161,6 @@ class ResponseServiceTest {
     @DisplayName("writes each carried member of a mixed body and leaves an omitted member untouched")
     void writesEachCarriedMemberOfAMixedBody(JsonNode content, JsonNode isApproved,
             String expectedContent, Boolean expectedApproval) {
-
         Response existing = storedRowCarryingApproval(false);
         existing.setContent(STORED_CONTENT);
         stubTheUpdateOf(existing);
@@ -1203,11 +1172,6 @@ class ResponseServiceTest {
         assertThat(written.getIsApproved()).isEqualTo(expectedApproval);
     }
 
-    /**
-     * Bodies carrying one member, or both, with the column values the update must leave behind.
-     *
-     * @return one argument row per mixed body
-     */
     private static Stream<Arguments> mixedUpdateBodies() {
         return Stream.of(
                 Arguments.of(TextNode.valueOf(REVISED_CONTENT), BooleanNode.TRUE,
@@ -1527,7 +1491,6 @@ class ResponseServiceTest {
     @DisplayName("reads a page or per_page below the lower bound as its default")
     void readsAPageOrPerPageBelowTheLowerBoundAsItsDefault(int page, int perPage,
             int expectedIndex, int expectedSize) {
-
         when(responseRepository.findAllRows(any(Pageable.class))).thenAnswer(invocation ->
                 new PageImpl<>(List.of(), invocation.<Pageable>getArgument(0), 0L));
 
@@ -1770,7 +1733,6 @@ class ResponseServiceTest {
     @DisplayName("declares the locked finder with a pessimistic write lock and the read finder without")
     void declaresTheLockedFinderWithAPessimisticWriteLockAndTheReadFinderWithout()
             throws NoSuchMethodException {
-
         Lock declared = ResponseRepository.class
                 .getMethod("findByIdForUpdate", Integer.class)
                 .getAnnotation(Lock.class);
@@ -1793,12 +1755,6 @@ class ResponseServiceTest {
         verify(responseRepository, never()).save(any(Response.class));
     }
 
-    /**
-     * Reports whether a type name belongs to a client that performs outbound HTTP calls.
-     *
-     * @param typeName the fully qualified name of a declared field or constructor parameter type
-     * @return {@code true} when the name matches an outbound client
-     */
     private static boolean carriesAnOutboundClient(String typeName) {
         return typeName.contains("WebClient")
                 || typeName.contains("RestClient")
@@ -1812,12 +1768,6 @@ class ResponseServiceTest {
                 || typeName.startsWith("okhttp3");
     }
 
-    /**
-     * Reports whether a method name names an operation that sends content outward.
-     *
-     * @param methodName the simple name of a declared method
-     * @return {@code true} when the name matches a publishing verb
-     */
     private static boolean namesAPublication(String methodName) {
         String normalised = methodName.toLowerCase(Locale.ROOT);
         return normalised.contains("publish")
@@ -1862,23 +1812,10 @@ class ResponseServiceTest {
         return new ResponseDto(RESPONSE_ID, STORED_CONTENT, STORED_AT, false, TWEET_ID);
     }
 
-    /**
-     * Builds a page of stored {@code responses} rows.
-     *
-     * @param index the 0-based index the page reports
-     * @param size  the number of rows a full page holds
-     * @param total the number of rows the table holds
-     * @return a page carrying one stored row
-     */
     private static Page<ResponseRow> pageOfStoredRows(int index, int size, long total) {
         return new PageImpl<>(List.of(projectedRow()), PageRequest.of(index, size), total);
     }
 
-    /**
-     * Builds one projected page row carrying the five values the wire contract renders.
-     *
-     * @return the projected row, never {@code null}
-     */
     private static ResponseRow projectedRow() {
         return new ResponseRow() {
             @Override
@@ -1916,23 +1853,12 @@ class ResponseServiceTest {
         };
     }
 
-    /**
-     * Stubs the read, the write and the conversion an accepted update performs on a stored row.
-     *
-     * @param existing the row {@link ResponseRepository} returns and receives back
-     */
     private void stubTheUpdateOf(Response existing) {
         when(responseRepository.findByIdForUpdate(RESPONSE_KEY)).thenReturn(Optional.of(existing));
         when(responseRepository.save(existing)).thenReturn(existing);
         when(responseMapper.toDto(existing)).thenReturn(storedDto());
     }
 
-    /**
-     * Captures the row an accepted update submitted to {@link ResponseRepository}.
-     *
-     * @param existing the row the repository returned for the read
-     * @return the captured row, which is {@code existing}
-     */
     private Response theRowSubmittedForUpdate(Response existing) {
         ArgumentCaptor<Response> submitted = ArgumentCaptor.forClass(Response.class);
         verify(responseRepository).save(submitted.capture());
@@ -2043,16 +1969,6 @@ class ResponseServiceTest {
                         .doesNotContain("23502"));
     }
 
-    /**
-     * Runs {@code call} with a {@link ListAppender} attached to the {@link ResponseService} logger at
-     * {@code DEBUG} and returns everything it recorded.
-     *
-     * <p>The previous level and appender set are restored before returning, whether {@code call}
-     * completes or raises.
-     *
-     * @param call the work to run while records are captured
-     * @return the captured records in order, never {@code null}
-     */
     private static List<ILoggingEvent> recordsOf(Runnable call) {
         ch.qos.logback.classic.Logger serviceLogger =
                 (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(ResponseService.class);
@@ -2071,23 +1987,12 @@ class ResponseServiceTest {
         return List.copyOf(records.list);
     }
 
-    /**
-     * Answers every read one page request can issue with an empty result and the supplied row total:
-     * the page statement and the row count.
-     *
-     * @param total the value {@code count()} and the page's {@code total} report
-     */
     private void stubEveryWindowRead(long total) {
         lenient().when(responseRepository.findAllRows(any(Pageable.class))).thenAnswer(invocation ->
                 new PageImpl<>(List.of(), invocation.<Pageable>getArgument(0), total));
         lenient().when(responseRepository.count()).thenReturn(total);
     }
 
-    /**
-     * Collects every {@link Pageable} the service handed to the repository during this test.
-     *
-     * @return the windows asked for, in call order
-     */
     private List<Pageable> pageRequestsIssued() {
         return mockingDetails(responseRepository).getInvocations().stream()
                 .flatMap(invocation -> Arrays.stream(invocation.getArguments()))
@@ -2096,15 +2001,8 @@ class ResponseServiceTest {
                 .toList();
     }
 
-    /**
-     * Builds a {@link TransactionTemplate} whose callback runs on the calling thread against a
-     * transaction manager that starts, commits and rolls back nothing.
-     *
-     * @return a template that executes its callback inline
-     */
     private static TransactionTemplate directTransactionTemplate() {
         return new TransactionTemplate(new PlatformTransactionManager() {
-
             @Override
             public TransactionStatus getTransaction(TransactionDefinition definition) {
                 return new SimpleTransactionStatus();
@@ -2112,21 +2010,14 @@ class ResponseServiceTest {
 
             @Override
             public void commit(TransactionStatus status) {
-                // No body.
             }
 
             @Override
             public void rollback(TransactionStatus status) {
-                // No body.
             }
         });
     }
 
-    /**
-     * Attaches a recorder to the class under test's logger.
-     *
-     * @return the attached recorder
-     */
     private static ListAppender<ILoggingEvent> attachLogRecorder() {
         ListAppender<ILoggingEvent> records = new ListAppender<>();
         records.start();
@@ -2134,22 +2025,11 @@ class ResponseServiceTest {
         return records;
     }
 
-    /**
-     * Detaches a recorder from the class under test's logger.
-     *
-     * @param records the recorder to detach
-     */
     private static void detachLogRecorder(ListAppender<ILoggingEvent> records) {
         ((Logger) org.slf4j.LoggerFactory.getLogger(ResponseService.class)).detachAppender(records);
         records.stop();
     }
 
-    /**
-     * Renders every captured record with its arguments substituted.
-     *
-     * @param records the recorder to read
-     * @return the rendered messages
-     */
     private static List<String> renderedRecords(ListAppender<ILoggingEvent> records) {
         return records.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
     }

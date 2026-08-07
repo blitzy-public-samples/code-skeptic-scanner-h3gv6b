@@ -130,7 +130,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @EnableConfigurationProperties(ScannerProperties.class)
 @DisplayName("AuthController POST /auth/token")
 class AuthControllerTest {
-
     private static final String TOKEN_ENDPOINT = "/auth/token";
 
     /** The 500 envelope the advice serves — see docs/DECISION_LOG.md DL-210. */
@@ -139,7 +138,6 @@ class AuthControllerTest {
     /** The 404 envelope the advice serves — see docs/DECISION_LOG.md DL-210. */
     private static final String NOT_FOUND_BODY = "{\"error\":\"Not found\"}";
 
-    /** The token route spelled with a percent-encoded letter; it decodes to {@value #TOKEN_ENDPOINT}. */
     private static final java.net.URI ENCODED_TOKEN_ENDPOINT =
             java.net.URI.create("/auth/%74oken");
 
@@ -177,16 +175,12 @@ class AuthControllerTest {
     private static final String TOKEN_TYPE = "token_type";
     private static final String EXPIRES_IN = "expires_in";
 
-    /** Wire identifier of the single row the stubbed protected route renders. */
     private static final String PROTECTED_TWEET_ID = "4711";
 
-    /** {@code content} of that row. */
     private static final String PROTECTED_TWEET_CONTENT = "AI coding tools are overhyped";
 
-    /** {@code like_count} of that row. */
     private static final int PROTECTED_TWEET_LIKE_COUNT = 142;
 
-    /** {@code doubt_rating} of that row. */
     private static final double PROTECTED_TWEET_DOUBT_RATING = 7.5d;
 
     @Autowired
@@ -195,11 +189,9 @@ class AuthControllerTest {
     @Autowired
     private ObjectMapper objectMapper;
 
-    /** Business collaborator of {@link TweetController}; the only mock on the protected route. */
     @MockitoBean
     private TwitterService twitterService;
 
-    /** Second business collaborator of {@link TweetController}, unused by {@code GET /tweets}. */
     @MockitoBean
     private SentimentAnalysisService sentimentAnalysisService;
 
@@ -972,7 +964,6 @@ class AuthControllerTest {
     void answersAnUndeclaredAuthRouteWith404AndTheNotFoundEnvelope() throws Exception {
         for (String path : List.of("/auth", "/auth/", "/auth/tokens", "/auth/token/refresh",
                 "/api/auth/token")) {
-
             mockMvc.perform(get(path).with(user(BUILT_IN_USERNAME)))
                     .andExpect(status().isNotFound())
                     .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
@@ -1020,17 +1011,12 @@ class AuthControllerTest {
     @Nested
     @DisplayName("the bound on credential verification in progress")
     class VerificationWorkBound {
-
-        /** Attempts the bounded-reporting case makes while every permit is held. */
         private static final int UNVERIFIED_BURST = 4;
 
-        /** Fewest permits this process issues, whatever the processor count. */
         private static final int PERMIT_FLOOR = 2;
 
-        /** Callers the concurrency case starts beyond the permit count. */
         private static final int SURPLUS_CALLERS = 2;
 
-        /** Longest the concurrency case waits for a caller to answer. */
         private static final long CALLER_TIMEOUT_SECONDS = 20L;
 
         @Test
@@ -1278,7 +1264,6 @@ class AuthControllerTest {
     @Nested
     @DisplayName("the record a token request leaves")
     class TokenRequestLogRecords {
-
         @Test
         @DisplayName("names no principal in the record a successful issuance leaves")
         void namesNoPrincipalInTheRecordASuccessfulIssuanceLeaves() {
@@ -1395,7 +1380,6 @@ class AuthControllerTest {
     @Nested
     @DisplayName("credential store configuration")
     class CredentialStoreConfiguration {
-
         @ParameterizedTest(name = "[{index}] {0}")
         @ValueSource(strings = {"$2a$10$", "$2b$12$", "$2y$14$"})
         @DisplayName("accepts a bcrypt hash of an accepted prefix and cost")
@@ -1523,14 +1507,6 @@ class AuthControllerTest {
         return securityConfigWith(configuredUsername(), passwordHash);
     }
 
-    /**
-     * A {@link SecurityConfig} over the bound configuration with the {@code scanner.auth} group
-     * replaced.
-     *
-     * @param username the value to bind as {@code scanner.auth.username}
-     * @param passwordHash the value to bind as {@code scanner.auth.password-hash}
-     * @return a configuration instance holding the real {@link JwtService} and CORS policy
-     */
     private SecurityConfig securityConfigWith(String username, String passwordHash) {
         ScannerProperties overridden = new ScannerProperties(
                 properties.databaseUrl(),
@@ -1547,14 +1523,6 @@ class AuthControllerTest {
         return new SecurityConfig(overridden, jwtService, corsConfigurationSource);
     }
 
-    /**
-     * Serializes a credential request body with both members present, {@code null} included.
-     *
-     * @param username the value of the {@code username} member, which may be {@code null}
-     * @param password the value of the {@code password} member, which may be {@code null}
-     * @return the encoded JSON object
-     * @throws Exception if serialization fails
-     */
     private String credentialBody(String username, String password) throws Exception {
         Map<String, Object> members = new LinkedHashMap<>();
         members.put("username", username);
@@ -1562,13 +1530,6 @@ class AuthControllerTest {
         return objectMapper.writeValueAsString(members);
     }
 
-    /**
-     * Performs {@code POST /auth/token} with a JSON content type and the given body.
-     *
-     * @param content the encoded request body
-     * @return the completed result, whatever its status
-     * @throws Exception if the request cannot be performed
-     */
     private MvcResult postToken(String content) throws Exception {
         return mockMvc.perform(post(TOKEN_ENDPOINT)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -1576,14 +1537,6 @@ class AuthControllerTest {
                 .andReturn();
     }
 
-    /**
-     * Performs {@code POST /auth/token} with the given credential and requires a 200.
-     *
-     * @param username the value of the {@code username} member
-     * @param password the value of the {@code password} member
-     * @return the completed result
-     * @throws Exception if the request cannot be performed or the status is not 200
-     */
     private MvcResult requestToken(String username, String password) throws Exception {
         return mockMvc.perform(post(TOKEN_ENDPOINT)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -1616,13 +1569,7 @@ class AuthControllerTest {
         assertThat(body).doesNotContain("error");
     }
 
-    /**
-     * An {@link AuthenticationManager} that counts its invocations and either returns an
-     * authenticated token for a fixed principal name or raises the {@link AuthenticationException}
-     * it was built with.
-     */
     private static final class RecordingAuthenticationManager implements AuthenticationManager {
-
             private final AtomicInteger invocations = new AtomicInteger();
 
             private final String resolvedPrincipalName;
@@ -1657,12 +1604,6 @@ class AuthControllerTest {
         }
     }
 
-
-    /**
-     * Builds the envelope the stubbed {@link TwitterService} returns for {@code GET /tweets}.
-     *
-     * @return one page carrying one row
-     */
     private static PaginatedTweetsDto onePageOfTweets() {
         TweetDto row = new TweetDto(PROTECTED_TWEET_ID, PROTECTED_TWEET_CONTENT,
                 PROTECTED_TWEET_LIKE_COUNT, LocalDateTime.of(2026, 1, 2, 3, 4, 5),
@@ -1671,12 +1612,6 @@ class AuthControllerTest {
         return new PaginatedTweetsDto(List.of(row), new PaginationDto(1, 10, 1L, 1));
     }
 
-    /**
-     * Reads the semaphore a controller bounds its credential verifications with.
-     *
-     * @param controller the controller to read
-     * @return that controller's verification permits
-     */
     private static Semaphore verificationPermitsOf(AuthController controller) {
         try {
             Field declared = AuthController.class.getDeclaredField("verificationPermits");
@@ -1693,7 +1628,6 @@ class AuthControllerTest {
      * the most that were open at one time — DL-272.
      */
     private static final class BlockingAuthenticationManager implements AuthenticationManager {
-
         private final String resolvedPrincipalName;
 
         private final CountDownLatch entered;
@@ -1749,21 +1683,10 @@ class AuthControllerTest {
         return appender;
     }
 
-    /**
-     * Detaches a recording appender from this controller's logger.
-     *
-     * @param appender the appender to detach
-     */
     private static void detachAppender(ListAppender<ILoggingEvent> appender) {
         ((Logger) LoggerFactory.getLogger(AuthController.class)).detachAppender(appender);
     }
 
-    /**
-     * Returns the formatted message of every {@code WARN} record the appender holds.
-     *
-     * @param appender the appender to read
-     * @return the warning messages in the order they were written
-     */
     private static List<String> warningRecords(ListAppender<ILoggingEvent> appender) {
         return appender.list.stream()
                 .filter(event -> event.getLevel() == Level.WARN)

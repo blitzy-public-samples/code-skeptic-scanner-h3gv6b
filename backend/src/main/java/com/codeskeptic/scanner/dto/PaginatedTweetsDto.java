@@ -4,19 +4,14 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import java.util.List;
 
 /**
- * Wire contract for the {@code 200 OK} body of {@code GET /tweets}.
+ * Wire contract for the {@code 200 OK} body of {@code GET /tweets}: the two-key envelope
+ * {@code tweets} and {@code pagination}, in the declaration order of the source dictionary at
+ * {@code backend/app/api/tweets.py:L19-20}, snake_case at both levels — DL-022.
  *
- * <p>A two-key envelope: {@code tweets} and {@code pagination}, in the declaration order of the source
- * dictionary ({@code backend/app/api/tweets.py:L19-20}). Keys are snake_case at both levels — DL-022.
- *
- * <p>The nested {@code pagination} object's keys are {@code page}, {@code per_page}, {@code total}
- * and {@code total_pages}, declared by {@link PaginationDto} — see docs/DECISION_LOG.md DL-038. Its
- * {@code page} value is 1-based, matching the {@code page} query parameter the route reads with a
- * default of 1 ({@code backend/app/api/tweets.py:L12}); the {@code per_page} parameter defaults to 10
- * ({@code backend/app/api/tweets.py:L13}). {@code service/TwitterService} performs the
- * 1-based-to-0-based conversion against Spring Data.
- *
- * <p>Page 1 of 10 per page over 25 rows serialises as:
+ * <p>The nested object's keys are {@code page}, {@code per_page}, {@code total} and
+ * {@code total_pages}, declared by {@link PaginationDto} — DL-038. {@code page} is 1-based on the wire,
+ * matching the query parameter of {@code :L12} whose default is 1, and {@code per_page} defaults to 10
+ * ({@code :L13}); {@code service/TwitterService} performs the 1-based-to-0-based conversion.
  *
  * <pre>{@code
  * {"tweets":[{"id":"1","content":"...","like_count":120,"created_at":"2026-08-01T12:00:00",
@@ -25,13 +20,10 @@ import java.util.List;
  *  "pagination":{"page":1,"per_page":10,"total":25,"total_pages":3}}
  * }</pre>
  *
- * <p>An empty page serialises {@code tweets} as an empty array:
- * {@code {"tweets":[],"pagination":{"page":1,"per_page":10,"total":0,"total_pages":0}}}.
+ * <p>An empty page serialises {@code tweets} as an empty array.
  *
- * @param tweets the page of mapped posts, one {@link TweetDto} per row, in the order the query
- *     returned them ({@code backend/app/api/tweets.py:L19})
- * @param pagination the page counters describing this result
- *     ({@code backend/app/api/tweets.py:L20})
+ * @param tweets     the page of mapped posts, in the order the query returned them ({@code :L19})
+ * @param pagination the page counters describing this result ({@code :L20})
  */
 // Ported from backend/app/api/tweets.py:L18-21 (faithful port of the GET /tweets envelope) — see docs/DECISION_LOG.md
 public record PaginatedTweetsDto(

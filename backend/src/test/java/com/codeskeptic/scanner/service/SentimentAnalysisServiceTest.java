@@ -64,52 +64,36 @@ import com.google.cloud.language.v1.Sentiment;
 @ExtendWith(MockitoExtension.class)
 @DisplayName("SentimentAnalysisService")
 class SentimentAnalysisServiceTest {
-
-    /** Tolerance applied to every floating-point comparison in this class. */
     private static final double TOLERANCE = 1e-9d;
 
-    /** Text passed to {@link SentimentAnalysisService#analyzeSentiment(String)}. */
     private static final String TWEET_TEXT = "AI coding tools still cannot get this right";
 
-    /** Message of the {@link IllegalStateException} raised once the bean has been destroyed. */
     private static final String DESTROYED_MESSAGE =
             "SentimentAnalysisService has been destroyed; the Natural Language API client is closed";
 
     // Bounds of the shutdown-drain tests — DL-268 — see docs/DECISION_LOG.md
 
-    /** Longest any latch, future or thread in this class is waited for. */
     private static final long LATCH_LIMIT_SECONDS = 10L;
 
-    /** Window allowed for a wait to be observed as still waiting. */
     private static final long SETTLE_MILLIS = 300L;
 
-    /** Milliseconds in one second, used where an API takes milliseconds. */
     private static final long MILLIS_PER_SECOND = 1_000L;
 
-    /** Nanoseconds in one millisecond, used to report an elapsed window. */
     private static final long NANOS_PER_MILLI = 1_000_000L;
 
-    /** Message carried by the provider failure the stubbed client raises. */
     private static final String PROVIDER_FAILURE_MESSAGE = "the provider rejected the request";
 
-    /** Operation names no method of the service may carry. */
     private static final String[] PUBLISHING_NAMES = { "publish", "post", "send", "tweet", "reply" };
 
-    /** Stubbed Natural Language client; reached only through the protected accessor. */
     @Mock
     private LanguageServiceClient languageServiceClient;
 
-    /** Unit under test, holding {@link #languageServiceClient} behind the accessor. */
     private SeamedService service;
 
     @BeforeEach
     void createService() {
         service = new SeamedService(languageServiceClient);
     }
-
-    // ---------------------------------------------------------------------
-    // Natural Language client acquisition
-    // ---------------------------------------------------------------------
 
     // The client is reached on first use and not at construction — DL-288 — see
     // docs/DECISION_LOG.md
@@ -140,10 +124,6 @@ class SentimentAnalysisServiceTest {
         assertThat(service.languageClientAccessorCalls()).isZero();
         verifyNoInteractions(languageServiceClient);
     }
-
-    // ---------------------------------------------------------------------
-    // analyzeSentiment(String)
-    // ---------------------------------------------------------------------
 
     @Test
     @DisplayName("sends a plain text english document carrying the given text")
@@ -254,10 +234,6 @@ class SentimentAnalysisServiceTest {
         assertThat(analyzeSentiment.getReturnType()).isEqualTo(double.class);
     }
 
-    // ---------------------------------------------------------------------
-    // calculateDoubtRating(double)
-    // ---------------------------------------------------------------------
-
     @ParameterizedTest(name = "a sentiment score of {0} yields a doubt rating of {1}")
     @CsvSource({
             "-1.0,10.0",
@@ -269,7 +245,6 @@ class SentimentAnalysisServiceTest {
     @DisplayName("maps a sentiment score between negative one and one to a doubt rating")
     void mapsASentimentScoreBetweenNegativeOneAndOneToADoubtRating(
             double sentimentScore, double expectedDoubtRating) {
-
         double doubtRating = service.calculateDoubtRating(sentimentScore);
 
         assertThat(doubtRating).isCloseTo(expectedDoubtRating, within(TOLERANCE));
@@ -332,11 +307,6 @@ class SentimentAnalysisServiceTest {
         assertThat(calculateDoubtRating.getReturnType()).isEqualTo(double.class);
     }
 
-
-    // ---------------------------------------------------------------------
-    // Rejected and unusual input
-    // ---------------------------------------------------------------------
-
     @Test
     @DisplayName("rejects null text and reaches the client zero times")
     void rejectsNullTextAndReachesTheClientZeroTimes() {
@@ -373,10 +343,6 @@ class SentimentAnalysisServiceTest {
         assertThat(sent.getValue().getContent()).isEmpty();
     }
 
-    // ---------------------------------------------------------------------
-    // A provider failure
-    // ---------------------------------------------------------------------
-
     @Test
     @DisplayName("propagates a provider failure unchanged")
     void propagatesAProviderFailureUnchanged() {
@@ -401,10 +367,6 @@ class SentimentAnalysisServiceTest {
 
         assertThat(service.analyzeSentiment(TWEET_TEXT)).isCloseTo(-0.5d, within(TOLERANCE));
     }
-
-    // ---------------------------------------------------------------------
-    // The client lifecycle
-    // ---------------------------------------------------------------------
 
     @Test
     @DisplayName("rejects analysis once the bean has been destroyed")
@@ -447,10 +409,6 @@ class SentimentAnalysisServiceTest {
         assertThat(close.getParameterCount()).isZero();
     }
 
-    // ---------------------------------------------------------------------
-    // The shutdown rejects new work before it drains — DL-268 — see docs/DECISION_LOG.md
-    // ---------------------------------------------------------------------
-
     @Test
     @DisplayName("awaits an in-flight analysis before releasing the language client")
     void awaitsAnInFlightAnalysisBeforeReleasingTheLanguageClient() throws Exception {
@@ -467,7 +425,6 @@ class SentimentAnalysisServiceTest {
             assertThat(analysisEntered.await(LATCH_LIMIT_SECONDS, TimeUnit.SECONDS)).isTrue();
 
             Future<?> shutdown = closer.submit(holdingAClient::closeLanguageClient);
-            // The shutdown cannot complete while the analysis holds the read lock.
             assertThatExceptionOfType(TimeoutException.class)
                     .isThrownBy(() -> shutdown.get(SETTLE_MILLIS, TimeUnit.MILLISECONDS));
             verify(languageServiceClient, never()).close();
@@ -561,10 +518,6 @@ class SentimentAnalysisServiceTest {
         assertThat(Modifier.isFinal(accessor.getModifiers())).isFalse();
     }
 
-    // ---------------------------------------------------------------------
-    // Non-finite sentiment scores
-    // ---------------------------------------------------------------------
-
     @ParameterizedTest(name = "a non-finite sentiment score of {0} yields a doubt rating of {1}")
     @CsvSource({
             "NaN,10.0",
@@ -574,7 +527,6 @@ class SentimentAnalysisServiceTest {
     @DisplayName("bounds a non-finite sentiment score to the doubt rating range")
     void boundsANonFiniteSentimentScoreToTheDoubtRatingRange(
             double sentimentScore, double expectedDoubtRating) {
-
         double doubtRating = service.calculateDoubtRating(sentimentScore);
 
         assertThat(doubtRating).isCloseTo(expectedDoubtRating, within(TOLERANCE));
@@ -593,10 +545,6 @@ class SentimentAnalysisServiceTest {
         assertThat(doubtRating).isBetween(0.0d, 10.0d);
         assertThat(Double.isFinite(doubtRating)).isTrue();
     }
-
-    // ---------------------------------------------------------------------
-    // The reported score
-    // ---------------------------------------------------------------------
 
     @Test
     @DisplayName("widens the reported float score to a double without rounding it")
@@ -618,16 +566,6 @@ class SentimentAnalysisServiceTest {
                         .containsAnyOf(PUBLISHING_NAMES));
     }
 
-    // ---------------------------------------------------------------------
-    // Fixtures
-    // ---------------------------------------------------------------------
-
-    /**
-     * Makes the stubbed client answer any {@link Document} with a response whose
-     * document sentiment carries {@code score}.
-     *
-     * @param score the document sentiment score the stubbed client reports
-     */
     private void stubDocumentSentimentScore(float score) {
         AnalyzeSentimentResponse response = AnalyzeSentimentResponse.newBuilder()
                 .setDocumentSentiment(Sentiment.newBuilder().setScore(score).build())
@@ -657,14 +595,6 @@ class SentimentAnalysisServiceTest {
         });
     }
 
-    /**
-     * Builds a service whose client field already holds {@code heldClient}, so the real accessor
-     * returns it and the release closes it.
-     *
-     * @param heldClient the client the service holds
-     * @return the service under test
-     * @throws ReflectiveOperationException if the field cannot be written
-     */
     private static SentimentAnalysisService serviceHoldingClient(LanguageServiceClient heldClient)
             throws ReflectiveOperationException {
         SentimentAnalysisService service = new SentimentAnalysisService();
@@ -674,12 +604,6 @@ class SentimentAnalysisServiceTest {
         return service;
     }
 
-    /**
-     * Shuts every supplied executor down and asserts each one terminates.
-     *
-     * @param workers the executors to release
-     * @throws InterruptedException if the awaiting thread is interrupted
-     */
     private static void awaitTermination(ExecutorService... workers) throws InterruptedException {
         for (ExecutorService worker : workers) {
             worker.shutdown();
@@ -693,20 +617,9 @@ class SentimentAnalysisServiceTest {
         }
     }
 
-    /**
-     * {@link SentimentAnalysisService} with the protected Natural Language client
-     * accessor overridden to return a supplied client and to count how often the
-     * accessor is reached.
-     */
     private static final class SeamedService extends SentimentAnalysisService {
-
         private final LanguageServiceClient suppliedClient;
 
-        /**
-         * Accessor invocation count, created on first use by
-         * {@link #accessorCalls()}. Calls made while the superclass constructor is
-         * still running are counted and retained.
-         */
         private AtomicInteger accessorCalls;
 
         private SeamedService(LanguageServiceClient suppliedClient) {
@@ -726,12 +639,6 @@ class SentimentAnalysisServiceTest {
             return accessorCalls;
         }
 
-        /**
-         * Returns how often {@link #languageClient()} has been reached on this
-         * instance.
-         *
-         * @return the accessor invocation count
-         */
         private int languageClientAccessorCalls() {
             return accessorCalls().get();
         }

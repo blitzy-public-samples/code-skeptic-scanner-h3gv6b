@@ -15,63 +15,41 @@ import java.util.stream.Collectors;
 // backend/app/schema/tweet.py:L11,L14 (both declared List[str]).
 /**
  * JPA attribute converter mapping a {@code List<String>} entity attribute onto a single
- * comma-delimited {@code String} column value, and the one authorized codec for that
- * representation.
+ * comma-delimited {@code String} column value, and the one authorised codec for that representation.
  *
- * <p>It is applied to individual attributes with {@code @Convert(converter =
- * DelimitedStringListConverter.class)}. The column remains a plain character column: this
- * converter declares no column type, length or nullability facet.</p>
+ * <p>Applied per attribute with {@code @Convert}. The column stays a plain character column: no column
+ * type, length or nullability facet is declared here.
  *
- * <h2>Encoding</h2>
- * <p>Elements are trimmed and joined with a comma. No character is given a special meaning
- * inside an element and no character is substituted: a comma, a backslash, a quote and any
- * non-ASCII character are all written literally. A read splits on every comma. An element that
- * itself contains a comma is read back as several elements — DL-164.</p>
+ * <p>No character is given a special meaning inside an element and none is substituted — a comma, a
+ * backslash, a quote and any non-ASCII character are written literally — and a read splits on every
+ * comma — DL-164.
  *
- * <h2>Write contract</h2>
- * <p>{@link #convertToDatabaseColumn(List)} and {@link #encode(List)} behave as follows.</p>
- * <ul>
- *   <li>A {@code null} attribute yields a {@code null} column value.</li>
- *   <li>Elements that are {@code null}, or empty once trimmed, are omitted.</li>
- *   <li>Retained elements are trimmed, then joined with a comma. Their content is otherwise
- *       unaltered: it is not re-cased, sorted, de-duplicated or re-ordered.</li>
- *   <li>An attribute that retains no elements yields a {@code null} column value, never
- *       the empty string.</li>
- * </ul>
+ * <p>Write: a {@code null} attribute yields a {@code null} column value; elements that are
+ * {@code null}, or empty once trimmed, are omitted; retained elements are trimmed then joined with a
+ * comma, with no re-casing, sorting, de-duplication or re-ordering; and an attribute retaining no
+ * element yields a {@code null} column value, never the empty string.
  *
- * <h2>Read contract</h2>
- * <p>{@link #convertToEntityAttribute(String)} and {@link #decode(String)} behave as follows.</p>
- * <ul>
- *   <li>{@code null} or blank column data yields an empty list.</li>
- *   <li>Any other value is split on every comma and each token is trimmed. Tokens that are empty
- *       once trimmed are dropped, which is what a hand-edited value carrying a repeated or
- *       trailing comma produces.</li>
- *   <li>The result is never {@code null} and never contains an empty string.</li>
- *   <li>The result is always a new mutable list. Callers may modify it, and successive
- *       calls share no state.</li>
- * </ul>
+ * <p>Read: {@code null} or blank column data yields an empty list; any other value is split on every
+ * comma and each token trimmed, tokens empty once trimmed being dropped, which is what a hand-edited
+ * value carrying a repeated or trailing comma produces. The result is never {@code null}, never
+ * contains an empty string, and is always a new mutable list sharing no state between calls.
  *
- * <h2>Round trip</h2>
- * <p>Reading back a written value returns the written list element for element for any list whose
- * elements are non-{@code null}, not blank and free of the delimiter. That holds for an element
- * containing a backslash, a double quote, a non-ASCII character, an emoji or interior whitespace.
- * Three kinds of element are not carried through unchanged — see docs/DECISION_LOG.md DL-164: a
- * {@code null} element and an element that is blank once trimmed are read back as absent, so a list
- * consisting only of those reads back empty; leading and trailing whitespace is discarded; and an
- * element containing a comma is read back as several elements.</p>
+ * <p>Round trip: a written value reads back element for element for any list whose elements are
+ * non-{@code null}, not blank and free of the delimiter. Three kinds of element are not carried through
+ * unchanged — DL-164: a {@code null} element and one blank once trimmed read back as absent; leading
+ * and trailing whitespace is discarded; and an element containing a comma reads back as several
+ * elements.
  *
  * <p>{@link #encode(List)} and {@link #decode(String)} are the static form of the same two
- * conversions, so the representation can be exercised and asserted without an entity: the two
- * instance methods delegate to them, and {@code repository/JpaMappingIntegrationTest} calls them
- * directly. No other production class calls either member — the Notion mirror carries neither of the
- * two delimited values, so it performs no delimited conversion — DL-164, DL-088.</p>
+ * conversions, so the representation can be asserted without an entity; the instance methods delegate
+ * to them and {@code repository/JpaMappingIntegrationTest} calls them directly. No other production
+ * class calls either member: the Notion mirror carries neither delimited value — DL-088, DL-164.
  *
- * <p>No method throws for any input. Instances hold no mutable state and are thread-safe.</p>
+ * <p>No method throws for any input. Instances hold no mutable state and are thread-safe.
  */
 @Converter
 public class DelimitedStringListConverter implements AttributeConverter<List<String>, String> {
 
-    /** Separates elements in the delimited value. */
     private static final String DELIMITER = ",";
 
     /**

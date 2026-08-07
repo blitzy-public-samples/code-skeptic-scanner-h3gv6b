@@ -55,7 +55,9 @@ import com.codeskeptic.scanner.service.SettingsService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-// Ported from backend/tests/test_api.py:L36-44 (faithful port) — see docs/DECISION_LOG.md
+// Replaces backend/tests/test_api.py:L36-44, whose source antecedent requested /settings/ with a
+// trailing slash, issued PUT /settings/ where the registered path is /settings/<key>, and expected a
+// key-to-value map body — see docs/DECISION_LOG.md DL-039
 /**
  * Exercises the two routes {@link SettingController} serves — {@code GET /settings} and
  * {@code PUT /settings/{key}} — through {@link MockMvc}.
@@ -97,26 +99,19 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @EnableConfigurationProperties(ScannerProperties.class)
 @DisplayName("SettingController")
 class SettingControllerTest {
-
-    /** Principal named by {@code scanner.auth.username} under the {@code test} profile. */
     private static final String PRINCIPAL = "admin";
 
-    /** Key of the row every positive case addresses. */
     private static final String KEY = "tweet_popularity_threshold";
 
-    /** Key that names no row. */
     private static final String ABSENT_KEY = "does_not_exist";
 
     /** Key spelled in the retired suite at {@code backend/tests/test_api.py:L39}. */
     private static final String UNDERSCORED_KEY = "auto_response";
 
-    /** Key spelled with digits alone. */
     private static final String NUMERIC_KEY = "123";
 
-    /** Key spelled with a hyphen. */
     private static final String HYPHENATED_KEY = "stream-keywords";
 
-    /** Description carried by the row {@link #KEY} names. */
     private static final String DESCRIPTION = "Minimum like count for a monitored post to be processed.";
 
     /** Wire literal of {@code backend/app/api/settings.py:L18}. */
@@ -131,11 +126,9 @@ class SettingControllerTest {
     /** The sanctioned envelope of an unmatched path — backend/app/main.py:L31-33, DL-183. */
     private static final String NOT_FOUND_BODY = "{\"error\":\"Not found\"}";
 
-    /** Members a {@code ProblemDetail} body carries; none of them reaches the wire. */
     private static final List<String> PROBLEM_DETAIL_MEMBERS =
             List.of("type", "title", "status", "detail", "instance", "errors");
 
-    /** Reads the response body of a case that asserts the parsed JSON shape. */
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @Autowired
@@ -146,10 +139,6 @@ class SettingControllerTest {
 
     @MockitoBean
     private SettingsService settingsService;
-
-    // -------------------------------------------------------------------------
-    // GET /settings — backend/app/api/settings.py:L7-11 — see docs/DECISION_LOG.md DL-039
-    // -------------------------------------------------------------------------
 
     @Test
     @DisplayName("renders every row as a JSON array of key, value and description")
@@ -303,7 +292,6 @@ class SettingControllerTest {
         verifyNoInteractions(settingsService);
     }
 
-    // G1 — the routes stay unprefixed: no /api segment and no version segment
     @ParameterizedTest(name = "[{index}] {0}")
     @ValueSource(strings = {"/api/settings", "/v1/settings", "/Settings"})
     @DisplayName("serves the collection at no prefixed or differently-cased path")
@@ -362,10 +350,6 @@ class SettingControllerTest {
 
         verify(settingsService).getAllSettings();
     }
-
-    // -------------------------------------------------------------------------
-    // PUT /settings/{key} — backend/app/api/settings.py:L13-24
-    // -------------------------------------------------------------------------
 
     @Test
     @DisplayName("replaces a value and renders the stored row")
@@ -510,7 +494,6 @@ class SettingControllerTest {
     @DisplayName("accepts a scalar value and passes its text to the service")
     void acceptsAScalarValueAndPassesItsTextToTheService(String jsonValue, String bound)
             throws Exception {
-
         when(settingsService.updateSetting(eq(KEY), anyString()))
                 .thenAnswer(invocation -> new SettingDto(KEY, invocation.getArgument(1), DESCRIPTION));
 
@@ -724,11 +707,6 @@ class SettingControllerTest {
         verify(settingsService).updateSetting(KEY, "250");
     }
 
-    // -------------------------------------------------------------------------
-    // Validation surface — backend/app/schema/tweet.py:L5-14 declares types and optionality only —
-    // see docs/DECISION_LOG.md DL-050
-    // -------------------------------------------------------------------------
-
     @Test
     @DisplayName("accepts a value of ten thousand characters")
     void acceptsAValueOfTenThousandCharacters() throws Exception {
@@ -783,11 +761,6 @@ class SettingControllerTest {
 
         verify(settingsService).updateSetting(NUMERIC_KEY, value);
     }
-
-    // -------------------------------------------------------------------------
-    // Request-binding surface — net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-092,
-    // DL-188
-    // -------------------------------------------------------------------------
 
     @ParameterizedTest(name = "[{index}] {0}")
     @ValueSource(strings = {
@@ -888,10 +861,6 @@ class SettingControllerTest {
                 .andExpect(content().string(""));
     }
 
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
-
     /**
      * Builds the {@code Authorization} header value of an authenticated request.
      *
@@ -905,22 +874,10 @@ class SettingControllerTest {
         return "Bearer " + jwtService.generateToken(PRINCIPAL);
     }
 
-    /**
-     * Builds a matcher asserting that the response status differs from {@code status}.
-     *
-     * @param status the status the response must not carry
-     * @return the matcher; never {@code null}
-     */
     private static ResultMatcher statusIsNot(int status) {
         return result -> assertThat(result.getResponse().getStatus()).isNotEqualTo(status);
     }
 
-    /**
-     * Builds a matcher asserting that the response body carries none of
-     * {@link #PROBLEM_DETAIL_MEMBERS}.
-     *
-     * @return the matcher; never {@code null}
-     */
     private static ResultMatcher carriesNoProblemDetailMember() {
         return result -> {
             JsonNode root = JSON.readTree(result.getResponse().getContentAsString());
@@ -932,12 +889,6 @@ class SettingControllerTest {
         };
     }
 
-    /**
-     * Builds a matcher asserting that the response body carries the member {@code error} and no
-     * member named after a request field.
-     *
-     * @return the matcher; never {@code null}
-     */
     private static ResultMatcher carriesOnlyTheErrorMember() {
         return result -> {
             JsonNode root = JSON.readTree(result.getResponse().getContentAsString());

@@ -7,26 +7,29 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
- * Outbound wire contract for a monitored X post.
- *
- * <p>Nine components in source declaration order. Every JSON key is declared explicitly and is
- * snake_case — see docs/DECISION_LOG.md DL-022. No validation annotation is declared — see
- * docs/DECISION_LOG.md DL-050.
+ * Outbound wire contract for a monitored X post: nine components in source declaration order, every
+ * JSON key declared explicitly and snake_case (DL-022), no validation annotation (DL-050).
  *
  * <p>{@code id} is a {@code String} on the wire while the column is
- * {@code Column(Integer, primary_key=True)} at {@code backend/app/db/models.py:L10} — see
- * docs/DECISION_LOG.md DL-023. {@code media} and {@code ai_tools_mentioned} serialise as JSON arrays
- * while the columns are single delimited {@code Column(String)} values at
- * {@code backend/app/db/models.py:L15} and {@code :L18} — see docs/DECISION_LOG.md DL-024.
+ * {@code Column(Integer, primary_key=True)} at {@code backend/app/db/models.py:L10} — DL-023.
+ * {@code media} and {@code ai_tools_mentioned} serialise as JSON arrays while the columns are single
+ * delimited {@code Column(String)} values at {@code :L15} and {@code :L18} — DL-024.
  *
- * <p>Null policy — see docs/DECISION_LOG.md DL-080. {@code backend/app/schema/tweet.py:L6-14}
- * declares eight fields required and {@code quoted_tweet_id} the sole {@code Optional[str]}, so the
- * canonical constructor rejects a {@code null} {@code id}, {@code content}, {@code likeCount},
- * {@code createdAt}, {@code doubtRating} and {@code userId} with {@link NullPointerException}, and
- * {@code quotedTweetId} is the one component that may be {@code null}. {@code likeCount} and
- * {@code doubtRating} are boxed, and a {@code null} value for either is rejected and is not read as
- * {@code 0}. No scalar is trimmed, rounded, defaulted or substituted. The {@code tweets} columns stay
- * nullable — see docs/DECISION_LOG.md DL-080.
+ * <p>Null policy — DL-080. {@code backend/app/schema/tweet.py:L6-14} declares eight fields required and
+ * {@code quoted_tweet_id} the sole {@code Optional[str]}, so the canonical constructor rejects a
+ * {@code null} for every component but that one with {@link NullPointerException}. {@code likeCount}
+ * and {@code doubtRating} are boxed, and a {@code null} for either is rejected; neither is read as
+ * {@code 0}. No
+ * scalar is trimmed, rounded, defaulted or substituted, and the {@code tweets} columns stay nullable.
+ *
+ * <p>The two {@link List} components are never {@code null}: the canonical constructor replaces
+ * {@code null} with an empty list and copies a supplied list unmodifiably, so a list the caller later
+ * mutates does not change this record.
+ *
+ * <pre>{@code
+ * {"id":"1","content":"...","like_count":0,"created_at":"2026-01-01T00:00:00","doubt_rating":0.0,
+ *  "media":[],"quoted_tweet_id":null,"user_id":"...","ai_tools_mentioned":[]}
+ * }</pre>
  *
  * <p>The two {@link List} components are never {@code null}: the canonical constructor replaces
  * {@code null} with an empty list and replaces a supplied list with an unmodifiable copy, so a list
@@ -39,23 +42,16 @@ import java.util.stream.Collectors;
  *  "media":[],"quoted_tweet_id":null,"user_id":"...","ai_tools_mentioned":[]}
  * }</pre>
  *
- * @param id post identifier, serialised as a string ({@code backend/app/schema/tweet.py:L6}); never
- *     {@code null}
- * @param content post body text ({@code backend/app/schema/tweet.py:L7}); never {@code null}
- * @param likeCount number of likes recorded for the post
- *     ({@code backend/app/schema/tweet.py:L8}); never {@code null}
- * @param createdAt time the post was created ({@code backend/app/schema/tweet.py:L9}); never
- *     {@code null}
- * @param doubtRating doubt rating on a 0-10 scale ({@code backend/app/schema/tweet.py:L10}); never
- *     {@code null}
- * @param media media references attached to the post ({@code backend/app/schema/tweet.py:L11});
- *     never {@code null}
- * @param quotedTweetId identifier of the quoted post; the sole {@code Optional[str]} field in the
- *     source ({@code backend/app/schema/tweet.py:L12}); may be {@code null}
- * @param userId identifier of the post author ({@code backend/app/schema/tweet.py:L13}); never
- *     {@code null}
- * @param aiToolsMentioned names of the AI tools named in the post
- *     ({@code backend/app/schema/tweet.py:L14}); never {@code null}
+ * @param id post identifier ({@code backend/app/schema/tweet.py:L6})
+ * @param content post body text ({@code :L7})
+ * @param likeCount number of likes recorded for the post ({@code :L8})
+ * @param createdAt time the post was created ({@code :L9})
+ * @param doubtRating doubt rating on a 0-10 scale ({@code :L10})
+ * @param media media references attached to the post ({@code :L11})
+ * @param quotedTweetId identifier of the quoted post, the sole {@code Optional[str]} field of the
+ *     source ({@code :L12}); the one component that may be {@code null}
+ * @param userId identifier of the post author ({@code :L13})
+ * @param aiToolsMentioned names of the AI tools named in the post ({@code :L14})
  */
 // Ported from backend/app/schema/tweet.py:L5-14 (faithful port) — see docs/DECISION_LOG.md
 // Boxed like_count and doubt_rating, and the required-versus-optional contract of AAP TR-6, are

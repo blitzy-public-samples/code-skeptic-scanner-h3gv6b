@@ -3,10 +3,11 @@
 # Ported from backend/app/main.py:L53 (faithful port) — DL-029 — see docs/DECISION_LOG.md
 server:
   port: ${PORT:5000}
-  # Net-new (no Python counterpart) — DL-293 — see docs/DECISION_LOG.md
-  # Under this strategy HttpServletRequest.isSecure() reports the forwarded X-Forwarded-Proto scheme,
-  # which is the value the Strict-Transport-Security writer declared on the chain by
-  # security/SecurityConfig reads.
+  # Net-new (no Python counterpart) — DL-293, DL-277 — see docs/DECISION_LOG.md
+  # Under this strategy HttpServletRequest.isSecure() reports the scheme carried by X-Forwarded-Proto;
+  # it does not report the scheme of the inbound connection. Strict-Transport-Security, declared inline on
+  # the chain by security/SecurityConfig, is written only on a request the container reports secure,
+  # so behind a TLS terminator this value is what causes that header to be emitted at all.
   forward-headers-strategy: ${FORWARD_HEADERS_STRATEGY:framework}
   # Net-new (no Python counterpart) — DL-238 — see docs/DECISION_LOG.md
   # The embedded container's own default, declared explicitly. Request headers above this size are
@@ -14,8 +15,8 @@ server:
   max-http-request-header-size: ${MAX_HTTP_REQUEST_HEADER_SIZE:8KB}
   # Net-new (no Python counterpart) — DL-294 — see docs/DECISION_LOG.md
   # The connector stops accepting requests and drains those already in flight before the context
-  # closes; the connection pool config/DataSourceConfig publishes closes after that drain completes.
-  # The drain is bounded by spring.lifecycle.timeout-per-shutdown-phase below.
+  # closes, so the connection pool published by config/DataSourceConfig closes after that drain
+  # completes. The drain is bounded by spring.lifecycle.timeout-per-shutdown-phase below.
   shutdown: ${SERVER_SHUTDOWN:graceful}
 
 # Net-new (the retired tree configured no logging framework) — DL-052, DL-206 — see
@@ -129,7 +130,8 @@ scanner:
     max-retries: ${OPENAI_MAX_RETRIES:2}
 
   jwt:
-    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-016, DL-184, DL-185, DL-186 — see docs/DECISION_LOG.md
+    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-186, DL-016, DL-185 — see
+    # docs/DECISION_LOG.md
     # Carries the HS256 key material as text, which is the contract of the PyJWT call at
     # backend/app/core/security.py:L11: the value's UTF-8 bytes are the key material and must number
     # at least 32. No encoding is applied or expected; any character a configuration value can carry

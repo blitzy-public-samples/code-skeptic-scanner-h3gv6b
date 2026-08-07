@@ -11,24 +11,20 @@ import jakarta.validation.constraints.NotNull;
  * Inbound request body of {@code POST /responses}.
  *
  * <p>One component, bound from the single key the source handler read out of the free-form body,
- * {@code tweet_id} ({@code backend/app/api/responses.py:L38}), carried as the raw JSON node the
- * request supplied, which is the value the guard at {@code backend/app/api/responses.py:L40} is
- * applied to — see docs/DECISION_LOG.md DL-286.
+ * {@code tweet_id} ({@code backend/app/api/responses.py:L38}), held as the raw JSON node the request
+ * supplied — the value the guard at {@code :L40} is applied to — DL-286.
  *
- * <p>{@code @NotNull} on {@link #tweetId()} is the only constraint declared and corresponds to that
- * guard, which answered an absent {@code tweet_id} with HTTP 400 and the body
- * {@code {"error": "Tweet ID is required"}} ({@code backend/app/api/responses.py:L40-41}) — see
- * docs/DECISION_LOG.md DL-050. It rejects a body carrying no {@code tweet_id} member at all;
- * {@link #usableTweetId()} answers for every carried value.
- *
- * <p>{@link #usableTweetId()} reports {@code null} for exactly the values Python read as false —
+ * <p>{@code @NotNull} on {@link #tweetId()} is the only constraint declared and rejects a body carrying
+ * no {@code tweet_id} member at all, which the source answered with 400 and
+ * {@code {"error": "Tweet ID is required"}} ({@code :L40-41}) — DL-050. {@link #usableTweetId()}
+ * answers for every carried value: {@code null} for exactly the values Python read as false —
  * {@code null}, {@code ""}, {@code 0}, {@code 0.0}, {@code -0.0}, {@code false}, {@code []} and
- * {@code {}} — and the identifier text for every other value, which is what the source passed on to
+ * {@code {}} — and the identifier text for every other, which is what the source passed on to
  * generation — DL-286.
  *
- * <p>The value is the stringified {@code tweets.id} primary key — the generated surrogate declared at
- * {@code backend/app/db/models.py:L10} and referenced by {@code responses.tweet_id} at
- * {@code backend/app/db/models.py:L27} — not an X post identifier. A conforming body is:
+ * <p>The value is the stringified {@code tweets.id} surrogate key declared at
+ * {@code backend/app/db/models.py:L10} and referenced by {@code responses.tweet_id} at {@code :L27},
+ * not an X post identifier. A conforming body is:
  *
  * <pre>{@code {"tweet_id": "7"}}</pre>
  *

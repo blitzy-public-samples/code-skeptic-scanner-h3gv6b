@@ -12,7 +12,8 @@ cd ..
 echo "Running tests..."
 npm test
 
-# Package backend application
+# Replaces `npm run build`, a Node command run inside backend/ - see backend/docs/DECISION_LOG.md
+# DL-053
 echo "Packaging backend application..."
 cd backend
 mvn clean package

@@ -28,87 +28,60 @@ import com.codeskeptic.scanner.security.JwtService;
 /**
  * Serves the one HTTP route that issues a bearer token.
  *
- * <p>This class has no counterpart in the retired Python tree — DL-019.
- * {@code backend/app/main.py:L26-29} registered four blueprints — {@code tweets_bp},
- * {@code responses_bp}, {@code settings_bp} and {@code analytics_bp} — and none declared an
- * authentication route. {@code create_access_token} at {@code backend/app/core/security.py:L6-12} and
- * the {@code passlib} helpers at {@code :L14-18} had no call site in the retired tree.
- * {@code frontend/src/utils/api.ts:L13-16} sends {@code Authorization: Bearer <token>} on every
- * request it makes.
+ * <p>No counterpart exists in the retired Python tree — DL-019: none of the four blueprints registered
+ * at {@code backend/app/main.py:L26-29} declared an authentication route, and
+ * {@code create_access_token} at {@code backend/app/core/security.py:L6-12} together with the
+ * {@code passlib} helpers at {@code :L14-18} had no call site. {@code frontend/src/utils/api.ts:L13-16}
+ * already sends {@code Authorization: Bearer <token>}.
  *
  * <table border="1">
  * <caption>Route surface</caption>
  * <tr><th>Method and path</th><th>Handler</th><th>Success</th><th>Source</th></tr>
- * <tr>
- *   <td>{@code POST /auth/token}</td>
- *   <td>{@link #issueToken(LoginRequest)}</td>
- *   <td>200, one JSON object</td>
- *   <td>no source construct — net-new, DL-019</td>
- * </tr>
+ * <tr><td>{@code POST /auth/token}</td><td>{@link #issueToken(LoginRequest)}</td>
+ *   <td>200, one JSON object</td><td>no source construct — net-new, DL-019</td></tr>
  * </table>
  *
- * <p>This class declares that one route and no other, and no operation over the credential store.
- * The path is unprefixed, as the paths of the four retired blueprints were: it carries no
- * {@code /api} segment and no version segment, and no type-level request mapping contributes a
- * prefix.
- *
- * <p>The request body is {@code {"username": "...", "password": "..."}}, bound to
- * {@link LoginRequest}. That record declares no Bean Validation constraint and this class declares no
- * {@code @Valid}, so an absent body and an absent or {@code null} member each reach
- * {@link #issueToken(LoginRequest)} as {@code null}. A member longer than
- * {@value #MAXIMUM_CREDENTIAL_LENGTH} characters is rejected before the
- * {@link AuthenticationManager} is reached — DL-118.
+ * <p>The path is unprefixed, as the four retired blueprints' paths were, and no type-level request
+ * mapping contributes a prefix. The request body binds to {@link LoginRequest}, which declares no Bean
+ * Validation constraint and carries no {@code @Valid} here, so an absent body and an absent or
+ * {@code null} member each arrive as {@code null}; a member longer than
+ * {@value #MAXIMUM_CREDENTIAL_LENGTH} characters is rejected before the {@link AuthenticationManager}
+ * is reached — DL-118.
  *
  * <p>The 200 body is {@link TokenResponse}:
  *
  * <pre>{@code {"access_token": "<compact-jws>", "token_type": "bearer", "expires_in": 3600}}</pre>
  *
  * <p>{@code token_type} carries the lowercase literal {@code bearer}. {@code expires_in} counts
- * seconds, while the configured lifetime {@code scanner.jwt.expiration-minutes} counts minutes;
- * {@link JwtService#getExpirationSeconds()} is the one place that converts between the two, and this
- * class neither multiplies nor divides the value it reports — DL-017. The minted token carries
- * exactly the {@code sub}, {@code iat} and {@code exp} claims: no role, no scope, no permission and
- * no authority claim — DL-018. {@code src/main/resources/application.yml} declares
- * {@code expiration-minutes: 60}; the value on the wire is {@code 3600}.
+ * seconds while {@code scanner.jwt.expiration-minutes} counts minutes, and
+ * {@link JwtService#getExpirationSeconds()} is the one place that converts between them — DL-017. The
+ * minted token carries exactly {@code sub}, {@code iat} and {@code exp}: no role, scope, permission or
+ * authority claim — DL-018.
  *
- * <p>Authorization for this route is declared in the security filter chain:
- * {@code security.SecurityConfig} permits {@code POST /auth/token} with no authentication and requires
- * an authenticated principal on every other request — DL-019, DL-021.
+ * <p>{@code security.SecurityConfig} permits this route with no authentication and requires an
+ * authenticated principal on every other request — DL-019, DL-021. The credential check is performed
+ * by the injected {@link AuthenticationManager}, which resolves the single {@code scanner.auth}
+ * principal through the {@code InMemoryUserDetailsManager} and compares against the stored hash through
+ * the {@code BCryptPasswordEncoder} — DL-020. This class declares no {@code AuthenticationProvider},
+ * {@code UserDetailsService} or {@code PasswordEncoder}, reads no entity, holds no repository and adds
+ * no table.
  *
- * <p>The credential check is performed by the injected {@link AuthenticationManager}, which
- * {@code security.SecurityConfig} publishes from the application's
- * {@code AuthenticationConfiguration}. That manager resolves the single {@code scanner.auth}
- * principal through the {@code InMemoryUserDetailsManager} and compares the presented password
- * against the stored hash through the {@code BCryptPasswordEncoder} — DL-020. This class declares no
- * {@code AuthenticationProvider}, holds no {@code UserDetailsService} and holds no
- * {@code PasswordEncoder}. It reads no entity, holds no repository and adds no table: the schema this
- * service creates stays the four tables of {@code backend/app/db/models.py}.
+ * <p>No submitted password, submitted principal name, resolved principal name or minted token is
+ * written to the log at any level — DL-052, DL-197.
  *
- * <p>No submitted password, no submitted principal name, no resolved principal name and no minted
- * token is written to the log at any level — DL-052, DL-197.
+ * <p>Verification work is bounded: a credential of accepted length acquires one of
+ * {@link #MAXIMUM_CONCURRENT_VERIFICATIONS} permits, waiting at most
+ * {@value #VERIFICATION_WAIT_MILLIS} milliseconds, and reaches bcrypt only while holding one; a request
+ * that acquires none receives the same 401 and empty body with no bcrypt computation performed —
+ * DL-272. Rejection reporting is bounded to one {@code WARN} per
+ * {@value #REJECTION_REPORT_INTERVAL_SECONDS} seconds per reason, carrying the suppressed count, with
+ * every suppressed rejection at {@code DEBUG} — DL-272. No per-client request quota and no request-rate
+ * ceiling is declared here; those remain ingress controls the deployment supplies.
  *
- * <p>The credential-verification work this process performs at one time is bounded: a submitted
- * credential of accepted length acquires one of {@link #MAXIMUM_CONCURRENT_VERIFICATIONS} permits,
- * waiting at most {@value #VERIFICATION_WAIT_MILLIS} milliseconds for it, and reaches bcrypt only
- * while it holds one. A request that acquires none is answered with the same 401 and the same empty
- * body a rejected credential receives, and no bcrypt computation is performed for it — DL-272.
- *
- * <p>This class declares no per-client request quota and no request-rate ceiling on
- * {@code POST /auth/token}; those remain ingress controls the deployment supplies — DL-272.
- *
- * <p>Rejection reporting is bounded: a rejection is reported at {@code WARN} at most once per
- * {@value #REJECTION_REPORT_INTERVAL_SECONDS} seconds per reason, carrying the number suppressed
- * after the previous record, and every suppressed rejection is written at {@code DEBUG} — DL-272.
- *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-017, DL-018,
- * DL-019, DL-020, DL-021, DL-052, DL-079, DL-117, DL-118 and DL-272; construct-level provenance is
- * recorded in {@code docs/TRACEABILITY_MATRIX.md}.
- *
- * <p>This class is a singleton bean and is thread-safe. Its mutable state is the six
+ * <p>Singleton bean, thread-safe. Its mutable state is the six
  * {@link java.util.concurrent.atomic.AtomicLong} fields the rejection reporter carries and the
  * {@link Semaphore} bounding verification work; no response status, header or body is derived from any
- * of the counters, and the semaphore selects between the 401 this route already returns and the
- * verification path.
+ * counter.
  */
 @RestController
 public class AuthController {
@@ -133,7 +106,6 @@ public class AuthController {
      */
     private static final int MAXIMUM_CREDENTIAL_LENGTH = 256;
 
-    /** Fewest verification permits this process issues, whatever the processor count — DL-272. */
     private static final int MINIMUM_CONCURRENT_VERIFICATIONS = 2;
 
     /**
@@ -160,26 +132,19 @@ public class AuthController {
      */
     private static final long REJECTION_REPORT_INTERVAL_SECONDS = 60L;
 
-    /** {@value #REJECTION_REPORT_INTERVAL_SECONDS} seconds in nanoseconds — DL-272. */
     private static final long REJECTION_REPORT_INTERVAL_NANOS =
             TimeUnit.SECONDS.toNanos(REJECTION_REPORT_INTERVAL_SECONDS);
 
-    /** Rejections for an over-length member not yet carried by a {@code WARN} record — DL-272. */
     private final AtomicLong unreportedOverLength = new AtomicLong();
 
-    /** Reading of {@link System#nanoTime()} at the last over-length {@code WARN} — DL-272. */
     private final AtomicLong lastOverLengthReportNanos = new AtomicLong();
 
-    /** Rejections by the manager not yet carried by a {@code WARN} record — DL-272. */
     private final AtomicLong unreportedNotAuthenticated = new AtomicLong();
 
-    /** Reading of {@link System#nanoTime()} at the last not-authenticated {@code WARN} — DL-272. */
     private final AtomicLong lastNotAuthenticatedReportNanos = new AtomicLong();
 
-    /** Requests turned away for want of a verification permit, not yet reported — DL-272. */
     private final AtomicLong unreportedUnverified = new AtomicLong();
 
-    /** Reading of {@link System#nanoTime()} at the last permit-exhaustion {@code WARN} — DL-272. */
     private final AtomicLong lastUnverifiedReportNanos = new AtomicLong();
 
     /**
@@ -202,7 +167,6 @@ public class AuthController {
      */
     private final AuthenticationManager authenticationManager;
 
-    /** Mints the token returned in the 200 body and reports its lifetime in seconds. */
     private final JwtService jwtService;
 
     /**
@@ -222,36 +186,27 @@ public class AuthController {
     /**
      * Authenticates a submitted credential and returns a freshly minted bearer token.
      *
-     * <p>The status is 200 on success, 401 when the submitted credential is rejected, and 500 when
-     * the authentication backend itself fails; this method selects no fourth status.
+     * <p>200 on success, 401 when the submitted credential is rejected, 500 when the authentication
+     * backend itself fails; no fourth status is selected. The {@code sub} claim of the minted token is
+     * {@link Authentication#getName()} of the authentication the {@link AuthenticationManager}
+     * returned, not the submitted string — DL-079.
      *
-     * <p>The {@code sub} claim of the minted token is {@link Authentication#getName()} of the
-     * authentication the {@link AuthenticationManager} returned, not the submitted string — DL-079.
-     *
-     * <p>A {@code null} request, a request whose {@code username} member is absent and a request
-     * whose {@code password} member is absent are each carried to the {@link AuthenticationManager}
-     * as a {@code null} principal or a {@code null} credential, and the manager rejects each of them.
-     * A member longer than {@value #MAXIMUM_CREDENTIAL_LENGTH} characters is rejected here, ahead of
-     * both the manager and bcrypt, and reports the same 401 — DL-118.
+     * <p>A {@code null} request and an absent {@code username} or {@code password} member each reach
+     * the manager as a {@code null} principal or credential and are rejected there. A member longer
+     * than {@value #MAXIMUM_CREDENTIAL_LENGTH} characters is rejected here, ahead of both the manager
+     * and bcrypt, reporting the same 401 — DL-118.
      *
      * <p>Only a rejected credential yields 401: {@link BadCredentialsException},
-     * {@link UsernameNotFoundException} and {@link AccountStatusException} and their subtypes. Every
-     * other {@link AuthenticationException} — {@code AuthenticationServiceException} and
-     * {@code InternalAuthenticationServiceException} among them — propagates to
-     * {@link GlobalExceptionHandler}, which answers 500 with
-     * {@code {"error": "Internal server error"}} — DL-117.
+     * {@link UsernameNotFoundException}, {@link AccountStatusException} and their subtypes. Every other
+     * {@link AuthenticationException} propagates to {@link GlobalExceptionHandler}, which answers 500
+     * with {@code {"error": "Internal server error"}} — DL-117.
      *
-     * <p>The 401 carries an empty body — the same status and the same empty body that the entry point
-     * of {@code security.SecurityConfig} returns for an unauthenticated request to any other route.
-     * No {@code {"error": <string>}} envelope is built here, and this route puts no new string on the
-     * wire — DL-019.
-     *
-     * <p>Example request body:
+     * <p>The 401 carries an empty body — the same status and body the entry point of
+     * {@code security.SecurityConfig} returns for any other unauthenticated request. No
+     * {@code {"error": <string>}} envelope is built here and this route puts no new string on the wire
+     * — DL-019.
      *
      * <pre>{@code {"username":"admin","password":"<plaintext>"}}</pre>
-     *
-     * <p>Example response body:
-     *
      * <pre>{@code {"access_token":"eyJhbGciOiJIUzI1NiJ9...","token_type":"bearer","expires_in":3600}}</pre>
      *
      * @param request the submitted credential, or {@code null} when the request carries no body

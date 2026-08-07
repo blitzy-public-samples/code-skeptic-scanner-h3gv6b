@@ -31,6 +31,8 @@ jobs:
     - name: Authenticate with Google Cloud
       run: gcloud auth configure-docker
 
+    # -f names a Dockerfile outside the ./backend build context, which the retired command omitted so
+    # no image could be built at all - see backend/docs/DECISION_LOG.md DL-053, DL-056
     - name: Build and push backend Docker image
       run: |
         docker build -t $BACKEND_IMAGE -f infrastructure/docker/Dockerfile.backend ./backend

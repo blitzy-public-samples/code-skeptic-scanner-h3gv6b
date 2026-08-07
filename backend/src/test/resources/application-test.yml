@@ -9,11 +9,10 @@
 # scanner.database-url declared below also declares
 # @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE).
 #
-# scanner.auth.password-hash below is a bcrypt hash of the plaintext `test-password` — DL-020.
-#
-# BUILD-ONLY PROFILE. The scanner.jwt.secret and scanner.auth.password-hash values below are real,
-# usable credentials scoped to `mvn clean verify`. A deployment supplies SECRET_KEY and
-# AUTH_PASSWORD_HASH, and neither application.yml value carries a default — DL-016, DL-020.
+# BUILD-ONLY PROFILE. The scanner.jwt.secret and scanner.auth.password-hash values below are
+# build-only test credentials, usable only against this profile during `mvn clean verify`. A
+# deployment supplies SECRET_KEY and AUTH_PASSWORD_HASH, and neither application.yml value carries a
+# default — DL-016, DL-020.
 #
 # scanner.twitter.consumer-key and scanner.twitter.consumer-secret are blank. task/TweetStreamClient
 # takes its blank-credential path and the build performs no X network call — DL-046, DL-239.
@@ -108,10 +107,10 @@ scanner:
     max-retries: 2
 
   jwt:
-    # Key ported from backend/app/core/security.py:L11; test value is net-new — DL-016, DL-186 — see
+    # Key ported from backend/app/core/security.py:L11; test value is net-new — DL-186, DL-016 — see
     # docs/DECISION_LOG.md
-    # Base64 encoding of 48 bytes of key material. The value is decoded before it becomes the signing
-    # key, and the decoded material is what the 32-byte floor applies to.
+    # A build-only raw key: the value's own UTF-8 bytes are the signing key, with no decoding step,
+    # and it carries more than the 32 bytes that floor requires.
     secret: Y29kZS1za2VwdGljLXNjYW5uZXItYnVpbGQtdmVyaWZpY2F0aW9uLWtleS0wMDAx
     # Ported from backend/app/core/security.py:L11 (faithful port) — DL-015 — see docs/DECISION_LOG.md
     algorithm: HS256
@@ -122,7 +121,7 @@ scanner:
     # Net-new (no Python counterpart) — DL-020 — see docs/DECISION_LOG.md
     username: admin
     # Net-new (no Python counterpart) — DL-020 — see docs/DECISION_LOG.md
-    # bcrypt hash of the plaintext `test-password`; the hashing counterpart in the retired tree was
+    # bcrypt hash of a build-only test credential; the hashing counterpart in the retired tree was
     # backend/app/core/security.py:L14-18.
     password-hash: '$2a$10$Lt3iVHWKlZC2hu2Nyh/NtekAa.gCoG3qZM.xoMT7w1b/zk3o7SBJS'
 

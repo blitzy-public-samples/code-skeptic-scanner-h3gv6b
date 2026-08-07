@@ -69,6 +69,8 @@ import com.codeskeptic.scanner.task.TweetStreamListener;
 import com.zaxxer.hikari.HikariDataSource;
 import reactor.core.publisher.Mono;
 
+// Replaces backend/tests/test_api.py, which imported fastapi.testclient against a Flask application
+// at :L2 and could not be executed — see docs/DECISION_LOG.md DL-239
 /**
  * Proves the whole application context assembles and that the route surface is the one the retired
  * blueprints served.
@@ -77,16 +79,13 @@ import reactor.core.publisher.Mono;
  * {@code test} profile, and nothing is mocked or stubbed out. The web environment is
  * {@link SpringBootTest.WebEnvironment#MOCK} and requests are issued through {@link MockMvc}, so the
  * real {@code SecurityFilterChain}, the real dispatcher and the real controllers all run without a
- * connector, a port or a server thread — DL-274. The connector itself is exercised by
- * {@code security.RequestBodyLimitIntegrationTest}, the one narrowly scoped test in this suite that
- * needs a running server.
+ * connector, a port or a server thread — DL-274.
  *
- * <p>The {@code test} profile supplies an in-memory database, a JWT secret, one
- * {@code scanner.auth} principal whose password is {@code test-password}, and blank X consumer
- * credentials, so ingestion contacts nothing. No test here resolves an OpenAI, Notion or Google
- * credential: {@code service.LlmService}, {@code service.NotionService} and
- * {@code service.SentimentAnalysisService} each create their client on first use, and no request
- * made here reaches one.
+ * <p>The {@code test} profile supplies an in-memory database, a JWT secret, one build-only
+ * {@code scanner.auth} principal, and blank X consumer credentials, so ingestion contacts nothing. No
+ * test here resolves an OpenAI, Notion or Google credential: {@code service.LlmService},
+ * {@code service.NotionService} and {@code service.SentimentAnalysisService} each create their client
+ * on first use, and no request made here reaches one.
  *
  * <p>Each of the eleven routes the four Flask blueprints served at
  * {@code backend/app/main.py:L26-29} is addressed without a token and must answer 401 with an empty
@@ -103,8 +102,6 @@ import reactor.core.publisher.Mono;
 @ActiveProfiles("test")
 @DisplayName("ScannerApplication")
 class ScannerApplicationTests {
-
-    /** Plaintext of the {@code scanner.auth.password-hash} declared by the {@code test} profile. */
     private static final String PASSWORD = "test-password";
 
     @Autowired
@@ -142,11 +139,6 @@ class ScannerApplicationTests {
         assertThat(context.getBeansOfType(type)).as(name).hasSize(1);
     }
 
-    /**
-     * Names the bean types the context must publish exactly once.
-     *
-     * @return one argument pair per type
-     */
     private static List<Arguments> declaredBeanTypes() {
         return List.of(
                 Arguments.of("TweetController", TweetController.class),
@@ -184,11 +176,6 @@ class ScannerApplicationTests {
         assertThat(response.getHeader(HttpHeaders.WWW_AUTHENTICATE)).isEqualTo("Bearer");
     }
 
-    /**
-     * Names the eleven routes the four retired Flask blueprints served.
-     *
-     * @return one argument pair per route
-     */
     private static List<Arguments> protectedRoutes() {
         return List.of(
                 Arguments.of(HttpMethod.GET, "/tweets"),
@@ -280,7 +267,6 @@ class ScannerApplicationTests {
             assertThat(((AtomicInteger) inFlight.get(client)).get())
                     .as("dispatches counted in flight after a refused record").isZero();
 
-            // Every shape is refused, including the keep-alive that is otherwise accepted silently
             for (String emitted : new String[] {"", "   ", "not json at all", record}) {
                 assertThat((boolean) dispatch.invoke(client, emitted, 100))
                         .as("a record of shape [%s] emitted during the drain", emitted).isFalse();
@@ -310,18 +296,15 @@ class ScannerApplicationTests {
         AtomicLong generation = (AtomicLong) generationField.get(client);
         long staleGeneration = generation.get();
 
-        // A fresh cycle takes the next generation and reports itself running
         long freshGeneration = generation.incrementAndGet();
         running.set(true);
 
-        // The stale cycle's terminal callback is delivered late and must not clear the fresh state
         assertThat(ingestionCycle.invoke(client, staleGeneration)).isInstanceOf(Mono.class);
         Mono<?> staleCycle = (Mono<?>) ingestionCycle.invoke(client, staleGeneration);
         staleCycle.subscribe().dispose();
         assertThat(running.get())
                 .as("running state of the fresh cycle after the stale cycle terminated").isTrue();
 
-        // The fresh cycle's own callback does clear it: its generation is still current
         Mono<?> ownCycle = (Mono<?>) ingestionCycle.invoke(client, freshGeneration);
         ownCycle.subscribe().dispose();
         assertThat(running.get())
@@ -337,8 +320,6 @@ class ScannerApplicationTests {
     void collectsAUsableAiToolNameThatFollowsUnusableRows() throws Exception {
         int ruleCap = context.getBean(ScannerProperties.class).ingestion().maxStreamRules();
         List<AiTool> seeded = new ArrayList<>();
-        // Enough unusable rows to exhaust the cap on their own: whitespace only, a leading and a
-        // trailing separator, and a character the rule grammar does not admit
         for (int index = 0; index < ruleCap; index++) {
             seeded.add(aiToolNamed(switch (index % 4) {
                 case 0 -> "   ";
@@ -347,7 +328,6 @@ class ScannerApplicationTests {
                 default -> "hash#" + index;
             }));
         }
-        // The usable names sit behind every one of them, and one is a repeat of another
         seeded.add(aiToolNamed("Copilot"));
         seeded.add(aiToolNamed("copilot"));
         seeded.add(aiToolNamed("Cursor"));
@@ -417,7 +397,6 @@ class ScannerApplicationTests {
         Instant nextExecution = pass.nextExecution();
         assertThat(nextExecution).isNotNull();
         assertThat(nextExecution).isBefore(Instant.now().plus(Duration.ofHours(25)));
-
     }
 
     // Net-new background enablement group — DL-250 — see docs/DECISION_LOG.md
@@ -472,11 +451,6 @@ class ScannerApplicationTests {
                 .getProperty("spring.lifecycle.timeout-per-shutdown-phase")).isEqualTo("30s");
     }
 
-    /**
-     * Authenticates the single configured principal and returns the token minted for it.
-     *
-     * @return the value of the {@code access_token} member of the token response
-     */
     private String accessToken() throws Exception {
         MockHttpServletResponse response = mockMvc.perform(post("/auth/token")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -490,13 +464,6 @@ class ScannerApplicationTests {
         return body.substring(start, body.indexOf('"', start));
     }
 
-    /**
-     * Builds a request for one route, carrying a minimal JSON body for a method that takes one.
-     *
-     * @param method the request method
-     * @param path   the route to address
-     * @return the request, carrying no {@code Authorization} header
-     */
     private static MockHttpServletRequestBuilder jsonRequest(HttpMethod method, String path) {
         MockHttpServletRequestBuilder request = request(method, path);
         if (HttpMethod.POST.equals(method) || HttpMethod.PUT.equals(method)) {

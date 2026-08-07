@@ -23,138 +23,79 @@ import com.codeskeptic.scanner.service.ResponseService;
 // Endpoint contract ported from backend/app/api/responses.py:L8-65 (faithful port) — see
 // docs/DECISION_LOG.md DL-021, DL-022, DL-023, DL-038, DL-048, DL-050, DL-059, DL-076, DL-092
 /**
- * Serves the four HTTP routes of the {@code responses} resource.
- *
- * <p>Replaces the Flask blueprint {@code responses_bp}, declared at
- * {@code backend/app/api/responses.py:L6} and registered on the application object at
- * {@code backend/app/main.py:L27}. The four routes declared here are the four the blueprint declared.
+ * Serves the four HTTP routes of the {@code responses} resource, all unprefixed — no {@code /api}
+ * segment and no version segment (DL-059). Replaces the Flask blueprint {@code responses_bp} declared
+ * at {@code backend/app/api/responses.py:L6} and registered at {@code backend/app/main.py:L27}.
  *
  * <table border="1">
  * <caption>Route surface</caption>
  * <tr><th>Method and path</th><th>Handler</th><th>Success</th><th>Source</th></tr>
- * <tr>
- *   <td>{@code GET /responses}</td>
- *   <td>{@link #getResponses(String, String)}</td>
- *   <td>200, a two-key envelope</td>
- *   <td>{@code backend/app/api/responses.py:L8-20}</td>
- * </tr>
- * <tr>
- *   <td>{@code GET /responses/{responseId}}</td>
- *   <td>{@link #getResponse(String)}</td>
- *   <td>200, one JSON object</td>
- *   <td>{@code backend/app/api/responses.py:L22-31}</td>
- * </tr>
- * <tr>
- *   <td>{@code POST /responses}</td>
- *   <td>{@link #generateResponse(CreateResponseRequest)}</td>
- *   <td>201, one JSON object</td>
- *   <td>{@code backend/app/api/responses.py:L33-49}</td>
- * </tr>
- * <tr>
- *   <td>{@code PUT /responses/{responseId}}</td>
+ * <tr><td>{@code GET /responses}</td><td>{@link #getResponses(String, String)}</td>
+ *   <td>200, a two-key envelope</td><td>{@code backend/app/api/responses.py:L8-20}</td></tr>
+ * <tr><td>{@code GET /responses/{responseId}}</td><td>{@link #getResponse(String)}</td>
+ *   <td>200, one JSON object</td><td>{@code backend/app/api/responses.py:L22-31}</td></tr>
+ * <tr><td>{@code POST /responses}</td><td>{@link #generateResponse(CreateResponseRequest)}</td>
+ *   <td>201, one JSON object</td><td>{@code backend/app/api/responses.py:L33-49}</td></tr>
+ * <tr><td>{@code PUT /responses/{responseId}}</td>
  *   <td>{@link #updateResponse(String, UpdateResponseRequest)}</td>
- *   <td>200, one JSON object</td>
- *   <td>{@code backend/app/api/responses.py:L51-65}</td>
- * </tr>
+ *   <td>200, one JSON object</td><td>{@code backend/app/api/responses.py:L51-65}</td></tr>
  * </table>
  *
- * <p>Paths are unprefixed: no {@code /api} segment and no version segment.
- * {@code POST /responses} answers 201; the other three answer 200.
- *
- * <p>Every rendered body is a {@code dto} record whose JSON keys are snake_case, fixed by an explicit
- * {@code @JsonProperty} on each record component — DL-022. Both identifiers of {@link ResponseDto}
- * are carried as strings — DL-023. No entity type is rendered or referenced here; this class reaches
- * the {@code responses} table through {@code service.ResponseService} only.
+ * <p>Wire keys are snake_case, fixed by an explicit {@code @JsonProperty} on each record component
+ * (DL-022), and both identifiers of {@link ResponseDto} are carried as strings (DL-023). No entity
+ * type is rendered or referenced here; the {@code responses} table is reached through
+ * {@code service.ResponseService} only.
  *
  * <p>This class selects the success status and builds no error body. The five error statuses of the
  * source routes are raised by {@code service.ResponseService} and answered by
  * {@link GlobalExceptionHandler}:
  *
  * <ul>
- *   <li>{@code NotFoundException} carrying {@code Response not found}, the wire literal of
- *       {@code backend/app/api/responses.py:L31}, for a {@code responseId} naming no row on
- *       {@code GET /responses/{responseId}} — answered with 404.</li>
- *   <li>{@code BadRequestException} carrying {@code Tweet ID is required}, the wire literal of
- *       {@code backend/app/api/responses.py:L41}, for every {@code tweet_id} value the guard at
- *       {@code :L40} read as false — {@code null}, {@code ""}, a zero, {@code false}, an empty array
- *       and an empty object — on {@code POST /responses};
- *       {@code MethodArgumentNotValidException} is raised instead when the body carries no
- *       {@code tweet_id} member, and both are answered with 400 and that literal — DL-286.</li>
- *   <li>{@code ResponseGenerationException} carrying {@code Failed to generate response}, the wire
- *       literal of {@code backend/app/api/responses.py:L49}, for every failure past that guard on
- *       {@code POST /responses} — answered with 500.</li>
- *   <li>{@code BadRequestException} carrying {@code Update data is required}, the wire literal of
- *       {@code backend/app/api/responses.py:L57}, for an absent body and a body carrying neither
- *       updatable key on {@code PUT /responses/{responseId}} — answered with 400.</li>
- *   <li>{@code NotFoundException} carrying {@code Response not found or update failed}, the wire
- *       literal of {@code backend/app/api/responses.py:L65}, for a {@code responseId} naming no row
- *       on {@code PUT /responses/{responseId}} — answered with 404.</li>
+ *   <li>404 {@code Response not found} ({@code :L31}) for a {@code responseId} naming no row on
+ *       {@code GET /responses/{responseId}}.</li>
+ *   <li>400 {@code Tweet ID is required} ({@code :L41}) for every {@code tweet_id} value the guard at
+ *       {@code :L40} read as false — {@code null}, {@code ""}, a zero, {@code false}, an empty array,
+ *       an empty object. A body carrying no {@code tweet_id} member raises
+ *       {@code MethodArgumentNotValidException} instead, answered with the same status and literal —
+ *       DL-286.</li>
+ *   <li>500 {@code Failed to generate response} ({@code :L49}) for every failure past that guard.
+ *       {@code POST /responses} declares no 404 branch: a {@code tweet_id} carrying no number and one
+ *       naming no {@code tweets} row both answer with this literal — DL-076.</li>
+ *   <li>400 {@code Update data is required} ({@code :L57}) for an absent body and a body carrying
+ *       neither updatable key on {@code PUT /responses/{responseId}}.</li>
+ *   <li>404 {@code Response not found or update failed} ({@code :L65}) for a {@code responseId} naming
+ *       no row on {@code PUT /responses/{responseId}}.</li>
  * </ul>
  *
- * <p>All four paths are unprefixed: no {@code /api} segment and no version segment — DL-059.
- * {@code POST /responses} is the only route of the four that answers 201.
+ * <p>Both path variables bind as {@link String}, the type Flask's default path converter delivered at
+ * {@code :L22} and {@code :L51} — DL-048. {@code page} and {@code per_page} also bind as
+ * {@link String} and are read as whole numbers here, substituting the declared default for an absent,
+ * blank or non-numeric value as {@code request.args.get(..., type=int)} did at {@code :L11-12}; no
+ * query parameter on these routes produces an error status — DL-217.
  *
- * <p>{@code POST /responses} declares no 404 branch. Its statuses are 400, 201 and 500 only, as at
- * {@code backend/app/api/responses.py:L33-49}: a {@code tweet_id} carrying no number and a
- * {@code tweet_id} naming no {@code tweets} row are both answered with the 500 literal of
- * {@code :L49} — DL-076.
+ * <p>The service is an injected singleton in a final field, in place of the per-request
+ * {@code ResponseService()} at {@code :L14}, {@code :L25}, {@code :L43} and {@code :L59}; the
+ * conversion invoked as {@code response.to_dict()} at {@code :L18}, {@code :L29}, {@code :L47} and
+ * {@code :L63} happens in {@code service.mapper.ResponseMapper} behind it and never here.
+ * Authentication is enforced by the security filter chain, in place of the bare {@code @jwt_required}
+ * at {@code :L9}, {@code :L23}, {@code :L34} and {@code :L52} — DL-021.
  *
- * <p>Both path variables are bound as {@link String}, the type Flask's default path converter
- * delivered at {@code backend/app/api/responses.py:L22} and {@code :L51} — DL-048.
+ * <p>No handler here writes to the X API and {@code service.ResponseService} declares no publish
+ * operation. {@code is_approved} ({@code backend/app/db/models.py:L26}) is a flag a human reviewer
+ * reads and no handler acts on its value.
  *
- * <p>{@code page} and {@code per_page} are bound as {@link String} and read as whole numbers here,
- * substituting the declared default for an absent, blank or non-numeric value as
- * {@code request.args.get(..., type=int)} did at
- * {@code backend/app/api/responses.py:L11-12}. No query parameter on these routes produces an error
- * status — DL-217.
- *
- * <p>The service is an injected singleton held in a final field, in place of the per-request
- * {@code ResponseService()} at {@code backend/app/api/responses.py:L14}, {@code :L25}, {@code :L43}
- * and {@code :L59}. The conversion invoked as {@code response.to_dict()} at {@code :L18},
- * {@code :L29}, {@code :L47} and {@code :L63} is performed by {@code service.mapper.ResponseMapper}
- * behind {@code service.ResponseService} and never here.
- *
- * <p>Authentication is enforced by the security filter chain ahead of the
- * {@code DispatcherServlet}, in place of the bare {@code @jwt_required} at
- * {@code backend/app/api/responses.py:L9}, {@code :L23}, {@code :L34} and {@code :L52} — DL-021. No
- * method here declares an authorization annotation.
- *
- * <p>No handler here writes to the X API and its one collaborator,
- * {@code service.ResponseService}, declares no publish operation. {@code is_approved}
- * ({@code backend/app/db/models.py:L26}) is a flag a human reviewer reads and no handler acts on its
- * value.
- *
- * <p>This is a singleton bean holding its one collaborator in a final field and no other state, so
- * every member declared here is safe for concurrent use.
- *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-021, DL-022,
- * DL-023, DL-038, DL-048, DL-050, DL-059, DL-076, DL-092 and DL-217; construct-level provenance is
- * recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * <p>Singleton bean holding one collaborator in a final field and no other state, so every member
+ * declared here is safe for concurrent use.
  */
 @RestController
 public class ResponseController {
 
-    /**
-     * Page number applied when {@code page} carries no number —
-     * {@code backend/app/api/responses.py:L11}.
-     */
     private static final int DEFAULT_PAGE = 1;
 
-    /**
-     * Page size applied when {@code per_page} carries no number —
-     * {@code backend/app/api/responses.py:L12}.
-     */
     private static final int DEFAULT_PER_PAGE = 10;
 
-    /** Reads, generates and updates the rows of the {@code responses} table. */
     private final ResponseService responseService;
 
-    /**
-     * Creates the controller with its one collaborator.
-     *
-     * @param responseService the service serving all four routes, must not be {@code null}
-     * @throws NullPointerException when {@code responseService} is {@code null}
-     */
     public ResponseController(ResponseService responseService) {
         this.responseService = Objects.requireNonNull(responseService,
                 "responseService must not be null.");
@@ -163,31 +104,20 @@ public class ResponseController {
     // Ported from backend/app/api/responses.py:L8-20 (faithful port) — DL-038, DL-217 — see
     // docs/DECISION_LOG.md
     /**
-     * Renders one page of the {@code responses} table inside the two-key list envelope.
+     * Renders one page of the {@code responses} table together with the block that describes it.
      *
      * <p>Reproduces {@code GET /responses} at {@code backend/app/api/responses.py:L8-20}. The body
      * carries {@code responses}, a JSON array of {@link ResponseDto} objects, and {@code pagination},
      * whose keys are {@code page}, {@code per_page}, {@code total} and {@code total_pages} — DL-038. An
-     * empty page renders {@code responses} as an empty array, and the status is 200 either way.
+     * empty page renders an empty array and the status is 200 either way.
      *
-     * <p>The query-parameter names are {@code page} at {@code backend/app/api/responses.py:L11},
-     * defaulting to 1, and {@code per_page} at {@code :L12}, defaulting to 10. {@code per_page} is
-     * spelled with an underscore on the wire and carries no camelCase alias — see
-     * docs/DECISION_LOG.md DL-059.
-     *
-     * <p>Each parameter is bound as text and read as a whole number after trimming. A value that holds
-     * no whole number — the empty string, a whitespace-only value, {@code abc}, {@code 2.5}, a value
-     * beyond {@code int} range — takes the same default an absent parameter takes, and the request is
-     * accepted; no such value is reported as a client error — see docs/DECISION_LOG.md DL-217.
-     *
-     * <p>A value that holds a whole number is passed to the service unchanged, including {@code 0} and
-     * a negative value: it is not clamped or bounds-checked here. {@code page} is 1-based on the wire,
-     * and {@code service.ResponseService} performs the conversion to the 0-based index Spring Data
-     * takes and reports the 1-based number back — DL-038. That service is also where a page size below
-     * one is read as the route default; no page size is reduced and the status stays 200 — see
-     * docs/DECISION_LOG.md DL-217.
-     *
-     * <p>Example response body for page 1 of 10 per page over a single row:
+     * <p>The parameters are {@code page} ({@code :L11}, default 1) and {@code per_page} ({@code :L12},
+     * default 10); {@code per_page} carries no camelCase alias — DL-059. Each is bound as text and read
+     * as a whole number after trimming, and a value holding no whole number takes the same default an
+     * absent parameter takes, and is not reported as a client error — DL-217. A value that does
+     * hold a whole number reaches the service unchanged, {@code 0} and negatives included: nothing is
+     * clamped here. The 1-based to 0-based conversion, the page-size floor and the reported counters
+     * belong to {@code service.ResponseService} — DL-038, DL-217.
      *
      * <pre>{@code
      * {"responses":[{"id":"1","content":"...","generated_at":"2026-01-31T09:15:00",
@@ -246,26 +176,19 @@ public class ResponseController {
      *
      * <p>Reproduces {@code POST /responses} at {@code backend/app/api/responses.py:L33-49}. The body
      * carries one member, {@code tweet_id}, read at {@code :L38} and declared by
-     * {@link CreateResponseRequest} with {@code @NotNull} as its only constraint — see
-     * docs/DECISION_LOG.md DL-050.
+     * {@link CreateResponseRequest} with {@code @NotNull} as its only constraint — DL-050. The success
+     * status is 201, as at {@code :L47}, with no {@code Location} header, and the stored row carries
+     * {@code is_approved} {@code false}.
      *
-     * <p>The success status is 201, as at {@code :L47}, and the body is the stored row carrying the
-     * {@code id} the database assigned. No {@code Location} header is set, as at {@code :L47}. The
-     * stored row carries {@code is_approved} {@code false}.
+     * <p>A body carrying no {@code tweet_id} member fails that constraint. Every carried value is read
+     * through {@link CreateResponseRequest#usableTweetId()}, which applies the {@code if not tweet_id}
+     * guard at {@code :L40} to the raw JSON value: {@code null}, {@code ""}, {@code 0}, {@code 0.0},
+     * {@code -0.0}, {@code false}, {@code []} and {@code {}} each reach the service as {@code null}
+     * before any identifier is parsed and before generation is attempted — DL-286. Both paths answer
+     * 400 with the literal of {@code :L41}; every other value reaches generation as text.
      *
-     * <p>An absent body binds to {@code null} and reaches the service as {@code null}. A body carrying
-     * no {@code tweet_id} member fails the {@code @NotNull} constraint and is answered with 400 and
-     * the literal of {@code :L41}.
-     *
-     * <p>Every carried value is read through {@link CreateResponseRequest#usableTweetId()}, which
-     * applies the {@code if not tweet_id} guard at {@code :L40} to the raw JSON value: {@code null},
-     * {@code ""}, {@code 0}, {@code 0.0}, {@code -0.0}, {@code false}, {@code []} and {@code {}} each
-     * reach the service as {@code null} and are answered with 400 and that same literal, before any
-     * identifier is parsed and before generation is attempted — DL-286. Every other value reaches
-     * generation as text.
-     *
-     * <p>This route declares no 404 branch: every failure past the guard is answered with 500 and the
-     * literal of {@code :L49} — DL-076.
+     * <p>This route declares no 404 branch: every failure past the guard answers 500 with the literal
+     * of {@code :L49} — DL-076.
      *
      * @param request the request body; {@code null} when the request carried no body
      * @return 201 carrying the stored row
@@ -288,31 +211,24 @@ public class ResponseController {
      * Applies a partial update to one {@code responses} row and renders the stored row.
      *
      * <p>Reproduces {@code PUT /responses/&lt;response_id&gt;} at
-     * {@code backend/app/api/responses.py:L51-65}. The path-variable name is {@code responseId},
-     * carrying the segment the source route spelled {@code response_id}, bound as a {@code String} —
-     * DL-048.
-     *
-     * <p>The two updatable properties are {@code content} and {@code is_approved}, declared by
-     * {@link UpdateResponseRequest}. No other property is bound or forwarded: {@code id},
+     * {@code backend/app/api/responses.py:L51-65}. The path variable binds as a {@link String} —
+     * DL-048. The two updatable properties are {@code content} and {@code is_approved}; {@code id},
      * {@code generated_at} and {@code tweet_id} are not writable through this route.
      *
-     * <p>The body is governed by one mechanism, and it is not Bean Validation.
-     * {@link UpdateResponseRequest} declares no Bean Validation constraint and this parameter declares
-     * no {@code @Valid} annotation, matching the free-form {@code request.json} read at {@code :L54} —
-     * see docs/DECISION_LOG.md DL-050. The presence of a key decides which column is written and the
-     * carried value decides what is stored, an explicit JSON {@code null} included; a carried value of
-     * any JSON type is accepted, as {@code request.json} accepted any type at {@code :L54} — see
-     * docs/DECISION_LOG.md DL-082, DL-231 and DL-244.
+     * <p>The body is governed by one mechanism, and it is not Bean Validation:
+     * {@link UpdateResponseRequest} declares no constraint and this parameter declares no
+     * {@code @Valid}, matching the free-form {@code request.json} read at {@code :L54} — DL-050. The
+     * presence of a key decides which column is written and the carried value decides what is stored,
+     * an explicit JSON {@code null} included, and a value of any JSON type is accepted — DL-082,
+     * DL-231, DL-244. Nothing is trimmed, defaulted or coerced.
      *
-     * <p>Neither value the body carries is trimmed, defaulted or coerced. An absent body binds to
-     * {@code null}. Reproducing the {@code if not update_data} guard at {@code :L56}, an absent body
-     * and a body carrying neither key are both answered with 400 and the literal of {@code :L57}.
+     * <p>Reproducing the {@code if not update_data} guard at {@code :L56}, an absent body and a body
+     * carrying neither key are both answered with 400 and the literal of {@code :L57}.
      *
      * <p>A {@code responseId} carrying no number, one naming no row, and a write that leaves
      * {@code content} or {@code is_approved} empty are all answered with 404 and the literal of
-     * {@code :L65}, {@code Response not found or update failed} — a different string from the
-     * {@code Response not found} that {@link #getResponse(String)} reports at {@code :L31}. The third
-     * case rolls the transaction back — see docs/DECISION_LOG.md DL-244.
+     * {@code :L65}, {@code Response not found or update failed}; {@link #getResponse(String)} reports
+     * the different string of {@code :L31}. The third case rolls the transaction back — DL-244.
      *
      * @param responseId the raw path segment identifying the row
      * @param request    the columns to write; {@code null} when the request carried no body

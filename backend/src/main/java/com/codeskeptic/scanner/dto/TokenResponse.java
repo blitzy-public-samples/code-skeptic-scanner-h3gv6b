@@ -36,7 +36,6 @@ public record TokenResponse(
         Long expiresIn
 ) {
 
-    /** Rendered by {@link #toString()} in place of {@code accessToken}. */
     private static final String REDACTED = "***REDACTED***";
 
     /**

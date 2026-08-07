@@ -32,40 +32,20 @@ import jakarta.servlet.http.HttpServletResponse;
 /**
  * Establishes the authentication for a request presenting a bearer token this service minted.
  *
- * <p>Replaces {@code JWTManager(app)} at {@code backend/app/main.py:L22} together with the eleven
- * {@code @jwt_required} route sites named above — DL-021. This filter is the verification half of the
- * token scheme; {@link JwtService} is the minting half.
+ * <p>The verification half of the token scheme; {@link JwtService} is the minting half — DL-021.
  *
- * <p>Per request the filter reads the {@code Authorization} header, which
- * {@code frontend/src/utils/api.ts:L14} already sends as {@code Bearer <token>}. The scheme name is
- * matched without regard to case — DL-113. One of three outcomes follows:
+ * <p>The scheme name of the {@code Authorization} header is matched without regard to case — DL-113.
+ * A token that is accepted, on a request carrying no authentication yet, sets its subject as an
+ * authenticated principal holding no authorities and writes the resulting context to the
+ * {@link SecurityContextRepository} the chain reads — DL-112. An absent header, another scheme, an
+ * empty remainder and a token that is not accepted all leave the context untouched.
  *
- * <ul>
- *   <li>No header, a header carrying another scheme, or the bearer scheme with an empty remainder —
- *       the context is left untouched.</li>
- *   <li>A bearer token {@link JwtService#extractUsername(String)} does not accept — the context is
- *       left untouched.</li>
- *   <li>A bearer token that is accepted, on a request carrying no authentication yet — the token's
- *       subject is set as an authenticated principal holding no authorities, and the resulting
- *       context is written to the {@link SecurityContextRepository} the chain reads — DL-112.</li>
- * </ul>
+ * <p>Runs on the {@code REQUEST}, {@code ASYNC} and {@code ERROR} dispatches, alongside the chain's
+ * authorization stage — DL-112. The chain always continues, exactly once per dispatch, on every path:
+ * this filter sets no status, writes no body and clears no context, and no exception leaves it.
  *
- * <p>The filter runs on the {@code REQUEST}, {@code ASYNC} and {@code ERROR} dispatches alongside
- * the security chain's authorization stage — DL-112.
- *
- * <p>The chain always continues, exactly once per dispatch, on every path. This filter sets no
- * status, writes no body and clears no context; a request reaching the authorization stage with no
- * authentication is answered by the entry point {@code SecurityConfig} configures.
- * {@link JwtService#extractUsername(String)} absorbs every verification failure; no exception leaves
- * this filter. Two fixed sentences are written at {@code DEBUG} — one when a request authenticates,
- * one when a presented token names a principal the credential store does not hold — and nothing is
- * written when a presented token does not verify, which {@link JwtService} records itself as one of
- * five fixed sentences. No record written on this path carries a header value, a token value, the
- * token's subject, the request method or the request URI — DL-052, DL-094, DL-111.
- *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-014, DL-021,
- * DL-052, DL-094, DL-111, DL-112 and DL-113; construct-level provenance is recorded in
- * {@code docs/TRACEABILITY_MATRIX.md}.
+ * <p>No record written here carries a header value, a token value, the token's subject, the request
+ * method or the request URI — DL-052, DL-094, DL-111.
  *
  * <p>All three fields are {@code final} and hold stateless collaborators; every member declared here
  * is safe for concurrent use.
@@ -81,7 +61,6 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
      */
     private static final String BEARER_PREFIX = "Bearer ";
 
-    /** Verifies a presented token and reads its {@code sub} claim. */
     private final JwtService jwtService;
 
     /** The repository the security chain reads the context back from — DL-112. */
@@ -90,18 +69,9 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     /** Resolves the {@code sub} claim against the configured credential store — DL-021. */
     private final UserDetailsService userDetailsService;
 
-    /** Strategy that holds the context for the current thread. */
     private final SecurityContextHolderStrategy securityContextHolderStrategy =
             SecurityContextHolder.getContextHolderStrategy();
 
-    /**
-     * Retains the collaborators that verify presented tokens and persist the resulting context.
-     *
-     * @param jwtService the service that verifies a presented token and reads its {@code sub} claim
-     * @param securityContextRepository the repository shared with the enclosing chain; this filter
-     *     writes the context the chain reads
-     * @throws NullPointerException if either argument is {@code null}
-     */
     public JwtAuthenticationFilter(JwtService jwtService,
             SecurityContextRepository securityContextRepository,
             UserDetailsService userDetailsService) {
@@ -196,16 +166,6 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         return token.isEmpty() ? null : token;
     }
 
-    /**
-     * Builds the authenticated token for a verified subject.
-     *
-     * <p>The token is marked authenticated. The principal is the token's {@code sub} claim, the
-     * credentials are {@code null} and the authority collection is empty — DL-021.
-     *
-     * @param username the name of the resolved principal
-     * @param request the request whose remote address and session id are recorded as details
-     * @return an authenticated token holding no authorities
-     */
     /**
      * Resolves a verified subject against the credential store.
      *

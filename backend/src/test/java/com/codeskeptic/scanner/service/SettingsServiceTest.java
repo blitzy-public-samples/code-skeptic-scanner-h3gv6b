@@ -94,29 +94,16 @@ import com.codeskeptic.scanner.service.mapper.SettingMapper;
 @ExtendWith(MockitoExtension.class)
 @DisplayName("SettingsService")
 class SettingsServiceTest {
-
-    // -----------------------------------------------------------------------
-    // Seeded keys — backend/app/db/models.py:L42 names the column they occupy
-    // -----------------------------------------------------------------------
-
-    /** Key of the seeded row that bounds the like count of a monitored post. */
     private static final String TWEET_POPULARITY_THRESHOLD_KEY = "tweet_popularity_threshold";
 
-    /** Key of the seeded row that spaces the response-generation sweeps. */
     private static final String RESPONSE_GENERATION_DELAY_KEY = "response_generation_delay";
 
-    /** Key of the seeded row that carries the terms the filtered stream tracks. */
     private static final String STREAM_KEYWORDS_KEY = "stream_keywords";
 
-    /** The three seeded keys, in the order the service writes them. */
     private static final List<String> SEEDED_KEYS = List.of(
             TWEET_POPULARITY_THRESHOLD_KEY,
             RESPONSE_GENERATION_DELAY_KEY,
             STREAM_KEYWORDS_KEY);
-
-    // -----------------------------------------------------------------------
-    // Configured values supplied through ScannerProperties
-    // -----------------------------------------------------------------------
 
     /**
      * Configured popularity threshold supplied to the service. The value declared at
@@ -131,13 +118,10 @@ class SettingsServiceTest {
      */
     private static final long CONFIGURED_RESPONSE_GENERATION_DELAY = 9377L;
 
-    /** First configured stream term supplied to the service. */
     private static final String CONFIGURED_KEYWORD_ONE = "sentinel-keyword-alpha";
 
-    /** Second configured stream term supplied to the service. */
     private static final String CONFIGURED_KEYWORD_TWO = "sentinel-keyword-beta";
 
-    /** Rendering of {@link #CONFIGURED_KEYWORD_ONE} and {@link #CONFIGURED_KEYWORD_TWO} as one value. */
     private static final String CONFIGURED_KEYWORDS_VALUE =
             CONFIGURED_KEYWORD_ONE + "," + CONFIGURED_KEYWORD_TWO;
 
@@ -147,32 +131,20 @@ class SettingsServiceTest {
     /** Value declared for {@code RESPONSE_GENERATION_DELAY} at {@code backend/app/core/config.py:L11}. */
     private static final String SOURCE_DECLARED_RESPONSE_GENERATION_DELAY = "60";
 
-    // -----------------------------------------------------------------------
-    // Stored-row fixtures
-    // -----------------------------------------------------------------------
-
-    /** Value already stored on the {@link #TWEET_POPULARITY_THRESHOLD_KEY} row. */
     private static final String STORED_VALUE = "250";
 
-    /** Description already stored on the {@link #TWEET_POPULARITY_THRESHOLD_KEY} row. */
     private static final String STORED_DESCRIPTION = "Threshold last set by the operator.";
 
-    /** Value supplied to {@link SettingsService#updateSetting(String, String)}. */
     private static final String REPLACEMENT_VALUE = "512";
 
-    /** Key that names no stored row. */
     private static final String ABSENT_KEY = "no-such-setting";
 
-    /** Message carried by the rejection that stands in for the {@code settings} primary key. */
     private static final String DUPLICATE_KEY_MESSAGE = "settings primary key already taken";
 
-    /** Message carried by the failure that is not an integrity violation. */
     private static final String UNRELATED_FAILURE_MESSAGE = "the connection is closed";
 
-    /** Number of concurrent callers the threaded seeding test starts. */
     private static final int CONCURRENT_SEEDERS = 8;
 
-    /** Bound on how long the threaded seeding test waits for its callers, in seconds. */
     private static final long CONCURRENCY_TIMEOUT_SECONDS = 20L;
 
     /** Wire literal of {@code backend/app/api/settings.py:L18}. */
@@ -181,17 +153,12 @@ class SettingsServiceTest {
     /** Wire literal of {@code backend/app/api/settings.py:L22}. */
     private static final String SETTING_NOT_FOUND = "Setting not found";
 
-    /** Message carried by the duplicate-key failure a concurrent insert produces. */
     private static final String DUPLICATE_KEY = "Duplicate entry for the settings primary key.";
 
-    /** Message carried by a write failure that is not a duplicate key. */
     private static final String WRITE_FAILED = "The settings insert failed.";
 
-    /** Simple names of the types that can contribute schema. */
-    /** The only persistence-context operation the seeding uses to write a row. */
     private static final String PERSIST_OPERATION = "persist";
 
-    /** The only persistence-context operation the seeding uses to force the write out. */
     private static final String FLUSH_OPERATION = "flush";
 
     private static final List<String> SCHEMA_CAPABLE_TYPE_NAMES = List.of(
@@ -206,22 +173,14 @@ class SettingsServiceTest {
             "Flyway",
             "Liquibase");
 
-    /** Suffix identifying a Spring Data repository collaborator. */
     private static final String REPOSITORY_TYPE_SUFFIX = "Repository";
 
-    // -----------------------------------------------------------------------
-    // Collaborators
-    // -----------------------------------------------------------------------
-
-    /** Stubbed data access for the {@code settings} table. */
     @Mock
     private SettingRepository settingRepository;
 
-    /** Stubbed entity-to-wire converter. */
     @Mock
     private SettingMapper settingMapper;
 
-    /** Stubbed configuration root; the {@code scanner.ingestion} group is stubbed on top of it. */
     @Mock
     private ScannerProperties properties;
 
@@ -233,10 +192,8 @@ class SettingsServiceTest {
     @Mock
     private EntityManager entityManager;
 
-    /** Definition of every transaction the seeding insert opened, oldest first. */
     private final List<TransactionDefinition> openedTransactions = new CopyOnWriteArrayList<>();
 
-    /** Unit under test, holding the mocked collaborators. */
     private SettingsService service;
 
     @BeforeEach
@@ -244,11 +201,6 @@ class SettingsServiceTest {
         service = new SettingsService(settingRepository, settingMapper, properties, entityManager,
                 inlineTransactionManager());
     }
-
-    // -----------------------------------------------------------------------
-    // Declared surface — backend/app/api/settings.py:L10,L20;
-    // frontend/src/schema/setting.ts:L3-7
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("returns the settings as a list of setting objects")
@@ -363,10 +315,6 @@ class SettingsServiceTest {
                 .containsOnly(PERSIST_OPERATION, FLUSH_OPERATION);
     }
 
-    // -----------------------------------------------------------------------
-    // getAllSettings()
-    // -----------------------------------------------------------------------
-
     @Test
     @DisplayName("returns every stored setting with its key its value and its description")
     void returnsEveryStoredSettingWithItsKeyItsValueAndItsDescription() {
@@ -463,10 +411,6 @@ class SettingsServiceTest {
         verifyNoMoreInteractions(settingMapper);
     }
 
-    // -----------------------------------------------------------------------
-    // updateSetting(String, String) — a null value
-    // -----------------------------------------------------------------------
-
     @Test
     @DisplayName("rejects a null value")
     void rejectsANullValue() {
@@ -495,10 +439,6 @@ class SettingsServiceTest {
 
         verifyNoInteractions(settingRepository);
     }
-
-    // -----------------------------------------------------------------------
-    // updateSetting(String, String) — values that are not null
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("accepts the value false")
@@ -581,10 +521,6 @@ class SettingsServiceTest {
         assertThat(stored.getValue()).hasSize(10_000);
     }
 
-    // -----------------------------------------------------------------------
-    // updateSetting(String, String) — a key that names no row
-    // -----------------------------------------------------------------------
-
     @Test
     @DisplayName("reports a key that names no row as absent")
     void reportsAKeyThatNamesNoRowAsAbsent() {
@@ -617,10 +553,6 @@ class SettingsServiceTest {
         verifyNoInteractions(settingRepository);
         verifyNoInteractions(settingMapper);
     }
-
-    // -----------------------------------------------------------------------
-    // updateSetting(String, String) — a stored row
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("returns the row carrying the new value")
@@ -683,10 +615,6 @@ class SettingsServiceTest {
         assertThat(rendered).containsExactly(new SettingDto(
                 TWEET_POPULARITY_THRESHOLD_KEY, REPLACEMENT_VALUE, STORED_DESCRIPTION));
     }
-
-    // -----------------------------------------------------------------------
-    // seedDefaultSettings() — the rows written
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("seeds three settings whose keys are the threshold the delay and the keywords")
@@ -765,10 +693,6 @@ class SettingsServiceTest {
         verify(properties, never()).ingestion();
     }
 
-    // -----------------------------------------------------------------------
-    // seedDefaultSettings() — insert if absent
-    // -----------------------------------------------------------------------
-
     @Test
     @DisplayName("checks every key for presence before writing it")
     void checksEveryKeyForPresenceBeforeWritingIt() {
@@ -813,10 +737,6 @@ class SettingsServiceTest {
                 .containsExactly(RESPONSE_GENERATION_DELAY_KEY, STREAM_KEYWORDS_KEY)
                 .doesNotContain(TWEET_POPULARITY_THRESHOLD_KEY);
     }
-
-    // -----------------------------------------------------------------------
-    // seedDefaultSettings() — a second seeding
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("holds three settings after seeding twice")
@@ -873,10 +793,6 @@ class SettingsServiceTest {
                 .containsExactly(RESPONSE_GENERATION_DELAY_KEY, STREAM_KEYWORDS_KEY)
                 .doesNotContain(TWEET_POPULARITY_THRESHOLD_KEY);
     }
-
-    // -----------------------------------------------------------------------
-    // seedDefaultSettings() — a key taken concurrently — DL-159
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("inserts each seeded row and never merges, so no statement it issues can update a "
@@ -1047,10 +963,6 @@ class SettingsServiceTest {
                 .doesNotContain(String.valueOf(CONFIGURED_POPULARITY_THRESHOLD));
     }
 
-    // -----------------------------------------------------------------------
-    // seedDefaultSettings() — concurrent seeding
-    // -----------------------------------------------------------------------
-
     @Test
     @DisplayName("opens one transaction of its own for every seeded key")
     void opensOneTransactionOfItsOwnForEverySeededKey() {
@@ -1143,7 +1055,6 @@ class SettingsServiceTest {
     @Test
     @DisplayName("propagates a write failure that is not a key another instance inserted first")
     void propagatesAWriteFailureThatIsNotAKeyAnotherInstanceInsertedFirst() {
-        // The failure reaches the caller on the first key, so no later key's value is read.
         when(properties.popularityThreshold()).thenReturn(CONFIGURED_POPULARITY_THRESHOLD);
         when(settingRepository.existsById(anyString())).thenReturn(false);
         doThrow(new DataIntegrityViolationException(WRITE_FAILED))
@@ -1154,15 +1065,6 @@ class SettingsServiceTest {
                 .hasMessage(WRITE_FAILED);
     }
 
-    // -----------------------------------------------------------------------
-    // Fixtures and stubs
-    // -----------------------------------------------------------------------
-
-    /**
-     * Returns one stored row per seeded key, each carrying a value and a description.
-     *
-     * @return three rows in the order {@link #SEEDED_KEYS} declares
-     */
     private static List<Setting> threeStoredRows() {
         return List.of(
                 new Setting(TWEET_POPULARITY_THRESHOLD_KEY, STORED_VALUE, STORED_DESCRIPTION),
@@ -1170,34 +1072,14 @@ class SettingsServiceTest {
                 new Setting(STREAM_KEYWORDS_KEY, CONFIGURED_KEYWORDS_VALUE, "Tracked terms."));
     }
 
-    /**
-     * Converts a row the way {@link SettingMapper} does, copying all three columns unchanged.
-     *
-     * @param row the row to convert
-     * @return the row's wire form
-     */
     private static SettingDto asDto(Setting row) {
         return new SettingDto(row.getKey(), row.getValue(), row.getDescription());
     }
 
-    /**
-     * Reports whether any row in {@code rows} carries {@code key}.
-     *
-     * @param rows the rows to search
-     * @param key  the key to look for
-     * @return {@code true} when a row carries the key
-     */
     private static boolean holdsKey(List<Setting> rows, String key) {
         return rows.stream().anyMatch(row -> key.equals(row.getKey()));
     }
 
-    /**
-     * Returns the single row seeded for {@code key}.
-     *
-     * @param rows the rows the repository was asked to write
-     * @param key  the key to select
-     * @return the row carrying {@code key}
-     */
     private static Setting seededRow(List<Setting> rows, String key) {
         return rows.stream()
                 .filter(row -> key.equals(row.getKey()))
@@ -1205,7 +1087,6 @@ class SettingsServiceTest {
                 .orElseThrow(() -> new AssertionError("No row was written for the key " + key + "."));
     }
 
-    /** Stubs the mapper to convert every row of a list. */
     private void stubMapperToConvertEveryRow() {
         when(settingMapper.toDtoList(any())).thenAnswer(invocation -> {
             List<Setting> rows = invocation.getArgument(0);
@@ -1213,13 +1094,6 @@ class SettingsServiceTest {
         });
     }
 
-    /**
-     * Stubs one stored row under {@code key}, together with the write and the conversion that follow
-     * a successful update.
-     *
-     * @param key the key the stored row carries
-     * @return the stored row the service reads, writes and converts
-     */
     private Setting stubStoredRow(String key) {
         Setting stored = new Setting(key, STORED_VALUE, STORED_DESCRIPTION);
         when(settingRepository.findById(key)).thenReturn(Optional.of(stored));
@@ -1229,24 +1103,10 @@ class SettingsServiceTest {
         return stored;
     }
 
-    /** Stubs every seeded key as absent. */
     private void stubEveryKeyAbsent() {
         when(settingRepository.existsById(anyString())).thenReturn(false);
     }
 
-    /**
-     * Stubs the insert to reject {@code rejectedKey} with an integrity violation and to accept every
-     * other key.
-     *
-     * @param rejectedKey the key whose insert is rejected
-     */
-    /**
-     * Stubs the state another instance leaves behind when it inserts {@code key} first: the key reads
-     * as absent when presence is first tested and as present afterwards, and the insert of that one
-     * key is rejected with an integrity violation.
-     *
-     * @param key the key another instance inserted first
-     */
     private void stubConcurrentInsertOf(String key) {
         AtomicInteger presenceTests = new AtomicInteger();
         when(settingRepository.existsById(anyString())).thenAnswer(invocation ->
@@ -1262,14 +1122,6 @@ class SettingsServiceTest {
                         && rejectedKey.equals(stored.getKey())));
     }
 
-    /**
-     * Runs {@code work} on {@value #CONCURRENT_SEEDERS} threads released together, and collects every
-     * failure any of them raises.
-     *
-     * @param work   the operation each thread performs once
-     * @param raised the list every raised failure is added to
-     * @throws InterruptedException when the calling thread is interrupted while waiting
-     */
     private static void runConcurrently(Runnable work, List<Throwable> raised)
             throws InterruptedException {
         CyclicBarrier released = new CyclicBarrier(CONCURRENT_SEEDERS);
@@ -1300,16 +1152,6 @@ class SettingsServiceTest {
 
     // Net-new: every test executor is awaited and its termination asserted — DL-273 — see
     // docs/DECISION_LOG.md
-    /**
-     * Shuts the supplied executor down and asserts that it terminates.
-     *
-     * <p>Termination is awaited for at most {@value #CONCURRENCY_TIMEOUT_SECONDS} seconds. A thread
-     * still running at that bound fails the test and is not left behind for the rest of the
-     * build. An interrupt while awaiting is restored on the calling thread and reported as a
-     * failure; it is never reported as a clean termination.
-     *
-     * @param executor the executor to release
-     */
     private static void awaitTermination(ExecutorService executor) {
         executor.shutdownNow();
         try {
@@ -1322,16 +1164,6 @@ class SettingsServiceTest {
         }
     }
 
-    /**
-     * Stubs the repository to report presence from {@code storedRows} and to append every written row
-     * to it, rejecting a key the list already holds.
-     *
-     * <p>The rejection stands in for the primary key of the {@code settings} table: a second write of
-     * a key already stored answers with {@link DataIntegrityViolationException} and appends no
-     * duplicate.
-     *
-     * @param storedRows the mutable list standing in for the {@code settings} table
-     */
     private void stubRepositoryBackedBy(List<Setting> storedRows) {
         when(settingRepository.existsById(anyString()))
                 .thenAnswer(invocation -> holdsKey(storedRows, invocation.getArgument(0)));
@@ -1345,20 +1177,12 @@ class SettingsServiceTest {
         }).when(entityManager).persist(any(Setting.class));
     }
 
-    /** Stubs the two configured values the seeding reads. */
     private void stubConfiguredSeedValues() {
         when(properties.popularityThreshold()).thenReturn(CONFIGURED_POPULARITY_THRESHOLD);
         when(properties.responseGenerationDelaySeconds())
                 .thenReturn(CONFIGURED_RESPONSE_GENERATION_DELAY);
     }
 
-    /**
-     * Captures the rows {@link SettingsService#updateSetting(String, String)} asked the repository to
-     * write, which it writes with {@code save}.
-     *
-     * @param expectedInserts the number of inserts expected
-     * @return the captured rows in the order they were inserted
-     */
     private List<Setting> seededRows(int expectedInserts) {
         ArgumentCaptor<Setting> inserted = ArgumentCaptor.forClass(Setting.class);
         verify(settingRepository, times(expectedInserts)).saveAndFlush(inserted.capture());
@@ -1378,15 +1202,8 @@ class SettingsServiceTest {
         return written.getAllValues();
     }
 
-    /**
-     * Builds a transaction manager that runs the seeding insert inline and records the definition each
-     * insert was opened with, so the per-key transaction is observable without a database.
-     *
-     * @return the recording transaction manager
-     */
     private PlatformTransactionManager inlineTransactionManager() {
         return new PlatformTransactionManager() {
-
             @Override
             public TransactionStatus getTransaction(TransactionDefinition definition) {
                 openedTransactions.add(definition);
@@ -1395,32 +1212,19 @@ class SettingsServiceTest {
 
             @Override
             public void commit(TransactionStatus status) {
-                // No transaction is started, so there is nothing to commit.
             }
 
             @Override
             public void rollback(TransactionStatus status) {
-                // No transaction is started, so there is nothing to roll back.
             }
         };
     }
 
-    /**
-     * Captures the single row {@link SettingsService#updateSetting(String, String)} asked the
-     * repository to write.
-     *
-     * @return the captured row
-     */
     private Setting savedRow() {
         ArgumentCaptor<Setting> written = ArgumentCaptor.forClass(Setting.class);
         verify(settingRepository).save(written.capture());
         return written.getValue();
     }
-
-
-    // -----------------------------------------------------------------------
-    // Log-injection guard — DL-149 — see docs/DECISION_LOG.md
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("renders a newline-bearing setting key with its control characters replaced, forging "
@@ -1455,12 +1259,6 @@ class SettingsServiceTest {
         });
     }
 
-    /**
-     * Collects the declared field types and constructor parameter types of {@link SettingsService},
-     * excluding synthetic fields.
-     *
-     * @return every type the class holds or accepts
-     */
     private static List<Class<?>> declaredCollaboratorTypes() {
         List<Class<?>> types = new ArrayList<>();
         for (Field field : SettingsService.class.getDeclaredFields()) {
@@ -1474,20 +1272,11 @@ class SettingsServiceTest {
         return types;
     }
 
-    /**
-     * A {@link PlatformTransactionManager} that records the definition of every transaction opened
-     * against it and counts the commits and rollbacks it is asked for. It opens no connection and
-     * reaches no database; the callback the template runs executes inline.
-     */
     private static final class RecordingTransactionManager implements PlatformTransactionManager {
-
-        /** One entry per transaction opened, in the order they were opened. */
         private final List<TransactionDefinition> openedTransactions = new ArrayList<>();
 
-        /** Number of transactions committed. */
         private int commits;
 
-        /** Number of transactions rolled back. */
         private int rollbacks;
 
         @Override
@@ -1506,29 +1295,14 @@ class SettingsServiceTest {
             rollbacks++;
         }
 
-        /**
-         * Returns the definition of every transaction opened against this manager.
-         *
-         * @return one entry per transaction, in the order they were opened
-         */
         private List<TransactionDefinition> definitions() {
             return List.copyOf(openedTransactions);
         }
 
-        /**
-         * Returns how many transactions were committed.
-         *
-         * @return the commit count
-         */
         private int commits() {
             return commits;
         }
 
-        /**
-         * Returns how many transactions were rolled back.
-         *
-         * @return the rollback count
-         */
         private int rollbacks() {
             return rollbacks;
         }

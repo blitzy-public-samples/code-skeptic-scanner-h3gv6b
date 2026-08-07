@@ -18,91 +18,48 @@ import com.codeskeptic.scanner.service.SettingsService;
 
 // Ported from backend/app/api/settings.py:L1-24 (faithful port) — see docs/DECISION_LOG.md
 /**
- * Serves the two HTTP routes of the {@code settings} resource.
- *
- * <p>Replaces the Flask blueprint {@code settings_bp}, declared at
- * {@code backend/app/api/settings.py:L5} and registered on the application object at
- * {@code backend/app/main.py:L28}. The two routes declared here are the two the blueprint declared.
+ * Serves the two HTTP routes of the {@code settings} resource, both unprefixed as the blueprint
+ * spelled them. Replaces the Flask blueprint {@code settings_bp} declared at
+ * {@code backend/app/api/settings.py:L5} and registered at {@code backend/app/main.py:L28}.
  *
  * <table border="1">
  * <caption>Route surface</caption>
  * <tr><th>Method and path</th><th>Handler</th><th>Success</th><th>Source</th></tr>
- * <tr>
- *   <td>{@code GET /settings}</td>
- *   <td>{@link #getSettings()}</td>
- *   <td>200, a JSON array</td>
- *   <td>{@code backend/app/api/settings.py:L7-11}</td>
- * </tr>
- * <tr>
- *   <td>{@code PUT /settings/{key}}</td>
+ * <tr><td>{@code GET /settings}</td><td>{@link #getSettings()}</td>
+ *   <td>200, a JSON array</td><td>{@code backend/app/api/settings.py:L7-11}</td></tr>
+ * <tr><td>{@code PUT /settings/{key}}</td>
  *   <td>{@link #updateSetting(String, UpdateSettingRequest)}</td>
- *   <td>200, one JSON object</td>
- *   <td>{@code backend/app/api/settings.py:L13-24}</td>
- * </tr>
+ *   <td>200, one JSON object</td><td>{@code backend/app/api/settings.py:L13-24}</td></tr>
  * </table>
  *
- * <p>Both paths are unprefixed, as the blueprint spelled them: no {@code /api} segment and no version
- * segment. Each path is spelled in full on its own handler.
+ * <p>{@code GET /settings} renders an unwrapped JSON array of {@link SettingDto} objects, each carrying
+ * {@code key}, {@code value} and {@code description}, matching the bare {@code jsonify(settings)} at
+ * {@code :L11} — DL-039. {@code PUT /settings/{key}} addresses a row that already exists and creates
+ * none; the default rows it addresses are seeded by {@code service.SettingsService} — DL-040.
  *
- * <p>{@code GET /settings} renders a JSON array whose elements are {@link SettingDto} objects, each
- * carrying {@code key}, {@code value} and {@code description}, unwrapped, matching the bare
- * {@code jsonify(settings)} at {@code backend/app/api/settings.py:L11} — see docs/DECISION_LOG.md
- * DL-039.
+ * <p>The guard at {@code :L17} is {@code if new_value is None:}, a test for {@code null} alone, so an
+ * empty string, {@code "false"} and {@code "0"} are all accepted; {@code dto.UpdateSettingRequest}
+ * declares {@code @NotNull} and no other constraint — DL-050.
  *
- * <p>{@code PUT /settings/{key}} addresses a row that already exists: a {@code key} naming no row is
- * reported as absent and no row is created for it. The default rows the route addresses are seeded by
- * {@code service.SettingsService} — see docs/DECISION_LOG.md DL-040.
+ * <p>This class selects status 200 and builds no error body. {@code service.SettingsService.updateSetting}
+ * raises {@code BadRequestException} carrying {@code No value provided} ({@code :L18}) for a
+ * {@code null} value and {@code NotFoundException} carrying {@code Setting not found} ({@code :L22})
+ * for a key naming no row; a body whose {@code value} member is absent raises
+ * {@code MethodArgumentNotValidException}, which {@link GlobalExceptionHandler} answers with the same
+ * 400 and literal.
  *
- * <p>The guard at {@code backend/app/api/settings.py:L17} is {@code if new_value is None:}, a test for
- * {@code null} alone, so an empty string, {@code "false"} and {@code "0"} are all accepted;
- * {@code dto.UpdateSettingRequest} declares {@code @NotNull} and no other constraint — see
- * docs/DECISION_LOG.md DL-050.
+ * <p>Both service operations were invoked statically on the class at {@code :L10} and {@code :L20};
+ * both are instance calls on the injected singleton here — DL-043. Authentication is enforced by the
+ * security filter chain in place of the bare {@code @jwt_required} at {@code :L8} and {@code :L14} —
+ * DL-021. The {@code settings} table is reached through {@code service.SettingsService} only.
  *
- * <p>This class selects the status 200 and builds no error body. The two error statuses of the source
- * route are produced away from here:
- *
- * <ul>
- *   <li>{@code BadRequestException} carrying {@code No value provided}, the wire literal of
- *       {@code backend/app/api/settings.py:L18}, is raised by
- *       {@code service.SettingsService.updateSetting} for a {@code null} value, and
- *       {@code MethodArgumentNotValidException} is raised for a body whose {@code value} member is
- *       absent. {@link GlobalExceptionHandler} answers both with 400 and the same literal.</li>
- *   <li>{@code NotFoundException} carrying {@code Setting not found}, the wire literal of
- *       {@code backend/app/api/settings.py:L22}, is raised by
- *       {@code service.SettingsService.updateSetting} for a key naming no row.
- *       {@link GlobalExceptionHandler} answers it with 404.</li>
- * </ul>
- *
- * <p>{@code SettingsService.get_all_settings()} at {@code backend/app/api/settings.py:L10} and
- * {@code SettingsService.update_setting(key, new_value)} at {@code :L20} were invoked statically on
- * the class; both are instance calls on the injected singleton here — see docs/DECISION_LOG.md
- * DL-043.
- *
- * <p>Authentication is enforced by the security filter chain, which runs ahead of the
- * {@code DispatcherServlet}, in place of the bare {@code @jwt_required} at
- * {@code backend/app/api/settings.py:L8} and {@code :L14} — see docs/DECISION_LOG.md DL-021.
- *
- * <p>This class reaches the {@code settings} table through {@code service.SettingsService} only.
- *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-021, DL-039, DL-040,
- * DL-043, DL-048 and DL-050; construct-level provenance is recorded in
- * {@code docs/TRACEABILITY_MATRIX.md}.
- *
- * <p>This class is a singleton bean, is thread-safe and holds no mutable state.
+ * <p>Singleton bean, thread-safe, holding no mutable state.
  */
 @RestController
 public class SettingController {
 
-    /** Reads and updates the rows of the {@code settings} table. */
     private final SettingsService settingsService;
 
-    /**
-     * Creates the controller with its one collaborator, replacing the static invocation at
-     * {@code backend/app/api/settings.py:L10,L20} — DL-043.
-     *
-     * @param settingsService the service serving both routes, must not be {@code null}
-     * @throws NullPointerException when {@code settingsService} is {@code null}
-     */
     public SettingController(SettingsService settingsService) {
         this.settingsService = Objects.requireNonNull(settingsService,
                 "settingsService must not be null.");
@@ -114,12 +71,8 @@ public class SettingController {
      *
      * <p>Reproduces {@code GET /settings} at {@code backend/app/api/settings.py:L7-11}. The body is a
      * JSON array; each element carries the {@code key}, {@code value} and {@code description} of one
-     * row. An empty table renders an empty array, and the status is 200 either way.
-     *
-     * <p>The route reads no query parameter and no header, as at
-     * {@code backend/app/api/settings.py:L9}.
-     *
-     * <p>Example response body:
+     * row. An empty table renders an empty array and the status is 200 either way. The route reads no
+     * query parameter and no header, as at {@code :L9}.
      *
      * <pre>{@code
      * [
@@ -139,28 +92,17 @@ public class SettingController {
     /**
      * Replaces the {@code value} of one row of the {@code settings} table and renders the stored row.
      *
-     * <p>Reproduces {@code PUT /settings/<key>} at {@code backend/app/api/settings.py:L13-24}. The
-     * path-variable name is {@code key}, as at {@code :L13}, bound as a {@code String} — the type
-     * Flask's default path converter delivered. A key of any spelling reaches the service and one
-     * naming no row yields 404 — see docs/DECISION_LOG.md DL-048.
+     * <p>Reproduces {@code PUT /settings/<key>} at {@code backend/app/api/settings.py:L13-24}. The path
+     * variable binds as a {@link String}, the type Flask's default path converter delivered, so a key of
+     * any spelling reaches the service and one naming no row yields 404 — DL-048.
      *
-     * <p>The body carries one member, {@code value}, read at {@code :L16}, and is passed to the service
-     * verbatim: not trimmed, defaulted or coerced. An empty string is stored, matching the
-     * {@code is None} test at {@code :L17}.
-     *
-     * <p>An absent body binds to {@code null} and reaches the service as a {@code null} value; a body
-     * carrying no {@code value} member fails the {@code @NotNull} constraint of
-     * {@link UpdateSettingRequest}. Both answer 400 with the literal of {@code :L18}.
-     *
-     * <p>Example request body:
+     * <p>The body's one member, {@code value}, read at {@code :L16}, is passed to the service verbatim:
+     * not trimmed, defaulted or coerced, so an empty string is stored, matching the {@code is None} test
+     * at {@code :L17}. An absent body binds to {@code null} and a body carrying no {@code value} member
+     * fails the {@code @NotNull} constraint of {@link UpdateSettingRequest}; both answer 400 with the
+     * literal of {@code :L18}.
      *
      * <pre>{@code {"value":"250"}}</pre>
-     *
-     * <p>Example response body:
-     *
-     * <pre>{@code
-     * {"key":"tweet_popularity_threshold","value":"250","description":"Minimum like count ..."}
-     * }</pre>
      *
      * @param key     the primary key of the row to update, taken from the path
      * @param request the request body; {@code null} when the request carried no body

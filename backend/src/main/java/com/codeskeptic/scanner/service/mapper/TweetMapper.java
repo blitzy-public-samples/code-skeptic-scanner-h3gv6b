@@ -7,8 +7,8 @@ import org.springframework.stereotype.Component;
 import com.codeskeptic.scanner.dto.TweetDto;
 import com.codeskeptic.scanner.entity.Tweet;
 
-// Net-new (no Python counterpart method) — call sites backend/app/api/tweets.py:L19,L30 —
-// DL-023, DL-024, DL-080 — see docs/DECISION_LOG.md
+// Net-new (no Python counterpart method) — the class is authorised by DL-295; call sites
+// backend/app/api/tweets.py:L19,L30 — DL-023, DL-024, DL-080 — see docs/DECISION_LOG.md
 /**
  * Converts {@link Tweet} entities into their {@link TweetDto} wire form.
  *

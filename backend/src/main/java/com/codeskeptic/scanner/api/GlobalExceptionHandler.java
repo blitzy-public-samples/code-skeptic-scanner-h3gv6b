@@ -38,22 +38,19 @@ import jakarta.servlet.RequestDispatcher;
  * response body the service returns.
  *
  * <p>Replaces the two {@code @app.errorhandler} functions at {@code backend/app/main.py:L31-37}. The
- * wire surface is exactly the surface the retired handlers put on the wire: the eight per-route
- * literals, carried through unaltered, plus the two global literals {@value #NOT_FOUND} and
- * {@value #INTERNAL_SERVER_ERROR}. No other literal is declared here and none is written to a
- * response body.
- *
- * <p>Every body produced here is an {@link ErrorResponse}: the single-key
- * {@code {"error": <string>}} envelope. The table names every handler this class declares and the
- * status and message each one puts on the wire.
+ * wire surface is exactly theirs: the eight per-route literals carried through unaltered, plus the
+ * two global literals {@value #NOT_FOUND} and {@value #INTERNAL_SERVER_ERROR}. Every body is an
+ * {@link ErrorResponse}, the single-key {@code {"error": <string>}} envelope — DL-210.
  *
  * <table border="1">
  * <caption>Status and message emitted by each handler</caption>
  * <tr><th>Handler</th><th>Status</th><th>Message on the wire</th></tr>
  * <tr><td>{@link #handleNotFound(NotFoundException)}</td><td>404</td>
- *   <td>the exception's own message — one of the five per-route 404 literals</td></tr>
+ *   <td>the exception's own message — one of five source branches carrying four distinct
+ *   literals</td></tr>
  * <tr><td>{@link #handleBadRequest(BadRequestException)}</td><td>400</td>
- *   <td>the exception's own message — one of the three per-route 400 literals</td></tr>
+ *   <td>the exception's own message — one of three source branches carrying three distinct
+ *   literals</td></tr>
  * <tr><td>{@link #handleResponseGenerationFailure(ResponseGenerationException)}</td><td>500</td>
  *   <td>{@code Failed to generate response}</td></tr>
  * <tr><td>{@link #handleMethodArgumentNotValid(MethodArgumentNotValidException)}</td><td>400</td>
@@ -64,55 +61,35 @@ import jakarta.servlet.RequestDispatcher;
  *   <td>no body for a framework request failure; {@value #INTERNAL_SERVER_ERROR} otherwise</td></tr>
  * </table>
  *
- * <p>A framework request failure — an unsupported method, an unsupported or unacceptable media type,
- * a missing or unconvertible request value, a malformed body — keeps the status the framework assigns
- * it and carries <em>no</em> body, which is how the retired application answered each of them: only
- * 404 and 500 carried the JSON envelope and every other status was answered by Werkzeug's own page.
- * {@link #handleUnexpectedException(Exception)} is the single handler that decides this, so no status
- * beyond 404 and 500 gains a literal of its own.
+ * <p>A framework request failure keeps the status the framework assigns it and carries <em>no</em>
+ * body, which is how the retired application answered each of them: only 404 and 500 carried the JSON
+ * envelope. {@link #handleUnexpectedException(Exception)} is the single handler that decides this — DL-092.
  *
  * <p>The three {@code com.codeskeptic.scanner.exception} types declare no {@code @ResponseStatus};
- * their status is assigned here. Their messages are copied through {@link Throwable#getMessage()}
- * unaltered; each of the eight per-route literals round-trips character-for-character.
+ * their status is assigned here and their messages are copied through {@link Throwable#getMessage()}
+ * character-for-character — DL-212. Authentication and authorisation failures are answered by the
+ * security filter chain ahead of the {@code DispatcherServlet} and reach no handler here.
  *
- * <p>A failure answered by {@code HttpServletResponse.sendError(int)} reaches no handler declared
- * here; the container re-dispatches the request to the error page, where Spring Boot's own
- * {@code BasicErrorController} renders the attribute map {@link #errorEnvelopeAttributes()} returns —
- * at most the single key {@value #ERROR_KEY} carrying {@value #NOT_FOUND} or
- * {@value #INTERNAL_SERVER_ERROR}, and no attribute at all for any other status.
- *
- * <p>Authentication and authorisation failures are answered by the security filter chain, which runs
- * ahead of the {@code DispatcherServlet}; no exception from them reaches this class.
- *
- * <p>All state declared here is immutable. The single advice instance is safe to share across
- * concurrent requests.
+ * <p>All state declared here is immutable; the single advice instance is safe to share.
  */
 // Ported from backend/app/main.py:L31-37 (faithful port) — see docs/DECISION_LOG.md
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
-    /** Records the exceptions reported by {@link #handleUnexpectedException(Exception)}. */
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
-    /** Wire literal of {@code backend/app/main.py:L33}. */
     private static final String NOT_FOUND = "Not found";
 
-    /** Wire literal of {@code backend/app/main.py:L37}. */
     private static final String INTERNAL_SERVER_ERROR = "Internal server error";
 
-    /** The single member of the error envelope of {@code backend/app/main.py:L32,L36}. */
     private static final String ERROR_KEY = "error";
 
-    /** Links of a cause chain {@link #typeChain(Throwable)} renders — DL-197. */
     private static final int TYPE_CHAIN_LIMIT = 5;
 
-    /** Separator between two links of a rendered cause chain. */
     private static final String CAUSE_SEPARATOR = " <- ";
 
-    /** Rendered in place of the links beyond {@value #TYPE_CHAIN_LIMIT}. */
     private static final String CHAIN_CONTINUES = "...";
 
-    /** Rendered by {@link #typeChain(Throwable)} for an absent failure. */
     private static final String ABSENT = "absent";
 
     /**
@@ -122,25 +99,24 @@ public class GlobalExceptionHandler {
      */
     private static final Set<String> TWEET_ID_FIELD_NAMES = Set.of("tweetId", "tweet_id");
 
-    /** Field names that select {@link BadRequestException#NO_VALUE_PROVIDED}. */
     private static final Set<String> VALUE_FIELD_NAMES = Set.of("value");
 
-    // Ported from backend/app/main.py:L31-37 (faithful port) — see docs/DECISION_LOG.md DL-183
+    // Envelope intent ported from backend/app/main.py:L31-37 (faithful port); the servlet ERROR-dispatch
+    // mechanism that carries it is net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-183
     /**
      * Publishes the error-attribute source that renders this class's envelope on the servlet
      * {@code ERROR} dispatch.
      *
-     * <p>The handler methods below translate every exception that reaches the
-     * {@code DispatcherServlet} during a {@code REQUEST} dispatch. A failure answered with
-     * {@code HttpServletResponse.sendError(int)} — which Spring Security's request firewall issues
-     * for a rejected path such as {@code //tweets} — unwinds that dispatch and asks the container to
-     * re-dispatch to the error page. This bean supplies the attributes rendered on that second
+     * <p>The handler methods below translate exceptions raised during a {@code REQUEST} dispatch. A
+     * failure answered with {@code HttpServletResponse.sendError(int)} — which Spring Security's
+     * request firewall issues for a rejected path such as {@code //tweets} — unwinds that dispatch and
+     * is re-dispatched to the error page. This bean supplies the attributes rendered on that second
      * dispatch, so a dispatched 404 or 500 puts the same envelope on the wire as the handlers below
-     * and no dispatch carries a request path, a timestamp or an exception detail.
+     * and no dispatch carries a request path, a timestamp or an exception detail — DL-183.
      *
      * <p>{@code DefaultErrorAttributes} is declared only while the context holds no
      * {@link ErrorAttributes} bean, so this bean replaces it while Spring Boot's own
-     * {@code BasicErrorController} stays the handler mapped to the error path — DL-183.
+     * {@code BasicErrorController} stays the handler mapped to the error path.
      *
      * @return the error-attribute source, replacing the framework default
      */
@@ -152,9 +128,10 @@ public class GlobalExceptionHandler {
     /**
      * Reports an absent entity with HTTP 404 and the exception's own message.
      *
-     * <p>Carries the five literals of {@code backend/app/api/tweets.py:L32,L43},
-     * {@code backend/app/api/responses.py:L31,L65} and {@code backend/app/api/settings.py:L22}; the
-     * message is passed through unmapped, and the two response-scoped literals stay distinct.
+     * <p>Carries the five source branches at {@code backend/app/api/tweets.py:L32,L43},
+     * {@code backend/app/api/responses.py:L31,L65} and {@code backend/app/api/settings.py:L22}, which
+     * declare four distinct literals between them: the two tweet branches share one. The message is
+     * passed through unmapped and the two response-scoped literals stay distinct — DL-212.
      *
      * @param ex the raised exception, whose message becomes the response body
      * @return HTTP 404 carrying the single-key error envelope

@@ -78,45 +78,31 @@ import ch.qos.logback.core.read.ListAppender;
 @ExtendWith(MockitoExtension.class)
 @DisplayName("TweetStreamListener")
 class TweetStreamListenerTest {
-
-    /** Identifier the stubbed repository assigns to a stored row. */
     private static final int STORED_ID = 7;
 
-    /** Identifier a delivered record carries in {@code data.id}. */
     private static final String DELIVERED_POST_ID = "1111111111";
 
-    /** Like count every accepted record carries. */
     private static final int POPULAR_LIKE_COUNT = 500;
 
-    /** Post text every accepted record carries. */
     private static final String POST_TEXT = "doubtful";
 
-    /** Sentiment score the stubbed analysis service reports for any text. */
     private static final double SENTIMENT_SCORE = -0.6D;
 
-    /** Doubt rating the stubbed analysis service reports for {@link #SENTIMENT_SCORE}. */
     private static final double REPORTED_DOUBT_RATING = 7.25D;
 
-    /** Valid stream creation time carried by records not exercising that member. */
     private static final String CREATED_AT = "2026-08-03T15:11:52.000Z";
 
-    /** Stored UTC-local form of {@link #CREATED_AT}. */
     private static final LocalDateTime STORED_CREATED_AT =
             LocalDateTime.of(2026, 8, 3, 15, 11, 52);
 
-    /** Valid author identifier carried by records not exercising that member. */
     private static final String AUTHOR_ID = "4242";
 
-    /** Identifier of the stored reply the stubbed generation reports. */
     private static final String GENERATED_ID = "11";
 
-    /** Content of the stored reply the stubbed generation reports. */
     private static final String GENERATED_CONTENT = "a draft reply";
 
-    /** Generation time of the stored reply the stubbed generation reports. */
     private static final LocalDateTime GENERATED_AT = LocalDateTime.of(2026, 8, 3, 15, 12, 0);
 
-    /** Reads a synthesized record into a tree. */
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @Mock
@@ -139,9 +125,6 @@ class TweetStreamListenerTest {
 
     private TweetStreamListener listener;
 
-    /**
-     * Assembles the listener over its six doubles.
-     */
     @BeforeEach
     void assembleListener() {
         listener = new TweetStreamListener(twitterService, sentimentAnalysisService, tweetRepository,
@@ -151,7 +134,6 @@ class TweetStreamListenerTest {
     @Nested
     @DisplayName("record validation")
     class RecordValidation {
-
         @Test
         @DisplayName("returns true and stores nothing for a null payload")
         void returnsTrueAndStoresNothingForANullPayload() {
@@ -357,7 +339,6 @@ class TweetStreamListenerTest {
     @Nested
     @DisplayName("popularity gate")
     class PopularityGate {
-
         @Test
         @DisplayName("offers an integral like count to the popularity gate and stores it")
         void offersAnIntegralLikeCountToThePopularityGateAndStoresIt() {
@@ -398,7 +379,6 @@ class TweetStreamListenerTest {
     @Nested
     @DisplayName("ingestion pipeline")
     class IngestionPipeline {
-
         @Test
         @DisplayName("evaluates the gate, then the sentiment, then stores the row")
         void evaluatesTheGateThenTheSentimentThenStoresTheRow() {
@@ -464,7 +444,6 @@ class TweetStreamListenerTest {
     @Nested
     @DisplayName("stored columns")
     class StoredColumns {
-
         @Test
         @DisplayName("maps every delivered member onto its column")
         void mapsEveryDeliveredMemberOntoItsColumn() {
@@ -581,7 +560,6 @@ class TweetStreamListenerTest {
     @Nested
     @DisplayName("response generation trigger")
     class ResponseGenerationTrigger {
-
         @Test
         @DisplayName("stores the row and triggers generation with the identifier assigned to it")
         void storesTheRowAndTriggersGenerationWithTheIdentifierAssignedToIt() {
@@ -598,8 +576,6 @@ class TweetStreamListenerTest {
             verifyNoMoreInteractions(responseService);
         }
 
-        // TwitterService carries no publish operation and none is reached — IR7 — see
-        // docs/DECISION_LOG.md
         @Test
         @DisplayName("reaches the popularity gate and no other Twitter operation")
         void reachesThePopularityGateAndNoOtherTwitterOperation() {
@@ -647,7 +623,6 @@ class TweetStreamListenerTest {
     @Nested
     @DisplayName("Notion mirrors")
     class NotionMirrors {
-
         @Test
         @DisplayName("mirrors the stored row, then triggers generation, then mirrors the reply")
         void mirrorsTheStoredRowThenTriggersGenerationThenMirrorsTheReply() {
@@ -831,10 +806,6 @@ class TweetStreamListenerTest {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // One threshold resolution per ingestion cycle — DL-255
-    // -----------------------------------------------------------------------
-
     @Test
     @DisplayName("evaluates the gate against a supplied threshold and resolves none itself")
     void evaluatesTheGateAgainstASuppliedThresholdAndResolvesNoneItself() {
@@ -886,34 +857,20 @@ class TweetStreamListenerTest {
         verify(twitterService).popularityThresholdInForce();
     }
 
-    /**
-     * Reports that the popularity gate accepts every like count offered to it.
-     */
     private void stubGateAccepts() {
         when(twitterService.meetsPopularityThreshold(any())).thenReturn(true);
     }
 
-    /**
-     * Reports that the popularity gate rejects every like count offered to it.
-     */
     private void stubGateRejects() {
         when(twitterService.meetsPopularityThreshold(any())).thenReturn(false);
     }
 
-    /**
-     * Reports {@link #SENTIMENT_SCORE} for any text, and {@link #REPORTED_DOUBT_RATING} only for
-     * exactly that score.
-     */
     private void stubSentiment() {
         when(sentimentAnalysisService.analyzeSentiment(anyString())).thenReturn(SENTIMENT_SCORE);
         when(sentimentAnalysisService.calculateDoubtRating(SENTIMENT_SCORE))
                 .thenReturn(REPORTED_DOUBT_RATING);
     }
 
-    /**
-     * Assigns {@link #STORED_ID} to the row offered for storage and returns it, as an insert of a new
-     * entity does.
-     */
     private void stubSave() {
         when(tweetRepository.save(any(Tweet.class))).thenAnswer(invocation -> {
             Tweet candidate = invocation.getArgument(0);
@@ -922,51 +879,29 @@ class TweetStreamListenerTest {
         });
     }
 
-    /**
-     * Reports a wire form for any stored row.
-     */
     private void stubWireForm() {
         when(tweetMapper.toDto(any(Tweet.class))).thenReturn(new TweetDto(
                 String.valueOf(STORED_ID), POST_TEXT, POPULAR_LIKE_COUNT, STORED_CREATED_AT,
                 REPORTED_DOUBT_RATING, List.of(), null, AUTHOR_ID, List.of()));
     }
 
-    /**
-     * Reports a stored reply for the row {@link #STORED_ID} names.
-     *
-     * @param approved value of the stored reply's approval flag
-     */
     private void stubGeneration(boolean approved) {
         when(responseService.generateResponseIfAbsent(String.valueOf(STORED_ID)))
                 .thenReturn(Optional.of(new ResponseDto(GENERATED_ID, GENERATED_CONTENT,
                         GENERATED_AT, approved, String.valueOf(STORED_ID))));
     }
 
-    /**
-     * Captures the single row offered to the repository.
-     *
-     * @return the captured row
-     */
     private Tweet storedRow() {
         ArgumentCaptor<Tweet> captor = ArgumentCaptor.forClass(Tweet.class);
         verify(tweetRepository).save(captor.capture());
         return captor.getValue();
     }
 
-    /**
-     * Asserts that no collaborator of the listener was reached.
-     */
     private void verifyNoCollaboratorWasReached() {
         verifyNoInteractions(twitterService, sentimentAnalysisService, tweetRepository,
                 responseService, notionService, tweetMapper);
     }
 
-    /**
-     * Builds an otherwise-accepted record whose {@code created_at} carries the supplied instant.
-     *
-     * @param stamped the instant the record declares as its creation time
-     * @return the record
-     */
     private static JsonNode recordCreatedAt(OffsetDateTime stamped) {
         return read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
                 + "\"created_at\":\"" + stamped.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME)
@@ -975,11 +910,6 @@ class TweetStreamListenerTest {
                 + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "}}}");
     }
 
-    /**
-     * Builds a record carrying only the members every accepted record must carry.
-     *
-     * @return the record
-     */
     private static JsonNode popularRecord() {
         return read("{\"data\":{\"text\":\"" + POST_TEXT + "\","
                 + "\"created_at\":\"" + CREATED_AT + "\","
@@ -987,12 +917,6 @@ class TweetStreamListenerTest {
                 + "\"public_metrics\":{\"like_count\":" + POPULAR_LIKE_COUNT + "}}}");
     }
 
-    /**
-     * Builds a record carrying every member the listener reads, including a delivered identifier, two
-     * attachment keys, a replied-to and a quoted reference, and two rule tags at the root.
-     *
-     * @return the record
-     */
     private static JsonNode fullRecord() {
         return read("{\"data\":{\"id\":\"" + DELIVERED_POST_ID + "\","
                 + "\"text\":\"GPT-4 doubts\","
@@ -1006,12 +930,6 @@ class TweetStreamListenerTest {
                 + "{\"id\":\"r2\",\"tag\":\"AI coding tool\"}]}");
     }
 
-    /**
-     * Reads a synthesized record into a tree.
-     *
-     * @param record the record to read
-     * @return the parsed tree
-     */
     private static JsonNode read(String record) {
         try {
             return JSON.readTree(record);
@@ -1020,12 +938,6 @@ class TweetStreamListenerTest {
         }
     }
 
-    /**
-     * Attaches a recording appender to the logger of the class under test and lowers that logger to
-     * {@code DEBUG}.
-     *
-     * @return the attached appender
-     */
     private static ListAppender<ILoggingEvent> attachRecordingAppender() {
         Logger logger = (Logger) LoggerFactory.getLogger(TweetStreamListener.class);
         logger.setLevel(Level.DEBUG);
@@ -1035,12 +947,6 @@ class TweetStreamListenerTest {
         return appender;
     }
 
-    /**
-     * Detaches a recording appender from the logger of the class under test and restores that
-     * logger's inherited level.
-     *
-     * @param appender the appender to detach
-     */
     private static void detachRecordingAppender(ListAppender<ILoggingEvent> appender) {
         Logger logger = (Logger) LoggerFactory.getLogger(TweetStreamListener.class);
         logger.detachAppender(appender);

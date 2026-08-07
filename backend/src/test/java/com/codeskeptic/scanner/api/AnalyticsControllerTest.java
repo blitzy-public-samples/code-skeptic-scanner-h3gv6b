@@ -50,13 +50,14 @@ import com.codeskeptic.scanner.service.AnalyticsService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-// Ported from backend/tests/test_api.py:L47-59 (faithful port) — see docs/DECISION_LOG.md
+// Replaces backend/tests/test_api.py:L47-59, whose source antecedent probed
+// /analytics/trends?start_date=&end_date=, a query the route does not declare — see
+// docs/DECISION_LOG.md DL-042
 @WebMvcTest(AnalyticsController.class)
 @ActiveProfiles("test")
 @Import({ SecurityConfig.class, CorsConfig.class, JwtService.class })
 @EnableConfigurationProperties(ScannerProperties.class)
 class AnalyticsControllerTest {
-
     private static final String PRINCIPAL = "admin";
     private static final String INTERNAL_ERROR_BODY =
             "{\"error\":\"Internal server error\"}";
@@ -332,7 +333,6 @@ class AnalyticsControllerTest {
                 "/api/analytics/summary",
                 "/analytics/summary/2023",
                 "/analytics/trends/2023")) {
-
             MvcResult result = mockMvc.perform(
                             get(path).header(HttpHeaders.AUTHORIZATION, bearer()))
                     .andExpect(status().isNotFound())
@@ -359,7 +359,6 @@ class AnalyticsControllerTest {
                 "Bearer " + minted + "tampered",
                 minted,
                 "Basic YWRtaW46YWRtaW4=")) {
-
             for (String path : List.of("/analytics/summary", "/analytics/trends")) {
                 MvcResult result = mockMvc.perform(
                                 get(path).header(HttpHeaders.AUTHORIZATION, credential))

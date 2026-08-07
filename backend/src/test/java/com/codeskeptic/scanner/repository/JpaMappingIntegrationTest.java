@@ -119,7 +119,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 @DataJpaTest
 @ActiveProfiles("test")
 class JpaMappingIntegrationTest {
-
     // backend/app/db/models.py:L8,L21,L33,L40
     private static final String TWEETS_TABLE = "tweets";
     private static final String RESPONSES_TABLE = "responses";
@@ -156,10 +155,8 @@ class JpaMappingIntegrationTest {
     private static final int NON_PRIMARY_KEY_COLUMN_COUNT = 16;
     private static final int MAPPED_COLUMN_COUNT = 20;
 
-    /** Count of fields carrying {@code @Column} across the four entities. */
     private static final int COLUMN_ANNOTATED_FIELD_COUNT = 19;
 
-    /** Count of fields carrying {@code @JoinColumn} across the four entities. */
     private static final int JOIN_COLUMN_ANNOTATED_FIELD_COUNT = 1;
 
     /**
@@ -219,7 +216,6 @@ class JpaMappingIntegrationTest {
             AI_TOOLS_TABLE, List.of("name", "description"),
             SETTINGS_TABLE, List.of("value", "description"));
 
-    /** Count of the character columns stating {@link #WIDE_CHARACTER_JDBC_TYPE_CODE}. */
     private static final int WIDE_CHARACTER_COLUMN_COUNT = 10;
 
     /**
@@ -265,27 +261,15 @@ class JpaMappingIntegrationTest {
      */
     private static final Set<Integer> IDENTIFIER_TYPES = Set.of(Types.INTEGER);
 
-    /** The type family of {@code tweets.like_count}, declared {@code Column(Integer)} at :L12. */
     private static final Set<Integer> INTEGER_TYPES = Set.of(Types.INTEGER);
 
-    /**
-     * The type family of the two {@code Column(DateTime)} columns at :L13 and :L25. SQLAlchemy's
-     * {@code DateTime} carries no time zone, so a zone-aware column fails this expectation.
-     */
     private static final Set<Integer> TIMESTAMP_TYPES = Set.of(Types.TIMESTAMP);
 
-    /** The type family of {@code tweets.doubt_rating}, declared {@code Column(Float)} at :L14. */
     private static final Set<Integer> FLOATING_POINT_TYPES =
             Set.of(Types.DOUBLE, Types.FLOAT, Types.REAL);
 
-    /** The type family of {@code responses.is_approved}, declared {@code Column(Boolean)} at :L26. */
     private static final Set<Integer> BOOLEAN_TYPES = Set.of(Types.BOOLEAN, Types.BIT);
 
-    /**
-     * The type family of every {@code Column(String)}. SQLAlchemy renders that declaration as a
-     * variable-length character type, so the fixed-width {@code CHAR} and {@code NCHAR} families are
-     * excluded.
-     */
     private static final Set<Integer> CHARACTER_TYPES = Set.of(Types.VARCHAR,
             Types.LONGVARCHAR, Types.NVARCHAR, Types.LONGNVARCHAR, Types.CLOB, Types.NCLOB);
 
@@ -315,15 +299,12 @@ class JpaMappingIntegrationTest {
                     "value", CHARACTER_TYPES,
                     "description", CHARACTER_TYPES));
 
-    /** Hibernate setting selecting the script-generation action. */
     private static final String SCHEMA_GENERATION_SCRIPTS_ACTION =
             "jakarta.persistence.schema-generation.scripts.action";
 
-    /** Hibernate setting naming the file the create script is written to. */
     private static final String SCHEMA_GENERATION_SCRIPTS_CREATE_TARGET =
             "jakarta.persistence.schema-generation.scripts.create-target";
 
-    /** Build directory the generated scripts are written under; backend/.gitignore excludes it. */
     private static final Path GENERATED_SCRIPT_DIRECTORY = Path.of("target", "generated-schema");
 
     /**
@@ -390,7 +371,6 @@ class JpaMappingIntegrationTest {
     private static final String DELIMITER = ",";
     private static final double TOLERANCE = 1.0e-9;
 
-    /** Number of unanswered {@code tweets} rows the keyset drain is asserted to cover. */
     private static final int BACKLOG_ROW_COUNT = 55;
 
     /**
@@ -755,12 +735,6 @@ class JpaMappingIntegrationTest {
                 .as("@JdbcTypeCode of the settings primary key").isNull();
     }
 
-    /**
-     * Reports whether a mapped field carries one of the schema's character columns.
-     *
-     * @param field the mapped field, never {@code null}
-     * @return {@code true} when the field's declared type is {@code String} or {@code List<String>}
-     */
     private static boolean isCharacterMapped(Field field) {
         return field.getType() == String.class || field.getType() == List.class;
     }
@@ -1544,17 +1518,6 @@ class JpaMappingIntegrationTest {
 
     // Net-new: every test executor is awaited and its termination asserted — DL-273 — see
     // docs/DECISION_LOG.md
-    /**
-     * Shuts the supplied executor down and asserts that it terminates.
-     *
-     * <p>Termination is awaited for at most {@value #EXECUTOR_TERMINATION_SECONDS} seconds. A thread
-     * still running at that bound fails the test and is not left behind for the rest of the
-     * build holding a JDBC connection from the pool. An interrupt while awaiting is
-     * restored on the calling thread and reported as a failure; it is never reported as a clean
-     * termination.
-     *
-     * @param executor the executor to release
-     */
     private static void awaitTermination(ExecutorService executor) {
         executor.shutdownNow();
         try {
@@ -1725,7 +1688,6 @@ class JpaMappingIntegrationTest {
         statistics.setStatisticsEnabled(true);
         statistics.clear();
 
-        // The row order is requested explicitly; relational row order is otherwise unspecified.
         Page<ResponseRow> page = responseRepository
                 .findAllRows(PageRequest.of(0, 10, Sort.by(Sort.Direction.ASC, "id")));
         List<Integer> parentIds = page.getContent().stream()
@@ -1733,8 +1695,6 @@ class JpaMappingIntegrationTest {
                 .toList();
 
         assertThat(page.getTotalElements()).as("rows the page reports").isEqualTo(3L);
-        // The explicit id ASC sort above fixes the response order, so the parent ids follow the
-        // insertion order of these three responses.
         assertThat(parentIds).as("parent identifier of every row on the page")
                 .containsExactly(first.getId(), second.getId(), third.getId());
         assertThat(page.getContent()).extracting(ResponseRow::getContent)
@@ -1910,13 +1870,6 @@ class JpaMappingIntegrationTest {
         }
     }
 
-    /**
-     * Counts occurrences of a character type name that are not followed by a parenthesised capacity.
-     *
-     * @param statement the generated statement, lower-cased
-     * @param typeName the character type name to look for
-     * @return the number of occurrences carrying no capacity
-     */
     // Net-new (no Python counterpart) — DL-068 — see docs/DECISION_LOG.md
     private static int uncapacitatedOccurrences(String statement, String typeName) {
         int occurrences = 0;
@@ -1932,12 +1885,6 @@ class JpaMappingIntegrationTest {
         return occurrences;
     }
 
-    /**
-     * Reads the column names listed in a statement's {@code primary key (...)} clause.
-     *
-     * @param statement the generated statement, lower-cased
-     * @return the primary-key column names, quoting removed, never {@code null}
-     */
     // Net-new (no Python counterpart) — DL-069 — see docs/DECISION_LOG.md
     private static List<String> primaryKeyColumns(String statement) {
         int clause = statement.indexOf("primary key (");
@@ -1952,13 +1899,6 @@ class JpaMappingIntegrationTest {
                 .toList();
     }
 
-    /**
-     * Reads the declaration of one column from a generated {@code create table} statement.
-     *
-     * @param statement the generated statement, lower-cased
-     * @param columnName the physical column name, quoting removed
-     * @return the text between the column name and the next comma or the statement end
-     */
     // Net-new (no Python counterpart) — DL-069 — see docs/DECISION_LOG.md
     private static String columnDeclaration(String statement, String columnName) {
         int open = statement.indexOf('(');
@@ -1972,16 +1912,6 @@ class JpaMappingIntegrationTest {
         return "";
     }
 
-    /**
-     * Generates the {@code create table} statement of each mapped table for one dialect.
-     *
-     * <p>Metadata is built from the four entity classes with the dialect stated explicitly, JDBC
-     * metadata access disabled and no connection provider, so no database is contacted for a vendor
-     * that is not running. The script is written under {@code target/} and read back.
-     *
-     * @param dialect the fully qualified Hibernate dialect class name
-     * @return one lower-cased statement per mapped table, keyed by logical table name
-     */
     // Net-new (no Python counterpart) — DL-166 — see docs/DECISION_LOG.md
     private static Map<String, String> generateCreateStatements(String dialect) {
         Map<String, Object> settings = new LinkedHashMap<>();
@@ -2024,13 +1954,6 @@ class JpaMappingIntegrationTest {
         return statements;
     }
 
-    /**
-     * Reads the physical column names of one mapped table from live metadata.
-     *
-     * @param logicalTable the table name declared on the entity
-     * @return the normalised physical column names of that table
-     * @throws SQLException when the metadata cannot be read
-     */
     private Set<String> readPhysicalColumns(String logicalTable) throws SQLException {
         try (Connection connection = dataSource.getConnection()) {
             DatabaseMetaData metaData = connection.getMetaData();
@@ -2038,12 +1961,6 @@ class JpaMappingIntegrationTest {
         }
     }
 
-    /**
-     * Uppercases an identifier for comparison against a stored identifier.
-     *
-     * @param identifier the identifier to normalise; may be {@code null}
-     * @return the uppercased identifier, or {@code null} when {@code identifier} is {@code null}
-     */
     private static String normalise(String identifier) {
         return identifier == null ? null : identifier.toUpperCase(Locale.ROOT);
     }
@@ -2061,12 +1978,6 @@ class JpaMappingIntegrationTest {
         return normalise(column.name()).replace("\"", "").replace("`", "");
     }
 
-    /**
-     * Uppercases every element of an identifier collection.
-     *
-     * @param identifiers the identifiers to normalise
-     * @return a set of the uppercased identifiers
-     */
     private static Set<String> normaliseAll(Iterable<String> identifiers) {
         Set<String> normalised = new LinkedHashSet<>();
         for (String identifier : identifiers) {
@@ -2075,13 +1986,6 @@ class JpaMappingIntegrationTest {
         return normalised;
     }
 
-    /**
-     * Reads the base tables of the {@code PUBLIC} schema.
-     *
-     * @param metaData the metadata of an open connection
-     * @return the stored table names keyed by their normalised form
-     * @throws SQLException when the metadata cannot be read
-     */
     private static Map<String, String> readStoredTableNames(DatabaseMetaData metaData)
             throws SQLException {
         Map<String, String> storedNames = new LinkedHashMap<>();
@@ -2099,14 +2003,6 @@ class JpaMappingIntegrationTest {
         return storedNames;
     }
 
-    /**
-     * Resolves the stored name of a mapped table.
-     *
-     * @param metaData    the metadata of an open connection
-     * @param logicalName the table name declared on the entity
-     * @return the name under which the database stores that table
-     * @throws SQLException when the metadata cannot be read
-     */
     private static String storedTableName(DatabaseMetaData metaData, String logicalName)
             throws SQLException {
         String storedName = readStoredTableNames(metaData).get(normalise(logicalName));
@@ -2114,16 +2010,6 @@ class JpaMappingIntegrationTest {
         return storedName;
     }
 
-    /**
-     * Reads the column metadata of one stored table.
-     *
-     * @param metaData    the metadata of an open connection
-     * @param storedTable the stored table name
-     * @return one attribute map per column, keyed by the normalised column name; each attribute map
-     *         holds {@code COLUMN_NAME}, {@code COLUMN_SIZE}, {@code DATA_TYPE}, {@code TYPE_NAME},
-     *         {@code NULLABLE}, {@code IS_NULLABLE} and {@code IS_AUTOINCREMENT}
-     * @throws SQLException when the metadata cannot be read
-     */
     private static Map<String, Map<String, Object>> readColumns(DatabaseMetaData metaData,
             String storedTable) throws SQLException {
         Map<String, Map<String, Object>> columns = new LinkedHashMap<>();
@@ -2144,15 +2030,6 @@ class JpaMappingIntegrationTest {
         return columns;
     }
 
-    /**
-     * Reads the attribute map of one column of a mapped table.
-     *
-     * @param metaData    the metadata of an open connection
-     * @param logicalTable the table name declared on the entity
-     * @param columnName  the physical column name
-     * @return the attribute map of that column
-     * @throws SQLException when the metadata cannot be read
-     */
     private static Map<String, Object> readColumn(DatabaseMetaData metaData, String logicalTable,
             String columnName) throws SQLException {
         String storedTable = storedTableName(metaData, logicalTable);
@@ -2162,14 +2039,6 @@ class JpaMappingIntegrationTest {
         return attributes;
     }
 
-    /**
-     * Reads the primary-key columns of one stored table.
-     *
-     * @param metaData    the metadata of an open connection
-     * @param storedTable the stored table name
-     * @return the normalised primary-key column names
-     * @throws SQLException when the metadata cannot be read
-     */
     private static List<String> readPrimaryKeyColumns(DatabaseMetaData metaData, String storedTable)
             throws SQLException {
         List<String> primaryKeyColumns = new ArrayList<>();
@@ -2181,15 +2050,6 @@ class JpaMappingIntegrationTest {
         return primaryKeyColumns;
     }
 
-    /**
-     * Reads the foreign keys declared by one stored table.
-     *
-     * @param metaData    the metadata of an open connection
-     * @param storedTable the stored table name
-     * @return one entry per foreign-key column, rendered as
-     *         {@code <fkColumn>-><pkTable>.<pkColumn>} in normalised form
-     * @throws SQLException when the metadata cannot be read
-     */
     private static List<String> readImportedKeys(DatabaseMetaData metaData, String storedTable)
             throws SQLException {
         List<String> importedKeys = new ArrayList<>();
@@ -2203,15 +2063,6 @@ class JpaMappingIntegrationTest {
         return importedKeys;
     }
 
-    /**
-     * Reads the foreign keys that reference one stored table.
-     *
-     * @param metaData    the metadata of an open connection
-     * @param storedTable the stored table name
-     * @return one entry per referencing column, rendered as {@code <fkTable>.<fkColumn>} in
-     *         normalised form
-     * @throws SQLException when the metadata cannot be read
-     */
     private static List<String> readExportedKeys(DatabaseMetaData metaData, String storedTable)
             throws SQLException {
         List<String> exportedKeys = new ArrayList<>();
@@ -2224,14 +2075,6 @@ class JpaMappingIntegrationTest {
         return exportedKeys;
     }
 
-    /**
-     * Reads the unique indexes of one stored table.
-     *
-     * @param metaData    the metadata of an open connection
-     * @param storedTable the stored table name
-     * @return the normalised indexed column names keyed by normalised index name
-     * @throws SQLException when the metadata cannot be read
-     */
     private static Map<String, Set<String>> readUniqueIndexes(DatabaseMetaData metaData,
             String storedTable) throws SQLException {
         Map<String, Set<String>> uniqueIndexes = new LinkedHashMap<>();
@@ -2249,14 +2092,6 @@ class JpaMappingIntegrationTest {
         return uniqueIndexes;
     }
 
-    /**
-     * Reads the table constraints of the {@code PUBLIC} schema.
-     *
-     * @param connection an open connection
-     * @return one entry per constraint, rendered as {@code <table>|<constraintType>} in normalised
-     *         form
-     * @throws SQLException when the query fails
-     */
     private static List<String> readTableConstraints(Connection connection) throws SQLException {
         List<String> constraints = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(
@@ -2273,13 +2108,6 @@ class JpaMappingIntegrationTest {
         return constraints;
     }
 
-    /**
-     * Collects the fields of an entity that carry the supplied mapping annotation.
-     *
-     * @param entityType the entity class
-     * @param annotation the mapping annotation to look for
-     * @return the declared fields carrying that annotation, in declaration order
-     */
     private static List<Field> mappedFields(Class<?> entityType,
             Class<? extends java.lang.annotation.Annotation> annotation) {
         List<Field> fields = new ArrayList<>();
@@ -2291,17 +2119,6 @@ class JpaMappingIntegrationTest {
         return fields;
     }
 
-    /**
-     * Builds a service instance over the real repositories and mappers in this test context.
-     *
-     * @param generator the generated-text adapter for this service instance
-     * @return a service whose storage transactions use the context transaction manager
-     */
-    /**
-     * Builds a configuration record carrying no popularity-threshold override and no credential.
-     *
-     * @return the bound configuration handed to a service under test
-     */
     private static ScannerProperties propertiesWithoutOverrides() {
         return new ScannerProperties(null, 100, 0L, null, null, null, null, null, null, null, null);
     }
@@ -2311,11 +2128,6 @@ class JpaMappingIntegrationTest {
                 new ResponseMapper(), new TweetMapper(), new TransactionTemplate(transactionManager));
     }
 
-    /**
-     * Returns the session factory statistics of this test context, enabled and cleared.
-     *
-     * @return the statistics recorder, counting only the statements issued after this call
-     */
     private Statistics statistics() {
         Statistics statistics = entityManager.getEntityManager()
                 .getEntityManagerFactory()
@@ -2325,14 +2137,6 @@ class JpaMappingIntegrationTest {
         return statistics;
     }
 
-    /**
-     * Persists a tweet carrying the supplied creation instant, doubt rating and like count.
-     *
-     * @param createdAt   value for {@code tweets.created_at}
-     * @param doubtRating value for {@code tweets.doubt_rating}
-     * @param likeCount   value for {@code tweets.like_count}
-     * @return the saved instance, carrying its assigned identifier
-     */
     private Tweet saveTweet(LocalDateTime createdAt, Double doubtRating, Integer likeCount) {
         Tweet tweet = new Tweet();
         tweet.setContent("A skeptical post about AI coding tools");
@@ -2343,14 +2147,6 @@ class JpaMappingIntegrationTest {
         return tweetRepository.save(tweet);
     }
 
-    /**
-     * Persists a response attached to the supplied tweet.
-     *
-     * @param tweet      the parent row
-     * @param content    value for {@code responses.content}
-     * @param isApproved value for {@code responses.is_approved}; may be {@code null}
-     * @return the saved instance, carrying its assigned identifier
-     */
     private Response saveResponse(Tweet tweet, String content, Boolean isApproved) {
         Response response = new Response();
         response.setContent(content);
@@ -2360,14 +2156,6 @@ class JpaMappingIntegrationTest {
         return responseRepository.save(response);
     }
 
-    /**
-     * Reads the raw {@code media} and {@code ai_tools_mentioned} column values of one tweet through
-     * the enclosing transaction.
-     *
-     * @param tweetId the identifier of the row to read
-     * @return a two-element array holding the {@code media} value then the
-     *         {@code ai_tools_mentioned} value
-     */
     private Object[] readDelimitedColumns(Integer tweetId) {
         entityManager.flush();
         Object[] rawColumns = (Object[]) entityManager.getEntityManager()
@@ -2377,17 +2165,6 @@ class JpaMappingIntegrationTest {
         return new Object[] {characterValueText(rawColumns[0]), characterValueText(rawColumns[1])};
     }
 
-    /**
-     * Writes the raw {@code media} and {@code ai_tools_mentioned} column values of one tweet,
-     * bypassing the attribute converter.
-     *
-     * <p>This reproduces a value written by a hand edit or by an earlier revision, so the read path
-     * can be asserted against text the converter did not produce.
-     *
-     * @param tweetId          the identifier of the row to write
-     * @param media            the raw {@code media} column text
-     * @param aiToolsMentioned the raw {@code ai_tools_mentioned} column text
-     */
     private void writeDelimitedColumns(Integer tweetId, String media, String aiToolsMentioned) {
         entityManager.getEntityManager()
                 .createNativeQuery("update tweets set media = :media, "

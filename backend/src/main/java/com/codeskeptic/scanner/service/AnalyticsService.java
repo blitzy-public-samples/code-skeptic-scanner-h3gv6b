@@ -32,7 +32,7 @@ import com.codeskeptic.scanner.repository.TweetRepository.TweetAggregate;
  * operations declared here carry the signatures its call sites already fixed:
  * {@code analytics_service.get_summary()} at {@code :L24} and {@code analytics_service.get_trends()}
  * at {@code :L14}, both argument-less, as {@code documentation/Code Structure.md:L557,L586} declares
- * them. Neither analytics route declares a query parameter — see docs/DECISION_LOG.md DL-042.
+ * them. Neither analytics route declares a query parameter — DL-042.
  *
  * <p>Every value the two operations report is an aggregate the database computes: a row count, a
  * derived count, an {@code avg} or a {@code sum}. The reports read the pre-existing {@code tweets},
@@ -43,30 +43,16 @@ import com.codeskeptic.scanner.repository.TweetRepository.TweetAggregate;
  * {@code spring.jpa.open-in-view} is {@code false}.
  *
  * <p>Where an {@code avg} or a {@code sum} yields {@code null} — the state of an empty table, and of a
- * bucket in which no row carries the aggregated column — the reported value is {@code null} — see
- * docs/DECISION_LOG.md DL-075. Every count is a {@code count(...)} and is never {@code null}, so an
- * empty database reports zero for each count and {@code null} for both means, and an empty observation
- * window reports an empty series.
+ * bucket in which no row carries the aggregated column — the reported value is {@code null} — DL-075.
+ * Every count is a {@code count(...)} and is never {@code null}, so an empty database reports zero for
+ * each count and {@code null} for both means, and an empty observation window reports an empty series.
  *
  * <p>This class selects no HTTP status and mints no client-visible message; a failure raised by the
  * persistence layer propagates to {@code api.GlobalExceptionHandler}.
  *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-041, DL-042,
- * DL-052, DL-075 and DL-180; this file's target-to-source row in {@code docs/TRACEABILITY_MATRIX.md} reads
- * "no source construct — net-new".
- *
- * <p>Usage:
- *
- * <pre>{@code
- * SummaryDto summary = analyticsService.getSummary();
- * TrendsDto trends = analyticsService.getTrends();
- * }</pre>
- *
- * <p>This is a singleton bean. Its four collaborators are held in final fields and are themselves
- * singletons, and this class holds no other state, so both operations are safe for concurrent use.
- *
- * @see SummaryDto
- * @see TrendsDto
+ * <p>This is a singleton bean holding its collaborators in final fields and no other state, so both
+ * operations are safe for concurrent use. This file's target-to-source row in
+ * {@code docs/TRACEABILITY_MATRIX.md} reads "no source construct — net-new".
  */
 @Service
 public class AnalyticsService {
@@ -74,13 +60,10 @@ public class AnalyticsService {
     // Logging baseline — DL-052 — see docs/DECISION_LOG.md
     private static final Logger log = LoggerFactory.getLogger(AnalyticsService.class);
 
-    /** Data access for the {@code tweets} table. */
     private final TweetRepository tweetRepository;
 
-    /** Data access for the {@code responses} table. */
     private final ResponseRepository responseRepository;
 
-    /** Data access for the {@code ai_tools} table. */
     private final AiToolRepository aiToolRepository;
 
     /** Source of the {@code scanner.analytics.trend-window-days} observation window. */
@@ -125,20 +108,18 @@ public class AnalyticsService {
      * <p>The metrics, in the order {@link SummaryDto} declares them:
      *
      * <ul>
-     *   <li>{@code total_tweets} — the number of {@code tweets} rows, the metric named at
+     *   <li>{@code total_tweets} — the number of {@code tweets} rows, named at
      *       {@code backend/tests/test_api.py:L50}.
-     *   <li>{@code total_responses} — the number of {@code responses} rows, the metric named at
+     *   <li>{@code total_responses} — the number of {@code responses} rows, named at
      *       {@code backend/tests/test_api.py:L51}.
      *   <li>{@code approved_responses} — the number of {@code responses} rows whose
-     *       {@code is_approved} column holds {@code true}
-     *       ({@code backend/app/db/models.py:L26}).
+     *       {@code is_approved} ({@code backend/app/db/models.py:L26}) holds {@code true}.
      *   <li>{@code pending_responses} — {@code total_responses} minus {@code approved_responses},
-     *       which counts both a row whose {@code is_approved} is {@code false} and a row whose
-     *       {@code is_approved} is {@code null}.
+     *       which counts both a {@code false} and a {@code null} {@code is_approved}.
      *   <li>{@code average_doubt_rating} — the mean of {@code tweets.doubt_rating}
-     *       ({@code backend/app/db/models.py:L14}), and {@code null} when no row carries one.
+     *       ({@code backend/app/db/models.py:L14}).
      *   <li>{@code average_like_count} — the mean of {@code tweets.like_count}
-     *       ({@code backend/app/db/models.py:L12}), and {@code null} when no row carries one.
+     *       ({@code backend/app/db/models.py:L12}).
      *   <li>{@code tracked_ai_tools} — the number of {@code ai_tools} rows
      *       ({@code backend/app/db/models.py:L32-37}).
      * </ul>
@@ -146,9 +127,8 @@ public class AnalyticsService {
      * <p>Six of the seven are read by three aggregate statements, one per table, and
      * {@code pending_responses} is arithmetic over two of them. All three read one repeatable-read
      * snapshot, so {@code approved_responses} never exceeds {@code total_responses} and
-     * {@code pending_responses} is never negative — see docs/DECISION_LOG.md DL-180.
-     *
-     * <p>An empty database yields {@code 0} for all five counts and {@code null} for both means.
+     * {@code pending_responses} is never negative — DL-180. An empty database yields {@code 0} for all
+     * five counts and {@code null} for both means.
      *
      * @return the seven metrics, never {@code null}; the two means are {@code null} when no row
      *         carries the averaged column
@@ -202,21 +182,18 @@ public class AnalyticsService {
      * Returns the day-bucketed trend series of {@code GET /analytics/trends}.
      *
      * <p><b>The window is a whole number of UTC calendar dates, not a rolling duration.</b> Its width
-     * is the {@code scanner.analytics.trend-window-days} property, default 30, read through
-     * {@link ScannerProperties} — DL-042. The cutoff is the start of the UTC day that is
-     * {@code windowDays - 1} days before the current UTC day, so a window of {@code n} days observes
-     * the current UTC date and the {@code n - 1} UTC dates before it, and the series holds
-     * <em>at most</em> {@code n} elements, never {@code n + 1} — DL-278. The current UTC day is read
-     * from the injected {@link Clock}, which is {@code Clock.systemUTC()}, so the cutoff does not move
-     * with the JVM's default time zone.
+     * is the {@code scanner.analytics.trend-window-days} property, default 30 — DL-042. The cutoff is
+     * the start of the UTC day that is {@code windowDays - 1} days before the current UTC day, so a
+     * window of {@code n} days observes the current UTC date and the {@code n - 1} UTC dates before it,
+     * and the series holds <em>at most</em> {@code n} elements, never {@code n + 1} — DL-278. The
+     * current UTC day is read from the injected {@link Clock}, which is {@code Clock.systemUTC()}, so
+     * the cutoff does not move with the JVM's default time zone. That basis matches the stored values:
+     * {@code task.TweetStreamListener} and {@code service.NotionService} both normalise a delivered
+     * timestamp to UTC before it reaches {@code tweets.created_at} — DL-192.
      *
-     * <p>That basis matches the stored values: {@code task.TweetStreamListener} and
-     * {@code service.NotionService} both normalise a delivered timestamp to UTC before it reaches
-     * {@code tweets.created_at} — DL-192.
-     *
-     * <p>The window also closes at the instant of the call, taken from the same {@link Clock}: a row
-     * stamped after that instant falls outside it, and the property is a finite positive number of days
-     * that {@link ScannerProperties} enforces at startup — DL-247.
+     * <p>The window also closes at the instant of the call, taken from the same {@link Clock}, and the
+     * property is a finite positive number of days that {@link ScannerProperties} enforces at
+     * startup — DL-247.
      *
      * <p>One element is produced per calendar day on which at least one {@code tweets} row was created
      * inside that interval, in ascending day order. A day on which no row was created produces no
@@ -225,13 +202,11 @@ public class AnalyticsService {
      *
      * <p>Each element carries the bucket day taken from {@code tweets.created_at}
      * ({@code backend/app/db/models.py:L13}), the number of rows created on it, the mean of
-     * {@code tweets.doubt_rating} over them — {@code null} when none carries one — and the total of
-     * {@code tweets.like_count} over them — {@code null} when none carries one.
-     *
-     * <p>A window containing no row yields an envelope holding an empty list. An element's day and row
-     * count are never {@code null} and its two measures are {@code null} exactly when no row in the
-     * bucket carries the aggregated column — see docs/DECISION_LOG.md DL-075. A window configured as
-     * zero or negative places the cutoff after the current UTC day, so the series is empty.
+     * {@code tweets.doubt_rating} over them and the total of {@code tweets.like_count} over them; each
+     * measure is {@code null} exactly when no row in the bucket carries the aggregated column —
+     * DL-075. A window containing no row yields an envelope holding an empty list, and a window
+     * configured as zero or negative places the cutoff after the current UTC day, so the series is
+     * empty.
      *
      * @return the series in ascending day order, never {@code null}
      */

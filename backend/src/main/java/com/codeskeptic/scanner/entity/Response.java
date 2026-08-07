@@ -79,10 +79,6 @@ public class Response {
     @JoinColumn(name = "tweet_id")
     private Tweet tweet;
 
-    /**
-     * No-argument constructor required by JPA for entity instantiation. Field values are populated by
-     * the persistence provider or by the accessors below.
-     */
     public Response() {
     }
 

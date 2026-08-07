@@ -64,7 +64,8 @@ import com.codeskeptic.scanner.service.ResponseService;
 
 import jakarta.validation.Constraint;
 
-// Ported from backend/tests/test_api.py (faithful port) — see docs/DECISION_LOG.md
+// Replaces backend/tests/test_api.py, whose source antecedent addressed paths this route surface does
+// not declare and could not be executed at all — see docs/DECISION_LOG.md DL-239
 /**
  * Exercises the four routes {@link ResponseController} serves, behind the application's servlet
  * security chain.
@@ -102,23 +103,16 @@ import jakarta.validation.Constraint;
 @EnableConfigurationProperties(ScannerProperties.class)
 @DisplayName("ResponseController")
 class ResponseControllerTest {
-
-    /** Principal named by {@code scanner.auth.username} under the {@code test} profile. */
     private static final String PRINCIPAL = "admin";
 
-    /** Identifier the single-row routes address. */
     private static final String RESPONSE_ID = "1";
 
-    /** Path segment carrying no number, accepted by Flask's default converter at {@code :L22}. */
     private static final String UNPARSEABLE_ID = "not-a-number";
 
-    /** Identifier of the {@code tweets} row {@code POST /responses} names. */
     private static final String TWEET_ID = "7";
 
-    /** Wire value of {@code responses.content} in every fixture row. */
     private static final String CONTENT = "A generated reply";
 
-    /** Wire value of {@code responses.generated_at} in every fixture row. */
     private static final String GENERATED_AT = "2026-01-31T09:15:30";
 
     /** Wire literal of {@code backend/app/api/responses.py:L31}. */
@@ -158,10 +152,6 @@ class ResponseControllerTest {
 
     @MockitoBean
     private ResponseService responseService;
-
-    // -------------------------------------------------------------------------
-    // GET /responses — pagination parity with request.args.get(..., type=int)
-    // -------------------------------------------------------------------------
 
     // backend/app/api/responses.py:L11-12 — the declared defaults are 1 and 10
     @Test
@@ -211,7 +201,6 @@ class ResponseControllerTest {
     @DisplayName("reads a size of 10 when the request spells the size parameter otherwise")
     void readsASizeOf10WhenTheRequestSpellsTheSizeParameterOtherwise(String parameterName)
             throws Exception {
-
         when(responseService.getPaginatedResponses(anyInt(), anyInt())).thenReturn(emptyPage(1, 10));
 
         mockMvc.perform(get("/responses")
@@ -318,7 +307,6 @@ class ResponseControllerTest {
     @DisplayName("answers 200 with the declared default when page does not convert to an integer")
     void answers200WithTheDeclaredDefaultWhenPageDoesNotConvertToAnInteger(String page)
             throws Exception {
-
         when(responseService.getPaginatedResponses(1, 10)).thenReturn(emptyPage(1, 10));
 
         mockMvc.perform(get("/responses").param("page", page)
@@ -333,7 +321,6 @@ class ResponseControllerTest {
     @DisplayName("answers 200 with the declared default when per_page does not convert to an integer")
     void answers200WithTheDeclaredDefaultWhenPerPageDoesNotConvertToAnInteger(String perPage)
             throws Exception {
-
         when(responseService.getPaginatedResponses(1, 10)).thenReturn(emptyPage(1, 10));
 
         mockMvc.perform(get("/responses").param("per_page", perPage)
@@ -371,10 +358,6 @@ class ResponseControllerTest {
                 .andExpect(jsonPath("$.pagination").doesNotExist());
     }
 
-    // -------------------------------------------------------------------------
-    // GET /responses/{responseId} — backend/app/api/responses.py:L22-31
-    // -------------------------------------------------------------------------
-
     // backend/app/api/responses.py:L29 — the row is rendered unwrapped
     @Test
     @DisplayName("renders the addressed row unwrapped with exactly the five snake_case keys")
@@ -410,7 +393,6 @@ class ResponseControllerTest {
     @DisplayName("answers 404 with the Response not found envelope when the row is absent")
     void answers404WithTheResponseNotFoundEnvelopeWhenTheRowIsAbsent(String responseId)
             throws Exception {
-
         when(responseService.getResponseById(responseId))
                 .thenThrow(NotFoundException.responseNotFound());
 
@@ -458,10 +440,6 @@ class ResponseControllerTest {
                 .andExpect(jsonPath("$.*", hasSize(1)));
     }
 
-    // -------------------------------------------------------------------------
-    // POST /responses — backend/app/api/responses.py:L33-49, statuses 400, 201, 500
-    // -------------------------------------------------------------------------
-
     // backend/app/api/responses.py:L47 — the success status of this route is 201
     @Test
     @DisplayName("answers 201, and not 200, carrying the generated row")
@@ -487,7 +465,6 @@ class ResponseControllerTest {
         ArgumentCaptor<String> generatedFor = ArgumentCaptor.forClass(String.class);
         verify(responseService).generateResponse(generatedFor.capture());
         assertThat(generatedFor.getValue()).isEqualTo(TWEET_ID);
-        // No publish operation is reached — IR7 — see docs/DECISION_LOG.md
         verifyNoMoreInteractions(responseService);
     }
 
@@ -505,7 +482,6 @@ class ResponseControllerTest {
                 .andExpect(jsonPath("$.is_approved").value(false));
 
         verify(responseService).generateResponse(TWEET_ID);
-        // No publish operation is reached — IR7 — see docs/DECISION_LOG.md
         verifyNoMoreInteractions(responseService);
     }
 
@@ -529,7 +505,6 @@ class ResponseControllerTest {
     @DisplayName("answers 400 with the Tweet ID is required envelope when the body names no tweet")
     void answers400WithTheTweetIdIsRequiredEnvelopeWhenTheBodyNamesNoTweet(String body)
             throws Exception {
-
         // The service reports the same literal for the normalised absent identifier as the constraint
         // reports for the omitted member — backend/app/api/responses.py:L40-41 — DL-286
         when(responseService.generateResponse(null)).thenThrow(BadRequestException.tweetIdRequired());
@@ -569,7 +544,6 @@ class ResponseControllerTest {
     @DisplayName("carries no identifier to the generator for a value the source guard rejected")
     void carriesNoIdentifierToTheGeneratorForAValueTheSourceGuardRejected(String body)
             throws Exception {
-
         when(responseService.generateResponse(null)).thenThrow(BadRequestException.tweetIdRequired());
 
         mockMvc.perform(post("/responses").contentType(MediaType.APPLICATION_JSON).content(body)
@@ -600,7 +574,6 @@ class ResponseControllerTest {
     @DisplayName("carries a value the source guard accepted to the generator unchanged")
     void carriesAValueTheSourceGuardAcceptedToTheGeneratorUnchanged(String body, String expected)
             throws Exception {
-
         when(responseService.generateResponse(expected)).thenThrow(new ResponseGenerationException());
 
         mockMvc.perform(post("/responses").contentType(MediaType.APPLICATION_JSON).content(body)
@@ -636,7 +609,6 @@ class ResponseControllerTest {
     @DisplayName("answers 500, and not 404, when no row can be generated for the named tweet")
     void answers500AndNot404WhenNoRowCanBeGeneratedForTheNamedTweet(String tweetId)
             throws Exception {
-
         when(responseService.generateResponse(tweetId)).thenThrow(new ResponseGenerationException());
 
         mockMvc.perform(post("/responses").contentType(MediaType.APPLICATION_JSON)
@@ -650,10 +622,6 @@ class ResponseControllerTest {
 
         verify(responseService).generateResponse(tweetId);
     }
-
-    // -------------------------------------------------------------------------
-    // PUT /responses/{responseId} — backend/app/api/responses.py:L51-65, statuses 400, 200, 404
-    // -------------------------------------------------------------------------
 
     // backend/app/api/responses.py:L63 — the success status of this route is 200
     @Test
@@ -752,7 +720,6 @@ class ResponseControllerTest {
     void forwardsEveryUsableCarriedMemberWithoutAnswering400(String body,
             boolean writesContent, String contentValue,
             boolean writesApproval, Boolean approvalValue) throws Exception {
-
         when(responseService.updateResponse(eq(RESPONSE_ID), any())).thenReturn(response(true));
 
         mockMvc.perform(put("/responses/" + RESPONSE_ID).contentType(MediaType.APPLICATION_JSON)
@@ -769,12 +736,6 @@ class ResponseControllerTest {
         assertThat(written.carriesNoUpdatableMember()).isFalse();
     }
 
-    /**
-     * The request bodies whose carried members the two addressed columns can hold.
-     *
-     * @return one argument set per body: the body, whether {@code content} is written and the value
-     *     it writes, then whether {@code is_approved} is written and the value it writes
-     */
     private static Stream<Arguments> usableUpdateBodies() {
         return Stream.of(
                 Arguments.of("{\"is_approved\":true}", false, null, true, Boolean.TRUE),
@@ -841,7 +802,6 @@ class ResponseControllerTest {
     @DisplayName("answers 400 with the Update data is required envelope when the body carries no writable member")
     void answers400WithTheUpdateDataIsRequiredEnvelopeWhenTheBodyCarriesNoWritableMember(String body)
             throws Exception {
-
         when(responseService.updateResponse(eq(RESPONSE_ID), any()))
                 .thenThrow(BadRequestException.updateDataRequired());
 
@@ -862,7 +822,6 @@ class ResponseControllerTest {
     @DisplayName("answers 404 with the Response not found or update failed envelope when the row is absent")
     void answers404WithTheResponseNotFoundOrUpdateFailedEnvelopeWhenTheRowIsAbsent()
             throws Exception {
-
         when(responseService.updateResponse(eq(RESPONSE_ID), any()))
                 .thenThrow(NotFoundException.responseNotFoundOrUpdateFailed());
 
@@ -921,10 +880,6 @@ class ResponseControllerTest {
                 .andExpect(jsonPath("$.*", hasSize(1)));
     }
 
-    // -------------------------------------------------------------------------
-    // Validation parity — backend/app/schema/response.py:L4-9 declares types and optionality only
-    // -------------------------------------------------------------------------
-
     // No @Size and no @NotBlank on the written content — DL-050 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "[{index}] content length={0}")
     @ValueSource(ints = {0, 1, 2, 512, 5000})
@@ -971,11 +926,6 @@ class ResponseControllerTest {
         assertThat(constraintAnnotationNames(ResponseDto.class)).isEmpty();
     }
 
-    // -------------------------------------------------------------------------
-    // Authentication — the bare @jwt_required of backend/app/api/responses.py:L9,L23,L34,L52
-    // is enforced here — DL-021 — see docs/DECISION_LOG.md
-    // -------------------------------------------------------------------------
-
     @Test
     @DisplayName("answers every route with a bare 401, and not a 403, when the request carries no token")
     void answersEveryRouteWithABare401WhenTheRequestCarriesNoToken() throws Exception {
@@ -1020,10 +970,6 @@ class ResponseControllerTest {
         verifyNoInteractions(responseService);
     }
 
-    // -------------------------------------------------------------------------
-    // Path surface — the four routes stay unprefixed — DL-059 — see docs/DECISION_LOG.md
-    // -------------------------------------------------------------------------
-
     @ParameterizedTest(name = "[{index}] {0}")
     @ValueSource(strings = {"/api/responses", "/v1/responses", "/Responses"})
     @DisplayName("generates no row at a prefixed or differently cased path")
@@ -1050,24 +996,10 @@ class ResponseControllerTest {
         verifyNoInteractions(responseService);
     }
 
-    // -------------------------------------------------------------------------
-    // Fixtures
-    // -------------------------------------------------------------------------
-
-    /**
-     * Mints a bearer credential for the configured principal.
-     *
-     * @return the value of an {@code Authorization} header the chain accepts
-     */
     private String bearer() {
         return "Bearer " + jwtService.generateToken(PRINCIPAL);
     }
 
-    /**
-     * Reads the update body the controller forwarded for {@link #RESPONSE_ID}.
-     *
-     * @return the forwarded body, never {@code null}
-     */
     private UpdateResponseRequest capturedUpdate() {
         ArgumentCaptor<UpdateResponseRequest> forwarded =
                 ArgumentCaptor.forClass(UpdateResponseRequest.class);
@@ -1075,77 +1007,34 @@ class ResponseControllerTest {
         return forwarded.getValue();
     }
 
-    /**
-     * Builds the wire form of one {@code responses} row.
-     *
-     * @param approved the value of the {@code is_approved} column
-     * @return the row
-     */
     private static ResponseDto response(boolean approved) {
         return new ResponseDto(RESPONSE_ID, CONTENT,
                 LocalDateTime.of(2026, 1, 31, 9, 15, 30), approved, TWEET_ID);
     }
 
-    /**
-     * Builds a page carrying one unapproved row and the counters that describe it.
-     *
-     * @return the envelope
-     */
     private static PaginatedResponsesDto onePage() {
         return new PaginatedResponsesDto(List.of(response(false)),
                 new PaginationDto(1, 10, 1L, 1));
     }
 
-    /**
-     * Builds an empty page carrying the supplied counters.
-     *
-     * @param page    the 1-based page number the envelope reports
-     * @param perPage the page size the envelope reports
-     * @return the envelope
-     */
     private static PaginatedResponsesDto emptyPage(int page, int perPage) {
         return new PaginatedResponsesDto(List.of(), new PaginationDto(page, perPage, 0L, 0));
     }
 
-    /**
-     * Builds a JSON-safe run of characters of the requested length.
-     *
-     * @param length the number of characters, zero or greater
-     * @return the run, empty when {@code length} is zero
-     */
     private static String longText(int length) {
         return "a".repeat(length);
     }
 
-    /**
-     * Asserts that the answered status is not the one supplied.
-     *
-     * @param unexpected the status the route must not answer with
-     * @return the matcher
-     */
     private static ResultMatcher statusIsNot(HttpStatus unexpected) {
         return result -> assertThat(result.getResponse().getStatus())
                 .isNotEqualTo(unexpected.value());
     }
 
-    /**
-     * Asserts that the answered body carries no occurrence of the supplied text.
-     *
-     * @param text the text the body must not carry
-     * @return the matcher
-     */
     private static ResultMatcher bodyDoesNotContain(String... text) {
         return result -> assertThat(result.getResponse().getContentAsString())
                 .doesNotContain(text);
     }
 
-    /**
-     * Reads the simple names of the Bean Validation constraints a record declares, across its
-     * fields, its accessors and its canonical constructor parameters.
-     *
-     * @param type the record type to read
-     * @return the constraint names, deduplicated and sorted, empty when the record declares none
-     */
     private static List<String> constraintAnnotationNames(Class<?> type) {
         Stream<Annotation> onFields = Arrays.stream(type.getDeclaredFields())
                 .flatMap(field -> Arrays.stream(field.getAnnotations()));

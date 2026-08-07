@@ -31,28 +31,16 @@ import com.codeskeptic.scanner.service.mapper.SettingMapper;
 /**
  * Reads and updates the rows of the {@code settings} table, and seeds its default rows.
  *
- * <p>Three operations are exposed. {@link #getAllSettings()} renders every row.
- * {@link #updateSetting(String, String)} replaces the {@code value} of one row that already exists.
- *
- * <p>Every row of the table is part of the configuration surface: it is rendered by
- * {@code GET /settings} and is writable through {@code PUT /settings/{key}}. No key is withheld
- * from the collection {@link #getAllSettings()} renders, and {@link #updateSetting(String, String)}
- * reports it as absent, so the route answers its own 404 literal for it — DL-284.
- * {@link #seedDefaultSettings()} inserts each of three default rows that is absent.
- *
- * <p>The first two correspond to the call sites the retired Flask blueprint already declared:
- * {@code SettingsService.get_all_settings()} at {@code backend/app/api/settings.py:L10} and
- * {@code SettingsService.update_setting(key, new_value)} at {@code :L20}. The source invoked both
- * statically on the class; both are instance methods on this bean and this class declares no static
- * method — see docs/DECISION_LOG.md DL-043.
- *
- * <p>{@code GET /settings} renders a JSON array of {@link SettingDto} objects, each carrying the
- * three columns the {@code settings} table declares at {@code backend/app/db/models.py:L42-44} — see
- * docs/DECISION_LOG.md DL-039.
+ * <p>{@link #getAllSettings()} renders every row as a {@link SettingDto} carrying the three columns
+ * the table declares at {@code backend/app/db/models.py:L42-44} — DL-039.
+ * {@link #updateSetting(String, String)} replaces the {@code value} of any row that already exists.
+ * No key is reserved: every row is rendered and every stored row is writable — DL-284. Both answer
+ * the call sites {@code backend/app/api/settings.py:L10} and {@code :L20} declared statically on the
+ * class; both are instance methods here and this class declares no static method — DL-043.
  *
  * <p>Every entity is converted to its wire form inside the transaction that loaded it. No detached
  * entity and no uninitialised proxy leaves this class, and {@code spring.jpa.open-in-view} is
- * {@code false} — see docs/DECISION_LOG.md DL-026.
+ * {@code false} — DL-026.
  *
  * <p>The two client-visible messages are the wire literals of
  * {@code backend/app/api/settings.py:L18} and {@code :L22}, carried by
@@ -60,20 +48,15 @@ import com.codeskeptic.scanner.service.mapper.SettingMapper;
  * key name, driver text or stack detail is appended to either. This class selects no HTTP status;
  * {@code api.GlobalExceptionHandler} does.
  *
- * <p>The {@code settings} table is reached through {@link SettingRepository} for every read and
- * update, and through {@link EntityManager#persist(Object)} for the seeding insert alone — DL-159.
- * This class declares no JPQL and no native query, so neither of the reserved column names
- * {@code key} and {@code value} is spelled in a statement. It opens no connection to an external
- * system, memoises nothing and declares no operation that publishes to X.
+ * <p>Reads and updates go through {@link SettingRepository}; the seeding insert alone goes through
+ * {@link EntityManager#persist(Object)} — DL-159. This class declares no JPQL and no native query, so
+ * neither of the reserved column names {@code key} and {@code value} is spelled in a statement. It
+ * opens no connection to an external system, memoises nothing and declares no operation that
+ * publishes to X.
  *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-039, DL-040,
- * DL-043, DL-052, DL-073 and DL-159; construct-level provenance is recorded in
- * {@code docs/TRACEABILITY_MATRIX.md}.
- *
- * <p>This class is thread-safe. It is a singleton bean, its collaborators are held in final fields
- * and are themselves singletons or thread-safe, and this class holds no other state. Two callers
- * updating the same key concurrently both write and the later write stands; two callers seeding the
- * same key concurrently insert once and neither overwrites the stored row.
+ * <p>This class is thread-safe: a singleton bean holding its collaborators in final fields and no
+ * other state. Two callers updating the same key concurrently both write and the later write stands;
+ * two callers seeding the same key concurrently insert once and neither overwrites the stored row.
  */
 @Service
 public class SettingsService {
@@ -88,7 +71,6 @@ public class SettingsService {
      */
     private static final String TWEET_POPULARITY_THRESHOLD_KEY = "tweet_popularity_threshold";
 
-    /** Description stored on the {@value #TWEET_POPULARITY_THRESHOLD_KEY} row. */
     private static final String TWEET_POPULARITY_THRESHOLD_DESCRIPTION =
             "Minimum like count for a monitored post to be processed.";
 
@@ -107,7 +89,6 @@ public class SettingsService {
      */
     private static final String RESPONSE_GENERATION_DELAY_KEY = "response_generation_delay";
 
-    /** Description stored on the {@value #RESPONSE_GENERATION_DELAY_KEY} row. */
     private static final String RESPONSE_GENERATION_DELAY_DESCRIPTION =
             "Seconds between response-generation sweeps.";
 
@@ -123,7 +104,6 @@ public class SettingsService {
      */
     private static final String STREAM_KEYWORDS_KEY = "stream_keywords";
 
-    /** Description stored on the {@value #STREAM_KEYWORDS_KEY} row. */
     private static final String STREAM_KEYWORDS_DESCRIPTION =
             "Comma-separated terms overriding the filtered-stream rule set; blank tracks the "
                     + "configured base terms together with every ai_tools row.";
@@ -134,15 +114,10 @@ public class SettingsService {
      */
     private static final String STREAM_KEYWORDS_SEED_VALUE = "";
 
-
-
-    /** Data access for the {@code settings} table. */
     private final SettingRepository settingRepository;
 
-    /** Converts a {@link Setting} into its {@link SettingDto} wire form. */
     private final SettingMapper settingMapper;
 
-    /** Source of the three seeded values. */
     private final ScannerProperties properties;
 
     /** Issues the insert-only write of one seeded row — DL-159 — see docs/DECISION_LOG.md. */
@@ -154,20 +129,6 @@ public class SettingsService {
      */
     private final TransactionTemplate insertTransaction;
 
-    /**
-     * Creates the bean with its collaborators, replacing the static invocation at
-     * {@code backend/app/api/settings.py:L10,L20} — DL-043.
-     *
-     * @param settingRepository data access for the {@code settings} table, must not be {@code null}
-     * @param settingMapper     entity-to-wire converter, must not be {@code null}
-     * @param properties        bound configuration supplying the seeded values, must not be
-     *                          {@code null}
-     * @param entityManager     persistence context the seeding insert is issued through, must not be
-     *                          {@code null}
-     * @param transactionManager transaction manager the per-key insert transaction is opened on, must
-     *                          not be {@code null}
-     * @throws NullPointerException when any argument is {@code null}
-     */
     public SettingsService(SettingRepository settingRepository,
             SettingMapper settingMapper,
             ScannerProperties properties,
@@ -215,9 +176,12 @@ public class SettingsService {
      * {@code if new_value is None} does at {@code :L17}, so an empty string is stored and returned. No
      * value is trimmed or normalised on the way in — DL-050.
      *
-     * <p>{@code key} is the primary key of the {@code settings} table and is never written, and
-     * {@code description} is not written either. A key that names no row is reported as absent and no
-     * row is created for it.
+     * <p>{@code key} and {@code description} are never written. A key that names no row is reported as
+     * absent and no row is created for it.
+     *
+     * <p>An edit of the {@value #STREAM_KEYWORDS_KEY} row that leaves no term the X rule grammar can
+     * carry is stored and reported at {@code WARN} naming the key and the term counts; the wire
+     * outcome is unchanged and ingestion falls back to the configured base terms — DL-257.
      *
      * @param key   the primary key of the row to update; a key naming no row, and a {@code null}
      *              key, are both reported as absent
@@ -226,10 +190,6 @@ public class SettingsService {
      *         as supplied
      * @throws BadRequestException when {@code value} is {@code null}, carrying the wire literal of
      *                             {@code backend/app/api/settings.py:L18}
-     * <p>An edit of the {@value #STREAM_KEYWORDS_KEY} row that leaves no term the X rule grammar can
-     * carry is stored and reported at {@code WARN} naming the key and the term counts; the wire
-     * outcome is unchanged and ingestion falls back to the configured base terms — DL-257.
-     *
      * @throws NotFoundException   when {@code key} names no row, carrying the wire literal of
      *                             {@code backend/app/api/settings.py:L22}
      */
@@ -262,29 +222,23 @@ public class SettingsService {
     /**
      * Inserts each of the three default rows of the {@code settings} table that is absent.
      *
-     * <p>The three keys are {@value #TWEET_POPULARITY_THRESHOLD_KEY},
-     * {@value #RESPONSE_GENERATION_DELAY_KEY} and {@value #STREAM_KEYWORDS_KEY}. Each carries a
-     * {@code description}. The first two carry a {@code value} rendered from configuration —
-     * {@code scanner.popularity-threshold} and {@code scanner.response-generation-delay-seconds}. The
-     * first is read back in place of that configuration default on every use, by
-     * {@code service.TwitterService} — DL-040. The second reports the interval and does not set it:
-     * {@code task.ResponseGenerationScheduler} declares its pacing on the method and the
-     * framework resolves that value once when it registers the task — DL-227. The third carries the
-     * blank value {@value #STREAM_KEYWORDS_SEED_VALUE}, which {@code task.TweetStreamClient} reads as
-     * "no override" — DL-044.
+     * <p>The keys are {@value #TWEET_POPULARITY_THRESHOLD_KEY},
+     * {@value #RESPONSE_GENERATION_DELAY_KEY} and {@value #STREAM_KEYWORDS_KEY}. The first two carry a
+     * {@code value} rendered from {@code scanner.popularity-threshold} and
+     * {@code scanner.response-generation-delay-seconds}. The first is read back in place of that
+     * configuration default on every use, by {@code service.TwitterService} — DL-040. The second
+     * reports the interval and does not set it: {@code task.ResponseGenerationScheduler} declares its
+     * pacing on the method and the framework resolves that value once when it registers the task —
+     * DL-227. The third carries the blank value {@value #STREAM_KEYWORDS_SEED_VALUE}, which
+     * {@code task.TweetStreamClient} reads as "no override" — DL-044.
      *
-     * <p>A key this operation observes as present is left exactly as it stands: its {@code value} and
-     * its {@code description} are both untouched, whatever they hold and however they came to hold
-     * it. A repeated call against unchanged data writes nothing.
+     * <p>A key observed as present is left exactly as it stands, {@code value} and
+     * {@code description} both. Rows are the only thing added: no column, table or index is
+     * contributed here.
      *
-     * <p>Rows are the only thing added. No column, table or index is contributed here; the schema is
-     * the four tables the source declared.
-     *
-     * <p>This method runs on {@link ApplicationReadyEvent}, after the context is refreshed, and is
-     * also directly invocable. It declares no transaction — DL-159 — see docs/DECISION_LOG.md. Each
-     * key is written in a transaction of its own; a rejected write is rolled back on its own and the
-     * remaining keys are still attempted. A key taken concurrently, by a second instance or by a second
-     * caller, is absorbed per key by {@link #seedIfAbsent(String, String, String)}.
+     * <p>This method runs on {@link ApplicationReadyEvent} and is also directly invocable. It declares
+     * no transaction — DL-159. Each key is written in a transaction of its own, so a rejected write is
+     * rolled back alone and the remaining keys are still attempted.
      *
      * @throws org.springframework.dao.DataIntegrityViolationException when a write is rejected and the
      *                                                                key it carried is still absent
@@ -310,36 +264,22 @@ public class SettingsService {
      * <p>The write is an insert and only an insert: the row is handed to
      * {@link jakarta.persistence.EntityManager#persist(Object)} and flushed, so the statement issued
      * is always {@code insert into settings}. No merge is performed and no {@code update} statement is
-     * reachable from this method — see docs/DECISION_LOG.md DL-159.
+     * reachable from this method — DL-159.
      *
      * <p>The insert runs in a transaction of its own, opened by {@link #insertTransaction} with
      * {@code PROPAGATION_REQUIRES_NEW}. A rejected insert rolls back that transaction alone, leaving
      * any transaction the caller holds usable and the remaining keys still writable.
      *
      * <p>{@code existsById} is consulted first and loads no row; the primary key is what refuses a
-     * duplicate — see docs/DECISION_LOG.md DL-159. Two concurrent outcomes are possible for one key
-     * and neither writes over a stored row:
-     *
-     * <ul>
-     *   <li>the key is present when {@code existsById} runs — nothing is written;
-     *   <li>the key is taken after {@code existsById} and before the insert reaches the database —
-     *       the insert is rejected by the primary key, the rejection is caught, presence is
-     *       re-established and the row the other writer stored is left exactly as it stands, both its
-     *       {@code value} and its {@code description}.
-     * </ul>
-     *
-     * <p>A rejection raised while the key is still absent afterwards is rethrown, wrapped in a
-     * {@link DataIntegrityViolationException} when the persistence provider reported it as a
+     * duplicate — DL-159. The check and the insert are two statements, so a key taken in between is
+     * refused by the primary key: that rejection is caught, presence is re-established and the row the
+     * other writer stored is left exactly as it stands, both its {@code value} and its
+     * {@code description}. A rejection raised while the key is still absent afterwards is rethrown,
+     * wrapped in a {@link DataIntegrityViolationException} when the provider reported it as a
      * {@link PersistenceException}.
      *
-     * <p>An insert is logged once at {@code INFO} and names the key; a key already present, and a key
+     * <p>An insert is logged once at {@code INFO} naming the key; a key already present, and a key
      * taken concurrently, are logged at {@code DEBUG}. No stored value is written to the log.
-     *
-     * <p>The presence check and the insert are two statements, so another instance may insert the
-     * same key in between. That outcome surfaces as a {@link DataIntegrityViolationException} on the
-     * insert, which is caught here: the row is re-read, the value the other instance stored is left
-     * in place, and nothing is rethrown. One row losing that race neither writes over the winning
-     * row nor stops the remaining rows from being seeded.
      *
      * @param key         the primary key of the default row
      * @param value       the value to store when the row is written

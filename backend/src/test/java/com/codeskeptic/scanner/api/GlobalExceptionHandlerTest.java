@@ -103,7 +103,6 @@ import org.slf4j.LoggerFactory;
 
 // Ported from backend/app/main.py:L31-37 (faithful port) — see docs/DECISION_LOG.md
 class GlobalExceptionHandlerTest {
-
     private static final String NOT_FOUND = "Not found";
 
     private static final String INTERNAL_SERVER_ERROR = "Internal server error";
@@ -143,7 +142,6 @@ class GlobalExceptionHandlerTest {
     /** The only two literals the advice puts on the wire outside a route's own message — DL-092. */
     private static final Set<String> GLOBAL_WIRE_LITERALS =
             Set.of("Not found", "Internal server error");
-
 
     private static final int UNAUTHORIZED = 401;
 
@@ -424,7 +422,6 @@ class GlobalExceptionHandlerTest {
     @DisplayName("answers a framework request failure with the framework's own status and no body")
     void answersAFrameworkRequestFailureWithItsOwnStatusAndNoBody(Exception reported,
             int expectedStatus, String description) {
-
         ResponseEntity<ErrorResponse> response = handler.handleUnexpectedException(reported);
 
         assertThat(response.getStatusCode().value()).as(description).isEqualTo(expectedStatus);
@@ -453,7 +450,6 @@ class GlobalExceptionHandlerTest {
             + "Internal server error envelope")
     void answersANonFrameworkFailureWith500(Exception reported, String description)
             throws JsonProcessingException {
-
         ResponseEntity<ErrorResponse> response = handler.handleUnexpectedException(reported);
 
         assertThat(response.getStatusCode().value()).as(description).isEqualTo(500);
@@ -489,7 +485,6 @@ class GlobalExceptionHandlerTest {
                 new HttpMessageNotWritableException(CAUSE_MESSAGE),
                 new MultipartException(CAUSE_MESSAGE), new IllegalArgumentException(CAUSE_MESSAGE),
                 new IllegalStateException(CAUSE_MESSAGE))) {
-
             assertThat(resolver.resolveMethod(failure))
                     .as("handler resolved for %s", failure.getClass().getSimpleName())
                     .isEqualTo(catchAll);
@@ -609,7 +604,6 @@ class GlobalExceptionHandlerTest {
             + "instead of raising a conversion failure")
     void bindsABodyRepeatingARecordComponentBeforeCompletion(String body, String expectedUsername,
             String expectedPassword) throws Exception {
-
         MappingJackson2HttpMessageConverter converter = new MappingJackson2HttpMessageConverter();
         MockHttpInputMessage message =
                 new MockHttpInputMessage(body.getBytes(StandardCharsets.UTF_8));
@@ -622,40 +616,21 @@ class GlobalExceptionHandlerTest {
         assertThat(((LoginRequest) bound).password()).isEqualTo(expectedPassword);
     }
 
-    /**
-     * Reads {@code body} onto {@code targetType} through the framework's own Jackson converter and
-     * returns the conversion failure it raises.
-     *
-     * @param targetType the record the body is bound onto
-     * @param body       the request body, as received
-     * @return the raised exception
-     */
     private static HttpMessageConversionException conversionFailureReadingBody(
             Class<?> targetType, String body) {
-
         return conversionFailureReadingBody(defaultConverter(), targetType, body);
     }
 
     private static HttpMessageConversionException conversionFailureReadingBody(
             MappingJackson2HttpMessageConverter converter, Class<?> targetType, String body) {
-
         return (HttpMessageConversionException) assertThatThrownBy(
                 () -> converter.read(targetType, null, inputMessageOf(body)))
                         .isInstanceOf(HttpMessageConversionException.class)
                         .actual();
     }
 
-    /**
-     * Reads {@code body} onto {@code targetType} through {@code converter} and returns the bound value.
-     *
-     * @param converter  the converter reading the body
-     * @param targetType the record the body is bound onto
-     * @param body       the request body, as received
-     * @return the bound value
-     */
     private static Object readBody(MappingJackson2HttpMessageConverter converter, Class<?> targetType,
             String body) {
-
         try {
             return converter.read(targetType, null, inputMessageOf(body));
         } catch (java.io.IOException failure) {
@@ -663,12 +638,6 @@ class GlobalExceptionHandlerTest {
         }
     }
 
-    /**
-     * Builds a JSON request message carrying {@code body}.
-     *
-     * @param body the request body, as received
-     * @return the message
-     */
     private static MockHttpInputMessage inputMessageOf(String body) {
         MockHttpInputMessage message =
                 new MockHttpInputMessage(body.getBytes(StandardCharsets.UTF_8));
@@ -676,7 +645,6 @@ class GlobalExceptionHandlerTest {
         return message;
     }
 
-    /** The converter the framework installs, with the duplicate handling it ships with. */
     private static MappingJackson2HttpMessageConverter defaultConverter() {
         return new MappingJackson2HttpMessageConverter();
     }
@@ -684,10 +652,6 @@ class GlobalExceptionHandlerTest {
     private static ExceptionHandlerMethodResolver resolverForTheAdvice() {
         return new ExceptionHandlerMethodResolver(GlobalExceptionHandler.class);
     }
-
-    // -----------------------------------------------------------------------
-    // What the advice writes to the log — DL-197
-    // -----------------------------------------------------------------------
 
     // Net-new (no Python counterpart) — DL-197 — see docs/DECISION_LOG.md
     @Test
@@ -808,8 +772,6 @@ class GlobalExceptionHandlerTest {
         appender.start();
         Logger adviceLogger = (Logger) LoggerFactory.getLogger(GlobalExceptionHandler.class);
         adviceLogger.addAppender(appender);
-        // DEBUG records are part of the contract these tests assert, so the level is raised for the
-        // duration of the test and restored by detachAdviceAppender.
         adviceLogger.setLevel(Level.DEBUG);
         return appender;
     }
@@ -963,39 +925,19 @@ class GlobalExceptionHandlerTest {
                 .isEqualTo(TWEET_NOT_FOUND);
     }
 
-    /**
-     * Builds the failure Spring MVC raises for a syntactically malformed request body.
-     *
-     * @return the failure
-     */
     private static HttpMessageNotReadableException malformedBody() {
         return new HttpMessageNotReadableException(CAUSE_MESSAGE,
                 new MockHttpInputMessage(new byte[0]));
     }
 
-    /**
-     * Builds the failure Spring MVC raises for a missing query parameter.
-     *
-     * @return the failure
-     */
     private static MissingServletRequestParameterException missingParameter() {
         return new MissingServletRequestParameterException("page", "int");
     }
 
-    /**
-     * Builds the failure Spring MVC raises for a request method the matched path does not support.
-     *
-     * @return the failure, reporting {@code GET} as the only supported method
-     */
     private static HttpRequestMethodNotSupportedException methodNotSupported() {
         return new HttpRequestMethodNotSupportedException("DELETE", List.of(HttpMethod.GET.name()));
     }
 
-    /**
-     * Builds the failure Spring MVC raises for a request body whose media type no handler consumes.
-     *
-     * @return the failure
-     */
     private static HttpMediaTypeNotSupportedException unsupportedMediaType() {
         return new HttpMediaTypeNotSupportedException(MediaType.TEXT_PLAIN,
                 List.of(MediaType.APPLICATION_JSON));
@@ -1055,10 +997,6 @@ class GlobalExceptionHandlerTest {
                 .isFalse();
     }
 
-    // -----------------------------------------------------------------------
-    // The servlet container's error path — DL-183 — see docs/DECISION_LOG.md
-    // -----------------------------------------------------------------------
-
     // The closed handler set the plan sanctions: the three domain failures, the validation failure,
     // the two unmatched-path types and the catch-all — DL-092 — see docs/DECISION_LOG.md
     @Test
@@ -1099,7 +1037,6 @@ class GlobalExceptionHandlerTest {
             + "handler, which answers 500 with the Internal server error envelope")
     void resolvesAnAuthenticationAndAccessDeniedFailureToTheCatchAllHandler()
             throws JsonProcessingException {
-
         ExceptionHandlerMethodResolver resolver = resolverForTheAdvice();
         Method catchAll = handlerMethodFor(Exception.class);
 
@@ -1225,7 +1162,6 @@ class GlobalExceptionHandlerTest {
     @DisplayName("publishes the single-key literal for a dispatched 404 and 500")
     void publishesTheSingleKeyLiteralForADispatchedStatus(int dispatchedStatus,
             String expectedMessage) {
-
         assertThat(errorAttributesFor(dispatchedStatus))
                 .containsExactly(entry("error", expectedMessage));
     }
@@ -1432,11 +1368,9 @@ class GlobalExceptionHandlerTest {
     }
 
     private void validationTargetHolder(Object target) {
-        // Reflection target of validationTargetParameter(); this method is never invoked.
     }
 
     private static final class ValidationTarget {
-
         public String getTweetId() {
             return null;
         }

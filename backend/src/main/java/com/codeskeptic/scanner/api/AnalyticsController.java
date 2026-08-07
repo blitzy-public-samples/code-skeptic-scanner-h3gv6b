@@ -13,60 +13,30 @@ import com.codeskeptic.scanner.service.AnalyticsService;
 // Endpoint contract ported from backend/app/api/analytics.py:L7-25 (faithful port) — see
 // docs/DECISION_LOG.md DL-021, DL-041, DL-042, DL-059
 /**
- * Serves the unprefixed {@code GET /analytics/trends} and
- * {@code GET /analytics/summary} routes from
- * {@code backend/app/api/analytics.py:L7-25}.
+ * Serves the unprefixed {@code GET /analytics/trends} and {@code GET /analytics/summary} routes from
+ * {@code backend/app/api/analytics.py:L7-25}, each answering 200 with one JSON object.
  *
- * <ul>
- *   <li>{@code GET /analytics/trends} — {@link #getTrends()}, 200 with one JSON object
- *       ({@code backend/app/api/analytics.py:L7-15}).</li>
- *   <li>{@code GET /analytics/summary} — {@link #getSummary()}, 200 with one JSON object
- *       ({@code backend/app/api/analytics.py:L17-25}).</li>
- * </ul>
+ * <p>Neither route declares a query parameter, a path variable, a request body or a header:
+ * {@code get_trends()} at {@code :L14} and {@code get_summary()} at {@code :L24} are argument-less, as
+ * are both operations of {@link AnalyticsService}, so a query parameter a client appends is not bound
+ * and leaves the body unchanged — DL-042. The blueprint declared these two routes and no third, so
+ * {@code GET /analytics} and {@code GET /analytics/} answer 404 with {@code {"error": "Not found"}} —
+ * the literal of {@code backend/app/main.py:L33}.
  *
- * <p>Both paths are unprefixed: no {@code /api} segment and no version segment.
- * {@code documentation/Technical Specifications.md:L386-387} documents the same two routes carrying
- * an {@code /api} prefix; the routes served here carry none — DL-059.
+ * <p>Each handler selects status 200 and renders the record {@link AnalyticsService} returned, matching
+ * {@code jsonify(trend_data)} at {@code :L15} and {@code jsonify(summary_data)} at {@code :L25}. This
+ * class computes, rounds, formats, reorders, filters and paginates nothing and holds no memoised
+ * result. Neither source route has a 400 or a 404 branch; a failure beneath either handler propagates
+ * to {@link GlobalExceptionHandler}, which answers 500 with {@code {"error": "Internal server error"}}.
  *
- * <p>Neither route declares a query parameter, a path variable, a request body or a header.
- * {@code get_trends()} at {@code backend/app/api/analytics.py:L14} and {@code get_summary()} at
- * {@code :L24} are argument-less, as are both operations of {@link AnalyticsService}. A query
- * parameter a client appends is not bound and leaves the body unchanged — DL-042.
+ * <p>The injected singleton stands in for the per-request {@code AnalyticsService()} at {@code :L13}
+ * and {@code :L23}, and authentication is enforced by the security filter chain in place of the bare
+ * {@code @jwt_required} at {@code :L8} and {@code :L18} — DL-021. The {@code tweets},
+ * {@code responses} and {@code ai_tools} tables are reached through {@code service.AnalyticsService}
+ * only.
  *
- * <p>The blueprint declared these two routes and no third. {@code GET /analytics} and
- * {@code GET /analytics/} are not declared here; {@link GlobalExceptionHandler} answers each with 404
- * and {@code {"error": "Not found"}}, the literal of {@code backend/app/main.py:L33}. The "Top AI
- * Tools Mentioned" and "Response Effectiveness" panels at
- * {@code documentation/Technical Specifications.md:L437-441} are interface descriptions, and no route
- * here carries them.
- *
- * <p>Each handler selects status 200 and renders the record {@link AnalyticsService} returned,
- * matching {@code jsonify(trend_data)} at {@code backend/app/api/analytics.py:L15} and
- * {@code jsonify(summary_data)} at {@code :L25}. This class computes, rounds, formats, reorders,
- * filters and paginates nothing, and holds no memoised result.
- *
- * <p>This class selects no other status and builds no error body. Neither source route has a 400 or a
- * 404 branch. A failure raised beneath either handler propagates to {@link GlobalExceptionHandler},
- * which answers 500 with {@code {"error": "Internal server error"}}, the literal of
- * {@code backend/app/main.py:L37}.
- *
- * <p>The injected singleton below stands in for the per-request {@code AnalyticsService()} at
- * {@code backend/app/api/analytics.py:L13} and {@code :L23}.
- *
- * <p>Authentication is enforced by the security filter chain, which runs ahead of the
- * {@code DispatcherServlet}, in place of the bare {@code @jwt_required} at
- * {@code backend/app/api/analytics.py:L8} and {@code :L18} — DL-021. The chain's
- * {@code anyRequest().authenticated()} rule covers both routes, and no authorization annotation is
- * declared on this class or on either handler.
- *
- * <p>This class reaches the {@code tweets}, {@code responses} and {@code ai_tools} tables through
- * {@code service.AnalyticsService} only.
- *
- * <p>This is a singleton bean holding its one collaborator in a final field and no other state, so
- * every member declared here is safe for concurrent use.
- *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-021, DL-041, DL-042
- * and DL-059; construct-level provenance is recorded in {@code docs/TRACEABILITY_MATRIX.md}.
+ * <p>Singleton bean holding one collaborator in a final field and no other state, so every member
+ * declared here is safe for concurrent use.
  *
  * @see AnalyticsService
  * @see TrendsDto
@@ -77,12 +47,6 @@ public class AnalyticsController {
 
     private final AnalyticsService analyticsService;
 
-    /**
-     * Creates the controller with its one collaborator.
-     *
-     * @param analyticsService the service serving both routes, must not be {@code null}
-     * @throws NullPointerException when {@code analyticsService} is {@code null}
-     */
     public AnalyticsController(AnalyticsService analyticsService) {
         this.analyticsService = Objects.requireNonNull(analyticsService,
                 "analyticsService must not be null.");

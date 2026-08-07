@@ -26,42 +26,34 @@ import jakarta.annotation.PreDestroy;
 // net-new: the source constructed the client eagerly at :L8 and closed it nowhere — see
 // docs/DECISION_LOG.md DL-288.
 /**
- * Adapter for the Google Cloud Natural Language API and the single home of the
- * doubt-rating calculation.
+ * Adapter for the Google Cloud Natural Language API and the single home of the doubt-rating
+ * calculation.
  *
- * <p>Three operations are exposed. {@link #analyzeSentiment(String)} returns the
- * document sentiment score the Natural Language API reports for a piece of text.
- * {@link #calculateDoubtRating(double)} converts such a score into the doubt
- * rating persisted on the {@code tweets.doubt_rating} column, and
- * <p>The underlying {@link LanguageServiceClient} authenticates with Application
- * Default Credentials and is created on first use by {@link #languageClient()};
- * constructing this bean resolves no credential and opens no connection. Every
- * {@code AnalyzeSentiment} call the client issues carries a bounded deadline.
+ * <p>{@link #analyzeSentiment(String)} returns the document sentiment score the Natural Language API
+ * reports for a piece of text, and {@link #calculateDoubtRating(double)} converts such a score into the
+ * doubt rating persisted on the {@code tweets.doubt_rating} column — DL-036, DL-037.
  *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md}
- * DL-010, DL-036, DL-037, DL-052 and DL-288; construct-level provenance is recorded in
- * {@code docs/TRACEABILITY_MATRIX.md}.
+ * <p>The underlying {@link LanguageServiceClient} authenticates with Application Default Credentials
+ * and is created on first use by {@link #languageClient()}; constructing this bean resolves no
+ * credential and opens no connection. Every {@code AnalyzeSentiment} call the client issues carries a
+ * bounded deadline.
  *
- * <p>This class is thread-safe. It is a singleton bean, and client acquisition,
- * client use and client release are coordinated by a read/write lock and a
- * destroyed flag:
+ * <p>This class is thread-safe. It is a singleton bean, and client acquisition, client use and client
+ * release are coordinated by a read/write lock and a destroyed flag:
  *
  * <ul>
  *   <li>{@link #analyzeSentiment(String)} holds the read lock for the whole
- *       acquisition-and-call sequence. The client it obtains is not closed while
- *       the call is in flight.</li>
- *   <li>{@link #closeLanguageClient()} sets the destroyed flag before it begins
- *       waiting, then takes the write lock. It waits for every in-flight call to
- *       return, for at most {@value #AWAIT_ACTIVE_USE_SECONDS} seconds, and
- *       releases the client once the wait has drained or that bound has
- *       elapsed.</li>
- *   <li>Once the bean is destroyed, {@link #languageClient()} and
- *       {@link #analyzeSentiment(String)} both throw
- *       {@link IllegalStateException}: no client is created and no request is
- *       issued after shutdown. {@link #analyzeSentiment(String)} tests the flag
- *       before it queues on the read lock and again once it holds it, so work
- *       arriving while a shutdown is waiting is rejected and is never
- *       started — DL-268.</li>
+ *       acquisition-and-call sequence. The client it obtains is not closed while the call is in
+ *       flight.</li>
+ *   <li>{@link #closeLanguageClient()} sets the destroyed flag before it begins waiting, then takes
+ *       the write lock. It waits for every in-flight call to return, for at most
+ *       {@value #AWAIT_ACTIVE_USE_SECONDS} seconds, and releases the client once the wait has drained
+ *       or that bound has elapsed.</li>
+ *   <li>Once the bean is destroyed, {@link #languageClient()} and {@link #analyzeSentiment(String)}
+ *       both throw {@link IllegalStateException}: no client is created and no request is issued after
+ *       shutdown. {@link #analyzeSentiment(String)} tests the flag before it queues on the read lock
+ *       and again once it holds it, so work arriving while a shutdown is waiting is rejected and is
+ *       never started — DL-268.</li>
  * </ul>
  */
 @Service
@@ -88,15 +80,10 @@ public class SentimentAnalysisService {
      */
     private static final int AWAIT_ACTIVE_USE_SECONDS = 30;
 
-    /** Message of the {@link IllegalStateException} raised once the bean has been destroyed. */
     private static final String DESTROYED_MESSAGE =
             "SentimentAnalysisService has been destroyed; the Natural Language API client is closed";
 
     // The score the API documents is a finite float — DL-233 — see docs/DECISION_LOG.md
-    /**
-     * Message of the {@link IllegalStateException} raised for a document sentiment score that is not
-     * a finite number.
-     */
     private static final String NON_FINITE_SCORE_MESSAGE =
             "The Natural Language API returned a document sentiment score that is not a finite "
                     + "number; the analysis has no reportable result";
@@ -131,41 +118,33 @@ public class SentimentAnalysisService {
     }
 
     /**
-     * Returns the document sentiment score the Natural Language API reports for
-     * the supplied text.
+     * Returns the document sentiment score the Natural Language API reports for the supplied text.
      *
-     * <p>The request carries the text as {@code PLAIN_TEXT} with language
-     * {@code en}. The score is returned exactly as received — unrounded,
-     * unscaled and unclamped. A failure reported by the API propagates to the
-     * caller unchanged; no substitute score is returned.
+     * <p>The request carries the text as {@code PLAIN_TEXT} with language {@code en}. The score is
+     * returned exactly as received — unrounded, unscaled and unclamped — and a failure reported by the
+     * API propagates to the caller unchanged, with no substitute score.
      *
-     * <p>The returned score is always finite. The API documents a score between
-     * {@code -1.0} and {@code 1.0}; a value that is not a finite number —
-     * {@link Double#NaN} or either infinity — is reported as a failure and is
-     * never returned. No score is clamped, rounded or substituted: a finite score
-     * outside that range is returned unchanged — see docs/DECISION_LOG.md DL-233.
+     * <p>The returned score is always finite. The API documents a score between {@code -1.0} and
+     * {@code 1.0}; a value that is not a finite number — {@link Double#NaN} or either infinity — is
+     * reported as a failure and is never returned, and a finite score outside that range is returned
+     * unchanged — DL-233.
      *
-     * <p>The call is bounded. One RPC attempt may take at most {@link #RPC_TIMEOUT} and
-     * the call as a whole at most {@link #TOTAL_TIMEOUT}, retries included; past
-     * that the call fails and the calling thread is released. Such a failure is
-     * logged at {@code ERROR} and rethrown unchanged like any other.
+     * <p>The call is bounded: one RPC attempt may take at most {@link #RPC_TIMEOUT} and the call as a
+     * whole at most {@link #TOTAL_TIMEOUT}, retries included; past that the call fails, the calling
+     * thread is released, and the failure is logged at {@code ERROR} and rethrown unchanged.
      *
-     * <p>The read lock of {@link #lifecycleLock} is held for the whole
-     * acquisition-and-call sequence. The client is not released mid-call.
-     *
-     * <p>The destroyed flag is tested before the read lock is requested and again once it is held, so
-     * a call arriving while {@link #closeLanguageClient()} is waiting is rejected immediately and does
-     * not queue behind the release — see docs/DECISION_LOG.md DL-268.
+     * <p>The read lock of {@link #lifecycleLock} is held for the whole acquisition-and-call sequence,
+     * so the client is not released mid-call. The destroyed flag is tested before the read lock is
+     * requested and again once it is held, so a call arriving while {@link #closeLanguageClient()} is
+     * waiting is rejected immediately and does not queue behind the release — DL-268.
      *
      * @param text the tweet text to analyse; must not be {@code null}
      * @return the document sentiment score, a finite value conventionally between
      *         {@code -1.0} (negative) and {@code 1.0} (positive)
      * @throws NullPointerException  if {@code text} is {@code null}
-     * @throws IllegalStateException if the bean has been destroyed, if the
-     *                               Natural Language client cannot be created
-     *                               from Application Default Credentials, or if
-     *                               the API reports a score that is not a finite
-     *                               number
+     * @throws IllegalStateException if the bean has been destroyed, if the Natural Language client
+     *                               cannot be created from Application Default Credentials, or if the
+     *                               API reports a score that is not a finite number
      */
     // Ported from backend/app/services/sentiment_analysis.py:L12-24 (faithful port). The parameter is
     // the tweet text, reconciling backend/app/api/tweets.py:L46 with

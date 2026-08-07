@@ -20,18 +20,15 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * Periodic pass that generates a stored reply for every {@code tweets} row that has none.
- *
- * <p>One pass sweeps the {@code tweets} rows with no associated {@code responses} row and, for each
- * of them, calls {@link ResponseService#generateResponseIfAbsentFor(Tweet)} to generate and store a reply
- * and then mirrors that reply onto the matching Notion page.
+ * Periodic pass that generates a stored reply for every {@code tweets} row that has none, and mirrors
+ * that reply onto the matching Notion page.
  *
  * <p>The sweep reads its candidates in consecutive batches of at most {@value #CANDIDATE_BATCH_ROWS}
  * rows, each batch taken from the rows whose identifier exceeds the last one the pass handled, and it
- * continues until a batch comes back short. One pass still considers the whole backlog, and
- * the rows one statement returns and the rows the pass holds at any moment are both bounded — see
- * docs/DECISION_LOG.md DL-248. The pass declares no transaction, so each batch is read in
- * the repository's own transaction and its rows are detached when that call returns.
+ * continues until a batch comes back short. One pass still considers the whole backlog, and the rows
+ * one statement returns and the rows the pass holds at any moment are both bounded — DL-248. The pass
+ * declares no transaction, so each batch is read in the repository's own transaction, its rows are
+ * detached when that call returns, and the calls to OpenAI and Notion run with no transaction open.
  *
  * <p>Pacing is declared on {@link #generatePendingResponses()} itself, as
  * {@code @Scheduled(fixedDelayString = "${scanner.response-generation-delay-seconds}")} in seconds:
@@ -50,37 +47,25 @@ import org.springframework.stereotype.Component;
  * {@code scanner.background.max-candidates-per-pass} candidates, whatever the backlog holds. A pass
  * that reaches that ceiling ends early, records it with the counts it had reached, and leaves the
  * untouched backlog to the following pass — DL-282. No allowance, window, attempt counter or failure
- * circuit stands between a candidate and its provider call, and the ceiling defers, queues and
- * re-attempts nothing.
+ * circuit stands between a candidate and its provider call.
  *
  * <p>This pass does not own ingestion's replies. It reaches
  * {@link ResponseService#generateResponseIfAbsentFor(Tweet)}, the entity-shaped signature of the one
  * claim-aware operation both background paths reach — {@code task.TweetStreamListener} reaches its
  * identifier-shaped signature and both run one body — so a candidate that listener is answering, or has
- * answered since the candidate query ran, stores nothing and is counted as skipped — see
- * docs/DECISION_LOG.md DL-195 and DL-226.
+ * answered since the candidate query ran, stores nothing and is counted as skipped — DL-195, DL-226. A
+ * selected row is handed to {@link ResponseService} as it was selected, so no candidate is read a
+ * second time — DL-226. {@link Tweet#getResponses()} is lazy, {@code spring.jpa.open-in-view} is
+ * {@code false}, and the collection is never traversed here.
  *
  * <p>The relational database is the system of record and Notion is a secondary mirror. A mirror write
  * is retried within the budget {@code service/NotionService} carries; a mirror still rejected after
  * that leaves the already stored reply in place, is counted separately in the pass summary as stored
- * without a mirror, and is not attempted again — no compensation, re-generation or durable
- * reconciliation of unmirrored replies exists — see docs/DECISION_LOG.md DL-253.
+ * without a mirror, and is not attempted again — DL-253.
  *
  * <p>No code path here publishes anything to X. The class reaches no HTTP client, and it does not
  * read, set or branch on the {@code responses.is_approved} flag of
  * {@code backend/app/db/models.py:L26}, which a human reads.
- *
- * <p>No transaction is declared on the pass: the candidate query and every write inside
- * {@link ResponseService} run within the boundaries those components declare, and the calls to
- * OpenAI and Notion run with no transaction open.
- *
- * <p>A selected row is handed to {@link ResponseService} as it was selected, so no candidate is read a
- * second time: the candidate query already carries every column the generator reads — DL-226.
- * {@link Tweet#getResponses()} is lazy and {@code spring.jpa.open-in-view} is {@code false}; the
- * collection is never traversed here.
- *
- * @see ResponseService#generateResponseIfAbsentFor(Tweet)
- * @see NotionService#updateTweetResponse(String, String)
  */
 // Fixed-delay intent ported from schedule_response_generation at
 // backend/app/tasks/response_generation.py:L35-50, absorbing the task body at :L10-33 (faithful port
@@ -140,33 +125,29 @@ public class ResponseGenerationScheduler {
     /**
      * Runs one generation pass over every {@code tweets} row that has no {@code responses} row.
      *
-     * <p>The pass reads its candidates in consecutive batches of at most
-     * {@value #CANDIDATE_BATCH_ROWS} rows, and for each candidate of each batch generates and stores a
-     * reply and mirrors it to Notion. The next batch is taken from the rows whose identifier exceeds
-     * the last candidate handled, so no candidate is read twice and none is skipped, and the sweep ends
-     * with the first batch that comes back short of that bound. A candidate another path already
-     * answered stores nothing and is counted as skipped. A candidate whose handling raises is recorded
-     * and skipped, and the pass continues with the next candidate. The pass closes with a summary of
-     * the attempted, succeeded, unmirrored, skipped and failed counts and the number of batches it read
-     * — see docs/DECISION_LOG.md DL-248 and DL-253.
+     * <p>Candidates are read in consecutive batches of at most {@value #CANDIDATE_BATCH_ROWS} rows,
+     * each batch taken from the rows whose identifier exceeds the last candidate handled, so no
+     * candidate is read twice and none is skipped; the sweep ends with the first batch that comes back
+     * short of that bound. For each candidate the pass generates and stores a reply and mirrors it to
+     * Notion. A candidate another path already answered stores nothing and is counted as skipped; a
+     * candidate whose handling raises is recorded and skipped, and the pass continues. The pass closes
+     * with a summary of the attempted, succeeded, unmirrored, skipped and failed counts and the number
+     * of batches read — DL-248, DL-253.
      *
      * <p>A candidate ingested after the pass began is answered by this pass when its identifier lies
      * past the cursor at the time the next batch is read, and by the following pass otherwise.
      *
-     * <p>Every tick runs a pass. {@code fixedDelayString} measures the interval from the completion of
-     * one pass to the start of the next, so no pass overlaps its predecessor, and the framework runs
-     * the first pass at the startup instant, and not one interval later — the work-then-sleep order
-     * of {@code backend/app/tasks/response_generation.py:L41-50}. The interval is
-     * {@code scanner.response-generation-delay-seconds}, read once when the task is registered — see
-     * docs/DECISION_LOG.md DL-047 and DL-227.
+     * <p>{@code fixedDelayString} measures the interval from the completion of one pass to the start of
+     * the next, so no pass overlaps its predecessor, and the framework runs the first pass at the
+     * startup instant — the work-then-sleep order of
+     * {@code backend/app/tasks/response_generation.py:L41-50}. The interval is
+     * {@code scanner.response-generation-delay-seconds}, read once when the task is registered —
+     * DL-047, DL-227.
      *
      * <p>Nothing runs in a process that does not carry the pass: {@code scanner.background.enabled} and
      * {@code scanner.background.response-generation-enabled} must both hold, and a tick in a process
-     * for which either is {@code false} returns without reading a candidate — see
-     * docs/DECISION_LOG.md DL-250.
-     *
-     * <p>The method takes no argument, returns nothing and throws nothing: every {@link
-     * RuntimeException} raised inside it is recorded and suppressed.
+     * for which either is {@code false} returns without reading a candidate — DL-250. Every
+     * {@link RuntimeException} raised inside this method is recorded and suppressed.
      */
     // Ported from schedule_response_generation() at
     // backend/app/tasks/response_generation.py:L35-50 (faithful port) — see docs/DECISION_LOG.md
@@ -362,12 +343,8 @@ public class ResponseGenerationScheduler {
 
     // The mirror outcome is reported separately from the stored reply — DL-253 — see
     // docs/DECISION_LOG.md
-    /**
-     * What one pass did with one candidate.
-     */
     private enum CandidateOutcome {
 
-        /** A reply was stored and mirrored to its Notion page. */
         STORED_AND_MIRRORED,
 
         /**

@@ -66,30 +66,18 @@ import io.jsonwebtoken.security.WeakKeyException;
  */
 @DisplayName("JwtService")
 class JwtServiceTest {
-
-    /** Value carried in the {@code sub} claim of every token this class mints or builds. */
     private static final String USERNAME = "someuser";
 
-    /** Value bound to {@code scanner.jwt.algorithm} by every service this class constructs. */
     private static final String HS256 = "HS256";
 
-
-    /**
-     * Value bound to {@code scanner.jwt.expiration-minutes}; the value
-     * {@code src/test/resources/application-test.yml} declares, and the largest the service accepts.
-     */
     private static final long EXPIRATION_MINUTES = 60L;
 
-    /** Smallest value {@code scanner.jwt.expiration-minutes} may carry. */
     private static final long MINIMUM_EXPIRATION_MINUTES = 1L;
 
-    /** Property key named by the message the lifetime guard raises. */
     private static final String LIFETIME_PROPERTY = "scanner.jwt.expiration-minutes";
 
-    /** Property key named by the message the algorithm guard raises. */
     private static final String ALGORITHM_PROPERTY = "scanner.jwt.algorithm";
 
-    /** {@link #EXPIRATION_MINUTES} expressed as a {@link Duration}. */
     private static final Duration LIFETIME = Duration.ofMinutes(EXPIRATION_MINUTES);
 
     /**
@@ -99,10 +87,6 @@ class JwtServiceTest {
     private static final String SECRET =
             "jwt-service-test-signing-secret-0123456789abcdef";
 
-    /**
-     * Exactly 32 bytes of key material as text, which is the shortest accepted secret. None of its
-     * characters appears in any failure message this class asserts on.
-     */
     private static final String SHORTEST_ACCEPTED_SECRET = "0123456789abcdef0123456789abcdef";
 
     /**
@@ -119,46 +103,29 @@ class JwtServiceTest {
     private static final String NON_BASE64_SECRET =
             "a passphrase! with spaces, punctuation and \u00e9 accents";
 
-    /** A second 56 bytes of key material, never bound to {@code scanner.jwt.secret}. */
     private static final String FOREIGN_SECRET =
             "jwt-service-test-foreign-signing-secret-fedcba9876543210";
 
-    /**
-     * 65 bytes of key material, bound to {@code scanner.jwt.secret} by the HS512 rejection test only.
-     * It meets the 512-bit floor jjwt 0.13.0 enforces for HS512, and a token signed with HS512 under
-     * it carries the very key the service under test verifies with.
-     */
     private static final String LONG_SECRET =
             "jwt-service-test-signing-secret-that-is-sixty-five-bytes-00000000x";
 
-    /** Key derived from {@link #SECRET}, matching the key every service under test derives. */
     private static final SecretKey SIGNING_KEY =
             Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8));
 
-    /** Key derived from {@link #FOREIGN_SECRET}. */
     private static final SecretKey FOREIGN_KEY =
             Keys.hmacShaKeyFor(FOREIGN_SECRET.getBytes(StandardCharsets.UTF_8));
 
-    /** Key derived from {@link #LONG_SECRET}. */
     private static final SecretKey LONG_SIGNING_KEY =
             Keys.hmacShaKeyFor(LONG_SECRET.getBytes(StandardCharsets.UTF_8));
 
-    /**
-     * Margin applied to both wall-clock bounds of the expiration window assertion. The {@code iat}
-     * and {@code exp} claims are NumericDate values carrying whole seconds.
-     */
     private static final Duration TOLERANCE = Duration.ofSeconds(2L);
 
-    /** How far in the past the {@code exp} claim of the expired token sits. */
     private static final Duration EXPIRED_BY = Duration.ofSeconds(60L);
 
-    /** A value that is not a compact JWS. */
     private static final String MALFORMED_TOKEN = "not-a-jwt";
 
-    /** A three-segment value whose segments are not JWS components. */
     private static final String DOTTED_MALFORMED_TOKEN = "aaa.bbb.ccc";
 
-    /** A value carrying whitespace only. */
     private static final String BLANK_TOKEN = "   ";
 
     @Test
@@ -694,12 +661,6 @@ class JwtServiceTest {
                 .doesNotContain(unverifiableToken);
     }
 
-    /**
-     * Tokens {@link JwtService#extractUsername(String)} cannot verify, each reaching the parser and
-     * producing one log record each.
-     *
-     * @return one unverifiable compact JWS or JWS-shaped value per invocation
-     */
     private static Stream<String> unverifiableTokens() {
         Instant now = Instant.now();
         return Stream.of(
@@ -716,10 +677,6 @@ class JwtServiceTest {
 
         assertThat(headerAlgorithmOf(service.generateToken(USERNAME))).isEqualTo(HS256);
     }
-
-    // ---------------------------------------------------------------------
-    // Adversarial verification policy — see docs/DECISION_LOG.md DL-108, DL-109, DL-110
-    // ---------------------------------------------------------------------
 
     @Test
     @DisplayName("rejects an HS384 token signed with the very key it verifies with")
@@ -860,7 +817,6 @@ class JwtServiceTest {
     @DisplayName("accepts the boundary token lifetimes and reports them in seconds")
     void acceptsTheBoundaryTokenLifetimesAndReportsThemInSeconds(long configuredMinutes,
             long expectedSeconds) {
-
         JwtService service = serviceWith(SECRET, HS256, configuredMinutes);
 
         assertThat(service.getExpirationSeconds()).isEqualTo(expectedSeconds);
@@ -895,12 +851,6 @@ class JwtServiceTest {
         assertThat(headerAlgorithmOf(service.generateToken(USERNAME))).isEqualTo(HS256);
     }
 
-    /**
-     * Builds a deterministic run of ASCII key material of the requested byte length.
-     *
-     * @param materialBytes number of bytes of key material to build; never negative
-     * @return the key material as text, which is the empty string for a length of {@code 0}
-     */
     private static String textOf(int materialBytes) {
         StringBuilder material = new StringBuilder(materialBytes);
         for (int index = 0; index < materialBytes; index++) {
@@ -909,38 +859,15 @@ class JwtServiceTest {
         return material.toString();
     }
 
-    /**
-     * Constructs the unit under test over a {@code scanner.jwt} group carrying the given values.
-     *
-     * @param secret value of {@code scanner.jwt.secret}
-     * @param algorithm value of {@code scanner.jwt.algorithm}
-     * @param expirationMinutes value of {@code scanner.jwt.expiration-minutes}
-     * @return the constructed service
-     */
     private static JwtService serviceWith(String secret, String algorithm, long expirationMinutes) {
         return new JwtService(
                 propertiesWith(new ScannerProperties.Jwt(secret, algorithm, expirationMinutes)));
     }
 
-    /**
-     * Builds a configuration root carrying the given {@code scanner.jwt} group. Every other group is
-     * absent; {@link JwtService} reads none of them.
-     *
-     * @param jwt the {@code scanner.jwt} group, which may be {@code null}
-     * @return the configuration root
-     */
     private static ScannerProperties propertiesWith(ScannerProperties.Jwt jwt) {
         return new ScannerProperties(null, 0, 0L, null, null, null, jwt, null, null, null, null);
     }
 
-    /**
-     * Builds a compact JWS carrying {@link #USERNAME} as its subject, signed with HS256.
-     *
-     * @param key the signing key
-     * @param issuedAt value of the {@code iat} claim
-     * @param expiresAt value of the {@code exp} claim
-     * @return the compact JWS serialization
-     */
     private static String tokenSignedWith(SecretKey key, Instant issuedAt, Instant expiresAt) {
         return Jwts.builder()
                 .subject(USERNAME)
@@ -950,12 +877,6 @@ class JwtServiceTest {
                 .compact();
     }
 
-    /**
-     * Verifies a token against {@link #SIGNING_KEY} and returns its claim set.
-     *
-     * @param token the compact JWS to verify
-     * @return the verified claim set
-     */
     private static Claims claimsOf(String token) {
         return Jwts.parser()
                 .verifyWith(SIGNING_KEY)
@@ -964,12 +885,6 @@ class JwtServiceTest {
                 .getPayload();
     }
 
-    /**
-     * Reads the {@code alg} header of a compact JWS without verifying its signature.
-     *
-     * @param token the compact JWS to inspect
-     * @return the value of the {@code alg} header
-     */
     private static String headerAlgorithmOf(String token) {
         String encodedHeader = token.substring(0, token.indexOf('.'));
         String header = new String(Base64.getUrlDecoder().decode(encodedHeader),

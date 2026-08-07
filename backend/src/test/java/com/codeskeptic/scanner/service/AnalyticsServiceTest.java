@@ -60,11 +60,6 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 @ExtendWith(MockitoExtension.class)
 @DisplayName("AnalyticsService")
 class AnalyticsServiceTest {
-
-    // -----------------------------------------------------------------------
-    // Measured values — one distinct sentinel per reported metric
-    // -----------------------------------------------------------------------
-
     private static final long TOTAL_TWEETS = 12L;
 
     private static final long TOTAL_RESPONSES = 7L;
@@ -85,36 +80,15 @@ class AnalyticsServiceTest {
 
     private static final long WIDER_PENDING_RESPONSES = 7L;
 
-    // -----------------------------------------------------------------------
-    // Observation window — scanner.analytics.trend-window-days
-    // -----------------------------------------------------------------------
-
     private static final int CONFIGURED_TREND_WINDOW_DAYS = 30;
 
     private static final int SHORTER_TREND_WINDOW_DAYS = 7;
 
-    // -----------------------------------------------------------------------
-    // Fixed clock — the UTC basis the window is measured from (DL-278)
-    // -----------------------------------------------------------------------
-
-    /**
-     * The instant every case measures the window from: 2026-08-06T10:30:00Z. Its UTC date is
-     * 2026-08-06, its date in {@code Pacific/Midway} (UTC-11:00) is 2026-08-05 and its date in
-     * {@code Pacific/Kiritimati} (UTC+14:00) is 2026-08-07, so a cutoff computed on the JVM default
-     * zone lands a day early in the first zone and a day late in the second; a cutoff computed on UTC
-     * lands on 2026-08-06 in both.
-     */
     private static final Instant FIXED_INSTANT = Instant.parse("2026-08-06T10:30:00Z");
 
-    /** UTC date of {@link #FIXED_INSTANT}. */
     private static final LocalDate FIXED_UTC_DATE = LocalDate.of(2026, 8, 6);
 
-    /** Clock every case injects, fixed at {@link #FIXED_INSTANT} and reading in UTC. */
     private static final Clock FIXED_UTC_CLOCK = Clock.fixed(FIXED_INSTANT, ZoneOffset.UTC);
-
-    // -----------------------------------------------------------------------
-    // Day buckets of the trend series
-    // -----------------------------------------------------------------------
 
     private static final LocalDate FIRST_BUCKET_DAY = LocalDate.of(2026, 8, 1);
 
@@ -133,10 +107,6 @@ class AnalyticsServiceTest {
     private static final double SECOND_BUCKET_AVERAGE_DOUBT_RATING = 2.25d;
 
     private static final long SECOND_BUCKET_TOTAL_LIKES = 47L;
-
-    // -----------------------------------------------------------------------
-    // Structural inventories
-    // -----------------------------------------------------------------------
 
     private static final List<String> SCHEMA_CAPABLE_TYPE_NAMES = List.of(
             "EntityManager",
@@ -170,10 +140,6 @@ class AnalyticsServiceTest {
 
     private static final String TRENDS_OPERATION = "getTrends";
 
-    // -----------------------------------------------------------------------
-    // Collaborators
-    // -----------------------------------------------------------------------
-
     @Mock
     private TweetRepository tweetRepository;
 
@@ -194,20 +160,9 @@ class AnalyticsServiceTest {
                 properties, FIXED_UTC_CLOCK);
     }
 
-    /**
-     * Returns the inclusive lower bound a window of {@code windowDays} UTC dates opens at, measured
-     * from {@link #FIXED_INSTANT}.
-     *
-     * @param windowDays the configured window width in UTC calendar dates
-     * @return the expected cutoff
-     */
     private static LocalDateTime expectedCutoff(int windowDays) {
         return FIXED_UTC_DATE.minusDays((long) windowDays - 1L).atStartOfDay();
     }
-
-    // -----------------------------------------------------------------------
-    // The declared surface
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("takes no argument to report the summary")
@@ -326,10 +281,6 @@ class AnalyticsServiceTest {
         assertThat(declared).isNotNull();
         assertThat(declared.readOnly()).isTrue();
     }
-
-    // -----------------------------------------------------------------------
-    // getSummary() — the reported metric set
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("reports seven metrics and no eighth")
@@ -471,10 +422,6 @@ class AnalyticsServiceTest {
         verify(aiToolRepository, times(2)).count();
     }
 
-    // -----------------------------------------------------------------------
-    // getSummary() — the empty database
-    // -----------------------------------------------------------------------
-
     @Test
     @DisplayName("reports the summary without raising when no tweet is stored")
     void reportsTheSummaryWithoutRaisingWhenNoTweetIsStored() {
@@ -531,10 +478,6 @@ class AnalyticsServiceTest {
         assertThat(summary.averageDoubtRating()).isEqualTo(AVERAGE_DOUBT_RATING);
         assertThat(summary.averageLikeCount()).isEqualTo(AVERAGE_LIKE_COUNT);
     }
-
-    // -----------------------------------------------------------------------
-    // getTrends() — the day-bucketed series
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("reports one series element for each day bucket the query returned")
@@ -638,7 +581,6 @@ class AnalyticsServiceTest {
 
         service.getTrends();
 
-        // 2026-08-06 minus 29 dates, at midnight: the 30th UTC date counting back from the clock.
         assertThat(capturedCutoff()).isEqualTo(LocalDateTime.of(2026, 7, 8, 0, 0));
         assertThat(capturedCutoff()).isEqualTo(expectedCutoff(CONFIGURED_TREND_WINDOW_DAYS));
     }
@@ -666,8 +608,6 @@ class AnalyticsServiceTest {
     void opensTheWindowOnTheUtcDateWhateverTheDefaultJvmZone() {
         TimeZone originalZone = TimeZone.getDefault();
         try {
-            // At 2026-08-06T10:30:00Z the local date in Pacific/Midway (UTC-11:00) is 2026-08-05,
-            // one day earlier, so a cutoff read from the default zone opens a day early.
             TimeZone.setDefault(TimeZone.getTimeZone("Pacific/Midway"));
             stubTheConfiguredWindow(SHORTER_TREND_WINDOW_DAYS);
             stubTheReturnedBuckets();
@@ -686,8 +626,6 @@ class AnalyticsServiceTest {
     void opensTheWindowOnTheUtcDateWhenTheDefaultJvmZoneIsADayAhead() {
         TimeZone originalZone = TimeZone.getDefault();
         try {
-            // At 2026-08-06T10:30:00Z the local date in Pacific/Kiritimati (UTC+14:00) is
-            // 2026-08-07, one day later, so a cutoff read from the default zone opens a day late.
             TimeZone.setDefault(TimeZone.getTimeZone("Pacific/Kiritimati"));
             stubTheConfiguredWindow(SHORTER_TREND_WINDOW_DAYS);
             stubTheReturnedBuckets();
@@ -804,10 +742,6 @@ class AnalyticsServiceTest {
         verify(properties, times(2)).analytics();
     }
 
-    // -----------------------------------------------------------------------
-    // The configured observation window
-    // -----------------------------------------------------------------------
-
     // The window property is a finite positive number of days — DL-247 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("accepts a window of one day and a window of one hundred years")
@@ -841,13 +775,6 @@ class AnalyticsServiceTest {
                 .hasMessageContaining("scanner.analytics.trend-window-days");
     }
 
-    // -----------------------------------------------------------------------
-    // Fixtures
-    // -----------------------------------------------------------------------
-
-    /**
-     * Stubs the three aggregate statements with the sentinel of every metric they back.
-     */
     private void stubTheMeasuredDatabase() {
         stubTweetTotals(TOTAL_TWEETS, AVERAGE_DOUBT_RATING, AVERAGE_LIKE_COUNT);
         stubResponseTotals(TOTAL_RESPONSES, APPROVED_RESPONSES);
@@ -860,34 +787,19 @@ class AnalyticsServiceTest {
         when(aiToolRepository.count()).thenReturn(0L);
     }
 
-    /**
-     * Stubs the single {@code tweets} aggregate statement.
-     *
-     * @param tweetCount         the row count to report
-     * @param averageDoubtRating the mean doubt rating to report, {@code null} for unmeasured
-     * @param averageLikeCount   the mean like count to report, {@code null} for unmeasured
-     */
     private void stubTweetTotals(Long tweetCount, Double averageDoubtRating,
             Double averageLikeCount) {
         when(tweetRepository.findAggregates())
                 .thenReturn(new TweetTotals(tweetCount, averageDoubtRating, averageLikeCount));
     }
 
-    /**
-     * Stubs the single {@code responses} aggregate statement.
-     *
-     * @param responseCount         the row count to report
-     * @param approvedResponseCount the approved row count to report
-     */
     private void stubResponseTotals(Long responseCount, Long approvedResponseCount) {
         when(responseRepository.findApprovalCounts())
                 .thenReturn(new ResponseTotals(responseCount, approvedResponseCount));
     }
 
-    /** The {@code tweets} aggregate projection, carrying the three values it reports. */
     private record TweetTotals(Long tweetCount, Double averageDoubtRating, Double averageLikeCount)
             implements TweetRepository.TweetAggregate {
-
         @Override
         public Long getTweetCount() {
             return tweetCount;
@@ -904,10 +816,8 @@ class AnalyticsServiceTest {
         }
     }
 
-    /** The {@code responses} aggregate projection, carrying the two values it reports. */
     private record ResponseTotals(Long responseCount, Long approvedResponseCount)
             implements ResponseRepository.ApprovalCounts {
-
         @Override
         public Long getResponseCount() {
             return responseCount;
@@ -939,20 +849,10 @@ class AnalyticsServiceTest {
                 SECOND_BUCKET_AVERAGE_DOUBT_RATING, SECOND_BUCKET_TOTAL_LIKES);
     }
 
-    /**
-     * Captures the opening bound the daily trend query was called with.
-     *
-     * @return the captured lower bound on {@code tweets.created_at}
-     */
     private LocalDateTime capturedCutoff() {
         return capturedWindow().since();
     }
 
-    /**
-     * Captures both bounds the daily trend query was called with.
-     *
-     * @return the captured closed interval on {@code tweets.created_at}
-     */
     private WindowBounds capturedWindow() {
         ArgumentCaptor<LocalDateTime> since = ArgumentCaptor.forClass(LocalDateTime.class);
         ArgumentCaptor<LocalDateTime> until = ArgumentCaptor.forClass(LocalDateTime.class);
@@ -964,16 +864,6 @@ class AnalyticsServiceTest {
     private record WindowBounds(LocalDateTime since, LocalDateTime until) {
     }
 
-    // -----------------------------------------------------------------------
-    // Reflection helpers
-    // -----------------------------------------------------------------------
-
-    /**
-     * Collects the declared field types and constructor parameter types of
-     * {@link AnalyticsService}, excluding synthetic fields.
-     *
-     * @return every type the class holds or accepts
-     */
     private static List<Class<?>> declaredCollaboratorTypes() {
         List<Class<?>> types = new ArrayList<>();
         for (Field field : AnalyticsService.class.getDeclaredFields()) {
@@ -1015,15 +905,6 @@ class AnalyticsServiceTest {
                 .toList();
     }
 
-    /**
-     * Reads the JSON key a record component serialises under.
-     *
-     * @param recordType    the record class to inspect
-     * @param componentName the component whose key is read
-     * @return the value of the {@link JsonProperty} annotation carried by the component, its
-     *         accessor or its backing field
-     * @throws AssertionError if the component is absent or carries no such annotation
-     */
     private static String jsonNameOf(Class<?> recordType, String componentName) {
         RecordComponent component = recordComponentOf(recordType, componentName);
         JsonProperty declared = component.getAnnotation(JsonProperty.class);
@@ -1055,18 +936,8 @@ class AnalyticsServiceTest {
         }
     }
 
-    /**
-     * One calendar-day bucket the daily trend query reports. The component names mirror the select
-     * aliases the projection binds to.
-     *
-     * @param bucketDate         the day the bucket covers
-     * @param tweetCount         the number of rows created on that day
-     * @param averageDoubtRating the mean doubt rating over those rows, which may be {@code null}
-     * @param totalLikes         the summed like count over those rows, which may be {@code null}
-     */
     private record Bucket(LocalDate bucketDate, Long tweetCount, Double averageDoubtRating,
             Long totalLikes) implements TweetRepository.DailyTrend {
-
         @Override
         public LocalDate getBucketDate() {
             return bucketDate;

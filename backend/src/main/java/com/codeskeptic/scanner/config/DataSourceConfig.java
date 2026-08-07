@@ -16,50 +16,32 @@ import com.zaxxer.hikari.HikariDataSource;
 /**
  * The connection source for the persistence layer.
  *
- * <p>Replaces {@code get_db_connection()} at {@code backend/app/db/database.py:L5-8}, which returned
- * {@code create_engine(settings.DATABASE_URL)}. The same value arrives here as
- * {@code scanner.database-url} on the injected {@link ScannerProperties} record and is published as
- * the application's single pooled {@link DataSource} bean — DL-027.
+ * <p>Replaces {@code create_engine(settings.DATABASE_URL)} at
+ * {@code backend/app/db/database.py:L5-8} with one pooled {@link DataSource} bean, and
+ * {@code get_db_session()} at {@code :L10-13} with Spring Boot's JPA auto-configuration plus
+ * {@code @Transactional} on the service layer — DL-027.
  *
- * <p>{@code get_db_session()} at {@code backend/app/db/database.py:L10-13} is replaced by Spring
- * Boot's JPA auto-configuration, which builds the {@code EntityManagerFactory} and the transaction
- * manager on top of the bean declared below, and by {@code @Transactional} on the service layer.
+ * <p>The dialect is read by Hibernate from the JDBC connection metadata and the driver is resolved at
+ * run time from the JDBC URL, so no vendor is named at compile time — DL-027, DL-028. Table creation
+ * is {@code spring.jpa.hibernate.ddl-auto} — DL-026. Pool geometry and timing are the HikariCP
+ * defaults; this class configures neither — DL-270.
  *
- * <p>{@link ScannerProperties} is reached by constructor injection into a {@code final} field, in
- * place of the {@code get_settings()} call at {@code backend/app/db/database.py:L6}.
- * {@link DatabaseUrlTranslator} holds the {@code DATABASE_URL} grammar; the dialect is read by
- * Hibernate from the JDBC connection metadata of the bean below and the driver is resolved at run
- * time from the JDBC URL — DL-027, DL-028. Table creation is {@code spring.jpa.hibernate.ddl-auto} in
- * {@code application.yml} — DL-026.
+ * <p>No JDBC URL, username or password reaches a log record or an exception message raised here —
+ * DL-052.
  *
- * <p>Pool geometry and pool timing are the HikariCP defaults the framework applies; this class
- * configures neither — DL-270.
- *
- * <p>No JDBC URL, username or password reaches a log record or an exception message raised by this
- * class — DL-052.
- *
- * <p>This class holds one immutable field, mutates nothing after construction and is safe for
- * concurrent use.
+ * <p>Holds one immutable field, mutates nothing after construction and is safe for concurrent use.
  */
 @Configuration
 public class DataSourceConfig {
 
     private static final Logger log = LoggerFactory.getLogger(DataSourceConfig.class);
 
-    /** Stands in for a credential the configured value did not carry, in the log record below. */
     private static final String ABSENT = "absent";
 
-    /** Stands in for a credential the configured value carried, in the log record below. */
     private static final String SUPPLIED = "supplied";
 
     private final ScannerProperties properties;
 
-    /**
-     * Captures the bound configuration this class reads.
-     *
-     * @param properties the bound {@code scanner} configuration root, never {@code null}
-     * @throws NullPointerException if {@code properties} is {@code null}
-     */
     public DataSourceConfig(ScannerProperties properties) {
         this.properties = Objects.requireNonNull(properties, "ScannerProperties must not be null.");
     }

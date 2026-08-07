@@ -27,24 +27,15 @@ import com.codeskeptic.scanner.service.mapper.TweetMapper;
 /**
  * Application service for the {@code tweets} table.
  *
- * <p>Four operations are exposed, each one named by a caller that already existed in the retired
- * module:
- *
- * <ul>
- *   <li>{@link #getPaginatedTweets(int, int)} renders one page of rows and backs
- *       {@code GET /tweets}.
- *   <li>{@link #getTweet(String)} renders one row by identifier and backs
- *       {@code GET /tweets/{tweetId}}.
- *   <li>{@link #analyzeTweet(String)} scores one row and records the doubt rating derived from that
- *       score, and backs {@code POST /tweets/{tweetId}/analyze} — DL-263.
- *   <li>{@link #updateTweetAnalysis(String, double)} writes the {@code doubt_rating} column of one
- *       row from a score the caller already holds.
- *   <li>{@link #meetsPopularityThreshold(Integer)} evaluates the ingestion popularity gate against
- *       the threshold in force, and {@link #meetsPopularityThreshold(Integer, int)} against a
- *       threshold the caller already resolved.
- *   <li>{@link #popularityThresholdInForce()} resolves that threshold once, for a caller that
- *       evaluates the gate repeatedly — DL-255.
- * </ul>
+ * <p>Six operations are exposed, each named by a caller that already existed in the retired module:
+ * {@link #getPaginatedTweets(int, int)} backs {@code GET /tweets}; {@link #getTweet(String)} backs
+ * {@code GET /tweets/{tweetId}}; {@link #analyzeTweet(String)} scores one row and records the derived
+ * doubt rating, backing {@code POST /tweets/{tweetId}/analyze} — DL-263;
+ * {@link #updateTweetAnalysis(String, double)} writes {@code doubt_rating} from a score the caller
+ * already holds; {@link #meetsPopularityThreshold(Integer)} and
+ * {@link #meetsPopularityThreshold(Integer, int)} evaluate the ingestion popularity gate against the
+ * threshold in force and against one the caller resolved; and
+ * {@link #popularityThresholdInForce()} resolves that threshold once per cycle — DL-255.
  *
  * <p>Every operation is a repository read, a repository write, or a comparison against a configured
  * threshold. The X protocol surface belongs to {@code task.TweetStreamClient} — DL-045.
@@ -66,15 +57,10 @@ import com.codeskeptic.scanner.service.mapper.TweetMapper;
  * {@code stream_tweets} at {@code backend/app/services/twitter_service.py:L19-23} by
  * {@code task.TweetStreamClient}, and {@code process_tweet} at {@code :L25-40} by {@link TweetMapper}
  * together with {@code task.TweetStreamListener}.
- *
- * @see TweetRepository
- * @see TweetMapper
- * @see SentimentAnalysisService
  */
 @Service
 public class TwitterService {
 
-    /** Records page rendering, threshold resolution and each doubt-rating write. */
     private static final Logger log = LoggerFactory.getLogger(TwitterService.class);
 
     // Row key seeded by SettingsService — DL-040 — see docs/DECISION_LOG.md
@@ -101,19 +87,14 @@ public class TwitterService {
     /** Order of every page read: {@code tweets.id} ascending. */
     private static final Sort PAGE_ORDER = Sort.by(Sort.Direction.ASC, "id");
 
-    /** Data access for the {@code tweets} table. */
     private final TweetRepository tweetRepository;
 
-    /** Data access for the {@code settings} table, read for the popularity-threshold override. */
     private final SettingRepository settingRepository;
 
-    /** Bound configuration supplying {@code scanner.popularity-threshold}. */
     private final ScannerProperties properties;
 
-    /** Converts a {@link Tweet} into its {@link TweetDto} wire form. */
     private final TweetMapper tweetMapper;
 
-    /** Supplies the doubt rating written to {@code tweets.doubt_rating}. */
     private final SentimentAnalysisService sentimentAnalysisService;
 
     /**
@@ -165,26 +146,20 @@ public class TwitterService {
      * {@link PaginationDto#page()} of the result restates the 1-based number.
      *
      * <p>Arguments outside the accepted range are replaced and the replacement is logged at
-     * {@code WARN}: a {@code page} below {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}, a
-     * and a {@code perPage} below {@value #MINIMUM_PER_PAGE} is read as
-     * {@value #DEFAULT_PER_PAGE} — DL-217 — see docs/DECISION_LOG.md. No upper bound is applied to
-     * {@code perPage}. The page size the pagination block restates is the size served.
+     * {@code WARN}: a {@code page} below {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}, and
+     * a {@code perPage} below {@value #MINIMUM_PER_PAGE} is read as {@value #DEFAULT_PER_PAGE} —
+     * DL-217. No upper bound is applied to {@code perPage}, and the page size the pagination block
+     * restates is the size served.
      *
      * <p>A {@code page} beyond the last populated page yields an empty {@link
      * PaginatedTweetsDto#tweets()} list while {@link PaginationDto#total()} and
      * {@link PaginationDto#totalPages()} continue to describe the whole table. An empty table yields
-     * an empty list, a {@code total} of {@code 0} and a {@code totalPages} of {@code 0}.
+     * an empty list, a {@code total} of {@code 0} and a {@code totalPages} of {@code 0}. A
+     * {@code page} whose first row lies beyond {@link Integer#MAX_VALUE} rows is answered the same
+     * way, with the requested page number and page size restated — DL-225.
      *
-     * <p>A {@code page} whose first row lies beyond {@link Integer#MAX_VALUE} rows — that is, one for
-     * which {@code (page - 1) * perPage} exceeds that bound — is answered the same way: the empty list
-     * and the same populated block, with the requested page number and page size restated. No page
-     * size is reduced and no request is rejected — see docs/DECISION_LOG.md DL-225.
-     *
-     * <p>The rows are converted inside this method's transaction and the returned lists are
-     * unmodifiable.
-     *
-     * <p>The page is read by one paged query. Rows are ordered by {@code tweets.id} ascending, and the
-     * rows one response carries are bounded by the requested page size and by the table.
+     * <p>The page is read by one paged query ordered by {@code tweets.id} ascending, the rows are
+     * converted inside this method's transaction, and the returned lists are unmodifiable.
      *
      * @param page    the 1-based page number requested through the {@code page} query parameter; a
      *                value below {@value #DEFAULT_PAGE} is read as {@value #DEFAULT_PAGE}
@@ -262,7 +237,8 @@ public class TwitterService {
     }
 
     // Net-new implementation of the method called at backend/app/api/tweets.py:L50, which the source
-    // left unimplemented behind the note at :L48-49 — see docs/DECISION_LOG.md
+    // left unimplemented behind the note at :L48-49 — mapped by the scaffolding-marker row for
+    // api/tweets.py:L34 in docs/TRACEABILITY_MATRIX.md — see docs/DECISION_LOG.md DL-037, DL-263
     /**
      * Writes the doubt rating derived from a document sentiment score onto the addressed
      * {@code tweets} row.
@@ -304,11 +280,8 @@ public class TwitterService {
      *   <li>The text is scored by {@link SentimentAnalysisService#analyzeSentiment(String)}. No
      *       transaction is open and no database connection is held while that call runs.</li>
      *   <li>{@code doubt_rating} is written by one statement addressing the row by identifier, whether
-     *       or not the row already carried a rating.</li>
+     *       or not the row already carried a rating — DL-263.</li>
      * </ol>
-     *
-     * <p>The row is read once and written once: nine columns are no longer transferred to write one,
-     * and the row is no longer read a second time before the write — DL-263.
      *
      * <p>A row deleted between the read and the write is reported with
      * {@link NotFoundException#TWEET_NOT_FOUND}, the same literal an unknown identifier produces.

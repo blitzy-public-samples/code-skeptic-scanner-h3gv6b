@@ -4,7 +4,8 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <!-- Net-new (no source construct) - see docs/DECISION_LOG.md -->
+    <!-- Net-new (no source construct: the retired tree carried no dependency manifest of any kind) -
+         see docs/DECISION_LOG.md DL-002, DL-003, DL-004 -->
     <!-- 3.5.16 is the final open-source release of the 3.5.x line. The support horizon and the
          upgrade plan are recorded in docs/DECISION_LOG.md DL-003. -->
     <parent>
@@ -137,7 +138,7 @@
         <!-- In-memory database for the @DataJpaTest and @SpringBootTest slices,
              and the third vendor config/DatabaseUrlTranslator resolves a scheme
              for. The BOM resolves the version - see docs/DECISION_LOG.md
-             DL-009, DL-242, DL-071. -->
+             DL-009, DL-071 -->
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
@@ -154,9 +155,10 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- Replaces the fastapi TestClient calls in
-             backend/tests/test_api.py:L1-59 - see docs/DECISION_LOG.md
-             DL-021. -->
+        <!-- Supplies the security-aware MockMvc support the @WebMvcTest slices
+             use to drive the chain of DL-021; MockMvc itself arrives with
+             spring-boot-starter-test above - see docs/DECISION_LOG.md
+             DL-021 -->
         <dependency>
             <groupId>org.springframework.security</groupId>
             <artifactId>spring-security-test</artifactId>
@@ -166,8 +168,9 @@
 
     <build>
         <plugins>
-            <!-- Version inherited from the parent - see docs/DECISION_LOG.md
-                 DL-004. -->
+            <!-- Produces the executable jar infrastructure/docker/Dockerfile.backend
+                 runs; the version is inherited from the parent of DL-003 - see
+                 docs/DECISION_LOG.md DL-003 -->
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

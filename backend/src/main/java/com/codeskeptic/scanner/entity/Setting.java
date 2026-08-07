@@ -50,10 +50,6 @@ public class Setting {
     @Column(name = "description")
     private String description;
 
-    /**
-     * No-argument constructor required by JPA for entity instantiation. Field values are populated by
-     * the persistence provider or by the accessors below.
-     */
     public Setting() {
     }
 

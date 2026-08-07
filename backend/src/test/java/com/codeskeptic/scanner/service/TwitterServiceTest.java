@@ -86,12 +86,10 @@ import com.codeskeptic.scanner.service.mapper.TweetMapper;
  */
 @ExtendWith(MockitoExtension.class)
 class TwitterServiceTest {
-
     private static final String POPULARITY_THRESHOLD_KEY = "tweet_popularity_threshold";
 
     private static final String TWEET_NOT_FOUND = "Tweet not found";
 
-    /** Value of {@code scanner.popularity-threshold} declared at {@code core/config.py:L10}. */
     private static final int CONFIGURED_THRESHOLD = 100;
 
     private static final int TWEET_ID = 7;
@@ -147,10 +145,6 @@ class TwitterServiceTest {
 
     @Mock
     private SentimentAnalysisService sentimentAnalysisService;
-
-    // -----------------------------------------------------------------------
-    // meetsPopularityThreshold(Integer) — the comparison
-    // -----------------------------------------------------------------------
 
     @ParameterizedTest(name = "a like count of {0} reports {1} against a threshold of 100")
     @CsvSource({
@@ -214,10 +208,6 @@ class TwitterServiceTest {
 
         assertThat(meetsThreshold).isFalse();
     }
-
-    // -----------------------------------------------------------------------
-    // meetsPopularityThreshold(Integer) — threshold resolution
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("prefers the stored setting row over the configured threshold")
@@ -316,10 +306,6 @@ class TwitterServiceTest {
         verify(settingRepository, times(2)).findById(POPULARITY_THRESHOLD_KEY);
     }
 
-    // -----------------------------------------------------------------------
-    // One threshold resolution per ingestion cycle — DL-255
-    // -----------------------------------------------------------------------
-
     @Test
     @DisplayName("resolves the threshold in force from the stored row")
     void resolvesTheThresholdInForceFromTheStoredRow() {
@@ -397,8 +383,6 @@ class TwitterServiceTest {
     @Test
     @DisplayName("warns again when the stored threshold holds a different unparseable value")
     void warnsAgainWhenTheStoredThresholdHoldsADifferentUnparseableValue() {
-        // Consecutive answers are chained and are not passed as varargs: a generic varargs array of
-        // Optional<Setting> cannot be created without an unchecked warning.
         when(settingRepository.findById(POPULARITY_THRESHOLD_KEY))
                 .thenReturn(Optional.of(thresholdRow("first")))
                 .thenReturn(Optional.of(thresholdRow("second")));
@@ -418,8 +402,6 @@ class TwitterServiceTest {
     @Test
     @DisplayName("warns again when a value that parses is stored between two unparseable ones")
     void warnsAgainWhenAValueThatParsesIsStoredBetweenTwoUnparseableOnes() {
-        // Consecutive answers are chained and are not passed as varargs: a generic varargs array of
-        // Optional<Setting> cannot be created without an unchecked warning.
         when(settingRepository.findById(POPULARITY_THRESHOLD_KEY))
                 .thenReturn(Optional.of(thresholdRow("bad")))
                 .thenReturn(Optional.of(thresholdRow("50")))
@@ -438,11 +420,6 @@ class TwitterServiceTest {
         }
     }
 
-    /**
-     * Attaches a recording appender to the logger of the unit under test.
-     *
-     * @return the attached appender
-     */
     private static ListAppender<ILoggingEvent> attachServiceAppender() {
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
@@ -450,22 +427,11 @@ class TwitterServiceTest {
         return appender;
     }
 
-    /**
-     * Detaches a recording appender from the logger of the unit under test.
-     *
-     * @param appender the appender to detach
-     */
     private static void detachServiceAppender(ListAppender<ILoggingEvent> appender) {
         ((Logger) LoggerFactory.getLogger(TwitterService.class)).detachAppender(appender);
         appender.stop();
     }
 
-    /**
-     * Reads the unparseable-threshold warnings the appender recorded.
-     *
-     * @param appender the appender that recorded the calls
-     * @return the formatted messages, in order
-     */
     private static List<String> unparseableWarnings(ListAppender<ILoggingEvent> appender) {
         return appender.list.stream()
                 .filter(event -> event.getLevel() == Level.WARN)
@@ -473,10 +439,6 @@ class TwitterServiceTest {
                 .filter(message -> message.contains("does not hold an integer"))
                 .toList();
     }
-
-    // -----------------------------------------------------------------------
-    // getTweet(String)
-    // -----------------------------------------------------------------------
 
     @ParameterizedTest(name = "the identifier [{0}] reports a row that is not present")
     @NullAndEmptySource
@@ -543,10 +505,6 @@ class TwitterServiceTest {
         assertThat(result.id()).isEqualTo(TWEET_ID_PATH_VALUE);
     }
 
-    // -----------------------------------------------------------------------
-    // updateTweetAnalysis(String, double) — identifier handling
-    // -----------------------------------------------------------------------
-
     @ParameterizedTest(name = "the identifier [{0}] reports a row that is not present")
     @NullAndEmptySource
     @ValueSource(strings = {"not-a-number", "12abc", "3.5", " 7 ", "-", "99999999999999999999"})
@@ -578,10 +536,6 @@ class TwitterServiceTest {
         verify(tweetRepository, never()).save(any(Tweet.class));
         verify(tweetRepository, never()).findById(any());
     }
-
-    // -----------------------------------------------------------------------
-    // updateTweetAnalysis(String, double) — the doubt rating written
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("writes the doubt rating the calculation returned")
@@ -648,10 +602,6 @@ class TwitterServiceTest {
         verify(tweetRepository, never()).save(any(Tweet.class));
         verifyNoInteractions(tweetMapper);
     }
-
-    // -----------------------------------------------------------------------
-    // analyzeTweet(String) — one read, one provider call, one write — DL-263
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("reads the row once, scores its text and writes the derived rating once")
@@ -773,13 +723,6 @@ class TwitterServiceTest {
         verify(tweetRepository, times(2)).updateDoubtRating(TWEET_ID, STUBBED_DOUBT_RATING);
     }
 
-    /**
-     * Builds the analyze projection carrying the supplied column values.
-     *
-     * @param id      value of {@code tweets.id}
-     * @param content value of {@code tweets.content}, possibly {@code null}
-     * @return the projection
-     */
     private static TweetRepository.AnalysisSubject analysisSubject(Integer id, String content) {
         return new TweetRepository.AnalysisSubject() {
             @Override
@@ -793,10 +736,6 @@ class TwitterServiceTest {
             }
         };
     }
-
-    // -----------------------------------------------------------------------
-    // getPaginatedTweets(int, int) — the page request
-    // -----------------------------------------------------------------------
 
     @ParameterizedTest(name = "page {0} of size {1} reads page index {2} of size {3}")
     @CsvSource({
@@ -1009,10 +948,6 @@ class TwitterServiceTest {
                         .as("sort of one window").isEqualTo(Sort.by(Sort.Direction.ASC, "id")));
     }
 
-    // -----------------------------------------------------------------------
-    // getPaginatedTweets(int, int) — the envelope
-    // -----------------------------------------------------------------------
-
     // No upper bound is applied to per_page — DL-217 — see docs/DECISION_LOG.md
     @ParameterizedTest(name = "per_page {0} reads a page of the same size")
     @ValueSource(ints = {99, 100, 101, 1_000, 1_001, Integer.MAX_VALUE})
@@ -1040,7 +975,6 @@ class TwitterServiceTest {
     @DisplayName("reads a page or per_page below the lower bound as its default")
     void readsAPageOrPerPageBelowTheLowerBoundAsItsDefault(int page, int perPage,
             int expectedIndex, int expectedSize) {
-
         when(tweetRepository.findAll(any(Pageable.class)))
                 .thenAnswer(invocation -> {
                     Pageable requested = invocation.getArgument(0);
@@ -1200,7 +1134,6 @@ class TwitterServiceTest {
     @DisplayName("reads the page and size the controller derived from the request")
     void readsThePageAndSizeTheControllerDerivedFromTheRequest(int expectedPage,
             int expectedPerPage) {
-
         int page = expectedPage;
         int perPage = expectedPerPage;
 
@@ -1214,10 +1147,6 @@ class TwitterServiceTest {
         assertThat(pageRequest.getValue().getPageNumber()).isEqualTo(expectedPage - 1);
         assertThat(pageRequest.getValue().getPageSize()).isEqualTo(expectedPerPage);
     }
-
-    // -----------------------------------------------------------------------
-    // Declared surface
-    // -----------------------------------------------------------------------
 
     @Test
     @DisplayName("declares no HTTP client among its fields")
@@ -1302,12 +1231,6 @@ class TwitterServiceTest {
         return new PageImpl<>(List.of(), PageRequest.of(0, 10), 0L);
     }
 
-    /**
-     * Answers every read one page request can issue with an empty result and the supplied row total:
-     * the page statement and the row count.
-     *
-     * @param total the value {@code count()} and the page's {@code total} report
-     */
     private void stubEveryWindowRead(long total) {
         lenient().when(tweetRepository.findAll(any(Pageable.class)))
                 .thenAnswer(invocation -> new PageImpl<>(List.of(), invocation.getArgument(0), total));
@@ -1315,11 +1238,6 @@ class TwitterServiceTest {
         lenient().when(tweetMapper.toDtoList(anyList())).thenReturn(List.of());
     }
 
-    /**
-     * Collects every {@link Pageable} the service handed to the repository during this test.
-     *
-     * @return the windows asked for, in call order
-     */
     private List<Pageable> pageRequestsIssued() {
         return mockingDetails(tweetRepository).getInvocations().stream()
                 .flatMap(invocation -> Arrays.stream(invocation.getArguments()))
@@ -1328,23 +1246,12 @@ class TwitterServiceTest {
                 .toList();
     }
 
-    /**
-     * Captures the single row the service asked the repository to write.
-     *
-     * @return the written row
-     */
     private Tweet savedRow() {
         ArgumentCaptor<Tweet> written = ArgumentCaptor.forClass(Tweet.class);
         verify(tweetRepository).save(written.capture());
         return written.getValue();
     }
 
-    /**
-     * Builds the unit under test with the four doubles and a real configuration record.
-     *
-     * @param popularityThreshold the value {@code scanner.popularity-threshold} carries
-     * @return the service under test
-     */
     private TwitterService serviceWithConfiguredThreshold(int popularityThreshold) {
         return new TwitterService(
                 tweetRepository,
@@ -1354,13 +1261,6 @@ class TwitterServiceTest {
                 sentimentAnalysisService);
     }
 
-    /**
-     * Builds a {@link ScannerProperties} whose {@code popularityThreshold} component carries the given
-     * value and whose remaining components are unset.
-     *
-     * @param popularityThreshold the value of {@code scanner.popularity-threshold}
-     * @return the bound configuration handed to the service under test
-     */
     private static ScannerProperties propertiesWithPopularityThreshold(int popularityThreshold) {
         return new ScannerProperties(
                 null, popularityThreshold, 0L, null, null, null, null, null, null, null, null);

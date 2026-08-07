@@ -3,26 +3,20 @@ package com.codeskeptic.scanner.exception;
 /**
  * Signals a request that the service rejects with HTTP 400.
  *
- * <p>{@link #getMessage()} returns the construction message unaltered — it is not normalised,
- * truncated or deduplicated — so each wire literal round-trips character-for-character.
+ * <p>{@link #getMessage()} returns the construction message unaltered — not normalised, truncated or
+ * deduplicated — so each wire literal round-trips character-for-character — DL-212.
  *
- * <p>The set of client-visible messages this type can carry is closed: it is exactly the three
- * literals declared as constants here, and each is reached through its own factory —
- * {@link #tweetIdRequired()} carries {@value #TWEET_ID_IS_REQUIRED}
- * ({@code backend/app/api/responses.py:L41}), {@link #updateDataRequired()} carries
- * {@value #UPDATE_DATA_IS_REQUIRED} ({@code backend/app/api/responses.py:L57}) and
- * {@link #noValueProvided()} carries {@value #NO_VALUE_PROVIDED}
- * ({@code backend/app/api/settings.py:L18}).
+ * <p>The set of client-visible messages is closed: exactly the three literals declared as constants
+ * here, each reached through its own factory — {@link #tweetIdRequired()}
+ * ({@code backend/app/api/responses.py:L41}), {@link #updateDataRequired()} ({@code :L57}) and
+ * {@link #noValueProvided()} ({@code backend/app/api/settings.py:L18}).
  *
- * <p>The constructor is private. No caller-supplied text, and no text taken from a database driver,
- * an external vendor response or any other throwable, can become the client-visible message. A
- * triggering throwable is attached with {@link #initCause(Throwable)} by
- * {@link #withCause(Throwable)} and is reachable through {@link #getCause()} only; it never appears
- * in {@link #getMessage()}.
+ * <p>The constructor is private, so no caller-supplied text and no text from a driver, a vendor
+ * response or another throwable can become the client-visible message. A triggering throwable is
+ * attached by {@link #withCause(Throwable)} and is reachable through {@link #getCause()} only.
  *
- * <p>Serialization: no instance crosses a serialization boundary — an instance is created, thrown,
- * caught by the error-handling advice in the same JVM and rendered as JSON. The type is serializable
- * through {@link RuntimeException} and declares a fixed {@code serialVersionUID}.
+ * <p>No instance crosses a serialization boundary; the type is serializable through
+ * {@link RuntimeException} and declares a fixed {@code serialVersionUID}.
  */
 // Ported from the inline HTTP 400 branches at backend/app/api/responses.py:L41,L57 and
 // backend/app/api/settings.py:L18 (faithful port) — DL-212 — see docs/DECISION_LOG.md

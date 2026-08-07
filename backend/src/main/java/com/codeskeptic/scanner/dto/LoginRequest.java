@@ -30,7 +30,6 @@ public record LoginRequest(
         @JsonProperty("username") String username,
         @JsonProperty(value = "password", access = JsonProperty.Access.WRITE_ONLY) String password) {
 
-    /** Rendered by {@link #toString()} in place of each component. */
     private static final String REDACTED = "***REDACTED***";
 
     /**

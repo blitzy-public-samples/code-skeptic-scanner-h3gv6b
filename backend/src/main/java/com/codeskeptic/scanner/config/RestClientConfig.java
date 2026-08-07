@@ -19,24 +19,18 @@ import jakarta.annotation.PreDestroy;
 /**
  * Transport for the Notion integration.
  *
- * <p>Replaces the {@code notion_client.Client} instance constructed at
- * {@code backend/app/services/notion_service.py:L8}, whose single {@code auth} argument carried
- * {@code NOTION_API_KEY}. The bean published here applies that credential, the Notion API host and
- * the version header the API requires on every request as bean-level defaults.
+ * <p>Replaces the {@code notion_client.Client} constructed at
+ * {@code backend/app/services/notion_service.py:L8} — DL-013. This class supplies transport only: the
+ * base URL, the mandatory version header and the {@code Authorization} header are bean-level
+ * defaults, and the two operations the retired service performed belong to
+ * {@code service/NotionService} together with {@code scanner.notion.database-id}.
  *
- * <p>This class supplies transport only. The two operations the retired service performed —
- * {@code pages.create} at {@code backend/app/services/notion_service.py:L23-26} and
- * {@code databases.query} at {@code backend/app/services/notion_service.py:L34-38} — belong to
- * {@code service/NotionService}, as does {@code scanner.notion.database-id}, read at
- * {@code backend/app/services/notion_service.py:L24} and
- * {@code backend/app/services/notion_service.py:L35}.
- *
- * <p>The framework defaults carried by the injected builder apply unchanged apart from the request
- * factory and its two timeout bounds — DL-013, DL-150, DL-221.
+ * <p>The injected builder's framework defaults apply unchanged apart from the request factory and its
+ * two timeout bounds — DL-150, DL-221.
  *
  * <p>The published {@link RestClient} is fully configured before it is returned, is never mutated
- * afterwards and is safe to share across concurrent requests. Every operation it carries is
- * synchronous and may be issued from any thread, including a reactive non-blocking thread — DL-221.
+ * afterwards and is safe to share. Every operation it carries is synchronous and may be issued from
+ * any thread, a reactive non-blocking thread included — DL-221.
  *
  * @see ScannerProperties.Notion
  */
@@ -44,7 +38,6 @@ import jakarta.annotation.PreDestroy;
 // DL-013, DL-052, DL-150, DL-193, DL-221.
 @Configuration
 public class RestClientConfig {
-
     private static final Logger log = LoggerFactory.getLogger(RestClientConfig.class);
 
     /**
@@ -56,7 +49,6 @@ public class RestClientConfig {
      */
     private static final String NOTION_API_BASE_URL = "https://api.notion.com";
 
-    /** Name of the header the Notion API requires on every request. */
     private static final String NOTION_VERSION_HEADER = "Notion-Version";
 
     /**
@@ -66,19 +58,12 @@ public class RestClientConfig {
      */
     private static final String DEFAULT_NOTION_API_VERSION = "2022-06-28";
 
-    /**
-     * Connect timeout applied when the {@code scanner.notion} group is absent. It is the value
-     * {@code ScannerProperties.Notion} declares as its own default — see docs/DECISION_LOG.md DL-150.
-     */
+    /** Applied when the {@code scanner.notion} group is absent; the group's own default — DL-150. */
     private static final long DEFAULT_CONNECT_TIMEOUT_SECONDS = 5L;
 
-    /**
-     * Read timeout applied when the {@code scanner.notion} group is absent. It is the value
-     * {@code ScannerProperties.Notion} declares as its own default — see docs/DECISION_LOG.md DL-150.
-     */
+    /** Applied when the {@code scanner.notion} group is absent; the group's own default — DL-150. */
     private static final long DEFAULT_READ_TIMEOUT_SECONDS = 10L;
 
-    /** Scheme prefix of the {@code Authorization} header value. */
     private static final String BEARER_PREFIX = "Bearer ";
 
     /**
@@ -87,7 +72,6 @@ public class RestClientConfig {
      */
     private static final long SHUTDOWN_AWAIT_SECONDS = 10L;
 
-    /** Bound configuration root; supplies {@code scanner.notion.api-key}. */
     private final ScannerProperties properties;
 
     /**
@@ -96,14 +80,6 @@ public class RestClientConfig {
      */
     private volatile HttpClient httpClient;
 
-    /**
-     * Injects the bound configuration root, replacing the {@code get_settings()} call issued at
-     * {@code backend/app/services/notion_service.py:L7} and declared at
-     * {@code backend/app/core/config.py:L17-18}.
-     *
-     * @param properties the bound configuration root; must not be {@code null}
-     * @throws NullPointerException if {@code properties} is {@code null}
-     */
     public RestClientConfig(ScannerProperties properties) {
         this.properties = Objects.requireNonNull(properties, "ScannerProperties must not be null");
     }

@@ -10,26 +10,23 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import com.codeskeptic.scanner.task.ResponseGenerationScheduler;
 
 /**
- * Deferred-work infrastructure for the backend service: the scheduling capability and the scheduler
- * that serves it.
+ * Deferred-work infrastructure: the scheduling capability and the scheduler that serves it.
  *
- * <p>{@code @EnableScheduling} is declared on this class and on no other class in this application.
- * It activates the scheduling that runs
- * {@link ResponseGenerationScheduler#generatePendingResponses()}, the one scheduled operation in the
- * application. That method carries its own
- * {@code @Scheduled(fixedDelayString = "${scanner.response-generation-delay-seconds}")} in seconds,
- * so the interval runs from the completion of one pass to the start of the next — the work-then-sleep
- * behaviour of {@code backend/app/tasks/response_generation.py:L41-50} — and this class holds no
- * pacing value, registers no task and reads no {@code settings} row — DL-047, DL-227.
+ * <p>{@code @EnableScheduling} is declared here and on no other class. The one scheduled operation,
+ * {@link ResponseGenerationScheduler#generatePendingResponses()}, carries its own
+ * {@code fixedDelayString}, so the interval runs from the completion of one pass to the start of the
+ * next — the work-then-sleep behaviour of {@code backend/app/tasks/response_generation.py:L41-50}.
+ * This class holds no pacing value, registers no task and reads no {@code settings} row — DL-047,
+ * DL-227.
  *
- * <p>The scheduler carries a pool of {@value #POOL_SIZE} threads. At shutdown it stops accepting work
- * and awaits a pass that is already running for up to {@value #SHUTDOWN_AWAIT_SECONDS} seconds. The
- * cancellation policy is left at the {@link ThreadPoolTaskScheduler} default. {@code @EnableAsync} is
- * not declared. No {@code SchedulingConfigurer}, {@code Trigger}, message broker, queue, distributed
- * scheduler lock, {@code ApplicationRunner} or {@code CommandLineRunner} is declared here — DL-047.
+ * <p>At shutdown the scheduler stops accepting work and awaits a pass already running for up to
+ * {@value #SHUTDOWN_AWAIT_SECONDS} seconds; the cancellation policy is the
+ * {@link ThreadPoolTaskScheduler} default. {@code @EnableAsync} is not declared, and no
+ * {@code SchedulingConfigurer}, {@code Trigger}, message broker, queue, distributed scheduler lock,
+ * {@code ApplicationRunner} or {@code CommandLineRunner} is declared here — DL-047.
  *
- * <p>This is a singleton configuration class holding no mutable state; every member declared here is
- * safe for concurrent use.
+ * <p>Singleton configuration class holding no mutable state; every member declared here is safe for
+ * concurrent use.
  */
 // The scheduling capability is ported from backend/app/main.py:L43-48 and
 // backend/app/tasks/response_generation.py:L8 (faithful port) — see docs/DECISION_LOG.md DL-047.
@@ -44,7 +41,6 @@ public class AsyncSchedulingConfig {
 
     private static final String THREAD_NAME_PREFIX = "scanner-scheduler-";
 
-    /** Threads the scheduler runs concurrently. */
     private static final int POOL_SIZE = 2;
 
     /**

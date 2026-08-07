@@ -7,17 +7,15 @@ import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 /**
- * Cross-origin resource sharing (CORS) configuration for the backend service.
+ * Cross-origin resource sharing configuration for the backend service.
  *
- * <p>Reproduces the permissive policy of {@code CORS(app)} at {@code backend/app/main.py:L20}, which
- * was invoked with no arguments at all: no {@code origins}, no {@code methods}, no
+ * <p>Reproduces the permissive policy of the argument-free {@code CORS(app)} at
+ * {@code backend/app/main.py:L20}: no {@code origins}, no {@code methods}, no
  * {@code allow_headers}, no {@code supports_credentials} and no resource pattern.
  *
- * <p>The {@link CorsConfigurationSource} bean published here is the only CORS mechanism this
- * application declares. Its bean name is {@code corsConfigurationSource}, the name Spring Security's
- * {@code CorsConfigurer} looks up. Note that Spring MVC also registers
- * {@code mvcHandlerMappingIntrospector}, a second bean of that same interface type in a running
- * context.
+ * <p>The bean's name is {@code corsConfigurationSource}, the name Spring Security's
+ * {@code CorsConfigurer} looks up. A running context also holds
+ * {@code mvcHandlerMappingIntrospector}, a second bean of that same interface type.
  */
 // Ported from backend/app/main.py:L20 (faithful port) — see docs/DECISION_LOG.md DL-051
 @Configuration

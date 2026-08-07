@@ -26,16 +26,10 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * {@code spring}-prefixed or {@code server}-prefixed key is declared; those live in
  * {@code application.yml}.
  *
- * <p>This record and every nested group are immutable, hold no reference to mutable state and are
- * safe for concurrent use. {@link #toString()} and the {@code toString()} of every nested group
- * render every credential, principal name and external resource identifier as
- * {@code ***REDACTED***} — DL-052 — using the same marker whether the underlying value is
- * {@code null}, empty or populated. {@link Analytics} and {@link Ingestion} keep the
- * compiler-generated form.
- *
- * <p>See {@code docs/DECISION_LOG.md} DL-015, DL-016, DL-017, DL-020, DL-027, DL-031, DL-033,
- * DL-034, DL-042, DL-044, DL-046 and DL-052; construct-level provenance is recorded in
- * {@code docs/TRACEABILITY_MATRIX.md}.
+ * <p>Immutable and safe for concurrent use. {@link #toString()}, and that of every nested group
+ * except {@link Analytics}, {@link Ingestion} and {@link Background}, renders every credential,
+ * principal name and external resource identifier as {@code ***REDACTED***} whether the underlying
+ * value is {@code null}, empty or populated — DL-052.
  *
  * @param databaseUrl value of {@code scanner.database-url}, carried verbatim under the
  *     {@code scanner} prefix and consumed by {@link DatabaseUrlTranslator}
@@ -83,7 +77,6 @@ public record ScannerProperties(
         @DefaultValue Background background) {
 
     // Credential redaction in toString() — DL-052 — see docs/DECISION_LOG.md
-    /** Rendered in place of every credential, principal name and resource identifier. */
     private static final String REDACTED = "***REDACTED***";
 
     /**
@@ -122,16 +115,13 @@ public record ScannerProperties(
      * components, declared with empty defaults in {@code application.yml} — DL-046.
      *
      * <p>{@code task/TweetStreamClient} reads {@code consumerKey} and {@code consumerSecret} for the
-     * app-only client-credentials exchange — DL-046. The remaining five components are declared, and
-     * every key the retired tree referenced resolves; the v2 read path signs nothing with them and no
-     * production code reads them — DL-031.
+     * app-only client-credentials exchange — DL-046. The other five credential components are declared
+     * so every key the retired tree referenced resolves; the v2 read path signs nothing with them —
+     * DL-031. All seven are redacted by {@link #toString()}.
      *
-     * <p>Seven components of this group are credentials and every one of those is redacted by
-     * {@link #toString()}. The eighth is not: {@code requestTimeoutSeconds} bounds the two short
-     * request/response calls {@code task/TweetStreamClient} makes on the X API — the app-only token
-     * exchange and the stream-rules calls — DL-230. The bound on the wait between two delivered
-     * stream records is {@code scanner.ingestion.stream-idle-timeout-seconds} on {@link Ingestion},
-     * which is the one property that binds {@code TWITTER_STREAM_IDLE_TIMEOUT_SECONDS} — DL-256.
+     * <p>{@code requestTimeoutSeconds} bounds the token exchange and the stream-rules calls only —
+     * DL-230. The wait between two delivered stream records is bounded by
+     * {@code scanner.ingestion.stream-idle-timeout-seconds} on {@link Ingestion} — DL-256.
      *
      * @param apiKey value of {@code scanner.twitter.api-key}
      * @param apiSecret value of {@code scanner.twitter.api-secret}
@@ -294,14 +284,10 @@ public record ScannerProperties(
      * (DL-200). {@code temperature} stays nullable, so a deployment that supplies a blank value omits
      * the parameter from the request.
      *
-     * <p>{@code service/LlmService} reads every component of this group.
+     * <p>{@code service/LlmService} reads every component of this group and range-checks
      * {@code maxCompletionTokens}, {@code n}, {@code temperature}, {@code requestTimeoutSeconds} and
-     * {@code maxRetries} are range-checked there, and {@code reasoningEffort} is carried on the
-     * request when it is not blank — DL-145, DL-146, DL-200, DL-201.
-     *
-     * <p>{@code service/LlmService} validates {@code reasoningEffort},
-     * {@code requestTimeoutSeconds} and {@code maxRetries} on the path that creates the client and
-     * builds the request — DL-145, DL-146, DL-201.
+     * {@code maxRetries} on the path that creates the client and builds the request; a non-blank
+     * {@code reasoningEffort} is carried on the request — DL-145, DL-146, DL-200, DL-201.
      *
      * @param apiKey value of {@code scanner.openai.api-key}, redacted by {@link #toString()}
      * @param model value of {@code scanner.openai.model}
@@ -579,11 +565,9 @@ public record ScannerProperties(
      * a process for which either is {@code false} starts that path in no way — see
      * docs/DECISION_LOG.md DL-250.
      *
-     * <p>All three default to {@code true}, so a single-process deployment runs both paths without
-     * configuring anything. {@code streamEnabled} binds the {@code TWITTER_STREAM_ENABLED} environment
-     * variable.
-     *
-     * <p>This group carries no credential. Its {@code toString()} is the compiler-generated one.
+     * <p>The three switches default to {@code true}, so a single-process deployment runs both paths
+     * without configuring anything; {@code streamEnabled} binds {@code TWITTER_STREAM_ENABLED}. The
+     * group carries no credential, so its {@code toString()} is the compiler-generated one.
      *
      * @param enabled                   value of {@code scanner.background.enabled}, default
      *     {@code true}: whether this process runs any background path at all
@@ -592,6 +576,12 @@ public record ScannerProperties(
      * @param responseGenerationEnabled value of
      *     {@code scanner.background.response-generation-enabled}, default {@code true}: whether this
      *     process runs the scheduled response-generation pass
+     * @param maxCandidatesPerPass      value of
+     *     {@code scanner.background.max-candidates-per-pass}, default
+     *     {@value #DEFAULT_MAX_CANDIDATES_PER_PASS}: the largest number of candidate rows one
+     *     generation pass reads. The canonical constructor raises a value below
+     *     {@value #MINIMUM_MAX_CANDIDATES_PER_PASS} to that floor, so the bound is never zero or
+     *     negative — DL-282
      */
     public record Background(
 

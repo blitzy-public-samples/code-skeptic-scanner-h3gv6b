@@ -19,41 +19,29 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * Spring Data JPA repository for the {@link Tweet} aggregate, which maps the {@code tweets} table.
  *
- * <p>The identifier type is {@link Integer}, matching the {@code @Id} field of {@link Tweet}.
+ * <p>The identifier type is {@link Integer}, matching the {@code @Id} field of {@link Tweet}. An
+ * identifier reaches this interface already parsed — DL-048.
  *
- * <p>Consumers reach the following operations through the surface inherited from
- * {@link JpaRepository}:
- *
- * <ul>
- *   <li>{@code findAll(Pageable)} returns one page of rows and backs {@code GET /tweets}. The caller
- *       builds the {@code Pageable}: the wire {@code page} parameter is 1-based and Spring Data is
- *       0-based — see docs/DECISION_LOG.md DL-038.
- *   <li>{@code findById(Integer)} returns one row wrapped in an {@link java.util.Optional} and backs
- *       {@code GET /tweets/{tweetId}} and {@code POST /tweets/{tweetId}/analyze}. An empty
- *       {@link java.util.Optional} denotes a row that is not present. The caller parses the path
- *       value before calling, so this operation only ever receives an {@link Integer} — see
- *       docs/DECISION_LOG.md DL-048.
- *   <li>{@code save(Tweet)} inserts an ingested row, and {@code task.TweetStreamListener} is its one
- *       caller — see docs/DECISION_LOG.md DL-049. The analysis write-back is not a {@code save}: the
- *       analyze route writes the one column it changes through
- *       {@link #updateDoubtRating(Integer, Double)} — see docs/DECISION_LOG.md DL-263.
- *   <li>{@code count()} returns the number of rows, which {@code TwitterService} reports as the
- *       {@code total} of a page whose first row lies past the offset a paged query can express — see
- *       docs/DECISION_LOG.md DL-225.
- * </ul>
+ * <p>Four operations are reached through the surface inherited from {@link JpaRepository}:
+ * {@code findAll(Pageable)} backs {@code GET /tweets}, over a {@link Pageable} the caller builds from
+ * the 1-based wire {@code page} — DL-038; {@code findById(Integer)} backs
+ * {@code GET /tweets/{tweetId}} and {@code POST /tweets/{tweetId}/analyze}; {@code save(Tweet)}
+ * inserts an ingested row and {@code task.TweetStreamListener} is its one caller — DL-049; and
+ * {@code count()} supplies the {@code total} of a page whose first row lies past the offset a paged
+ * query can express — DL-225. The analysis write-back is not a {@code save}: the analyze route writes
+ * the one column it changes through {@link #updateDoubtRating(Integer, Double)} — DL-263.
  *
  * <p>Six members are declared below: {@link #findByIdForUpdate(Integer)},
  * {@link #findUnansweredBatchAfter(Integer, Pageable)}, {@link #findAggregates()},
  * {@link #findDailyTrendsBetween(java.time.LocalDateTime, java.time.LocalDateTime)},
- * {@link #findAnalysisSubjectById(Integer)} and {@link #updateDoubtRating(Integer, Double)}.
+ * {@link #findAnalysisSubjectById(Integer)} and {@link #updateDoubtRating(Integer, Double)}. Every
+ * query among them is JPQL and names no vendor, vendor-specific function or dialect, so a single
+ * artifact serves PostgreSQL, MySQL/MariaDB and H2 — DL-027.
  *
  * <p>Spring Data supplies the implementation as a runtime proxy. Transaction boundaries are declared
  * on the {@code @Service} and {@code @Component} methods that call this interface, and the
  * {@code tweets} table is created from the annotations on {@link Tweet} by
- * {@code spring.jpa.hibernate.ddl-auto} — see docs/DECISION_LOG.md DL-026.
- *
- * <p>Every query declared below is JPQL and names no vendor, vendor-specific function or dialect, so
- * a single artifact serves PostgreSQL, MySQL/MariaDB and H2 — see docs/DECISION_LOG.md DL-027.
+ * {@code spring.jpa.hibernate.ddl-auto} — DL-026.
  *
  * <p>{@link Tweet#getResponses()} is lazy and {@code spring.jpa.open-in-view} is {@code false}. The
  * empty-collection predicate of {@link #findUnansweredBatchAfter(Integer, Pageable)} is evaluated in
@@ -61,8 +49,6 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>{@code doubt_rating} is computed by {@code SentimentAnalysisService} and the popularity gate over
  * {@code like_count} is evaluated by {@code TwitterService}; neither value is derived here.
- *
- * @see Tweet
  */
 // Ported from backend/app/db/database.py:L10-13 (faithful port) — see docs/DECISION_LOG.md
 // The identifier type parameter is Integer, matching tweets.id — DL-138 — see
@@ -93,8 +79,8 @@ public interface TweetRepository extends JpaRepository<Tweet, Integer> {
      *         the cursor. Never {@code null}
      */
     // Ported from backend/app/tasks/response_generation.py:L43, whose expression was
-    // `Tweet.query.filter(Tweet.response == None).all()` (faithful port of the predicate) — DL-248,
-    // DL-248 — see docs/DECISION_LOG.md
+    // `Tweet.query.filter(Tweet.response == None).all()` (faithful port of the predicate) — see
+    // docs/DECISION_LOG.md DL-248
     @Query("""
             select t
             from Tweet t
@@ -231,38 +217,20 @@ public interface TweetRepository extends JpaRepository<Tweet, Integer> {
      *
      * <p>A closed projection over the {@code tweets} table. Spring Data binds each accessor to the
      * select alias of the same name, and the four values populate a {@code TrendsDto.TrendPoint} —
-     * see docs/DECISION_LOG.md DL-213.
+     * DL-213. The bucket day is never {@code null} and the row count is at least 1; the mean doubt
+     * rating and the summed like count are {@code null} when no row in the bucket carries the
+     * aggregated column.
      */
     // Net-new (no Python counterpart; shape of TrendsDto.TrendPoint) — DL-213 — see
     // docs/DECISION_LOG.md
     interface DailyTrend {
 
-        /**
-         * Returns the calendar day this bucket covers, taken from {@code tweets.created_at}.
-         *
-         * @return the bucket day, never {@code null}
-         */
         LocalDate getBucketDate();
 
-        /**
-         * Returns the number of {@code tweets} rows created on this day.
-         *
-         * @return the row count, at least 1 and never {@code null}
-         */
         Long getTweetCount();
 
-        /**
-         * Returns the mean {@code tweets.doubt_rating} over this day's rows.
-         *
-         * @return the mean doubt rating, or {@code null} when no row in this bucket carries one
-         */
         Double getAverageDoubtRating();
 
-        /**
-         * Returns the sum of {@code tweets.like_count} over this day's rows.
-         *
-         * @return the summed like count, or {@code null} when no row in this bucket carries one
-         */
         Long getTotalLikes();
     }
 
@@ -271,31 +239,17 @@ public interface TweetRepository extends JpaRepository<Tweet, Integer> {
      * {@link TweetRepository#findAggregates()}.
      *
      * <p>A closed projection over the {@code tweets} table. Spring Data binds each accessor to the
-     * select alias of the same name — see docs/DECISION_LOG.md DL-180.
+     * select alias of the same name — DL-180. The row count is never {@code null} and never negative;
+     * either mean is {@code null} when no row carries the averaged column.
      */
     // Net-new (no Python counterpart; three members of dto/SummaryDto) — DL-180 — see
     // docs/DECISION_LOG.md
     interface TweetAggregate {
 
-        /**
-         * Returns the number of {@code tweets} rows.
-         *
-         * @return the row count, never {@code null} and never negative
-         */
         Long getTweetCount();
 
-        /**
-         * Returns the mean {@code tweets.doubt_rating} over every row.
-         *
-         * @return the mean doubt rating, or {@code null} when no row carries one
-         */
         Double getAverageDoubtRating();
 
-        /**
-         * Returns the mean {@code tweets.like_count} over every row.
-         *
-         * @return the mean like count, or {@code null} when no row carries one
-         */
         Double getAverageLikeCount();
     }
 
@@ -304,23 +258,14 @@ public interface TweetRepository extends JpaRepository<Tweet, Integer> {
      * {@link TweetRepository#findAnalysisSubjectById(Integer)}.
      *
      * <p>A closed projection over the {@code tweets} table. Spring Data binds each accessor to the
-     * select alias of the same name — see docs/DECISION_LOG.md DL-263.
+     * select alias of the same name — DL-263. The identifier is never {@code null}; the text is
+     * {@code null} when the column holds none.
      */
     // Net-new (no Python counterpart) — DL-263 — see docs/DECISION_LOG.md
     interface AnalysisSubject {
 
-        /**
-         * Returns the value of {@code tweets.id}.
-         *
-         * @return the identifier, never {@code null}
-         */
         Integer getId();
 
-        /**
-         * Returns the value of {@code tweets.content}.
-         *
-         * @return the stored text, or {@code null} when the column holds none
-         */
         String getContent();
     }
 }

@@ -51,10 +51,6 @@ public class AiTool {
     @Column(name = "description")
     private String description;
 
-    /**
-     * No-argument constructor mandated by the JPA specification. Field values are populated by the
-     * persistence provider or by the accessors below.
-     */
     public AiTool() {
     }
 

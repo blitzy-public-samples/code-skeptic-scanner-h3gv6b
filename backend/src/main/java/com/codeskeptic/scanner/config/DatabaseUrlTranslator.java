@@ -17,7 +17,6 @@ import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-
 // Net-new class derived from backend/app/core/config.py:L9 — the opaque DATABASE_URL the retired
 // tree read at backend/app/db/database.py:L5 and never interpreted — DL-027, DL-071, DL-072 — see
 // docs/DECISION_LOG.md
@@ -25,86 +24,32 @@ import org.slf4j.LoggerFactory;
  * Translates the opaque {@code DATABASE_URL} value, bound to {@code scanner.database-url}, into a
  * JDBC URL together with the username and the password as separate values.
  *
- * <p>Existing lower-case {@code jdbc:} values pass through unchanged. SQLAlchemy-style PostgreSQL,
- * MySQL, MariaDB and H2 URLs are parsed into vendor JDBC URLs; user-info and recognised credential
- * query properties are returned separately. Unsupported, malformed or unresolved values fail with
- * {@link IllegalStateException} — DL-064, DL-072 — see docs/DECISION_LOG.md.
- *
- * <p>The value is consumed exactly as supplied: no character of it is trimmed, case-folded or
- * otherwise normalised on the way into a returned URL. A value padded with leading or trailing
- * whitespace is not a parseable URL and raises {@link IllegalStateException}. Classification is the
- * one place trimmed text is used: {@link #isUnset(String)} trims before testing for
- * blankness and for the unresolved-placeholder shape, so a padded {@code ${DATABASE_URL}} is
- * recognised as unset — DL-186. That trimmed copy is used for the test alone and never reaches the
- * returned URL.
- *
- * <p>Behaviour contract, applied in this order:
+ * <p>Behaviour contract, applied in this order — DL-064, DL-072:
  * <ol>
- *   <li>A {@code null}, empty or whitespace-only value raises {@link IllegalStateException}. So does
- *       an unresolved {@code ${DATABASE_URL}} placeholder, the literal text that binds when the
- *       environment variable is absent — DL-186 — see docs/DECISION_LOG.md.</li>
- *   <li>A value beginning with the literal lower-case {@code jdbc:} is returned exactly as
- *       supplied, character for character, with a {@code null} username and a {@code null}
- *       password. It is not parsed, rewritten, trimmed, stripped or inspected, and its scheme is
- *       matched case-sensitively; a value carrying credential material passes through it too —
- *       DL-064 — see docs/DECISION_LOG.md.</li>
- *   <li>Any other value is parsed as a {@link URI}. Everything from the first {@code '+'} of the
- *       scheme onward is discarded, the remaining scheme is mapped case-insensitively to a JDBC
- *       vendor, the user-info component is split on its first {@code ':'} into the username and the
- *       password, any recognised credential property is taken out of the query under either property
- *       separator, and the URL is
- *       reassembled as {@code <jdbc-authority-prefix><host>[:<port>]<path>[?<query>]}. The
- *       {@code :<port>} segment is present only when the value declares a port, the
- *       {@code ?<query>} segment only when at least one property is retained, and neither the
- *       user-info component nor any credential property appears in the reassembled URL.</li>
- *   <li>An unrecognised scheme raises {@link IllegalStateException} naming the supported
- *       schemes.</li>
+ *   <li>A {@code null}, empty, whitespace-only or unresolved {@code ${DATABASE_URL}} value raises
+ *       {@link IllegalStateException} — DL-186.</li>
+ *   <li>A value beginning with the literal lower-case {@code jdbc:} is returned character for
+ *       character with a {@code null} username and password: not parsed, not trimmed, scheme matched
+ *       case-sensitively, credential material passed through — DL-064.</li>
+ *   <li>Any other value is parsed as a {@link URI}: everything from the first {@code '+'} of the
+ *       scheme onward is discarded, the remaining scheme is mapped case-insensitively to a vendor, the
+ *       user-info component is split on its first {@code ':'}, any recognised credential property is
+ *       taken out of the query under either separator, and the result is reassembled as
+ *       {@code <jdbc-authority-prefix><host>[:<port>]<path>[?<query>]}.</li>
+ *   <li>An unrecognised scheme raises {@link IllegalStateException} naming the supported schemes.</li>
  * </ol>
  *
- * <p>On the parse path {@link TranslatedDatabaseUrl#jdbcUrl()} carries no username and no password:
- * the user-info component is split out, and a property whose name is {@code user}, {@code username},
- * {@code uid}, {@code password}, {@code passwd}, {@code pwd}, {@code password1}, {@code password2} or
- * {@code password3} — matched exactly and case-insensitively — is removed from the query and fills
- * whichever half of the credential pair the user-info component left unset — DL-072 — see
- * docs/DECISION_LOG.md. Every other property, a vendor property naming a driver secret included, is
- * retained verbatim; AAP 0.6.5.1 reassembles the query as supplied.
+ * <p>Apart from {@link #isUnset(String)}, which tests a trimmed copy that never reaches the returned
+ * URL, the value is consumed exactly as supplied, so a whitespace-padded value is unparseable —
+ * DL-186. On the parse path the returned URL carries neither user-info nor any of the nine recognised
+ * credential property names; every other property is retained verbatim, in its original order and
+ * with its preceding separator, a vendor property naming a driver secret included — DL-072.
  *
- * <p>Extraction splits the query component on {@code '&'} and {@code ';'} alike, so a credential
- * property is removed under either separator and neither separator can carry one into the reassembled
- * URL. Every retained property keeps its original order and the separator that preceded it in the
- * supplied value; a retained property that becomes the first one carries no separator, and a query
- * whose every property is a credential leaves no {@code ?} segment at all — DL-072.
- *
- * <p>Supported schemes and the JDBC authority prefix each maps to, which is the matrix of
- * AAP 0.6.5.1: {@code postgresql} and {@code postgres} map to {@code jdbc:postgresql://};
- * {@code mysql} and {@code mariadb} map to {@code jdbc:mysql://}; {@code h2} maps to
- * {@code jdbc:h2://} — DL-187 — see docs/DECISION_LOG.md. The set matches the runtime-scope JDBC
- * drivers declared in backend/pom.xml, which are {@code org.postgresql:postgresql},
- * {@code com.mysql:mysql-connector-j} and {@code com.h2database:h2}. A literal {@code jdbc:h2:} value
- * reaches H2 through the pass-through path instead, which is what
- * src/test/resources/application-test.yml supplies — DL-071, DL-242 — see docs/DECISION_LOG.md.
- *
- * <p>Server products this service is verified against: PostgreSQL 16 and MySQL 8.4. A
- * {@code mariadb} value translates onto the MySQL vendor and a warning naming that unverified
- * combination is recorded whenever the scheme is declared — DL-187 — see docs/DECISION_LOG.md.
- *
- * <p>Examples, in which {@code USERNAME} and {@code PASSWORD} stand for the configured credentials:
- * <pre>{@code
- * var translated = DatabaseUrlTranslator.translate(
- *         "postgresql://USERNAME:PASSWORD@db.internal:5432/codeskeptic");
- * translated.jdbcUrl();   // jdbc:postgresql://db.internal:5432/codeskeptic
- * translated.username();  // USERNAME
- * translated.password();  // PASSWORD
- *
- * DatabaseUrlTranslator.translate("mariadb://db.internal:3306/codeskeptic")
- *         .jdbcUrl();     // jdbc:mysql://db.internal:3306/codeskeptic
- *
- * DatabaseUrlTranslator.translate("h2://localhost/scanner")
- *         .jdbcUrl();     // jdbc:h2://localhost/scanner
- *
- * DatabaseUrlTranslator.translate("jdbc:h2:mem:scanner_test")
- *         .jdbcUrl();     // jdbc:h2:mem:scanner_test, passed through unchanged
- * }</pre>
+ * <p>Scheme map: {@code postgresql} and {@code postgres} onto {@code jdbc:postgresql://},
+ * {@code mysql} and {@code mariadb} onto {@code jdbc:mysql://}, {@code h2} onto {@code jdbc:h2://} —
+ * one entry per runtime-scope driver — DL-009, DL-028, DL-071. Verified server products are
+ * PostgreSQL 16 and MySQL 8.4; a {@code mariadb} value translates onto the MySQL vendor and records a
+ * warning naming that unverified combination — DL-187.
  */
 public final class DatabaseUrlTranslator {
 
@@ -131,22 +76,14 @@ public final class DatabaseUrlTranslator {
     private static final int NO_PORT = -1;
     private static final int MAX_PORT = 65535;
 
-    /** Rendered by {@link TranslatedDatabaseUrl#toString()} in place of each of its values. */
     private static final String REDACTED = "***REDACTED***";
 
-    /** The grammar named by every failure message. */
     private static final String EXPECTED_FORM = "<scheme>://[username[:password]@]host[:port]/database";
 
-    /**
-     * Maps a URL scheme, lower-cased and with any {@code +driver} suffix removed, to the JDBC
-     * vendor it resolves to.
-     */
     private static final Map<String, Vendor> VENDOR_BY_SCHEME;
 
-    // Scheme-to-vendor map of AAP 0.6.5.1; mariadb resolves onto the MySQL vendor — DL-187 — see
-    // docs/DECISION_LOG.md
-    // The map holds one entry per runtime-scope driver, H2 included — DL-071, DL-242 — see
-    // docs/DECISION_LOG.md
+    // Scheme-to-vendor map of AAP 0.6.5.1; mariadb resolves onto the MySQL vendor — DL-187. One entry
+    // per runtime-scope driver, H2 included — DL-009, DL-071 — see docs/DECISION_LOG.md
     static {
         final Map<String, Vendor> vendors = new LinkedHashMap<>();
         vendors.put("postgresql", Vendor.POSTGRESQL);
@@ -181,7 +118,6 @@ public final class DatabaseUrlTranslator {
      */
     private static final Set<String> IDENTITY_PROPERTY_NAMES = Set.of("user", "username", "uid");
 
-    /** Separates properties inside the query or property section of a URL. */
     private static final Pattern PROPERTY_SEPARATOR = Pattern.compile("[?&;]");
 
     /**
@@ -211,13 +147,11 @@ public final class DatabaseUrlTranslator {
             this.jdbcAuthorityPrefix = jdbcAuthorityPrefix;
         }
 
-        /** Returns the vendor token named in log records and failure messages. */
-        String token() {
+            String token() {
             return token;
         }
 
-        /** Returns everything the reassembled URL carries before the host. */
-        String jdbcAuthorityPrefix() {
+            String jdbcAuthorityPrefix() {
             return jdbcAuthorityPrefix;
         }
     }

@@ -94,53 +94,28 @@ import com.openai.services.blocking.chat.ChatCompletionService;
 @ExtendWith(MockitoExtension.class)
 @DisplayName("LlmService")
 class LlmServiceTest {
-
-    /** Tolerance applied to every floating-point comparison in this class. */
     private static final double TOLERANCE = 1e-9d;
 
     // Bounds of the shutdown-drain tests — DL-266 — see docs/DECISION_LOG.md
 
-    /** Longest any latch, future or thread in this class is waited for. */
     private static final long LATCH_LIMIT_SECONDS = 10L;
 
-    /** Window allowed for a wait to be observed as still waiting. */
     private static final long SETTLE_MILLIS = 300L;
 
-    /** Milliseconds in one second, used where an API takes milliseconds. */
     private static final long MILLIS_PER_SECOND = 1_000L;
 
-    // -------------------------------------------------------------------------
-    // scanner.openai values carried by the properties under test
-    // -------------------------------------------------------------------------
-
-    /** Value bound to {@code scanner.openai.api-key}. */
     private static final String API_KEY = "not-a-real-openai-credential";
 
-    /** Value bound to {@code scanner.openai.model}. */
     private static final String MODEL = "gpt-5.6-terra";
 
-    /** Value bound to {@code scanner.openai.max-completion-tokens}. */
     private static final long MAX_COMPLETION_TOKENS = 150L;
 
-    /**
-     * Value bound to {@code scanner.openai.temperature} by the default fixture. The fixture binds
-     * {@code null}, the state a deployment reaches by setting the key blank, and the tests below assert
-     * the omission path. The shipped default is {@code 0.7} and is pinned by
-     * {@code ScannerApplicationTests}.
-     */
     private static final Double TEMPERATURE = null;
 
-    /** Value bound to {@code scanner.openai.n}. */
     private static final long N = 1L;
 
-    /**
-     * The {@code scanner.openai.reasoning-effort} value the fixtures bind. It differs from the shipped
-     * default of {@code none}, and the tests below assert the carried-value path. The shipped default is
-     * pinned by {@code ScannerApplicationTests}.
-     */
     private static final String REASONING_EFFORT = "low";
 
-    /** A {@code scanner.openai.reasoning-effort} value the configured model does not accept. */
     private static final String UNACCEPTED_REASONING_EFFORT = "exhaustive";
 
     /**
@@ -149,63 +124,38 @@ class LlmServiceTest {
      */
     private static final String SHIPPED_REASONING_EFFORT = "none";
 
-    /** The shipped {@code scanner.openai.temperature} value — AAP §0.3.4. */
     private static final Double SHIPPED_TEMPERATURE = 0.7d;
 
-    /** The {@code scanner.openai.request-timeout-seconds} value the fixtures bind. */
     private static final long REQUEST_TIMEOUT_SECONDS = 30L;
 
-    /** The {@code scanner.openai.max-retries} value the fixtures bind. */
     private static final int MAX_RETRIES = 2;
 
-    /** Request timeout, in seconds, that the OpenAI client applies none of on its own. */
     private static final long DISTINCTIVE_REQUEST_TIMEOUT_SECONDS = 17L;
 
-    /** Retry count that differs from the one the OpenAI client defaults to. */
     private static final int DISTINCTIVE_MAX_RETRIES = 5;
 
-    /** Second value bound to {@code scanner.openai.model}. */
     private static final String OTHER_MODEL = "a-different-chat-model-identifier";
 
-    /** Second value bound to {@code scanner.openai.max-completion-tokens}. */
     private static final long OTHER_MAX_COMPLETION_TOKENS = 77L;
 
-    /** Second value bound to {@code scanner.openai.temperature}, supplied explicitly. */
     private static final Double OTHER_TEMPERATURE = 0.11d;
 
-    // -------------------------------------------------------------------------
-    // Post supplied to generateResponse(TweetDto)
-    // -------------------------------------------------------------------------
-
-    /** Identifier of the post the tests reply to. */
     private static final String TWEET_ID = "4711";
 
-    /** Body of the post the tests reply to. */
     private static final String TWEET_CONTENT = "AI coding tools still cannot get this right";
 
-    /** Number of likes recorded on the post the tests reply to. */
     private static final int LIKE_COUNT = 250;
 
-    /** Creation time of the post the tests reply to. */
     private static final LocalDateTime CREATED_AT = LocalDateTime.of(2026, 1, 31, 9, 15);
 
-    /** Doubt rating of the post the tests reply to. */
     private static final double DOUBT_RATING = 7.5d;
 
-    /** Media references attached to the post the tests reply to. */
     private static final List<String> MEDIA = List.of("https://pbs.example/media/1.png");
 
-    /** Author of the post the tests reply to. */
     private static final String USER_ID = "user-99";
 
-    /** AI tool names carried by the post the tests reply to. */
     private static final List<String> AI_TOOLS_MENTIONED = List.of("GitHub Copilot", "Cursor");
 
-    // -------------------------------------------------------------------------
-    // Prompt and generated text
-    // -------------------------------------------------------------------------
-
-    /** Prompt the request is asserted to carry for the post above, spelled out in full. */
     private static final String EXPECTED_PROMPT =
             "Generate a response to the following tweet: 'AI coding tools still cannot get this right'"
                     + "\n\n"
@@ -213,31 +163,21 @@ class LlmServiceTest {
                     + "\n\n"
                     + "Response:";
 
-    /** Text the stubbed response carries, padded on both sides. */
     private static final String PADDED_GENERATED_TEXT = "  Even seasoned reviewers disagree.  ";
 
-    /**
-     * Longest run of a guarded value a log record carries — the bound the provider-member shape check
-     * applies to every provider-supplied member. A longer value is withheld in full.
-     */
     private static final int GUARDED_VALUE_LIMIT = 64;
 
-    /** Text {@link #PADDED_GENERATED_TEXT} yields once trimmed. */
     private static final String TRIMMED_GENERATED_TEXT = "Even seasoned reviewers disagree.";
 
-    /** Stubbed OpenAI client, reached only through the protected accessor. */
     @Mock
     private OpenAIClient openAiClient;
 
-    /** Chat service the stubbed client returns. */
     @Mock
     private ChatService chatService;
 
-    /** Chat Completions service the stubbed chat service returns. */
     @Mock
     private ChatCompletionService chatCompletionService;
 
-    /** Unit under test, holding {@link #openAiClient} behind the accessor. */
     private SeamedService service;
 
     @BeforeEach
@@ -245,10 +185,6 @@ class LlmServiceTest {
         service = seamedServiceCarrying(
                 openaiGroup(MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N));
     }
-
-    // -------------------------------------------------------------------------
-    // OpenAI client acquisition
-    // -------------------------------------------------------------------------
 
     @Test
     @DisplayName("constructing the service reaches the openai client accessor zero times")
@@ -325,10 +261,6 @@ class LlmServiceTest {
         verifyNoInteractions(openAiClient);
     }
 
-    // -------------------------------------------------------------------------
-    // Request routing and the model identifier
-    // -------------------------------------------------------------------------
-
     @Test
     @DisplayName("sends one chat completions request and no streaming request")
     void sendsOneChatCompletionsRequestAndNoStreamingRequest() {
@@ -392,10 +324,6 @@ class LlmServiceTest {
         assertThat(messages.get(0).asUser().content().isText()).isTrue();
         assertThat(messages.get(0).asUser().content().asText()).isEqualTo(EXPECTED_PROMPT);
     }
-
-    // -------------------------------------------------------------------------
-    // Call parameters
-    // -------------------------------------------------------------------------
 
     @Test
     @DisplayName("sends a max completion tokens value of one hundred and fifty")
@@ -765,7 +693,6 @@ class LlmServiceTest {
     @DisplayName("rejects a temperature carried alongside an effort other than none, naming both keys")
     void rejectsATemperatureCarriedAlongsideAnEffortOtherThanNoneNamingBothKeys(
             String reasoningEffort) {
-
         service = seamedServiceCarrying(new ScannerProperties.Openai(API_KEY, MODEL,
                 MAX_COMPLETION_TOKENS, SHIPPED_TEMPERATURE, N, reasoningEffort,
                 REQUEST_TIMEOUT_SECONDS, MAX_RETRIES));
@@ -838,10 +765,6 @@ class LlmServiceTest {
 
         assertThat(capturedRequest().stop()).isEmpty();
     }
-
-    // -------------------------------------------------------------------------
-    // Reasoning effort — DL-145
-    // -------------------------------------------------------------------------
 
     @Test
     @DisplayName("sends the configured reasoning effort")
@@ -927,10 +850,6 @@ class LlmServiceTest {
         assertThat(thrown).isInstanceOf(IllegalStateException.class);
         assertThat(thrown.getMessage()).doesNotContain("exhaustive");
     }
-
-    // -------------------------------------------------------------------------
-    // Prompt composition
-    // -------------------------------------------------------------------------
 
     @Test
     @DisplayName("composes the prompt from the post body and the context clause")
@@ -1122,10 +1041,6 @@ class LlmServiceTest {
                 bodyWithAQuote, "AI tools mentioned: GitHub Copilot, Cursor; doubt rating: 7.5"));
     }
 
-    // -------------------------------------------------------------------------
-    // Bounds applied to the Context: value — DL-265 — see docs/DECISION_LOG.md
-    // -------------------------------------------------------------------------
-
     @Test
     @DisplayName("carries no more than ten ai tool names into the prompt")
     void carriesNoMoreThanTenAiToolNamesIntoThePrompt() {
@@ -1216,10 +1131,6 @@ class LlmServiceTest {
                 "AI tools mentioned: none; doubt rating: 7.5"));
     }
 
-    // -------------------------------------------------------------------------
-    // Returned generated text
-    // -------------------------------------------------------------------------
-
     @Test
     @DisplayName("returns the trimmed text of the first choice")
     void returnsTheTrimmedTextOfTheFirstChoice() {
@@ -1244,11 +1155,6 @@ class LlmServiceTest {
 
         assertThat(generatedText).isEqualTo("first choice text");
     }
-
-    // -------------------------------------------------------------------------
-    // Unusable model output is a generation failure, reported under one of four fixed codes —
-    // DL-083 and DL-145
-    // -------------------------------------------------------------------------
 
     @Test
     @DisplayName("reports NO_CHOICE when the response carries no choice")
@@ -1410,10 +1316,6 @@ class LlmServiceTest {
         assertThat(generatedText).isNotBlank();
     }
 
-    // -------------------------------------------------------------------------
-    // Client lifecycle — DL-085
-    // -------------------------------------------------------------------------
-
     @Test
     @DisplayName("closes the cached openai client when the bean is destroyed")
     void closesTheCachedOpenaiClientWhenTheBeanIsDestroyed() throws Exception {
@@ -1493,10 +1395,6 @@ class LlmServiceTest {
                 .withMessageContaining("destroyed");
     }
 
-    // -------------------------------------------------------------------------
-    // Failure propagation
-    // -------------------------------------------------------------------------
-
     @Test
     @DisplayName("propagates the openai client failure unchanged")
     void propagatesTheOpenaiClientFailureUnchanged() {
@@ -1522,10 +1420,6 @@ class LlmServiceTest {
         assertThat(thrown.getMessage())
                 .isNotEqualTo(ResponseGenerationException.FAILED_TO_GENERATE_RESPONSE);
     }
-
-    // -------------------------------------------------------------------------
-    // Declared surface
-    // -------------------------------------------------------------------------
 
     @Test
     @DisplayName("declares generation and client release as its only public operations")
@@ -1566,18 +1460,11 @@ class LlmServiceTest {
     @DisplayName("rejects a reply record that carries no value for a source-required component")
     void rejectsAReplyRecordThatCarriesNoValueForASourceRequiredComponent(String wireKey,
             ThrowingCallable construction) {
-
         assertThatNullPointerException()
                 .isThrownBy(construction)
                 .withMessage(wireKey + " must not be null.");
     }
 
-    /**
-     * Names one construction per source-required component of {@code dto/ResponseDto}, each leaving
-     * that component unset.
-     *
-     * @return the wire key and the construction that omits it
-     */
     private static List<Arguments> unsetReplyComponents() {
         LocalDateTime generatedAt = LocalDateTime.of(2026, 1, 31, 9, 15);
         return List.of(
@@ -1600,18 +1487,11 @@ class LlmServiceTest {
     @DisplayName("rejects a post record that carries no value for a source-required component")
     void rejectsAPostRecordThatCarriesNoValueForASourceRequiredComponent(String wireKey,
             ThrowingCallable construction) {
-
         assertThatNullPointerException()
                 .isThrownBy(construction)
                 .withMessage(wireKey + " must not be null.");
     }
 
-    /**
-     * Names one construction per source-required component of {@code dto/TweetDto}, each leaving that
-     * component unset.
-     *
-     * @return the wire key and the construction that omits it
-     */
     private static List<Arguments> unsetPostComponents() {
         return List.of(
                 Arguments.of("id", (ThrowingCallable) () -> new TweetDto(
@@ -1668,10 +1548,6 @@ class LlmServiceTest {
         assertThat(accessor.getParameterTypes()).isEmpty();
         assertThat(accessor.getReturnType()).isEqualTo(OpenAIClient.class);
     }
-
-    // -------------------------------------------------------------------------
-    // Call budget and client lifecycle — DL-085, DL-146 — see docs/DECISION_LOG.md
-    // -------------------------------------------------------------------------
 
     @Test
     @DisplayName("binds a finite request timeout and an explicit retry count from configuration")
@@ -1809,10 +1685,6 @@ class LlmServiceTest {
                 .withMessageContaining("destroyed");
     }
 
-    // -------------------------------------------------------------------------
-    // The shutdown awaits an in-flight completion — DL-266 — see docs/DECISION_LOG.md
-    // -------------------------------------------------------------------------
-
     @Test
     @DisplayName("awaits an in-flight generation before releasing the openai client")
     void awaitsAnInFlightGenerationBeforeReleasingTheOpenaiClient() throws Exception {
@@ -1829,7 +1701,6 @@ class LlmServiceTest {
             assertThat(generationEntered.await(LATCH_LIMIT_SECONDS, TimeUnit.SECONDS)).isTrue();
 
             Future<?> shutdown = closer.submit(holdingAClient::closeOpenAiClient);
-            // The shutdown cannot complete while the generation holds the read lock.
             assertThatExceptionOfType(TimeoutException.class)
                     .isThrownBy(() -> shutdown.get(SETTLE_MILLIS, TimeUnit.MILLISECONDS));
             verify(openAiClient, never()).close();
@@ -1864,7 +1735,6 @@ class LlmServiceTest {
             assertThatExceptionOfType(TimeoutException.class)
                     .isThrownBy(() -> shutdown.get(SETTLE_MILLIS, TimeUnit.MILLISECONDS));
 
-            // A request arriving during the wait is rejected and is not queued behind the release.
             assertThatIllegalStateException()
                     .isThrownBy(() -> holdingAClient.generateResponse(tweet()))
                     .withMessageContaining("destroyed");
@@ -1908,29 +1778,13 @@ class LlmServiceTest {
         }
     }
 
-    /**
-     * Reads the transport options an {@link OpenAIClient} was built with.
-     *
-     * @param client the client under inspection
-     * @return the options the builder applied
-     * @throws ReflectiveOperationException when the options cannot be read
-     */
     private static ClientOptions clientOptionsOf(OpenAIClient client)
             throws ReflectiveOperationException {
-
         Field options = client.getClass().getDeclaredField("clientOptions");
         options.setAccessible(true);
         return (ClientOptions) options.get(client);
     }
 
-    /**
-     * Builds a service already holding {@code heldClient} in the field the shutdown callback
-     * releases, standing in for a service whose accessor has created one.
-     *
-     * @param heldClient the client the service holds
-     * @return the service holding that client
-     * @throws ReflectiveOperationException when the field cannot be written
-     */
     private static LlmService serviceHoldingClient(OpenAIClient heldClient)
             throws ReflectiveOperationException {
         LlmService service = new LlmService(propertiesCarrying(
@@ -1964,24 +1818,10 @@ class LlmServiceTest {
         assertThat(constructorParameterTypes).containsExactly(ScannerProperties.class);
     }
 
-    // -------------------------------------------------------------------------
-    // Fixtures
-    // -------------------------------------------------------------------------
-
-    /**
-     * Supplies the doubt ratings a {@code double} can carry that are not numbers.
-     *
-     * @return the not-a-number and the two infinite doubt ratings
-     */
     private static DoubleStream doubtRatingsThatAreNotNumbers() {
         return DoubleStream.of(Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY);
     }
 
-    /**
-     * Supplies the model outputs that carry no usable text.
-     *
-     * @return the empty, whitespace-only, tab and newline outputs
-     */
     private static java.util.stream.Stream<String> blankGeneratedText() {
         return java.util.stream.Stream.of("", " ", "   ", "\t", "\n", " \t\n ");
     }
@@ -1995,11 +1835,6 @@ class LlmServiceTest {
         return java.util.stream.Stream.of("I cannot help with that.", "no", " padded refusal ");
     }
 
-    /**
-     * Supplies the refusal values that leave a reply usable — absent, empty and whitespace-only.
-     *
-     * @return {@code null} for an absent refusal, then the blank refusals
-     */
     private static java.util.stream.Stream<String> blankRefusals() {
         return java.util.stream.Stream.of(null, "", " ", "\t\n");
     }
@@ -2028,11 +1863,6 @@ class LlmServiceTest {
                 .map(ReasoningEffort::asString);
     }
 
-    /**
-     * Supplies accepted reasoning efforts carrying surrounding whitespace.
-     *
-     * @return {@code low} surrounded by whitespace
-     */
     private static java.util.stream.Stream<String> paddedReasoningEfforts() {
         return java.util.stream.Stream.of(" low", "low ", "  low  ", "\tlow\n");
     }
@@ -2046,12 +1876,6 @@ class LlmServiceTest {
         return java.util.stream.Stream.of(null, "", " ", "   ", "\t", "\n", " \t\n ");
     }
 
-    /**
-     * Supplies reasoning-effort values the OpenAI SDK does not recognise, including one that differs
-     * from an accepted value by case only.
-     *
-     * @return the rejected reasoning-effort values
-     */
     /**
      * Every accepted {@code scanner.openai.reasoning-effort} value under which the configured model
      * refuses an explicit temperature — DL-145, DL-200 — see docs/DECISION_LOG.md.
@@ -2067,57 +1891,24 @@ class LlmServiceTest {
                 "exhaustive", "very-high", "0", "minimal ish");
     }
 
-    /**
-     * Builds the post every test replies to unless it supplies its own.
-     *
-     * @return a post carrying {@link #TWEET_CONTENT}, {@link #DOUBT_RATING} and
-     *     {@link #AI_TOOLS_MENTIONED}
-     */
     private static TweetDto tweet() {
         return tweetCarrying(TWEET_CONTENT, DOUBT_RATING, AI_TOOLS_MENTIONED);
     }
 
-    /**
-     * Builds a post carrying the three values the prompt is composed from, holding every other
-     * component at its fixture value.
-     *
-     * @param content the post body
-     * @param doubtRating the doubt rating
-     * @param aiToolsMentioned the AI tool names
-     * @return the post
-     */
     private static TweetDto tweetCarrying(String content, double doubtRating,
             List<String> aiToolsMentioned) {
-
         return new TweetDto(TWEET_ID, content, LIKE_COUNT, CREATED_AT, doubtRating, MEDIA, null,
                 USER_ID, aiToolsMentioned);
     }
 
-    /**
-     * Assembles the prompt a post with the given body and context clause yields.
-     *
-     * @param content the post body interpolated between single quotes
-     * @param context the value following {@code Context: }
-     * @return the composed prompt
-     */
     private static String expectedPrompt(String content, String context) {
         return "Generate a response to the following tweet: '" + content + "'"
                 + "\n\nContext: " + context
                 + "\n\nResponse:";
     }
 
-    /**
-     * Builds a {@code scanner.openai} group carrying {@link #API_KEY} and the supplied values.
-     *
-     * @param model value of {@code scanner.openai.model}
-     * @param maxCompletionTokens value of {@code scanner.openai.max-completion-tokens}
-     * @param temperature value of {@code scanner.openai.temperature}
-     * @param n value of {@code scanner.openai.n}
-     * @return the group
-     */
     private static ScannerProperties.Openai openaiGroup(String model, long maxCompletionTokens,
             Double temperature, long n) {
-
         // A carried temperature is accepted only while the reasoning effort is none — DL-145, DL-200 — see
         // docs/DECISION_LOG.md
         return new ScannerProperties.Openai(API_KEY, model, maxCompletionTokens, temperature, n,
@@ -2125,91 +1916,38 @@ class LlmServiceTest {
                 REQUEST_TIMEOUT_SECONDS, MAX_RETRIES);
     }
 
-    /**
-     * Builds a {@code scanner.openai} group carrying the supplied reasoning effort and the values
-     * every other test uses.
-     *
-     * @param reasoningEffort value of {@code scanner.openai.reasoning-effort}, possibly {@code null}
-     * @return the group
-     */
     private static ScannerProperties.Openai openaiGroupWithReasoningEffort(String reasoningEffort) {
         return new ScannerProperties.Openai(API_KEY, MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N,
                 reasoningEffort, REQUEST_TIMEOUT_SECONDS, MAX_RETRIES);
     }
 
-    /**
-     * Builds a configuration root carrying the supplied {@code scanner.openai} group. Every group
-     * {@link LlmService} does not read is left unbound.
-     *
-     * @param openai the {@code scanner.openai} group
-     * @return the configuration root
-     */
     private static ScannerProperties propertiesCarrying(ScannerProperties.Openai openai) {
         return new ScannerProperties(null, 100, 60L, null, null, openai, null, null, null, null, null);
     }
 
-    /**
-     * Builds an unseamed {@link LlmService} whose cached client is the supplied one.
-     *
-     * <p>The cached field is written directly, which places a stubbed client where
-     * {@link LlmService#closeOpenAiClient()} reads it: {@link SeamedService} overrides the accessor
-     * and leaves that field unpopulated.
-     *
-     * @param client the client to cache
-     * @return the service holding {@code client}
-     * @throws ReflectiveOperationException if the cached field cannot be written
-     */
     private static LlmService plainServiceHolding(OpenAIClient client)
             throws ReflectiveOperationException {
-
         LlmService service = new LlmService(propertiesCarrying(
                 openaiGroup(MODEL, MAX_COMPLETION_TOKENS, TEMPERATURE, N)));
         cachedClientField().set(service, client);
         return service;
     }
 
-    /**
-     * Reads the client an unseamed {@link LlmService} has cached.
-     *
-     * @param service the service to read
-     * @return the cached client, or {@code null} when none is cached
-     * @throws ReflectiveOperationException if the cached field cannot be read
-     */
     private static OpenAIClient cachedClientOf(LlmService service)
             throws ReflectiveOperationException {
-
         return (OpenAIClient) cachedClientField().get(service);
     }
 
-    /**
-     * Returns the accessible field holding the cached OpenAI client.
-     *
-     * @return the cached-client field
-     * @throws ReflectiveOperationException if the field is not declared
-     */
     private static Field cachedClientField() throws ReflectiveOperationException {
         Field field = LlmService.class.getDeclaredField("client");
         field.setAccessible(true);
         return field;
     }
 
-    /**
-     * Builds the unit under test over a configuration root carrying the supplied group, with
-     * {@link #openAiClient} behind the accessor.
-     *
-     * @param openai the {@code scanner.openai} group
-     * @return the unit under test
-     */
     private SeamedService seamedServiceCarrying(ScannerProperties.Openai openai) {
         return new SeamedService(propertiesCarrying(openai), openAiClient);
     }
 
-    /**
-     * Builds a Chat Completions response carrying the supplied choices in order.
-     *
-     * @param choices the choices the response carries; none yields a response with no choice
-     * @return the response
-     */
     private static ChatCompletion completionCarrying(ChatCompletion.Choice... choices) {
         return ChatCompletion.builder()
                 .id("chatcmpl-fixture")
@@ -2219,36 +1957,15 @@ class LlmServiceTest {
                 .build();
     }
 
-    /**
-     * Builds a complete choice: the supplied content, no refusal and a {@code stop} finish reason.
-     *
-     * @param content the message content, or {@link Optional#empty()} for a choice carrying none
-     * @return the choice
-     */
     private static ChatCompletion.Choice choiceCarrying(Optional<String> content) {
         return choiceCarrying(content, Optional.empty(), ChatCompletion.Choice.FinishReason.STOP);
     }
 
-    /**
-     * Builds one choice carrying the supplied content and finish reason, and no refusal.
-     *
-     * @param content      the message content the choice carries
-     * @param finishReason the reason the model stopped
-     * @return the choice
-     */
     private static ChatCompletion.Choice choiceCarrying(Optional<String> content,
             ChatCompletion.Choice.FinishReason finishReason) {
         return choiceCarrying(content, Optional.empty(), finishReason);
     }
 
-    /**
-     * Builds one choice carrying the supplied content, refusal and finish reason.
-     *
-     * @param content      the message content, or {@link Optional#empty()} for a choice carrying none
-     * @param refusal      the refusal, or {@link Optional#empty()} for a choice carrying none
-     * @param finishReason the reason the model stopped
-     * @return the choice
-     */
     private static ChatCompletion.Choice choiceCarrying(Optional<String> content,
             Optional<String> refusal, ChatCompletion.Choice.FinishReason finishReason) {
         return ChatCompletion.Choice.builder()
@@ -2262,26 +1979,10 @@ class LlmServiceTest {
                 .build();
     }
 
-    /**
-     * Makes the stubbed client answer any request with a response whose single choice carries
-     * {@code choiceContent}.
-     *
-     * @param choiceContent the message content the stubbed response carries
-     */
     private void stubGeneratedText(String choiceContent) {
         stubClientReturning(completionCarrying(choiceCarrying(Optional.of(choiceContent))));
     }
 
-    /**
-     * Makes the stubbed client answer any request with {@code completion}.
-     *
-     * @param completion the response the stubbed client returns
-     */
-    /**
-     * Builds a provider rejection carrying a status, a type, a code and a parameter name.
-     *
-     * @return the rejection the client raises
-     */
     private static BadRequestException rejectedRequest() {
         return BadRequestException.builder()
                 .headers(Headers.builder().build())
@@ -2294,12 +1995,6 @@ class LlmServiceTest {
                 .build();
     }
 
-    /**
-     * Builds a rejection whose provider-controlled members carry a carriage return, a line feed and a
-     * NUL character.
-     *
-     * @return the rejection to raise from the stubbed client
-     */
     private static BadRequestException rejectedRequestCarryingControlCharacters() {
         return BadRequestException.builder()
                 .headers(Headers.builder().build())
@@ -2312,12 +2007,6 @@ class LlmServiceTest {
                 .build();
     }
 
-    /**
-     * Builds a rejection whose {@code param} member carries the supplied value.
-     *
-     * @param param the value the {@code param} member carries
-     * @return the rejection to raise from the stubbed client
-     */
     private static BadRequestException rejectedRequestCarryingParam(String param) {
         return BadRequestException.builder()
                 .headers(Headers.builder().build())
@@ -2330,11 +2019,6 @@ class LlmServiceTest {
                 .build();
     }
 
-    /**
-     * Attaches a recorder to this class's logger.
-     *
-     * @return the attached recorder
-     */
     private static ListAppender<ILoggingEvent> attachLogRecorder() {
         ListAppender<ILoggingEvent> records = new ListAppender<>();
         records.start();
@@ -2342,22 +2026,11 @@ class LlmServiceTest {
         return records;
     }
 
-    /**
-     * Detaches a recorder from this class's logger.
-     *
-     * @param records the recorder to detach
-     */
     private static void detachLogRecorder(ListAppender<ILoggingEvent> records) {
         ((Logger) LoggerFactory.getLogger(LlmService.class)).detachAppender(records);
         records.stop();
     }
 
-    /**
-     * Renders every captured record with its arguments substituted.
-     *
-     * @param records the recorder to read
-     * @return the rendered messages
-     */
     private static List<String> renderedRecords(ListAppender<ILoggingEvent> records) {
         return records.list.stream().map(ILoggingEvent::getFormattedMessage).toList();
     }
@@ -2393,12 +2066,6 @@ class LlmServiceTest {
         };
     }
 
-    /**
-     * Shuts every supplied executor down and asserts each one terminates.
-     *
-     * @param workers the executors to release
-     * @throws InterruptedException if the awaiting thread is interrupted
-     */
     private static void awaitTermination(ExecutorService... workers) throws InterruptedException {
         for (ExecutorService worker : workers) {
             worker.shutdown();
@@ -2418,22 +2085,12 @@ class LlmServiceTest {
         when(chatCompletionService.create(any(ChatCompletionCreateParams.class))).thenReturn(completion);
     }
 
-    /**
-     * Makes the stubbed client throw {@code failure} for any request.
-     *
-     * @param failure the throwable the stubbed client raises
-     */
     private void stubClientFailure(RuntimeException failure) {
         when(openAiClient.chat()).thenReturn(chatService);
         when(chatService.completions()).thenReturn(chatCompletionService);
         when(chatCompletionService.create(any(ChatCompletionCreateParams.class))).thenThrow(failure);
     }
 
-    /**
-     * Captures the single request the stubbed Chat Completions service received.
-     *
-     * @return the captured request
-     */
     private ChatCompletionCreateParams capturedRequest() {
         ArgumentCaptor<ChatCompletionCreateParams> sentRequest =
                 ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
@@ -2441,12 +2098,6 @@ class LlmServiceTest {
         return sentRequest.getValue();
     }
 
-    /**
-     * Captures every request the stubbed Chat Completions service received, in order.
-     *
-     * @param expectedCount the number of requests the service is verified to have received
-     * @return the captured requests, oldest first
-     */
     private List<ChatCompletionCreateParams> capturedRequests(int expectedCount) {
         ArgumentCaptor<ChatCompletionCreateParams> sentRequests =
                 ArgumentCaptor.forClass(ChatCompletionCreateParams.class);
@@ -2454,36 +2105,16 @@ class LlmServiceTest {
         return sentRequests.getAllValues();
     }
 
-    /**
-     * Reads the text of the first user message a request carries.
-     *
-     * @param request the captured request
-     * @return the prompt the request carries
-     */
     private static String promptOf(ChatCompletionCreateParams request) {
         return request.messages().get(0).asUser().content().asText();
     }
 
-    /**
-     * Extracts the {@code Context:} clause of a prompt, without its {@code Context: } marker.
-     *
-     * @param prompt the assembled prompt
-     * @return the clause between the context marker and the response marker
-     */
     private static String contextOf(String prompt) {
         String[] segments = prompt.split("\n\n", -1);
         assertThat(segments).hasSize(3);
         return segments[1].substring("Context: ".length());
     }
 
-    /**
-     * Looks up a record component by name.
-     *
-     * @param recordType the record class to inspect
-     * @param name the component name
-     * @return the named component
-     * @throws AssertionError if {@code recordType} declares no component with that name
-     */
     private static RecordComponent recordComponent(Class<?> recordType, String name) {
         return Arrays.stream(recordType.getRecordComponents())
                 .filter(component -> component.getName().equals(name))
@@ -2492,18 +2123,9 @@ class LlmServiceTest {
                         recordType.getSimpleName() + " declares no component named " + name));
     }
 
-    /**
-     * {@link LlmService} with the protected OpenAI client accessor overridden to return a supplied
-     * client and to count how often the accessor is reached.
-     */
     private static final class SeamedService extends LlmService {
-
         private final OpenAIClient suppliedClient;
 
-        /**
-         * Accessor invocation count, created on first use by {@link #accessorCalls()}. Calls made
-         * while the superclass constructor is still running are counted and retained.
-         */
         private AtomicInteger accessorCalls;
 
         private SeamedService(ScannerProperties properties, OpenAIClient suppliedClient) {
@@ -2524,11 +2146,6 @@ class LlmServiceTest {
             return accessorCalls;
         }
 
-        /**
-         * Returns how often {@link #openAiClient()} has been reached on this instance.
-         *
-         * @return the accessor invocation count
-         */
         private int openAiClientAccessorCalls() {
             return accessorCalls().get();
         }

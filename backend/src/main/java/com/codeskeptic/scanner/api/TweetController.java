@@ -19,107 +19,54 @@ import com.codeskeptic.scanner.service.TwitterService;
 // Endpoint contract ported from backend/app/api/tweets.py:L9-55 (faithful port) — see
 // docs/DECISION_LOG.md DL-021, DL-022, DL-023, DL-036, DL-037, DL-038, DL-048, DL-059
 /**
- * Serves the three HTTP routes of the {@code tweets} resource.
- *
- * <ul>
- *   <li>{@code GET /tweets} — {@link #getTweets(String, String)}, 200 with the two-key envelope
- *       ({@code backend/app/api/tweets.py:L9-21}).</li>
- *   <li>{@code GET /tweets/{tweetId}} — {@link #getTweet(String)}, 200 with one JSON object
- *       ({@code backend/app/api/tweets.py:L23-32}).</li>
- *   <li>{@code POST /tweets/{tweetId}/analyze} — {@link #analyzeTweet(String)}, 200 with a two-key
- *       object ({@code backend/app/api/tweets.py:L36-55}).</li>
- * </ul>
+ * Serves the three HTTP routes of the {@code tweets} resource, all unprefixed — no {@code /api}
+ * segment and no version segment.
  *
  * <table border="1">
  * <caption>Route surface</caption>
  * <tr><th>Method and path</th><th>Handler</th><th>Success</th><th>Source</th></tr>
- * <tr>
- *   <td>{@code GET /tweets}</td>
- *   <td>{@link #getTweets(String, String)}</td>
- *   <td>200, a two-key envelope</td>
- *   <td>{@code backend/app/api/tweets.py:L9-21}</td>
- * </tr>
- * <tr>
- *   <td>{@code GET /tweets/{tweetId}}</td>
- *   <td>{@link #getTweet(String)}</td>
- *   <td>200, one JSON object</td>
- *   <td>{@code backend/app/api/tweets.py:L23-32}</td>
- * </tr>
- * <tr>
- *   <td>{@code POST /tweets/{tweetId}/analyze}</td>
- *   <td>{@link #analyzeTweet(String)}</td>
- *   <td>200, a two-key object</td>
- *   <td>{@code backend/app/api/tweets.py:L36-55}</td>
- * </tr>
+ * <tr><td>{@code GET /tweets}</td><td>{@link #getTweets(String, String)}</td>
+ *   <td>200, a two-key envelope</td><td>{@code backend/app/api/tweets.py:L9-21}</td></tr>
+ * <tr><td>{@code GET /tweets/{tweetId}}</td><td>{@link #getTweet(String)}</td>
+ *   <td>200, one JSON object</td><td>{@code backend/app/api/tweets.py:L23-32}</td></tr>
+ * <tr><td>{@code POST /tweets/{tweetId}/analyze}</td><td>{@link #analyzeTweet(String)}</td>
+ *   <td>200, a two-key object</td><td>{@code backend/app/api/tweets.py:L36-55}</td></tr>
  * </table>
  *
- * <p>Paths are unprefixed: no {@code /api} segment and no version segment.
+ * <p>The path variable of the two addressed routes binds as a {@link String}, the type Flask's default
+ * path converter delivered, so an identifier that does not parse is reported absent; it is not
+ * reported as a client error — DL-048.
  *
- * <p>{@code GET /tweets} reads the query parameters {@code page} and {@code per_page}, whose wire
- * names and defaults of 1 and 10 are those of {@code backend/app/api/tweets.py:L12-13}, and passes
- * both to the service unchanged. The 1-based wire page to 0-based repository index conversion and
- * the {@code pagination} counters belong to {@code service.TwitterService} and
- * {@code dto.PaginationDto} — DL-038, DL-217.
+ * <p>This class selects status 200 and builds no error body: {@code service.TwitterService} raises
+ * {@code NotFoundException} carrying {@code Tweet not found}, the literal of
+ * {@code backend/app/api/tweets.py:L32} and {@code :L43}, and {@link GlobalExceptionHandler} answers
+ * it with 404. Wire keys are snake_case and identifiers serialise as strings — DL-022, DL-023.
  *
- * <p>The path variable of the two addressed routes is bound as a {@link String}, the type Flask's
- * default path converter delivered at {@code backend/app/api/tweets.py:L23} and {@code :L36} —
- * DL-048.
+ * <p>The single collaborator is an injected singleton held in a final field, in place of the
+ * per-request {@code TwitterService()} at {@code backend/app/api/tweets.py:L15}, {@code :L26} and
+ * {@code :L39}; the conversion invoked as {@code tweet.to_dict()} at {@code :L19} and {@code :L30}
+ * happens in {@code service.mapper.TweetMapper} behind it. This class performs no conversion and reads
+ * no repository.
  *
- * <p>This class selects status 200 and builds no error body. {@code service.TwitterService} raises
- * {@code NotFoundException} carrying {@code Tweet not found} — the wire literal of
- * {@code backend/app/api/tweets.py:L32} and {@code :L43} — for an identifier that does not parse, is
- * {@code null}, or parses but addresses no row, and {@link GlobalExceptionHandler} answers it with
- * 404 and that literal.
- *
- * <p>On the analyze route the row is read before the sentiment request is issued, the order of
- * {@code backend/app/api/tweets.py:L40} ahead of {@code :L45-46}.
- *
- * <p>Both collaborators are injected singletons held in final fields, in place of the per-request
- * {@code TwitterService()} at {@code backend/app/api/tweets.py:L15}, {@code :L26} and {@code :L39}
- * and {@code SentimentAnalysis()} at {@code :L45}. The conversion invoked as {@code tweet.to_dict()}
- * at {@code :L19} and {@code :L30} is performed by {@code service.mapper.TweetMapper} through
- * {@code service.TwitterService}; this class performs no conversion and reads no repository. Wire
- * keys are snake_case and identifiers serialise as strings — DL-022, DL-023.
- *
- * <p>Authentication is enforced by the security filter chain, which runs ahead of the
- * {@code DispatcherServlet}, in place of the bare {@code @jwt_required} at
- * {@code backend/app/api/tweets.py:L10}, {@code :L24} and {@code :L37} — DL-021.
+ * <p>Authentication is enforced by the security filter chain ahead of the {@code DispatcherServlet},
+ * in place of the bare {@code @jwt_required} at {@code :L10}, {@code :L24} and {@code :L37} — DL-021.
  *
  * <p>No route declared here, and no collaborator reached from here, publishes to X.
  *
- * <p>This is a singleton bean holding both collaborators in final fields and no other state, so
- * every member declared here is safe for concurrent use.
- *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-021, DL-022,
- * DL-023, DL-036, DL-037, DL-038, DL-048, DL-059 and DL-217; construct-level provenance is recorded
- * in {@code docs/TRACEABILITY_MATRIX.md}.
+ * <p>Singleton bean holding one collaborator in a final field and no other state, so every member
+ * declared here is safe for concurrent use.
  */
 @RestController
 public class TweetController {
 
     private static final Logger log = LoggerFactory.getLogger(TweetController.class);
 
-    /** Page number applied when {@code page} carries no number — {@code backend/app/api/tweets.py:L12}. */
     private static final int DEFAULT_PAGE = 1;
 
-    /** Page size applied when {@code per_page} carries no number — {@code backend/app/api/tweets.py:L13}. */
     private static final int DEFAULT_PER_PAGE = 10;
 
-    /**
-     * Reads the {@code tweets} table, orchestrates the analyze route and writes the
-     * {@code doubt_rating} column.
-     */
     private final TwitterService twitterService;
 
-    /**
-     * Creates the controller with its single collaborator.
-     *
-     * <p>Scoring belongs to {@code service.TwitterService}, which orchestrates the read, the provider
-     * call and the write of the analyze route in one operation — DL-263.
-     *
-     * @param twitterService the service serving all three routes, must not be {@code null}
-     * @throws NullPointerException when the argument is {@code null}
-     */
     public TweetController(TwitterService twitterService) {
         this.twitterService = Objects.requireNonNull(twitterService,
                 "twitterService must not be null.");
@@ -131,31 +78,17 @@ public class TweetController {
      * Renders one page of the {@code tweets} table together with the block that describes it.
      *
      * <p>Reproduces {@code GET /tweets} at {@code backend/app/api/tweets.py:L9-21}. The body is the
-     * two-key envelope of {@code :L18-21}: {@code tweets} carries one object per row of the page and
-     * {@code pagination} carries the page counters. The status is 200 for every accepted request,
-     * including one whose page holds no row.
+     * two-key envelope of {@code :L18-21} and the status is 200 for every accepted request, a page
+     * holding no row included.
      *
-     * <p>The two query parameters are read under the wire names {@code page} and {@code per_page} of
-     * {@code :L12-13}, with the defaults 1 and 10 declared there. An absent parameter takes its
-     * default and the request is accepted. Only those two spellings are bound; a query parameter of
-     * any other spelling is ignored and the default applies.
-     *
-     * <p>Each parameter is bound as text and read as a whole number after trimming. A value that
-     * holds no whole number — the empty string, a whitespace-only value, {@code abc}, {@code 2.5},
-     * a value beyond {@code int} range — takes the same default an absent parameter takes and the
-     * request is accepted; no such value is reported as a client error — see docs/DECISION_LOG.md
-     * DL-217. A value that holds a whole number is passed on as received, including {@code 0} and a
-     * negative value: this method applies no minimum, no maximum and no re-basing.
-     * {@code service.TwitterService.getPaginatedTweets} reads a 1-based {@code page} and requests the
-     * matching 0-based repository index, and the {@code page} value it reports back is 1-based — see
-     * docs/DECISION_LOG.md DL-038. That method is also where a page size below one is read as the
-     * route default; no page size is reduced and the status stays 200 — see docs/DECISION_LOG.md
-     * DL-217.
-     *
-     * <p>Example request: {@code GET /tweets} carrying the query string {@code page=3} with
-     * {@code per_page=25}, which reads the third page of 25 rows.
-     *
-     * <p>Example response body:
+     * <p>The parameters bind under the wire names {@code page} and {@code per_page} of {@code :L12-13}
+     * with the defaults 1 and 10 declared there; only those two spellings bind. Each is read as text
+     * and converted after trimming, and a value holding no whole number — empty, whitespace-only,
+     * {@code abc}, {@code 2.5}, beyond {@code int} range — takes the same default an absent parameter
+     * takes, and is not reported as a client error — DL-217. A value that does hold a whole
+     * number is passed on as received, {@code 0} and negatives included: this method applies no
+     * minimum, no maximum and no re-basing. The 1-based to 0-based conversion, the page-size floor and
+     * the reported counters belong to {@code service.TwitterService} — DL-038, DL-217.
      *
      * <pre>{@code
      * {"tweets":[{"id":"1","content":"...","like_count":120,"created_at":"2026-08-01T12:00:00",
@@ -218,33 +151,19 @@ public class TweetController {
      * renders the score.
      *
      * <p>Reproduces {@code POST /tweets/<tweet_id>/analyze} at
-     * {@code backend/app/api/tweets.py:L36-55}. The route reads no request body, no query parameter
-     * and no header; the path value is its only input, bound as a {@link String} — see
-     * docs/DECISION_LOG.md DL-048.
+     * {@code backend/app/api/tweets.py:L36-55}. The path value, bound as a {@link String}, is the only
+     * input — DL-048.
      *
-     * <p>Three steps run in the order of the source handler:
+     * <p>Three steps run in the source handler's order, on every invocation: the row is read
+     * ({@code :L40}), its text is scored ({@code :L46} — DL-036), and the score is handed to
+     * {@code service.TwitterService.updateTweetAnalysis} ({@code :L50}), which derives the doubt
+     * rating and writes the {@code doubt_rating} column. An identifier that does not parse and one
+     * that addresses no row are both reported absent with no external call made, the branch at
+     * {@code :L42-43}.
      *
-     * <ol>
-     *   <li>the addressed row is read ({@code :L40}); an identifier that does not parse, and one
-     *       that addresses no row, are reported as absent with no external call made, the branch at
-     *       {@code :L42-43}, which {@link GlobalExceptionHandler} answers with 404 and the body
-     *       {@code {"error":"Tweet not found"}};</li>
-     *   <li>the text of that row is scored ({@code :L46}) — see docs/DECISION_LOG.md DL-036;</li>
-     *   <li>the score is handed to {@code service.TwitterService.updateTweetAnalysis}
-     *       ({@code :L50}), which derives the doubt rating and writes the {@code doubt_rating}
-     *       column.</li>
-     * </ol>
-     *
-     * <p>All three steps run on every invocation, as at {@code backend/app/api/tweets.py:L36-55}: the
-     * text is scored again and the {@code doubt_rating} column is written again, whether the row
-     * already carried a rating or not.
-     *
-     * <p>The body carries the two keys of {@code :L52-55}. {@code tweet_id} is the path value as
-     * received, taken from the path and not from the row that was read — see
-     * docs/DECISION_LOG.md DL-037. {@code analysis_result} is the document sentiment score; the
-     * derived doubt rating is not part of this body.
-     *
-     * <p>Example response body:
+     * <p>The body carries the two keys of {@code :L52-55}: {@code tweet_id} is the path value as
+     * received, taken from the path and not from the row that was read, and {@code analysis_result} is
+     * the document sentiment score — the derived doubt rating is not part of this body — DL-037.
      *
      * <pre>{@code {"tweet_id":"1","analysis_result":-0.4}}</pre>
      *
@@ -262,7 +181,6 @@ public class TweetController {
 
         return ResponseEntity.ok(new AnalysisResultDto(tweetId, analysisResult));
     }
-
 
     // Query-parameter conversion of request.args.get(..., type=int) at
     // backend/app/api/tweets.py:L12-13 — see docs/DECISION_LOG.md DL-217

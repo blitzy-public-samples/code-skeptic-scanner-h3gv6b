@@ -88,38 +88,26 @@ import com.codeskeptic.scanner.service.ResponseService;
 @ExtendWith(MockitoExtension.class)
 @DisplayName("ResponseGenerationScheduler")
 class ResponseGenerationSchedulerTest {
-
-    /** Name of the one method a scheduler invokes on this class. */
     private static final String PASS_METHOD_NAME = "generatePendingResponses";
 
-    /** {@code tweets.id} of the first candidate. */
     private static final int FIRST_CANDIDATE_ID = 42;
 
-    /** {@code tweets.id} of the second candidate. */
     private static final int SECOND_CANDIDATE_ID = 43;
 
-    /** {@code tweets.id} of the third candidate. */
     private static final int THIRD_CANDIDATE_ID = 44;
 
-    /** Identifier the first candidate is mirrored under. */
     private static final String FIRST_CANDIDATE_ID_TEXT = "42";
 
-    /** Identifier the second candidate is mirrored under. */
     private static final String SECOND_CANDIDATE_ID_TEXT = "43";
 
-    /** {@code responses.id} of the reply generated for the first candidate. */
     private static final String FIRST_REPLY_ID = "11";
 
-    /** {@code responses.id} of the reply generated for the second candidate. */
     private static final String SECOND_REPLY_ID = "12";
 
-    /** {@code responses.content} of the reply generated for the first candidate. */
     private static final String FIRST_REPLY_TEXT = "a first draft reply";
 
-    /** {@code responses.content} of the reply generated for the second candidate. */
     private static final String SECOND_REPLY_TEXT = "a second draft reply";
 
-    /** {@code responses.generated_at} every stubbed reply carries. */
     private static final LocalDateTime GENERATED_AT = LocalDateTime.of(2026, 1, 2, 3, 4, 5);
 
     /** Candidate ceiling no case of this class reaches — DL-282. */
@@ -147,12 +135,6 @@ class ResponseGenerationSchedulerTest {
                 boundWith(UNREACHABLE_CEILING));
     }
 
-    /**
-     * Builds a bound configuration carrying the supplied per-pass candidate ceiling.
-     *
-     * @param candidateCeiling value of {@code scanner.background.max-candidates-per-pass}
-     * @return the bound configuration
-     */
     private static ScannerProperties boundWith(int candidateCeiling) {
         return new ScannerProperties(null, 100, 60L, null, null, null, null, null, null, null,
                 new ScannerProperties.Background(true, true, true, candidateCeiling));
@@ -194,7 +176,6 @@ class ResponseGenerationSchedulerTest {
                 .isEqualTo("${scanner.response-generation-delay-seconds}");
         assertThat(declared.timeUnit()).as("unit of the declared delay").isEqualTo(TimeUnit.SECONDS);
 
-        // A fixed RATE would measure start-to-start and change the pacing of the source loop — IR10
         assertThat(declared.fixedRateString()).as("fixedRateString").isEmpty();
         assertThat(declared.fixedRate()).as("fixedRate").isEqualTo(-1L);
         assertThat(declared.cron()).as("cron").isEmpty();
@@ -272,7 +253,6 @@ class ResponseGenerationSchedulerTest {
     @DisplayName("reads no candidate in a process that does not carry the pass")
     void readsNoCandidateInAProcessThatDoesNotCarryThePass(boolean enabled,
             boolean responseGenerationEnabled) {
-
         ScannerProperties withheld = new ScannerProperties(null, 100, 60L, null, null, null, null,
                 null, null, null,
                 new ScannerProperties.Background(enabled, true, responseGenerationEnabled,
@@ -507,7 +487,6 @@ class ResponseGenerationSchedulerTest {
             detachAppender(recorded);
         }
 
-        // The second reply is mirrored even though Notion refused the first mirror
         verify(notionService).updateTweetResponse(SECOND_CANDIDATE_ID_TEXT, SECOND_REPLY_TEXT);
     }
 
@@ -660,13 +639,6 @@ class ResponseGenerationSchedulerTest {
         verify(tweetRepository, never()).save(any());
     }
 
-    /**
-     * Builds consecutively numbered candidate rows.
-     *
-     * @param firstIdentifier the identifier the first row carries
-     * @param rows            the number of rows to build
-     * @return the rows
-     */
     private static List<Tweet> candidatesNumbered(int firstIdentifier, int rows) {
         List<Tweet> built = new ArrayList<>(rows);
         for (int row = 0; row < rows; row++) {
@@ -675,11 +647,6 @@ class ResponseGenerationSchedulerTest {
         return List.copyOf(built);
     }
 
-    /**
-     * Reads the batch bound the pass declares, so these assertions and the pass cannot drift.
-     *
-     * @return the value of the declared candidate batch bound
-     */
     private static int declaredBatchBound() {
         try {
             Field bound = ResponseGenerationScheduler.class
@@ -692,50 +659,20 @@ class ResponseGenerationSchedulerTest {
         }
     }
 
-    /**
-     * Builds a {@code tweets} row carrying the supplied identifier and nothing else.
-     *
-     * @param id the {@code tweets.id} the row carries
-     * @return a candidate row whose {@code responses} collection is empty
-     */
     private static Tweet candidate(int id) {
         Tweet candidate = new Tweet();
         candidate.setId(id);
         return candidate;
     }
 
-    /**
-     * Builds a generated reply that is not approved.
-     *
-     * @param id      the {@code responses.id} the reply carries
-     * @param content the {@code responses.content} the reply carries
-     * @param tweetId the {@code responses.tweet_id} the reply carries
-     * @return the generated reply
-     */
     private static ResponseDto reply(String id, String content, String tweetId) {
         return reply(id, content, tweetId, false);
     }
 
-    /**
-     * Builds a generated reply carrying the supplied approval flag.
-     *
-     * @param id       the {@code responses.id} the reply carries
-     * @param content  the {@code responses.content} the reply carries
-     * @param tweetId  the {@code responses.tweet_id} the reply carries
-     * @param approved the {@code responses.is_approved} the reply carries
-     * @return the generated reply
-     */
     private static ResponseDto reply(String id, String content, String tweetId, boolean approved) {
         return new ResponseDto(id, content, GENERATED_AT, approved, tweetId);
     }
 
-    /**
-     * Joins two equally sized capture lists element by element.
-     *
-     * @param identifiers the identifier captured from each call, in call order
-     * @param text        the reply text captured from each call, in call order
-     * @return one {@code identifier=text} entry per call, in call order
-     */
     private static List<String> pairsOf(List<String> identifiers, List<String> text) {
         List<String> pairs = new ArrayList<>(identifiers.size());
         for (int index = 0; index < identifiers.size(); index++) {
@@ -744,11 +681,6 @@ class ResponseGenerationSchedulerTest {
         return pairs;
     }
 
-    /**
-     * Attaches a recording appender to the logger of the unit under test.
-     *
-     * @return the attached appender
-     */
     private static ListAppender<ILoggingEvent> attachAppender() {
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
@@ -756,22 +688,11 @@ class ResponseGenerationSchedulerTest {
         return appender;
     }
 
-    /**
-     * Detaches a recording appender from the logger of the unit under test.
-     *
-     * @param appender the appender to detach
-     */
     private static void detachAppender(ListAppender<ILoggingEvent> appender) {
         ((Logger) LoggerFactory.getLogger(ResponseGenerationScheduler.class))
                 .detachAppender(appender);
     }
 
-    /**
-     * Returns the single closing summary the pass recorded.
-     *
-     * @param appender the appender that recorded the pass
-     * @return the formatted summary message
-     */
     private static String passSummary(ListAppender<ILoggingEvent> appender) {
         List<String> summaries = appender.list.stream()
                 .filter(event -> event.getLevel() == Level.INFO)

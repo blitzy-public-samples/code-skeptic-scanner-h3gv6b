@@ -26,10 +26,13 @@ import com.codeskeptic.scanner.service.mapper.TweetMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 
 // Ported from the TweetListener class at backend/app/tasks/tweet_monitoring.py:L8-34 (faithful port
-// of intent) — see docs/DECISION_LOG.md DL-049
-// Net-new: the persistence step the source left unimplemented at :L29 and the generation trigger it
-// left unimplemented at :L32; both resolutions are recorded in docs/TRACEABILITY_MATRIX.md §1.9 —
-// see docs/DECISION_LOG.md DL-049
+// of intent; the source class subclassed no tweepy listener, so its on_status was never invoked)
+// Net-new: the persistence step the source left unimplemented at :L29 — see docs/DECISION_LOG.md
+// DL-223 — and the generation trigger it left unimplemented at :L32 — see docs/DECISION_LOG.md
+// DL-195. Both resolutions are recorded in docs/TRACEABILITY_MATRIX.md §1.9
+// The stored row carries a generated surrogate identifier and ingestion performs no de-duplication —
+// see docs/DECISION_LOG.md DL-049; the two Notion mirror records are reported at two levels — see
+// docs/DECISION_LOG.md DL-224
 /**
  * Handles one record delivered by the X filtered stream.
  *
@@ -43,33 +46,29 @@ import com.fasterxml.jackson.databind.JsonNode;
  * <p>The relational database is the system of record and both Notion writes are secondary mirrors: a
  * failed row mirror leaves the stored row in place and does not stop the trigger, a failed trigger
  * leaves the stored row in place and issues no reply mirror, and a failed reply mirror leaves the
- * stored reply in place.
+ * stored reply in place — DL-224.
  *
  * <p>This class issues no outbound request of its own and carries no X protocol surface. The stream
  * connection, its rule set and its reconnection handling belong to {@link TweetStreamClient}, which
- * calls this operation once per delivered record.
- *
- * <p>Two values this operation depends on are computed elsewhere: the popularity gate is evaluated by
- * {@link TwitterService#meetsPopularityThreshold(Integer)}, and the doubt rating written to
- * {@code tweets.doubt_rating} is produced by
+ * calls this operation once per delivered record. Two values it depends on are computed elsewhere: the
+ * popularity gate by {@link TwitterService#meetsPopularityThreshold(Integer)}, and the doubt rating
+ * written to {@code tweets.doubt_rating} by
  * {@link SentimentAnalysisService#calculateDoubtRating(double)}.
  *
  * <p>A record that passes the popularity gate reaches the sentiment call directly: no allowance,
  * window, attempt counter or failure circuit stands between the two. A sentiment call that raises is
  * named at {@code DEBUG} and the record is skipped — no row is stored, nothing is mirrored and no
- * generation is triggered — and the next delivered record reaches the sentiment call in the same way.
+ * generation is triggered.
  *
  * <p>Ingestion stores every accepted record: no stored row is read back for comparison and no
- * identifier of the delivered record is matched against the table. A record delivered twice stores
+ * identifier of the delivered record is matched against the table, so a record delivered twice stores
  * two rows — DL-049.
  *
  * <p>Every row this class stores has a wire form: a record whose {@code data.text},
  * {@code data.public_metrics.like_count}, {@code data.created_at} or {@code data.author_id} is absent
  * or does not carry its wire type is named at {@code WARN} and skipped, no row is stored for it, and no
- * neutral value is substituted for it — DL-080, DL-223. No stored row is left unrenderable by
- * {@link TweetMapper}, unmirrorable or unanswerable. Preparing a stored row's wire form is
- * nevertheless guarded, and a failure there is reported at {@code WARN} — see docs/DECISION_LOG.md
- * DL-224.
+ * neutral value is substituted for it — DL-080, DL-223. Preparing a stored row's wire form is
+ * nevertheless guarded, and a failure there is reported at {@code WARN} — DL-224.
  *
  * <p>{@code spring.jpa.open-in-view} is {@code false}. The stored entity is converted to its wire
  * form by {@link TweetMapper}, which reads only loaded scalar values and never traverses the lazy
@@ -79,24 +78,14 @@ import com.fasterxml.jackson.databind.JsonNode;
  * place of the {@code TwitterService()} and {@code SentimentAnalysis()} instantiation performed at
  * {@code backend/app/tasks/tweet_monitoring.py:L40-41}. This class is thread-safe and carries no
  * mutable state.
- *
- * <p>Decisions covering this file are recorded in {@code docs/DECISION_LOG.md} DL-049, DL-052,
- * DL-080, DL-194, DL-195, DL-197 and DL-199; construct-level provenance is recorded in
- * {@code docs/TRACEABILITY_MATRIX.md}.
- *
- * @see TwitterService#meetsPopularityThreshold(Integer)
- * @see SentimentAnalysisService#calculateDoubtRating(double)
- * @see ResponseService#generateResponseIfAbsent(String)
  */
 @Component
 public class TweetStreamListener {
 
     private static final Logger log = LoggerFactory.getLogger(TweetStreamListener.class);
 
-    /** Recorded when a delivered record carries no {@code data} object. */
     private static final String REJECTED_NO_DATA_OBJECT = "it carries no data object";
 
-    /** Payload member carrying the delivered post object. */
     private static final String KEY_DATA = "data";
     private static final String KEY_TEXT = "text";
     private static final String KEY_PUBLIC_METRICS = "public_metrics";
@@ -188,16 +177,10 @@ public class TweetStreamListener {
      * Handles one stream record and reports whether streaming continues.
      *
      * <p>Every member is read through {@link JsonNode#path(String)}, which yields a missing node when
-     * the member is absent. The four steps documented at
-     * {@code documentation/Code Structure.md:L1407-1411} run in order: the popularity gate over
-     * {@code data.public_metrics.like_count}, the sentiment score and doubt rating over
-     * {@code data.text}, one stored {@code tweets} row, then the Notion mirror followed by the
-     * generation trigger. The stored row's {@code id} is assigned by the database on insert and the
-     * {@code responses} association is not touched.
-     *
-     * <p>{@code text}, {@code like_count}, {@code created_at} and {@code author_id} must carry their
-     * wire types before any row is written. A missing or wrong-typed required member is named at
-     * {@code WARN} and the record is skipped; no neutral value is stored — DL-080.
+     * the member is absent. {@code text}, {@code like_count}, {@code created_at} and {@code author_id}
+     * must carry their wire types before any row is written: a missing or wrong-typed required member
+     * is named at {@code WARN} and the record is skipped, and no neutral value is stored — DL-080,
+     * DL-223.
      *
      * <p>Four steps run in the order documented at
      * {@code documentation/Code Structure.md:L1407-1411}:
@@ -220,9 +203,8 @@ public class TweetStreamListener {
      *   <li>The stored row is mirrored to the Notion database, then
      *       {@link ResponseService#generateResponseIfAbsent(String)} is called with the assigned
      *       identifier. That call is the single background generation entry point and stores nothing
-     *       when the row already carries a reply — see docs/DECISION_LOG.md DL-195. The generated row
-     *       is stored by that call awaiting review; nothing here reads or writes its approval
-     *       flag.</li>
+     *       when the row already carries a reply — DL-195. The generated row is stored by that call
+     *       awaiting review; nothing here reads or writes its approval flag.</li>
      * </ol>
      *
      * <p>Every handled outcome reports {@code true}, matching

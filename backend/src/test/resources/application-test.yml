@@ -1,0 +1,163 @@
+# The Spring `test` profile of the code-skeptic-scanner-backend module.
+#
+# Net-new (no source construct): no Python test configuration existed under backend/ on the source
+# branch. The retired suite was backend/tests/test_api.py, test_services.py and test_tasks.py.
+#
+# This document is layered over src/main/resources/application.yml while the `test` profile is
+# active; a key omitted here keeps the value application.yml gives it. A test class that starts a
+# Spring context declares @ActiveProfiles("test"), and a @DataJpaTest class that reads the
+# scanner.database-url declared below also declares
+# @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE).
+#
+# BUILD-ONLY PROFILE. The scanner.jwt.secret and scanner.auth.password-hash values below are
+# build-only test credentials, usable only against this profile during `mvn clean verify`. A
+# deployment supplies SECRET_KEY and AUTH_PASSWORD_HASH, and neither application.yml value carries a
+# default — DL-016, DL-020.
+#
+# scanner.twitter.consumer-key and scanner.twitter.consumer-secret are blank. task/TweetStreamClient
+# takes its blank-credential path and the build performs no X network call — DL-046, DL-239.
+#
+# Each non-trivial value below carries the identifier of the decision that owns it. The profile-wide
+# choices are: the in-memory database of DL-009, the create-drop schema of DL-026, the untranslated
+# scanner.database-url of DL-027 and the reserved-word quoting of DL-061.
+#
+# see docs/DECISION_LOG.md
+
+# Ported from backend/app/db/database.py:L5-13 (faithful port) — see docs/DECISION_LOG.md
+spring:
+  jpa:
+    hibernate:
+      # Net-new (no Python counterpart) — DL-026 — see docs/DECISION_LOG.md
+      ddl-auto: create-drop
+    # Net-new (no Python counterpart) — DL-026 — see docs/DECISION_LOG.md
+    open-in-view: false
+    properties:
+      hibernate:
+        # Net-new (no Python counterpart) — column names at
+        # backend/app/db/models.py:L42-43 — DL-061 — see docs/DECISION_LOG.md
+        auto_quote_keyword: true
+
+scanner:
+  # Key ported from backend/app/core/config.py:L9 and backend/app/db/database.py:L7; test value is
+  # net-new — DL-009, DL-027 — see docs/DECISION_LOG.md
+  database-url: 'jdbc:h2:mem:scanner_test;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE'
+
+  # Ported from backend/app/core/config.py:L10 and backend/app/services/twitter_service.py:L43,L46 (faithful port) — see docs/DECISION_LOG.md
+  popularity-threshold: 100
+  # Ported from backend/app/core/config.py:L11 and backend/app/tasks/response_generation.py:L50 (faithful port) — see docs/DECISION_LOG.md
+  # Test profile: a pass runs at startup and the next falls 24 hours after it, which leaves one pass
+  # per test context — DL-239, DL-251.
+  response-generation-delay-seconds: 86400
+
+  twitter:
+    # Ported from backend/app/core/config.py:L5-6 (faithful port) — see docs/DECISION_LOG.md
+    api-key: test-twitter-api-key
+    api-secret: test-twitter-api-secret
+    # Ported from backend/app/services/twitter_service.py:L12 (faithful port) — DL-031 — see docs/DECISION_LOG.md
+    api-secret-key: test-twitter-api-secret-key
+    # Ported from backend/app/tasks/tweet_monitoring.py:L46-47 (faithful port) — DL-031, DL-046,
+    # DL-239 — see docs/DECISION_LOG.md
+    # Blank under the test profile: task/TweetStreamClient reads these two keys at the head of
+    # start() and reaches no host while either carries no value. A context-loading test issues no
+    # request to X.
+    consumer-key: ''
+    consumer-secret: ''
+    # Ported from backend/app/services/twitter_service.py:L13 and backend/app/tasks/tweet_monitoring.py:L48-49 (faithful port) — DL-046 — see docs/DECISION_LOG.md
+    # OAuth 1.0a user-context components. Declared so every key the retired tree referenced resolves;
+    # the X API v2 read path signs nothing with them.
+    access-token: test-twitter-access-token
+    access-token-secret: test-twitter-access-token-secret
+    # Net-new (no Python counterpart) — DL-230 — see docs/DECISION_LOG.md
+    # Declared explicitly. The build reaches no X host: this bound applies to no call made by the
+    # test profile.
+    request-timeout-seconds: 10
+
+  notion:
+    # Ported from backend/app/core/config.py:L7 and backend/app/services/notion_service.py:L8 (faithful port) — see docs/DECISION_LOG.md
+    api-key: test-notion-api-key
+    # Ported from backend/app/services/notion_service.py:L24,L35 (faithful port) — see docs/DECISION_LOG.md
+    database-id: test-notion-database-id
+    # Net-new (no Python counterpart) — DL-151 — see docs/DECISION_LOG.md
+    api-version: 2022-06-28
+    # Net-new (no Python counterpart) — DL-150 — see docs/DECISION_LOG.md
+    connect-timeout-seconds: 5
+    # Net-new (no Python counterpart) — DL-150 — see docs/DECISION_LOG.md
+    read-timeout-seconds: 10
+    # Net-new (no Python counterpart) — DL-253 — see docs/DECISION_LOG.md
+    # No mirror write is retried under this profile, and no test waits on a backoff.
+    mirror-max-retries: 0
+    mirror-retry-backoff-millis: 0
+
+  openai:
+    # Ported from backend/app/core/config.py:L8 and backend/app/services/llm_service.py:L9 (faithful port) — see docs/DECISION_LOG.md
+    api-key: test-openai-api-key
+    # Net-new (no Python counterpart) — DL-033 — see docs/DECISION_LOG.md
+    model: gpt-5.6-terra
+    # Ported from backend/app/services/llm_service.py:L22 (faithful port) — DL-034, DL-202 — see docs/DECISION_LOG.md
+    max-completion-tokens: 150
+    # Ported from backend/app/services/llm_service.py:L25 (faithful port) — DL-200 — see docs/DECISION_LOG.md
+    temperature: 0.7
+    # Ported from backend/app/services/llm_service.py:L23 (faithful port) — see docs/DECISION_LOG.md
+    n: 1
+    # Net-new (no Python counterpart) — DL-145 — see docs/DECISION_LOG.md
+    reasoning-effort: none
+    # Net-new (no Python counterpart) — DL-146 — see docs/DECISION_LOG.md
+    request-timeout-seconds: 30
+    # Net-new (no Python counterpart) — DL-146 — see docs/DECISION_LOG.md
+    max-retries: 2
+
+  jwt:
+    # Key ported from backend/app/core/security.py:L11; test value is net-new — DL-186, DL-016 — see
+    # docs/DECISION_LOG.md
+    # A build-only raw key: the value's own UTF-8 bytes are the signing key, with no decoding step,
+    # and it carries more than the 32 bytes that floor requires.
+    secret: Y29kZS1za2VwdGljLXNjYW5uZXItYnVpbGQtdmVyaWZpY2F0aW9uLWtleS0wMDAx
+    # Ported from backend/app/core/security.py:L11 (faithful port) — DL-015 — see docs/DECISION_LOG.md
+    algorithm: HS256
+    # Ported from backend/app/core/security.py:L9-10 (faithful port) — DL-017 — see docs/DECISION_LOG.md
+    expiration-minutes: 60
+
+  auth:
+    # Net-new (no Python counterpart) — DL-020 — see docs/DECISION_LOG.md
+    username: admin
+    # Net-new (no Python counterpart) — DL-020 — see docs/DECISION_LOG.md
+    # bcrypt hash of a build-only test credential; the hashing counterpart in the retired tree was
+    # backend/app/core/security.py:L14-18.
+    password-hash: '$2a$10$Lt3iVHWKlZC2hu2Nyh/NtekAa.gCoG3qZM.xoMT7w1b/zk3o7SBJS'
+    # Net-new (no Python counterpart) — DL-272 — see docs/DECISION_LOG.md
+    # Declared explicitly at the production defaults, so the admission bound a test context runs with
+    # is stated rather than inherited: 0 derives one permit per processor with a floor of 2, and a
+    # verification waits up to 10s for admission.
+    verification-permits: 0
+    verification-wait-millis: 10000
+
+  analytics:
+    # Net-new (no Python counterpart) — DL-042, DL-278 — see docs/DECISION_LOG.md
+    trend-window-days: 30
+
+  ingestion:
+    # Net-new (no Python counterpart); the keyword list was empty at
+    # backend/app/tasks/tweet_monitoring.py:L53-55 — DL-044 — see docs/DECISION_LOG.md
+    stream-base-keywords:
+      - 'AI coding tool'
+      - 'AI code assistant'
+      - 'AI generated code'
+      - 'GPT-4'
+    # DL-254 — see docs/DECISION_LOG.md
+    max-stream-rules: 25
+    # DL-256 — see docs/DECISION_LOG.md
+    # The one idle bound the filtered-stream subscription carries. Declared explicitly at the
+    # production default; the build reaches no X host, so it bounds no call the test profile makes.
+    stream-idle-timeout-seconds: 60
+
+  background:
+    # Net-new (no Python counterpart) — DL-250 — see docs/DECISION_LOG.md
+    # Both background paths are declared enabled under this profile, which is what a single-process
+    # deployment runs with. The X stream still declines to start: both consumer credentials are blank
+    # under this profile — DL-046.
+    enabled: true
+    stream-enabled: true
+    response-generation-enabled: true
+    # Net-new (no Python counterpart) — DL-282 — see docs/DECISION_LOG.md
+    # The bound is declared under this profile, which states the value a test context runs with.
+    max-candidates-per-pass: 200

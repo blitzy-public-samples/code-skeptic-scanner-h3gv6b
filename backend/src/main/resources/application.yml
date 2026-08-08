@@ -170,6 +170,17 @@ scanner:
     # Net-new (no Python counterpart) — DL-020 — see docs/DECISION_LOG.md
     # bcrypt hash, declared with no default: AUTH_PASSWORD_HASH must be supplied.
     password-hash: ${AUTH_PASSWORD_HASH}
+    # Net-new (no Python counterpart) — DL-272 — see docs/DECISION_LOG.md
+    # Credential verifications POST /auth/token performs at one time. 0 or less selects one per
+    # processor the runtime reports, with a floor of 2. Raise it to match the concurrent logins the
+    # deployment intends to serve; each permit costs one bcrypt computation's worth of CPU.
+    verification-permits: ${AUTH_VERIFICATION_PERMITS:0}
+    # Net-new (no Python counterpart) — DL-272 — see docs/DECISION_LOG.md
+    # Longest a submitted credential waits for admission before the route answers 503 with a
+    # Retry-After header and an empty body. Accepted: 0 or more. Turning a valid credential away is
+    # an availability condition, never a 401, so this value trades queueing delay against 503s and
+    # never against whether a credential authenticates.
+    verification-wait-millis: ${AUTH_VERIFICATION_WAIT_MILLIS:10000}
 
   analytics:
     # Net-new (no Python counterpart) — DL-042 — see docs/DECISION_LOG.md

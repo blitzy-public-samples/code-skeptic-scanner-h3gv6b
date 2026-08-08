@@ -14,18 +14,59 @@ COPY src ./src
 
 RUN mvn -B clean package -DskipTests
 
+# Runtime stage. The base image is the one AAP section 0.8.4 names; it is not substituted — DL-307 —
+# see docs/DECISION_LOG.md
 FROM eclipse-temurin:21-jre
+
+# Fixed identity the process runs under. 10001 is above the base image's own allocations and is
+# declared numerically so the runtime identity does not depend on name resolution inside the
+# container — DL-307 — see docs/DECISION_LOG.md
+ARG APP_UID=10001
+ARG APP_GID=10001
+ARG APP_USER=scanner
+
+# One layer: apply every security update the base image's vendor has published, then create the
+# unprivileged account, then discard the package lists so they are not carried in the image. The
+# upgrade closes OS-package records that have a fixed version available; records the vendor has not
+# fixed are unaffected by it and stay in the image — DL-307 — see docs/DECISION_LOG.md
+RUN set -eux; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get update; \
+    apt-get upgrade -y; \
+    groupadd --system --gid "${APP_GID}" "${APP_USER}"; \
+    useradd --system --uid "${APP_UID}" --gid "${APP_GID}" --home-dir /app --shell /usr/sbin/nologin "${APP_USER}"; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY --from=build /app/target/*.jar app.jar
+# The jar is owned by the unprivileged account and readable by it; nothing in the image is writable
+# by it, because the application writes only to stdout and to java.io.tmpdir — DL-307
+COPY --from=build --chown=${APP_UID}:${APP_GID} /app/target/*.jar app.jar
+
+# Every instruction below this line runs as the unprivileged account, and so does the container's
+# process. Trivy DS-0002 — DL-307 — see docs/DECISION_LOG.md
+USER ${APP_UID}:${APP_GID}
 
 # Unchanged from the retired image: the application binds this port — DL-029 — see
 # docs/DECISION_LOG.md
 EXPOSE 5000
 
+# Credential-free liveness probe. The CORS preflight of an existing route is used because it is the
+# one request the service answers 200 without a bearer token, so the probe proves the container's
+# listener, the servlet container and the filter chain are all serving without adding a route the
+# route table does not have and without embedding a credential in the image. `--fail` makes any
+# status other than 2xx a failed check. The start period covers JVM start plus schema bootstrap
+# against the configured database — DL-307 — see docs/DECISION_LOG.md
+HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl --fail --silent --show-error --output /dev/null \
+        --request OPTIONS \
+        --header 'Origin: http://healthcheck.invalid' \
+        --header 'Access-Control-Request-Method: GET' \
+        http://127.0.0.1:5000/settings
+
 # Replaces `CMD ["python", "app.py"]`, which named a file the repository never held.
 CMD ["java", "-jar", "app.jar"]
 
-# This file declares no ARG, ENV, USER, ENTRYPOINT or HEALTHCHECK. The process runs under the base
-# image's own identity, as the retired image did — DL-307 — see docs/DECISION_LOG.md
+# This file declares no ENTRYPOINT and no ENV. It declares three build ARGs, one USER and one
+# HEALTHCHECK, all in the runtime stage — DL-307 — see docs/DECISION_LOG.md

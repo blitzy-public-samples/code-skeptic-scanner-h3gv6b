@@ -7,6 +7,8 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 import org.springframework.context.annotation.Bean;
 
+import com.codeskeptic.scanner.config.DataSourceConfig;
+
 /**
  * Entry point and composition root of the Code Skeptic Scanner backend service.
  *
@@ -42,12 +44,23 @@ public class ScannerApplication {
      *
      * <p>Replaces {@code app.run(debug=True)} at {@code backend/app/main.py:L53}.
      *
+     * <p>One listener is registered before the run: the startup diagnostic of
+     * {@link DataSourceConfig.DatabaseStartupFailureAnalyzer}, which turns a failure of the JDBC and
+     * dialect chain into a report naming {@code scanner.database-url} and its remediation. It is
+     * registered here, on the {@link SpringApplication} itself, rather than declared as a bean or in a
+     * {@code META-INF/spring.factories} resource: a database failure happens before the context becomes
+     * active, so no bean of that context can observe it, and the framework multicasts
+     * {@code ApplicationFailedEvent} to application-registered listeners on exactly that path —
+     * DL-305.
+     *
      * @param args the process command-line arguments, forwarded verbatim to
-     *     {@link SpringApplication#run(Class, String...)}, which exposes them to the context as a
+     *     {@link SpringApplication#run(String...)}, which exposes them to the context as a
      *     command-line property source
      */
     public static void main(String[] args) {
-        SpringApplication.run(ScannerApplication.class, args);
+        SpringApplication application = new SpringApplication(ScannerApplication.class);
+        application.addListeners(new DataSourceConfig.DatabaseStartupFailureAnalyzer());
+        application.run(args);
     }
 
     /**

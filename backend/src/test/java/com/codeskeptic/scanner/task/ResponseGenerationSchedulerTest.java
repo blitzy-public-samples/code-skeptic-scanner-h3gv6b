@@ -55,6 +55,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.scheduling.annotation.Schedules;
 
 import com.codeskeptic.scanner.dto.ResponseDto;
+import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.entity.Tweet;
 
 import ch.qos.logback.classic.Level;
@@ -62,6 +63,7 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.codeskeptic.scanner.config.ScannerProperties;
+import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.NotionService;
 import com.codeskeptic.scanner.service.ResponseService;
@@ -72,10 +74,10 @@ import com.codeskeptic.scanner.service.ResponseService;
 /**
  * Exercises {@link ResponseGenerationScheduler}.
  *
- * <p>Assertions cover the scheduling surface the pass presents — one public no-argument method
- * carrying exactly one {@code @Scheduled} declaration, whose fixed delay names
- * {@code scanner.response-generation-delay-seconds} in seconds — together with the four collaborators
- * its single constructor binds.
+ * <p>Assertions cover the scheduling surface the pass presents — the public no-argument pass, the
+ * public interval resolver the registered trigger consults, and the absence of any pacing annotation
+ * on the class, since the pacing lives on the registration in {@code config/AsyncSchedulingConfig} —
+ * together with the five collaborators its single constructor binds.
  *
  * <p>Assertions then cover the pass itself: one reply generated and mirrored per candidate, in
  * candidate order and on the thread that started the pass; each reply mirrored against the candidate
@@ -83,9 +85,12 @@ import com.codeskeptic.scanner.service.ResponseService;
  * failing candidate, a failing candidate query and a rejected mirror each leaving the pass returning
  * normally; and the candidate row handed on as it was selected.
  *
- * <p>The interval between passes is declared on the pass itself and asserted here; the scheduling
- * capability that runs it is activated by {@code config/AsyncSchedulingConfig} — see
- * docs/DECISION_LOG.md DL-047, DL-227.
+ * <p>Assertions then cover the interval itself: the {@code response_generation_delay} {@code settings}
+ * row in force when it holds a positive whole number of seconds,
+ * {@code scanner.response-generation-delay-seconds} when the row is absent, holds {@code null}, does
+ * not parse or is not positive, and one warning per distinct unusable value — see docs/DECISION_LOG.md
+ * DL-227, DL-309. The scheduling capability that runs the pass, and the trigger that consults this
+ * interval, are both declared by {@code config/AsyncSchedulingConfig} — DL-047, DL-228, DL-309.
  *
  * <p>Every collaborator is a Mockito double. No Spring context is started, no scheduler thread is
  * created, no network call is made and no database is reached.
@@ -94,6 +99,14 @@ import com.codeskeptic.scanner.service.ResponseService;
 @DisplayName("ResponseGenerationScheduler")
 class ResponseGenerationSchedulerTest {
     private static final String PASS_METHOD_NAME = "generatePendingResponses";
+
+    private static final String DELAY_METHOD_NAME = "responseGenerationDelaySecondsInForce";
+
+    /** Key of the settings row that sets the interval — DL-227, DL-309. */
+    private static final String DELAY_SETTING_KEY = "response_generation_delay";
+
+    /** Value of {@code scanner.response-generation-delay-seconds} every case here binds. */
+    private static final long CONFIGURED_DELAY_SECONDS = 60L;
 
     private static final int FIRST_CANDIDATE_ID = 42;
 
@@ -136,6 +149,10 @@ class ResponseGenerationSchedulerTest {
     @Mock
     private NotionService notionService;
 
+    /** Reads the response_generation_delay row the interval is resolved from — DL-309. */
+    @Mock
+    private SettingRepository settingRepository;
+
     private ResponseGenerationScheduler scheduler;
 
     /**
@@ -146,7 +163,7 @@ class ResponseGenerationSchedulerTest {
     @BeforeEach
     void assemblePass() {
         scheduler = new ResponseGenerationScheduler(tweetRepository, responseService, notionService,
-                boundWith(UNREACHABLE_CEILING));
+                boundWith(UNREACHABLE_CEILING), settingRepository);
     }
 
     private static ScannerProperties boundWith(int candidateCeiling) {
@@ -155,8 +172,8 @@ class ResponseGenerationSchedulerTest {
     }
 
     @Test
-    @DisplayName("presents one public no-argument method as the pass a scheduler runs")
-    void presentsOnePublicNoArgumentPass() {
+    @DisplayName("presents the pass and the interval resolver as its public no-argument methods")
+    void presentsThePassAndTheIntervalResolverAsItsPublicNoArgumentMethods() {
         List<Method> entryPoints = Arrays.stream(ResponseGenerationScheduler.class
                         .getDeclaredMethods())
                 .filter(method -> !method.isSynthetic())
@@ -167,45 +184,36 @@ class ResponseGenerationSchedulerTest {
 
         assertThat(entryPoints)
                 .as("public no-argument methods")
+                .extracting(Method::getName)
+                .containsExactlyInAnyOrder(PASS_METHOD_NAME, DELAY_METHOD_NAME);
+
+        assertThat(entryPoints)
+                .filteredOn(method -> PASS_METHOD_NAME.equals(method.getName()))
                 .singleElement()
                 .satisfies(pass -> {
-                    assertThat(pass.getName()).isEqualTo(PASS_METHOD_NAME);
                     assertThat(pass.getReturnType()).isEqualTo(void.class);
                     assertThat(pass.getExceptionTypes()).isEmpty();
                 });
+        assertThat(entryPoints)
+                .filteredOn(method -> DELAY_METHOD_NAME.equals(method.getName()))
+                .singleElement()
+                .satisfies(resolver -> {
+                    assertThat(resolver.getReturnType()).isEqualTo(long.class);
+                    assertThat(resolver.getExceptionTypes()).isEmpty();
+                });
     }
 
-    // TR-12 and IR10: fixed DELAY, measured end-to-start, never fixedRate — DL-047 — see
+    // The pacing is on the registration, not on this class: the interval has to be re-read once per
+    // pass, and a declarative fixed delay is resolved once by construction — DL-227, DL-309 — see
     // docs/DECISION_LOG.md
     @Test
-    @DisplayName("declares its pacing as one fixed delay in seconds naming the configured property")
-    void declaresItsPacingAsOneFixedDelayInSeconds() throws NoSuchMethodException {
-        Scheduled declared = ResponseGenerationScheduler.class
-                .getDeclaredMethod(PASS_METHOD_NAME)
-                .getAnnotation(Scheduled.class);
-
-        assertThat(declared).as("@Scheduled on the pass").isNotNull();
-        assertThat(declared.fixedDelayString())
-                .as("the fixed delay in force")
-                .isEqualTo("${scanner.response-generation-delay-seconds}");
-        assertThat(declared.timeUnit()).as("unit of the declared delay").isEqualTo(TimeUnit.SECONDS);
-
-        assertThat(declared.fixedRateString()).as("fixedRateString").isEmpty();
-        assertThat(declared.fixedRate()).as("fixedRate").isEqualTo(-1L);
-        assertThat(declared.cron()).as("cron").isEmpty();
-        assertThat(declared.initialDelayString()).as("initialDelayString").isEmpty();
-        assertThat(declared.initialDelay()).as("initialDelay").isEqualTo(-1L);
-    }
-
-    @Test
-    @DisplayName("carries exactly one scheduled method and no asynchronous or enabling annotation")
-    void carriesExactlyOneScheduledMethodAndNoEnablingAnnotation() {
+    @DisplayName("declares no pacing annotation of its own, so no interval is resolved once at "
+            + "registration")
+    void declaresNoPacingAnnotationOfItsOwn() {
         assertThat(ResponseGenerationScheduler.class.getDeclaredMethods())
                 .as("methods carrying their own interval, rate or schedule")
-                .filteredOn(method -> method.isAnnotationPresent(Scheduled.class)
-                        || method.isAnnotationPresent(Schedules.class))
-                .extracting(Method::getName)
-                .containsExactly(PASS_METHOD_NAME);
+                .noneMatch(method -> method.isAnnotationPresent(Scheduled.class)
+                        || method.isAnnotationPresent(Schedules.class));
 
         assertThat(ResponseGenerationScheduler.class.getDeclaredMethods())
                 .as("methods declared asynchronous")
@@ -217,9 +225,53 @@ class ResponseGenerationSchedulerTest {
                 .doesNotContain(EnableScheduling.class.getName(), EnableAsync.class.getName());
     }
 
+    // The settings row sets the interval — DL-227, DL-309 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("binds exactly the four collaborators one pass uses")
-    void bindsExactlyTheFourCollaboratorsOnePassUses() {
+    @DisplayName("takes the interval from the response_generation_delay row when it holds a positive "
+            + "whole number of seconds")
+    void takesTheIntervalFromTheSettingRow() {
+        when(settingRepository.findById(DELAY_SETTING_KEY))
+                .thenReturn(Optional.of(new Setting(DELAY_SETTING_KEY, " 7 ", "seeded")));
+
+        assertThat(scheduler.responseGenerationDelaySecondsInForce()).isEqualTo(7L);
+    }
+
+    @Test
+    @DisplayName("takes the configured interval when the row is absent")
+    void takesTheConfiguredIntervalWhenTheRowIsAbsent() {
+        when(settingRepository.findById(DELAY_SETTING_KEY)).thenReturn(Optional.empty());
+
+        assertThat(scheduler.responseGenerationDelaySecondsInForce())
+                .isEqualTo(CONFIGURED_DELAY_SECONDS);
+    }
+
+    @Test
+    @DisplayName("takes the configured interval when the row holds null")
+    void takesTheConfiguredIntervalWhenTheRowHoldsNull() {
+        when(settingRepository.findById(DELAY_SETTING_KEY))
+                .thenReturn(Optional.of(new Setting(DELAY_SETTING_KEY, null, "seeded")));
+
+        assertThat(scheduler.responseGenerationDelaySecondsInForce())
+                .isEqualTo(CONFIGURED_DELAY_SECONDS);
+    }
+
+    // A non-positive interval would place the next instant at or before the previous completion —
+    // DL-309 — see docs/DECISION_LOG.md
+    @ParameterizedTest(name = "[{index}] stored value {0}")
+    @ValueSource(strings = {"0", "-1", "-86400", "", " ", "sixty", "7.5", "9999999999999999999999"})
+    @DisplayName("takes the configured interval for a stored value that is not a positive whole "
+            + "number of seconds")
+    void takesTheConfiguredIntervalForAnUnusableStoredValue(String stored) {
+        when(settingRepository.findById(DELAY_SETTING_KEY))
+                .thenReturn(Optional.of(new Setting(DELAY_SETTING_KEY, stored, "seeded")));
+
+        assertThat(scheduler.responseGenerationDelaySecondsInForce())
+                .isEqualTo(CONFIGURED_DELAY_SECONDS);
+    }
+
+    @Test
+    @DisplayName("binds exactly the five collaborators one pass uses")
+    void bindsExactlyTheFiveCollaboratorsOnePassUses() {
         Constructor<?>[] constructors = ResponseGenerationScheduler.class.getDeclaredConstructors();
 
         assertThat(constructors).as("declared constructors").hasSize(1);
@@ -228,7 +280,7 @@ class ResponseGenerationSchedulerTest {
         assertThat(parameterTypes)
                 .as("collaborators bound by the constructor")
                 .containsExactly(TweetRepository.class, ResponseService.class, NotionService.class,
-                        ScannerProperties.class);
+                        ScannerProperties.class, SettingRepository.class);
         assertThat(parameterTypes)
                 .extracting(Class::getSimpleName)
                 .doesNotContain("LlmService");
@@ -241,20 +293,24 @@ class ResponseGenerationSchedulerTest {
 
         assertThatNullPointerException()
                 .isThrownBy(() -> new ResponseGenerationScheduler(null, responseService,
-                        notionService, bound))
+                        notionService, bound, settingRepository))
                 .withMessageContaining("tweetRepository");
         assertThatNullPointerException()
                 .isThrownBy(() -> new ResponseGenerationScheduler(tweetRepository, null,
-                        notionService, bound))
+                        notionService, bound, settingRepository))
                 .withMessageContaining("responseService");
         assertThatNullPointerException()
                 .isThrownBy(() -> new ResponseGenerationScheduler(tweetRepository, responseService,
-                        null, bound))
+                        null, bound, settingRepository))
                 .withMessageContaining("notionService");
         assertThatNullPointerException()
                 .isThrownBy(() -> new ResponseGenerationScheduler(tweetRepository, responseService,
-                        notionService, null))
+                        notionService, null, settingRepository))
                 .withMessageContaining("properties");
+        assertThatNullPointerException()
+                .isThrownBy(() -> new ResponseGenerationScheduler(tweetRepository, responseService,
+                        notionService, bound, null))
+                .withMessageContaining("settingRepository");
     }
 
     // The pass runs only in a process that carries it — DL-250 — see docs/DECISION_LOG.md
@@ -272,8 +328,8 @@ class ResponseGenerationSchedulerTest {
                 new ScannerProperties.Background(enabled, true, responseGenerationEnabled,
                         UNREACHABLE_CEILING));
 
-        new ResponseGenerationScheduler(tweetRepository, responseService, notionService, withheld)
-                .generatePendingResponses();
+        new ResponseGenerationScheduler(tweetRepository, responseService, notionService, withheld,
+                settingRepository).generatePendingResponses();
 
         verifyNoInteractions(tweetRepository, responseService, notionService);
     }
@@ -288,8 +344,8 @@ class ResponseGenerationSchedulerTest {
         when(tweetRepository.findUnansweredBatchAfter(isNull(), any(Pageable.class)))
                 .thenReturn(List.of());
 
-        new ResponseGenerationScheduler(tweetRepository, responseService, notionService, unbound)
-                .generatePendingResponses();
+        new ResponseGenerationScheduler(tweetRepository, responseService, notionService, unbound,
+                settingRepository).generatePendingResponses();
 
         verify(tweetRepository).findUnansweredBatchAfter(isNull(), any(Pageable.class));
         verifyNoInteractions(responseService, notionService);

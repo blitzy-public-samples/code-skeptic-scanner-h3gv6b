@@ -406,17 +406,33 @@ public record ScannerProperties(
         }
     }
 
-    // Net-new (no Python counterpart) — DL-020 — see docs/DECISION_LOG.md
+    // Net-new (no Python counterpart) — DL-020, DL-272 — see docs/DECISION_LOG.md
     /**
-     * The {@code scanner.auth} group: the single application principal.
+     * The {@code scanner.auth} group: the single application principal and the admission bound the
+     * token route applies to credential verification.
      *
      * <p>{@code password-hash} holds a bcrypt hash, never a plaintext password. The hashing
      * counterpart in the retired tree was {@code backend/app/core/security.py:L14-18}.
      *
-     * <p>Both components are redacted by {@link #toString()}.
+     * <p>{@code verificationPermits} and {@code verificationWaitMillis} size the admission bound
+     * {@code api.AuthController} applies before a submitted credential reaches bcrypt — DL-272. Both
+     * are operational values: a deployment raises the permit count to match the credential
+     * verifications it intends to serve at one time, and the wait to match the queueing delay it
+     * accepts before answering that the route is unavailable. Neither affects whether a credential
+     * authenticates.
+     *
+     * <p>The two credential components are redacted by {@link #toString()}; the two bounds are
+     * rendered, since neither is a secret.
      *
      * @param username value of {@code scanner.auth.username}
      * @param passwordHash value of {@code scanner.auth.password-hash}
+     * @param verificationPermits value of {@code scanner.auth.verification-permits}, default
+     *     {@code 0}. Zero or less selects one permit per processor the runtime reports, with a floor
+     *     of {@value Auth#MINIMUM_DERIVED_VERIFICATION_PERMITS}; a positive value is used as given.
+     *     {@link #verificationPermitsInForce()} resolves it — DL-272
+     * @param verificationWaitMillis value of {@code scanner.auth.verification-wait-millis}, default
+     *     {@code 10000}. Longest a submitted credential waits for a permit before the route reports
+     *     itself unavailable. Accepted: {@code 0} or more — DL-272
      */
     public record Auth(
 
@@ -425,17 +441,62 @@ public record ScannerProperties(
 
             // scanner.auth.password-hash — bcrypt hash; the hashing counterpart is
             // backend/app/core/security.py:L14-18 — DL-020
-            String passwordHash) {
+            String passwordHash,
+
+            // scanner.auth.verification-permits — no Python counterpart — DL-272
+            @DefaultValue("0") int verificationPermits,
+
+            // scanner.auth.verification-wait-millis — no Python counterpart — DL-272
+            @DefaultValue("10000") long verificationWaitMillis) {
 
         /**
-         * Renders this group with the principal name and the password hash redacted — DL-052.
+         * Fewest permits {@link #verificationPermitsInForce()} derives when the configured value
+         * selects derivation — DL-272.
+         */
+        public static final int MINIMUM_DERIVED_VERIFICATION_PERMITS = 2;
+
+        /**
+         * Refuses a negative wait — DL-272.
          *
-         * @return the group's components, both values redacted
+         * @throws IllegalStateException when {@code verificationWaitMillis} is negative
+         */
+        public Auth {
+            if (verificationWaitMillis < 0L) {
+                throw new IllegalStateException(
+                        "scanner.auth.verification-wait-millis must not be negative; it is "
+                                + verificationWaitMillis + ".");
+            }
+        }
+
+        /**
+         * Resolves the number of credential verifications this process performs at one time.
+         *
+         * <p>A configured value of zero or less selects one permit per processor the runtime
+         * reports, never fewer than {@value #MINIMUM_DERIVED_VERIFICATION_PERMITS}; a positive value
+         * is returned as configured — DL-272.
+         *
+         * @return the permit count, always at least one
+         */
+        public int verificationPermitsInForce() {
+            if (verificationPermits > 0) {
+                return verificationPermits;
+            }
+            return Math.max(MINIMUM_DERIVED_VERIFICATION_PERMITS,
+                    Runtime.getRuntime().availableProcessors());
+        }
+
+        /**
+         * Renders this group with the principal name and the password hash redacted, and both
+         * admission bounds shown — DL-052, DL-272.
+         *
+         * @return the group's components, the two credential values redacted
          */
         @Override
         public String toString() {
             return "Auth[username=" + REDACTED
                     + ", passwordHash=" + REDACTED
+                    + ", verificationPermits=" + verificationPermits
+                    + ", verificationWaitMillis=" + verificationWaitMillis
                     + "]";
         }
     }

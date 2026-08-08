@@ -2,7 +2,10 @@ name: Continuous Deployment
 
 on:
   workflow_run:
-    workflows: ["Continuous Integration"]
+    # This string must equal the `name:` of .github/workflows/ci.yml byte for byte, or no
+    # workflow_run event is produced and this workflow never starts - see
+    # backend/docs/DECISION_LOG.md DL-102
+    workflows: ["Code Skeptic Scanner CI"]
     branches: [main]
     types:
       - completed
@@ -11,6 +14,9 @@ env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
   BACKEND_IMAGE: gcr.io/${{ secrets.GCP_PROJECT_ID }}/code-skeptic-backend
   FRONTEND_BUCKET: ${{ secrets.GCP_FRONTEND_BUCKET }}
+  # Read by the notification step, which is skipped when the secret is unset - see
+  # backend/docs/DECISION_LOG.md DL-310
+  SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
 
 jobs:
   deploy:
@@ -18,15 +24,24 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
+    # Every `uses:` in this file names a full commit SHA, with the release it belongs to in the
+    # trailing comment - see backend/docs/DECISION_LOG.md DL-310
     - name: Checkout code
-      uses: actions/checkout@v2
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - name: Set up Google Cloud SDK
-      uses: google-github-actions/setup-gcloud@v0.2.1
+    # setup-gcloud v3 accepts neither `service_account_key` nor `export_default_credentials`, so the
+    # credential is supplied by this step instead; the secret names are unchanged - see
+    # backend/docs/DECISION_LOG.md DL-310
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
       with:
         project_id: ${{ secrets.GCP_PROJECT_ID }}
-        service_account_key: ${{ secrets.GCP_SA_KEY }}
-        export_default_credentials: true
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+    - name: Set up Google Cloud SDK
+      uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+      with:
+        project_id: ${{ secrets.GCP_PROJECT_ID }}
 
     - name: Authenticate with Google Cloud
       run: gcloud auth configure-docker
@@ -68,10 +83,15 @@ jobs:
         # Add post-deployment test commands here
         # Example: npm run test:e2e
 
+    # 8398a7/action-slack is an archived repository. The notification is posted directly instead, so
+    # this workflow carries no unmaintained third-party action and nothing here needs pinning. The
+    # webhook is read from the environment rather than interpolated into the command - see
+    # backend/docs/DECISION_LOG.md DL-310
     - name: Notify team of successful deployment
-      uses: 8398a7/action-slack@v3
-      with:
-        status: ${{ job.status }}
-        text: Deployment to production completed successfully!
-        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
-      if: success()
+      if: success() && env.SLACK_WEBHOOK != ''
+      run: |
+        curl --fail --silent --show-error \
+          --request POST \
+          --header 'Content-Type: application/json' \
+          --data '{"text":"Deployment to production completed successfully!"}' \
+          "$SLACK_WEBHOOK"

@@ -82,12 +82,13 @@ public class SettingsService {
      * {@code RESPONSE_GENERATION_DELAY} at {@code backend/app/core/config.py:L11} — DL-040 — see
      * docs/DECISION_LOG.md.
      *
-     * <p>The row reports the interval; it does not set it. Pacing is declared on
-     * {@code task.ResponseGenerationScheduler.generatePendingResponses()} as
-     * {@code @Scheduled(fixedDelayString = "${scanner.response-generation-delay-seconds}")}, which the
-     * framework resolves once when it registers the task, so an edit written through
-     * {@code PUT /settings/{key}} changes what {@code GET /settings} reports and takes effect on the
-     * interval at the next restart — DL-227.
+     * <p>The row sets the interval. {@code task.ResponseGenerationScheduler} reads it through
+     * {@code responseGenerationDelaySecondsInForce()} once per pass, at the moment the trigger
+     * registered by {@code config.AsyncSchedulingConfig} computes the next instant, so an edit written
+     * through {@code PUT /settings/{key}} takes effect on the following interval with no restart. The
+     * configured {@code scanner.response-generation-delay-seconds} applies when the row is absent,
+     * holds {@code null}, does not parse as a whole number of seconds, or is not positive — DL-227,
+     * DL-309.
      */
     private static final String RESPONSE_GENERATION_DELAY_KEY = "response_generation_delay";
 
@@ -248,10 +249,10 @@ public class SettingsService {
      * {@value #RESPONSE_GENERATION_DELAY_KEY} and {@value #STREAM_KEYWORDS_KEY}. The first two carry a
      * {@code value} rendered from {@code scanner.popularity-threshold} and
      * {@code scanner.response-generation-delay-seconds}. The first is read back in place of that
-     * configuration default on every use, by {@code service.TwitterService} — DL-040. The second
-     * reports the interval and does not set it: {@code task.ResponseGenerationScheduler} declares its
-     * pacing on the method and the framework resolves that value once when it registers the task —
-     * DL-227. The third carries the blank value {@value #STREAM_KEYWORDS_SEED_VALUE}, which
+     * configuration default on every use, by {@code service.TwitterService} — DL-040. The second is
+     * read back in place of its configuration default once per pass, by
+     * {@code task.ResponseGenerationScheduler} — DL-227, DL-309. The third carries the blank value
+     * {@value #STREAM_KEYWORDS_SEED_VALUE}, which
      * {@code task.TweetStreamClient} reads as "no override" — DL-044.
      *
      * <p>A key observed as present is left exactly as it stands, {@code value} and

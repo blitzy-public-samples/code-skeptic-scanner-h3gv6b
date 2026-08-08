@@ -1,14 +1,21 @@
 package com.codeskeptic.scanner;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
 
+import java.io.File;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.sql.SQLException;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -16,27 +23,38 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Stream;
 import javax.sql.DataSource;
 
+import com.zaxxer.hikari.HikariDataSource;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.event.ApplicationFailedEvent;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
+import org.springframework.boot.diagnostics.FailureAnalysis;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationListener;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.scheduling.Trigger;
+import org.springframework.scheduling.TriggerContext;
+import org.springframework.scheduling.config.CronTask;
 import org.springframework.scheduling.config.FixedDelayTask;
+import org.springframework.scheduling.config.FixedRateTask;
 import org.springframework.scheduling.config.ScheduledTask;
 import org.springframework.scheduling.config.ScheduledTaskHolder;
+import org.springframework.scheduling.config.TriggerTask;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
@@ -49,8 +67,10 @@ import com.codeskeptic.scanner.api.GlobalExceptionHandler;
 import com.codeskeptic.scanner.api.ResponseController;
 import com.codeskeptic.scanner.api.SettingController;
 import com.codeskeptic.scanner.api.TweetController;
+import com.codeskeptic.scanner.config.DataSourceConfig;
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.entity.AiTool;
+import com.codeskeptic.scanner.entity.Setting;
 import com.codeskeptic.scanner.repository.AiToolRepository;
 import com.codeskeptic.scanner.repository.ResponseRepository;
 import com.codeskeptic.scanner.repository.SettingRepository;
@@ -66,7 +86,6 @@ import com.codeskeptic.scanner.service.TwitterService;
 import com.codeskeptic.scanner.task.ResponseGenerationScheduler;
 import com.codeskeptic.scanner.task.TweetStreamClient;
 import com.codeskeptic.scanner.task.TweetStreamListener;
-import com.zaxxer.hikari.HikariDataSource;
 import reactor.core.publisher.Mono;
 
 // Replaces backend/tests/test_api.py, which imported fastapi.testclient against a Flask application
@@ -103,6 +122,9 @@ import reactor.core.publisher.Mono;
 @DisplayName("ScannerApplication")
 class ScannerApplicationTests {
     private static final String PASSWORD = "test-password";
+
+    /** Key of the seeded settings row that sets the response-generation interval — DL-227, DL-309. */
+    private static final String RESPONSE_GENERATION_DELAY_KEY = "response_generation_delay";
 
     @Autowired
     private ApplicationContext context;
@@ -375,28 +397,112 @@ class ScannerApplicationTests {
         ScheduledTaskHolder holder = holders.values().iterator().next();
         assertThat(holder.getScheduledTasks()).hasSize(1);
 
-        // TR-12: the one task is registered as a fixed-DELAY task, so the interval runs from the end
-        // of one pass to the start of the next — DL-047 — see docs/DECISION_LOG.md
-        ScheduledTask pass = holder.getScheduledTasks().stream()
-                .filter(scheduledTask -> scheduledTask.getTask() instanceof FixedDelayTask)
-                .findFirst()
-                .orElseThrow();
+        // The one task is registered against a trigger, so the interval is recomputed once per pass
+        // and the settings row can set it — DL-227, DL-228, DL-309 — see docs/DECISION_LOG.md
+        ScheduledTask pass = holder.getScheduledTasks().iterator().next();
+        assertThat(pass.getTask()).as("the registered task")
+                .isInstanceOf(TriggerTask.class)
+                .isNotInstanceOf(FixedDelayTask.class)
+                .isNotInstanceOf(FixedRateTask.class)
+                .isNotInstanceOf(CronTask.class);
 
-        FixedDelayTask registered = (FixedDelayTask) pass.getTask();
-        assertThat(registered.getIntervalDuration()).as("the registered fixed delay")
-                .isEqualTo(Duration.ofSeconds(86_400L));
-        assertThat(registered.getInitialDelayDuration()).as("the registered initial delay")
-                .isEqualTo(Duration.ZERO);
-
-        // The first pass runs at startup, which is the work-then-sleep order of
-        // backend/app/tasks/response_generation.py:L41-50. The interval in force under the test
-        // profile is a day, and no second pass falls inside the suite window.
+        // The interval in force under the test profile is a day, seeded onto the row from
+        // scanner.response-generation-delay-seconds, and no second pass falls inside the suite window.
         assertThat(context.getBean(ScannerProperties.class).responseGenerationDelaySeconds())
+                .isEqualTo(86_400L);
+        assertThat(context.getBean(ResponseGenerationScheduler.class)
+                .responseGenerationDelaySecondsInForce())
+                .as("the interval in force")
                 .isEqualTo(86_400L);
 
         Instant nextExecution = pass.nextExecution();
         assertThat(nextExecution).isNotNull();
         assertThat(nextExecution).isBefore(Instant.now().plus(Duration.ofHours(25)));
+    }
+
+    // IR10 and the work-then-sleep order of backend/app/tasks/response_generation.py:L41-50: the
+    // first pass runs at the startup instant and each later pass is spaced from the previous
+    // completion by the interval in force — DL-047, DL-309 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("runs the first pass at the current instant and spaces each later pass from the "
+            + "previous completion by the interval the settings row sets")
+    void spacesEachPassFromThePreviousCompletionByTheIntervalInForce() {
+        Trigger trigger = registeredResponseGenerationTrigger();
+        Instant now = Instant.parse("2026-04-05T06:07:08Z");
+        Instant completion = now.minusSeconds(30L);
+
+        assertThat(trigger.nextExecution(triggerContext(now, null)))
+                .as("first pass, with no completion to measure from")
+                .isEqualTo(now);
+        assertThat(trigger.nextExecution(triggerContext(now, completion)))
+                .as("a later pass, spaced from the previous completion by the day-long interval")
+                .isEqualTo(completion.plus(Duration.ofSeconds(86_400L)));
+
+        // The row sets the interval: an edit is picked up by the next computation — DL-227, DL-309
+        SettingRepository settings = context.getBean(SettingRepository.class);
+        Setting stored = settings.findById(RESPONSE_GENERATION_DELAY_KEY).orElseThrow();
+        String seeded = stored.getValue();
+        try {
+            stored.setValue("11");
+            settings.saveAndFlush(stored);
+
+            assertThat(trigger.nextExecution(triggerContext(now, completion)))
+                    .as("a later pass, once the row holds eleven seconds")
+                    .isEqualTo(completion.plus(Duration.ofSeconds(11L)));
+        } finally {
+            stored.setValue(seeded);
+            settings.saveAndFlush(stored);
+        }
+
+        assertThat(trigger.nextExecution(triggerContext(now, completion)))
+                .as("a later pass, once the row holds the seeded value again")
+                .isEqualTo(completion.plus(Duration.ofSeconds(86_400L)));
+    }
+
+    /**
+     * Resolves the trigger the scheduling registrar received for the response-generation pass.
+     *
+     * @return the registered trigger; never {@code null}
+     */
+    private Trigger registeredResponseGenerationTrigger() {
+        ScheduledTaskHolder holder =
+                context.getBeansOfType(ScheduledTaskHolder.class).values().iterator().next();
+        ScheduledTask pass = holder.getScheduledTasks().iterator().next();
+        assertThat(pass.getTask()).isInstanceOf(TriggerTask.class);
+        Trigger trigger = ((TriggerTask) pass.getTask()).getTrigger();
+        assertThat(trigger).isNotNull();
+        return trigger;
+    }
+
+    /**
+     * Builds a trigger context reporting a fixed clock and a chosen previous completion.
+     *
+     * @param now            the instant the context's clock reports
+     * @param lastCompletion the previous pass's completion, or {@code null} before the first pass
+     * @return the context; never {@code null}
+     */
+    private static TriggerContext triggerContext(Instant now, Instant lastCompletion) {
+        return new TriggerContext() {
+            @Override
+            public Clock getClock() {
+                return Clock.fixed(now, ZoneOffset.UTC);
+            }
+
+            @Override
+            public Instant lastScheduledExecution() {
+                return lastCompletion;
+            }
+
+            @Override
+            public Instant lastActualExecution() {
+                return lastCompletion;
+            }
+
+            @Override
+            public Instant lastCompletion() {
+                return lastCompletion;
+            }
+        };
     }
 
     // Net-new background enablement group — DL-250 — see docs/DECISION_LOG.md
@@ -471,4 +577,113 @@ class ScannerApplicationTests {
         }
         return request;
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // Startup diagnostic for a failure of the JDBC and dialect chain. Registered on the
+    // SpringApplication by main() rather than through a META-INF/spring.factories resource, because a
+    // database failure happens before the context becomes active — DL-305 — see docs/DECISION_LOG.md
+    // ---------------------------------------------------------------------------------------------
+
+    /** Message Hibernate raises when it cannot read a dialect from the connection metadata. */
+    private static final String DIALECT_FAILURE_MESSAGE =
+            "Unable to determine Dialect without JDBC metadata (please set 'jakarta.persistence.jdbc.url')";
+
+    @Test
+    @DisplayName("turns a driver failure into a diagnostic naming the configuration key, carrying "
+            + "neither the jdbc url nor a credential")
+    void turnsADriverFailureIntoADiagnosticNamingTheConfigurationKey() {
+        SQLException driverFailure = new SQLException(
+                "Connection to db.internal:5432 refused for jdbc:postgresql://scanner:s3cret@db.internal:5432/codeskeptic",
+                "08001");
+        Throwable failure = new IllegalStateException("Failed to initialize pool", driverFailure);
+
+        FailureAnalysis analysis =
+                new DataSourceConfig.DatabaseStartupFailureAnalyzer().analyze(failure);
+
+        assertThat(analysis).as("the analysis for a driver failure").isNotNull();
+        assertThat(analysis.getAction())
+                .contains("DATABASE_URL")
+                .contains("scanner.database-url");
+        assertThat(analysis.getDescription()).contains("08001");
+        assertThat(analysis.getDescription())
+                .as("no jdbc url and no credential may reach the diagnostic — DL-052")
+                .doesNotContain("jdbc:postgresql")
+                .doesNotContain("s3cret");
+        assertThat(analysis.getCause()).isSameAs(failure);
+    }
+
+    @Test
+    @DisplayName("turns a dialect-determination failure into the same diagnostic")
+    void turnsADialectDeterminationFailureIntoTheSameDiagnostic() {
+        Throwable failure = new IllegalStateException("Error creating bean with name 'entityManagerFactory'",
+                new RuntimeException(DIALECT_FAILURE_MESSAGE));
+
+        FailureAnalysis analysis =
+                new DataSourceConfig.DatabaseStartupFailureAnalyzer().analyze(failure);
+
+        assertThat(analysis).isNotNull();
+        assertThat(analysis.getAction()).contains("DATABASE_URL");
+    }
+
+    @Test
+    @DisplayName("recognises no other failure, so the framework's own report stands alone")
+    void recognisesNoOtherFailure() {
+        DataSourceConfig.DatabaseStartupFailureAnalyzer diagnostic =
+                new DataSourceConfig.DatabaseStartupFailureAnalyzer();
+
+        assertThat(diagnostic.analyze(new IllegalStateException("Web server failed to start. Port 5000 was already in use.")))
+                .isNull();
+        assertThat(diagnostic.analyze(null)).isNull();
+    }
+
+    @Test
+    @DisplayName("is an application listener for the failure event, which is the path a database "
+            + "failure takes before any context is active")
+    void isAnApplicationListenerForTheFailureEvent() {
+        DataSourceConfig.DatabaseStartupFailureAnalyzer diagnostic =
+                new DataSourceConfig.DatabaseStartupFailureAnalyzer();
+
+        assertThat(diagnostic).isInstanceOf(ApplicationListener.class);
+
+        // Both shapes are safe to hand to the listener: the recognised one reports, the unrecognised
+        // one reports nothing, and neither throws out of the framework's multicast.
+        SpringApplication application = new SpringApplication(ScannerApplication.class);
+        assertThatCode(() -> {
+            diagnostic.onApplicationEvent(new ApplicationFailedEvent(application, new String[0], null,
+                    new IllegalStateException("boot", new SQLException("refused", "08001"))));
+            diagnostic.onApplicationEvent(new ApplicationFailedEvent(application, new String[0], null,
+                    new IllegalStateException("unrelated")));
+        }).doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("is reached without a META-INF/spring.factories resource: the module's source tree "
+            + "carries exactly two resources, application.yml and application-test.yml")
+    void isReachedWithoutASpringFactoriesResource() throws Exception {
+        // The module root is derived from this module's own compiled output — target/classes — rather
+        // than from the working directory, so the assertion does not depend on where the runner starts.
+        Path moduleRoot = Path.of(ScannerApplication.class.getProtectionDomain()
+                .getCodeSource().getLocation().toURI()).getParent().getParent();
+        assertThat(moduleRoot.resolve("pom.xml")).as("the module root").isRegularFile();
+
+        List<String> resources = new ArrayList<>();
+        for (String tree : List.of("src/main/resources", "src/test/resources")) {
+            Path root = moduleRoot.resolve(tree);
+            assertThat(root).as(tree).isDirectory();
+            try (Stream<Path> files = Files.walk(root)) {
+                files.filter(Files::isRegularFile)
+                        .map(file -> tree + "/"
+                                + root.relativize(file).toString().replace(File.separatorChar, '/'))
+                        .sorted()
+                        .forEach(resources::add);
+            }
+        }
+
+        assertThat(resources)
+                .as("the accepted resource inventory of this module is exactly two files, and it "
+                        + "carries no META-INF resource of its own — DL-305")
+                .containsExactly("src/main/resources/application.yml",
+                        "src/test/resources/application-test.yml");
+    }
+
 }

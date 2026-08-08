@@ -34,10 +34,15 @@ import org.hibernate.type.SqlTypes;
  * mapped to {@code List<String>} attributes by {@link DelimitedStringListConverter}, which owns
  * their null and empty semantics — see docs/DECISION_LOG.md DL-024.
  *
- * <p>No column declares a not-null marker, a duplicate-value restriction or a length facet. The five
- * character columns carry {@code @JdbcTypeCode(SqlTypes.LONGVARCHAR)}, which each dialect renders as
- * its widest character type that needs no declared capacity, for the bare {@code Column(String)} of
- * backend/app/db/models.py:L11,L15-18 — see docs/DECISION_LOG.md DL-068.
+ * <p>No column declares a not-null marker or a duplicate-value restriction. The five character
+ * columns carry {@code @JdbcTypeCode(SqlTypes.LONGVARCHAR)} together with
+ * {@code length = Integer.MAX_VALUE}, the pair that renders each dialect's widest character type
+ * carrying no capacity at all — {@code text} on PostgreSQL, {@code longtext} on MySQL and
+ * {@code clob} on H2 — for the bare {@code Column(String)} of
+ * backend/app/db/models.py:L11,L15-18 — see docs/DECISION_LOG.md DL-068. The {@code length} facet
+ * declares no bound: it is above every dialect's greatest capacity-bearing character type, which is
+ * what selects the capacity-free type, and the generated DDL states no capacity for these columns
+ * on any vendor.
  */
 // Ported from backend/app/db/models.py:L7-18 (faithful port) — see docs/DECISION_LOG.md
 // Departures from the literal source declaration, each recorded in the decision log: id declares
@@ -57,10 +62,10 @@ public class Tweet {
     @Column(name = "id")
     private Integer id;
 
-    // backend/app/db/models.py:L11 — wide character column, no declared capacity — DL-068 — see
+    // backend/app/db/models.py:L11 — wide character column rendered with no capacity — DL-068 — see
     // docs/DECISION_LOG.md
     @JdbcTypeCode(SqlTypes.LONGVARCHAR)
-    @Column(name = "content")
+    @Column(name = "content", length = Integer.MAX_VALUE)
     private String content;
 
     // backend/app/db/models.py:L12
@@ -77,32 +82,32 @@ public class Tweet {
 
     // backend/app/db/models.py:L15
     // Single delimited column value carried as a list — DL-024 — see docs/DECISION_LOG.md
-    // Wide character column, no declared capacity — DL-068 — see docs/DECISION_LOG.md
+    // Wide character column rendered with no capacity — DL-068 — see docs/DECISION_LOG.md
     @Convert(converter = DelimitedStringListConverter.class)
     @JdbcTypeCode(SqlTypes.LONGVARCHAR)
-    @Column(name = "media")
+    @Column(name = "media", length = Integer.MAX_VALUE)
     private List<String> media;
 
     // backend/app/db/models.py:L16
     // Sole Optional[str] field in the source (backend/app/schema/tweet.py:L12); may be null.
-    // Wide character column, no declared capacity — DL-068 — see docs/DECISION_LOG.md
+    // Wide character column rendered with no capacity — DL-068 — see docs/DECISION_LOG.md
     @JdbcTypeCode(SqlTypes.LONGVARCHAR)
-    @Column(name = "quoted_tweet_id")
+    @Column(name = "quoted_tweet_id", length = Integer.MAX_VALUE)
     private String quotedTweetId;
 
     // backend/app/db/models.py:L17
     // Identifier of the post author, held as a plain column value; there is no user table.
-    // Wide character column, no declared capacity — DL-068 — see docs/DECISION_LOG.md
+    // Wide character column rendered with no capacity — DL-068 — see docs/DECISION_LOG.md
     @JdbcTypeCode(SqlTypes.LONGVARCHAR)
-    @Column(name = "user_id")
+    @Column(name = "user_id", length = Integer.MAX_VALUE)
     private String userId;
 
     // backend/app/db/models.py:L18
     // Single delimited column value carried as a list — DL-024 — see docs/DECISION_LOG.md
-    // Wide character column, no declared capacity — DL-068 — see docs/DECISION_LOG.md
+    // Wide character column rendered with no capacity — DL-068 — see docs/DECISION_LOG.md
     @Convert(converter = DelimitedStringListConverter.class)
     @JdbcTypeCode(SqlTypes.LONGVARCHAR)
-    @Column(name = "ai_tools_mentioned")
+    @Column(name = "ai_tools_mentioned", length = Integer.MAX_VALUE)
     private List<String> aiToolsMentioned;
 
     // Ported from backend/app/db/models.py:L30 (faithful port) — see docs/DECISION_LOG.md

@@ -30,11 +30,14 @@ import org.hibernate.type.SqlTypes;
  * <p>{@code is_approved} carries the approval flag a human reviewer reads
  * ({@code backend/app/db/models.py:L26}).
  *
- * <p>None of the five columns declares a not-null marker, a duplicate-value restriction or a length
- * facet, matching the source declarations. {@code content} carries
- * {@code @JdbcTypeCode(SqlTypes.LONGVARCHAR)}, which each dialect renders as its widest character
- * type that needs no declared capacity, for the bare {@code Column(String)} of
- * backend/app/db/models.py:L24 — see docs/DECISION_LOG.md DL-068.
+ * <p>None of the five columns declares a not-null marker or a duplicate-value restriction, matching
+ * the source declarations. {@code content} carries {@code @JdbcTypeCode(SqlTypes.LONGVARCHAR)}
+ * together with {@code length = Integer.MAX_VALUE}, the pair that renders each dialect's widest
+ * character type carrying no capacity at all — {@code text} on PostgreSQL, {@code longtext} on
+ * MySQL and {@code clob} on H2 — for the bare {@code Column(String)} of
+ * backend/app/db/models.py:L24 — see docs/DECISION_LOG.md DL-068. The {@code length} facet declares
+ * no bound: it is above every dialect's greatest capacity-bearing character type, which is what
+ * selects the capacity-free type.
  */
 // Ported from backend/app/db/models.py:L20-28 (faithful port) — see docs/DECISION_LOG.md
 // Departures from the literal source declaration, each recorded in the decision log: the type keeps
@@ -55,10 +58,10 @@ public class Response {
     @Column(name = "id")
     private Integer id;
 
-    // backend/app/db/models.py:L24 — wide character column, no declared capacity — DL-068 — see
+    // backend/app/db/models.py:L24 — wide character column rendered with no capacity — DL-068 — see
     // docs/DECISION_LOG.md
     @JdbcTypeCode(SqlTypes.LONGVARCHAR)
-    @Column(name = "content")
+    @Column(name = "content", length = Integer.MAX_VALUE)
     private String content;
 
     // backend/app/db/models.py:L25

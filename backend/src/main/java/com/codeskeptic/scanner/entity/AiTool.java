@@ -20,10 +20,14 @@ import org.hibernate.type.SqlTypes;
  * {@code Column(Integer, primary_key=True)} of backend/app/db/models.py:L35 — DL-070 — see
  * docs/DECISION_LOG.md.
  *
- * <p>No column declares a not-null marker, a duplicate-value restriction or a length facet.
- * {@code name} and {@code description} carry {@code @JdbcTypeCode(SqlTypes.LONGVARCHAR)}, which each
- * dialect renders as its widest character type that needs no declared capacity, for the bare
- * {@code Column(String)} at backend/app/db/models.py:L36-37 — DL-068 — see docs/DECISION_LOG.md.
+ * <p>No column declares a not-null marker or a duplicate-value restriction. {@code name} and
+ * {@code description} carry {@code @JdbcTypeCode(SqlTypes.LONGVARCHAR)} together with
+ * {@code length = Integer.MAX_VALUE}, the pair that renders each dialect's widest character type
+ * carrying no capacity at all — {@code text} on PostgreSQL, {@code longtext} on MySQL and
+ * {@code clob} on H2 — for the bare {@code Column(String)} at backend/app/db/models.py:L36-37 —
+ * DL-068 — see docs/DECISION_LOG.md. The {@code length} facet declares no bound: it is above every
+ * dialect's greatest capacity-bearing character type, which is what selects the capacity-free
+ * type.
  */
 // Ported from backend/app/db/models.py:L32-37 (faithful port) — see docs/DECISION_LOG.md
 // equals(Object) and hashCode() are net-new Java persistence mechanics — DL-023 — see
@@ -39,16 +43,16 @@ public class AiTool {
     @Column(name = "id")
     private Integer id;
 
-    // backend/app/db/models.py:L36 — wide character column, no declared capacity — DL-068 — see
+    // backend/app/db/models.py:L36 — wide character column rendered with no capacity — DL-068 — see
     // docs/DECISION_LOG.md
     @JdbcTypeCode(SqlTypes.LONGVARCHAR)
-    @Column(name = "name")
+    @Column(name = "name", length = Integer.MAX_VALUE)
     private String name;
 
-    // backend/app/db/models.py:L37 — wide character column, no declared capacity — DL-068 — see
+    // backend/app/db/models.py:L37 — wide character column rendered with no capacity — DL-068 — see
     // docs/DECISION_LOG.md
     @JdbcTypeCode(SqlTypes.LONGVARCHAR)
-    @Column(name = "description")
+    @Column(name = "description", length = Integer.MAX_VALUE)
     private String description;
 
     public AiTool() {

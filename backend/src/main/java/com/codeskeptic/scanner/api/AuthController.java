@@ -7,6 +7,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AccountStatusException;
@@ -20,6 +21,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.LoginRequest;
 import com.codeskeptic.scanner.dto.TokenResponse;
 import com.codeskeptic.scanner.security.JwtService;
@@ -69,11 +71,16 @@ import com.codeskeptic.scanner.security.JwtService;
  * <p>No submitted password, submitted principal name, resolved principal name or minted token is
  * written to the log at any level — DL-052, DL-197.
  *
- * <p>Verification work is bounded: a credential of accepted length acquires one of
- * {@link #MAXIMUM_CONCURRENT_VERIFICATIONS} permits, waiting at most
- * {@value #VERIFICATION_WAIT_MILLIS} milliseconds, and reaches bcrypt only while holding one; a request
- * that acquires none receives the same 401 and empty body with no bcrypt computation performed —
- * DL-272. Rejection reporting is bounded to one {@code WARN} per
+ * <p>Verification work is bounded, and being turned away by that bound is reported as an
+ * availability condition rather than as a rejected credential — DL-272. A credential of accepted
+ * length acquires one of {@code scanner.auth.verification-permits} permits, waiting at most
+ * {@code scanner.auth.verification-wait-millis} milliseconds, and reaches bcrypt only while holding
+ * one. A request that acquires none receives **503** with an empty body and a {@code Retry-After}
+ * header, never the route's 401, so a valid credential is never reported as invalid because the
+ * process was busy; no bcrypt computation is performed for it. Both bounds are configuration: the
+ * permit count defaults to one per processor with a floor of two, and the wait defaults to ten
+ * seconds, which a deployment raises or lowers to match the concurrency it intends to serve.
+ * Rejection reporting is bounded to one {@code WARN} per
  * {@value #REJECTION_REPORT_INTERVAL_SECONDS} seconds per reason, carrying the suppressed count, with
  * every suppressed rejection at {@code DEBUG} — DL-272. No per-client request quota and no request-rate
  * ceiling is declared here; those remain ingress controls the deployment supplies.
@@ -106,24 +113,14 @@ public class AuthController {
      */
     private static final int MAXIMUM_CREDENTIAL_LENGTH = 256;
 
-    private static final int MINIMUM_CONCURRENT_VERIFICATIONS = 2;
-
     /**
-     * Credential verifications this process performs at one time — DL-272.
+     * Value of the {@code Retry-After} header the 503 carries, in seconds — DL-272.
      *
-     * <p>The value is the greater of {@value #MINIMUM_CONCURRENT_VERIFICATIONS} and the processor
-     * count the runtime reports, read once at class initialisation. It is the number of bcrypt
-     * computations this process performs at one time on behalf of this route.
+     * <p>It is a fixed, deliberately small hint: the admission bound clears as soon as a verification
+     * in progress completes, so a client that waits a second and retries is the intended behaviour.
+     * No response body accompanies it, so the availability condition puts no new string on the wire.
      */
-    private static final int MAXIMUM_CONCURRENT_VERIFICATIONS = Math.max(
-            MINIMUM_CONCURRENT_VERIFICATIONS, Runtime.getRuntime().availableProcessors());
-
-    /**
-     * Longest a request waits for one of the {@link #MAXIMUM_CONCURRENT_VERIFICATIONS} verification
-     * permits, in milliseconds — DL-272. A request that does not hold a permit by this bound is
-     * answered with the route's 401 and reaches bcrypt in no way.
-     */
-    private static final long VERIFICATION_WAIT_MILLIS = 250L;
+    private static final String RETRY_AFTER_SECONDS = "1";
 
     /**
      * Shortest span between two {@code WARN} records reporting rejected credentials of the same
@@ -143,21 +140,37 @@ public class AuthController {
 
     private final AtomicLong lastNotAuthenticatedReportNanos = new AtomicLong();
 
-    private final AtomicLong unreportedUnverified = new AtomicLong();
+    private final AtomicLong unreportedUnadmitted = new AtomicLong();
 
-    private final AtomicLong lastUnverifiedReportNanos = new AtomicLong();
+    private final AtomicLong lastUnadmittedReportNanos = new AtomicLong();
+
+    /**
+     * Credential verifications this process performs at one time — DL-272.
+     *
+     * <p>Resolved once, at construction, from {@code scanner.auth.verification-permits} through
+     * {@link ScannerProperties.Auth#verificationPermitsInForce()}: a configured value of zero or less
+     * selects one permit per processor the runtime reports, with a floor of two.
+     */
+    private final int verificationPermitCount;
+
+    /**
+     * Longest a request waits for a verification permit, in milliseconds — DL-272.
+     *
+     * <p>Resolved once, at construction, from {@code scanner.auth.verification-wait-millis}. A
+     * request that does not hold a permit by this bound is answered 503 and reaches bcrypt in no way.
+     */
+    private final long verificationWaitMillis;
 
     /**
      * Permits bounding the credential verifications in progress at one time — DL-272.
      *
-     * <p>{@link #MAXIMUM_CONCURRENT_VERIFICATIONS} permits are issued. A request acquires one before
-     * it reaches {@link AuthenticationManager#authenticate}, waits at most
-     * {@value #VERIFICATION_WAIT_MILLIS} milliseconds for it, and releases it as the verification
-     * returns or raises. A request that acquires none is answered with the route's 401 and no bcrypt
-     * computation is performed for it.
+     * <p>{@link #verificationPermitCount} permits are issued. A request acquires one before it
+     * reaches {@link AuthenticationManager#authenticate}, waits at most
+     * {@link #verificationWaitMillis} milliseconds for it, and releases it as the verification
+     * returns or raises. A request that acquires none is answered 503 with a {@code Retry-After}
+     * header and no bcrypt computation is performed for it.
      */
-    private final Semaphore verificationPermits =
-            new Semaphore(MAXIMUM_CONCURRENT_VERIFICATIONS);
+    private final Semaphore verificationPermits;
 
     /**
      * Performs the credential check behind {@code POST /auth/token} — DL-019.
@@ -170,26 +183,46 @@ public class AuthController {
     private final JwtService jwtService;
 
     /**
-     * Creates the controller with its two collaborators.
+     * Creates the controller with its two collaborators and the configured admission bound.
+     *
+     * <p>The permit count and the wait are read once, here, so the bound a process runs with is fixed
+     * for its lifetime and is reported at {@code INFO} at construction — DL-272.
      *
      * @param authenticationManager checks the submitted credential, must not be {@code null}
      * @param jwtService mints the token and reports its lifetime, must not be {@code null}
-     * @throws NullPointerException when either argument is {@code null}
+     * @param properties supplies {@code scanner.auth.verification-permits} and
+     *     {@code scanner.auth.verification-wait-millis}, must not be {@code null}
+     * @throws NullPointerException when any argument is {@code null}
      */
-    public AuthController(AuthenticationManager authenticationManager, JwtService jwtService) {
+    public AuthController(AuthenticationManager authenticationManager, JwtService jwtService,
+            ScannerProperties properties) {
         this.authenticationManager = Objects.requireNonNull(authenticationManager,
                 "authenticationManager must not be null.");
         this.jwtService = Objects.requireNonNull(jwtService, "jwtService must not be null.");
+        Objects.requireNonNull(properties, "properties must not be null.");
+        ScannerProperties.Auth auth = Objects.requireNonNull(properties.auth(),
+                "properties.auth() must not be null.");
+
+        this.verificationPermitCount = auth.verificationPermitsInForce();
+        this.verificationWaitMillis = auth.verificationWaitMillis();
+        this.verificationPermits = new Semaphore(this.verificationPermitCount);
+
+        // No credential, principal name or hash is named — DL-052, DL-197 — see
+        // docs/DECISION_LOG.md
+        log.info("POST /auth/token admits {} credential verification(s) at a time, each waiting at "
+                        + "most {}ms for admission before the route reports itself unavailable",
+                this.verificationPermitCount, this.verificationWaitMillis);
     }
 
     // Net-new (no Python counterpart) — see docs/DECISION_LOG.md DL-019, DL-117, DL-118
     /**
      * Authenticates a submitted credential and returns a freshly minted bearer token.
      *
-     * <p>200 on success, 401 when the submitted credential is rejected, 500 when the authentication
-     * backend itself fails; no fourth status is selected. The {@code sub} claim of the minted token is
-     * {@link Authentication#getName()} of the authentication the {@link AuthenticationManager}
-     * returned, not the submitted string — DL-079.
+     * <p>200 on success, 401 when the submitted credential is rejected, 503 when the process is
+     * already performing every credential verification it admits at one time, and 500 when the
+     * authentication backend itself fails; no fifth status is selected. The {@code sub} claim of the
+     * minted token is {@link Authentication#getName()} of the authentication the
+     * {@link AuthenticationManager} returned, not the submitted string — DL-079.
      *
      * <p>A {@code null} request and an absent {@code username} or {@code password} member each reach
      * the manager as a {@code null} principal or credential and are rejected there. A member longer
@@ -206,12 +239,19 @@ public class AuthController {
      * {@code {"error": <string>}} envelope is built here and this route puts no new string on the wire
      * — DL-019.
      *
+     * <p>The 503 is the one status that is not about the submitted credential: it reports that this
+     * process is already performing every credential verification it admits and that the submitted
+     * credential was never examined. It carries an empty body and a {@code Retry-After} header of
+     * {@value #RETRY_AFTER_SECONDS} second(s), so a caller can distinguish "try again" from "these
+     * credentials are wrong" without this route putting a new string on the wire — DL-272.
+     *
      * <pre>{@code {"username":"admin","password":"<plaintext>"}}</pre>
      * <pre>{@code {"access_token":"eyJhbGciOiJIUzI1NiJ9...","token_type":"bearer","expires_in":3600}}</pre>
      *
      * @param request the submitted credential, or {@code null} when the request carries no body
-     * @return 200 carrying the minted token, its type and its lifetime in seconds, or 401 with an
-     *     empty body when the submitted credential is rejected
+     * @return 200 carrying the minted token, its type and its lifetime in seconds; 401 with an empty
+     *     body when the submitted credential is rejected; or 503 with an empty body and a
+     *     {@code Retry-After} header when the process admits no further verification
      */
     @PostMapping("/auth/token")
     public ResponseEntity<TokenResponse> issueToken(
@@ -229,13 +269,14 @@ public class AuthController {
             return unauthorized();
         }
 
-        // Bounded verification work: at most MAXIMUM_CONCURRENT_VERIFICATIONS bcrypt computations run
-        // at one time in this process — DL-272 — see docs/DECISION_LOG.md
+        // Bounded verification work: at most verificationPermitCount bcrypt computations run at one
+        // time in this process, and exhausting that bound is an availability condition rather than a
+        // rejected credential — DL-272 — see docs/DECISION_LOG.md
         if (!acquireVerificationPermit()) {
-            reportRejection(unreportedUnverified, lastUnverifiedReportNanos,
-                    "was not verified: all {} verification permit(s) were held",
-                    MAXIMUM_CONCURRENT_VERIFICATIONS);
-            return unauthorized();
+            reportRejection(unreportedUnadmitted, lastUnadmittedReportNanos,
+                    "was not admitted: all {} verification permit(s) were held",
+                    verificationPermitCount);
+            return serviceUnavailable();
         }
 
         Authentication authentication;
@@ -267,18 +308,18 @@ public class AuthController {
     // Net-new bound on the credential-verification work in progress — DL-272 — see
     // docs/DECISION_LOG.md
     /**
-     * Acquires one of the {@link #MAXIMUM_CONCURRENT_VERIFICATIONS} verification permits.
+     * Acquires one of the {@link #verificationPermitCount} verification permits.
      *
-     * <p>The call waits at most {@value #VERIFICATION_WAIT_MILLIS} milliseconds. An interrupt while
+     * <p>The call waits at most {@link #verificationWaitMillis} milliseconds. An interrupt while
      * waiting restores the thread's interrupt status and is answered as an unacquired permit, so the
-     * request is reported with the route's 401 and no verification is started for it.
+     * request is reported with the route's 503 and no verification is started for it.
      *
      * @return {@code true} when a permit is held, which the caller releases; {@code false} when the
      *     wait elapsed or the thread was interrupted
      */
     private boolean acquireVerificationPermit() {
         try {
-            return verificationPermits.tryAcquire(VERIFICATION_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+            return verificationPermits.tryAcquire(verificationWaitMillis, TimeUnit.MILLISECONDS);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return false;
@@ -343,5 +384,21 @@ public class AuthController {
      */
     private static ResponseEntity<TokenResponse> unauthorized() {
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+    }
+
+    // Net-new availability response — DL-272 — see docs/DECISION_LOG.md
+    /**
+     * Builds the one availability response this route returns: 503 with an empty body and a
+     * {@code Retry-After} header of {@value #RETRY_AFTER_SECONDS} second(s).
+     *
+     * <p>It reports that the submitted credential was never examined, which is what distinguishes it
+     * from {@link #unauthorized()} — DL-272.
+     *
+     * @return the 503 response; never {@code null}
+     */
+    private static ResponseEntity<TokenResponse> serviceUnavailable() {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER, RETRY_AFTER_SECONDS)
+                .build();
     }
 }

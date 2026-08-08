@@ -16,11 +16,19 @@ import org.hibernate.type.SqlTypes;
  * generated. The table is created from these annotations by
  * {@code spring.jpa.hibernate.ddl-auto} — see docs/DECISION_LOG.md DL-026.
  *
- * <p>No column declares a not-null marker, a duplicate-value restriction or a length facet.
- * {@code value} and {@code description} carry {@code @JdbcTypeCode(SqlTypes.LONGVARCHAR)}, which each
- * dialect renders as its widest character type that needs no declared capacity, for the bare
- * {@code Column(String)} at backend/app/db/models.py:L43-44 — DL-068. {@code key} states no JDBC type
- * code; it is the indexed primary key — DL-069 — see docs/DECISION_LOG.md.
+ * <p>No column declares a not-null marker or a duplicate-value restriction. {@code value} and
+ * {@code description} carry {@code @JdbcTypeCode(SqlTypes.LONGVARCHAR)} together with
+ * {@code length = Integer.MAX_VALUE}, the pair that renders each dialect's widest character type
+ * carrying no capacity at all — {@code text} on PostgreSQL, {@code longtext} on MySQL and
+ * {@code clob} on H2 — for the bare {@code Column(String)} at backend/app/db/models.py:L43-44 —
+ * DL-068. The {@code length} facet declares no bound: it is above every dialect's greatest
+ * capacity-bearing character type, which is what selects the capacity-free type.
+ *
+ * <p>{@code key} carries neither facet and is rendered {@code varchar(255)}, the persistence
+ * provider's own undeclared-length default, on every supported dialect. It is the one character
+ * column a primary key indexes, and a capacity-free character type cannot be indexed without a
+ * prefix length on MySQL, so the pair the other two columns carry is unavailable to it — DL-069 —
+ * see docs/DECISION_LOG.md.
  */
 // Ported from backend/app/db/models.py:L39-44 (faithful port) — see docs/DECISION_LOG.md
 // Departures from the literal source declaration, each recorded in the decision log: key and value
@@ -32,22 +40,23 @@ import org.hibernate.type.SqlTypes;
 @Table(name = "settings")
 public class Setting {
 
-    // backend/app/db/models.py:L42 — quoted identifier — DL-061; indexed primary key, no JDBC type
-    // code — DL-069 — see docs/DECISION_LOG.md
+    // backend/app/db/models.py:L42 — quoted identifier — DL-061; indexed primary key carrying
+    // neither a JDBC type code nor a length facet, so it renders varchar(255) — DL-069 — see
+    // docs/DECISION_LOG.md
     @Id
     @Column(name = "\"key\"")
     private String key;
 
-    // backend/app/db/models.py:L43 — quoted identifier — DL-061; wide character column, no declared
-    // capacity — DL-068 — see docs/DECISION_LOG.md
+    // backend/app/db/models.py:L43 — quoted identifier — DL-061; wide character column rendered
+    // with no capacity — DL-068 — see docs/DECISION_LOG.md
     @JdbcTypeCode(SqlTypes.LONGVARCHAR)
-    @Column(name = "\"value\"")
+    @Column(name = "\"value\"", length = Integer.MAX_VALUE)
     private String value;
 
-    // backend/app/db/models.py:L44 — wide character column, no declared capacity — DL-068 — see
+    // backend/app/db/models.py:L44 — wide character column rendered with no capacity — DL-068 — see
     // docs/DECISION_LOG.md
     @JdbcTypeCode(SqlTypes.LONGVARCHAR)
-    @Column(name = "description")
+    @Column(name = "description", length = Integer.MAX_VALUE)
     private String description;
 
     public Setting() {

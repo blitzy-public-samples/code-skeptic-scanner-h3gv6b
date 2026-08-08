@@ -11,19 +11,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v2
+    # Every `uses:` in this file names a full commit SHA, with the release it belongs to in the
+    # trailing comment. A tag is a movable reference; a SHA is not - see
+    # backend/docs/DECISION_LOG.md DL-310
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     # Replaces the retired Python 3.9 toolchain step - see backend/docs/DECISION_LOG.md DL-004,
     # DL-005
     - name: Set up JDK 21
-      uses: actions/setup-java@v4
+      uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
       with:
         distribution: 'temurin'
         java-version: '21'
         cache: maven
 
     - name: Set up Node.js
-      uses: actions/setup-node@v2
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
         node-version: '14'
 

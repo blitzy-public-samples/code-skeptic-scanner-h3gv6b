@@ -2,6 +2,7 @@ package com.codeskeptic.scanner.security;
 
 import java.io.IOException;
 import java.util.Collections;
+import java.util.Enumeration;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -29,6 +30,8 @@ import jakarta.servlet.http.HttpServletResponse;
 // Token verification is delegated to JwtService — see docs/DECISION_LOG.md DL-014.
 // Context persistence and dispatch coverage — see docs/DECISION_LOG.md DL-112.
 // Case-insensitive scheme matching — see docs/DECISION_LOG.md DL-113.
+// A request carrying more than one Authorization field is refused before any token is parsed — see
+// docs/DECISION_LOG.md DL-308.
 /**
  * Establishes the authentication for a request presenting a bearer token this service minted.
  *
@@ -39,6 +42,11 @@ import jakarta.servlet.http.HttpServletResponse;
  * authenticated principal holding no authorities and writes the resulting context to the
  * {@link SecurityContextRepository} the chain reads — DL-112. An absent header, another scheme, an
  * empty remainder and a token that is not accepted all leave the context untouched.
+ *
+ * <p>Exactly one {@code Authorization} field is read. A request presenting two or more is ambiguous —
+ * which field is authoritative is not something this filter may choose — so every one of them is
+ * discarded without being parsed and the request proceeds unauthenticated, whatever order the fields
+ * arrived in and whichever of them would have been accepted alone — DL-308.
  *
  * <p>Runs on the {@code REQUEST}, {@code ASYNC} and {@code ERROR} dispatches, alongside the chain's
  * authorization stage — DL-112. The chain always continues, exactly once per dispatch, on every path:
@@ -86,9 +94,9 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
      * Authenticates the request when it presents an acceptable bearer token, then continues the
      * chain.
      *
-     * <p>An unacceptable token and an absent header are treated alike: the context is left as it was
-     * found and the request proceeds unauthenticated. An authentication already present in the
-     * context is not replaced.
+     * <p>An unacceptable token, an absent header and more than one {@code Authorization} field are
+     * treated alike: the context is left as it was found and the request proceeds unauthenticated. An
+     * authentication already present in the context is not replaced.
      *
      * @param request the request whose {@code Authorization} header is read
      * @param response handed to the context repository so the context can be persisted
@@ -100,7 +108,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
             FilterChain filterChain) throws ServletException, IOException {
 
-        String token = bearerToken(request.getHeader(HttpHeaders.AUTHORIZATION));
+        String token = bearerToken(soleAuthorizationHeader(request));
         if (token != null) {
             Optional<String> username = jwtService.extractUsername(token);
             if (username.isPresent()
@@ -145,6 +153,41 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilterErrorDispatch() {
         return false;
+    }
+
+    // Net-new refusal of an ambiguous request — DL-308 — see docs/DECISION_LOG.md
+    /**
+     * Reads the request's single {@code Authorization} field.
+     *
+     * <p>A request carrying two or more such fields is ambiguous, so none of them is returned and the
+     * request is left unauthenticated: reading the first would make the outcome depend on field
+     * order, which is what a proxy or a client may reorder — DL-308. The refusal is recorded once per
+     * request at {@code DEBUG} as a fixed sentence carrying the field count and nothing else: no
+     * header value, no token and no request line — DL-052, DL-111.
+     *
+     * @param request the request to read, never {@code null}
+     * @return the sole header value, or {@code null} when the request carries none or more than one
+     */
+    private static String soleAuthorizationHeader(HttpServletRequest request) {
+        Enumeration<String> fields = request.getHeaders(HttpHeaders.AUTHORIZATION);
+        if (fields == null || !fields.hasMoreElements()) {
+            return null;
+        }
+        String sole = fields.nextElement();
+        if (!fields.hasMoreElements()) {
+            return sole;
+        }
+
+        int count = 2;
+        while (fields.hasMoreElements()) {
+            fields.nextElement();
+            count++;
+        }
+        // A fixed sentence: the field count only — no header value, no token, no request method and
+        // no request URI — DL-111, DL-308 — see docs/DECISION_LOG.md
+        log.debug("A request presented {} Authorization fields, which is ambiguous; none was parsed "
+                + "and the request continues unauthenticated", count);
+        return null;
     }
 
     /**

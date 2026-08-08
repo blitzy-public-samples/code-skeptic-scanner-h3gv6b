@@ -17,7 +17,18 @@ npm test
 echo "Packaging backend application..."
 cd backend
 mvn clean package
-gcloud builds submit --tag gcr.io/code-skeptic-scanner/backend
+cd ..
+
+# The image is built through the same Dockerfile and the same build context .github/workflows/cd.yml
+# uses, from the repository root, so this script and the pipeline cannot diverge. `gcloud builds
+# submit --tag` is not used because it looks for a Dockerfile inside the context it uploads, and this
+# project's Dockerfile lives outside the ./backend context on purpose - see
+# backend/docs/DECISION_LOG.md DL-053, DL-056
+echo "Building and pushing backend image..."
+gcloud auth configure-docker --quiet
+docker build -t gcr.io/code-skeptic-scanner/backend \
+  -f infrastructure/docker/Dockerfile.backend ./backend
+docker push gcr.io/code-skeptic-scanner/backend
 
 # Deploy backend to Google Cloud Run
 echo "Deploying backend to Google Cloud Run..."

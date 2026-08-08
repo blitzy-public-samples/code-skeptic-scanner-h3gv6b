@@ -691,6 +691,62 @@ class AuthControllerTest {
         assertBareUnauthorized(result);
     }
 
+    // A request presenting more than one Authorization field is refused whatever the field order —
+    // DL-308 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("answers a protected route with 401 for two Authorization fields, whichever order "
+            + "the acceptable one arrives in")
+    void answersAProtectedRouteWith401ForTwoAuthorizationFields() throws Exception {
+        String token = mintedToken();
+        String tampered = "Bearer header.payload.signature";
+
+        mockMvc.perform(get(PROTECTED_ENDPOINT)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                        .header(HttpHeaders.AUTHORIZATION, tampered))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().string(""));
+
+        mockMvc.perform(get(PROTECTED_ENDPOINT)
+                        .header(HttpHeaders.AUTHORIZATION, tampered)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().string(""));
+
+        verifyNoInteractions(twitterService, sentimentAnalysisService);
+    }
+
+    // Two acceptable fields are as ambiguous as one acceptable and one tampered — DL-308 — see
+    // docs/DECISION_LOG.md
+    @Test
+    @DisplayName("answers a protected route with 401 for two acceptable Authorization fields")
+    void answersAProtectedRouteWith401ForTwoAcceptableAuthorizationFields() throws Exception {
+        String token = mintedToken();
+
+        mockMvc.perform(get(PROTECTED_ENDPOINT)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().string(""));
+
+        verifyNoInteractions(twitterService, sentimentAnalysisService);
+    }
+
+    // One acceptable field still authenticates, so the refusal above is about ambiguity and not
+    // about the header — DL-308 — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("still authenticates a protected route presenting one Authorization field")
+    void stillAuthenticatesAProtectedRoutePresentingOneAuthorizationField() throws Exception {
+        String token = mintedToken();
+        when(twitterService.getPaginatedTweets(1, 10))
+                .thenReturn(new PaginatedTweetsDto(List.of(), new PaginationDto(1, 10, 0L, 0)));
+
+        mockMvc.perform(get(PROTECTED_ENDPOINT)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + token))
+                .andExpect(status().isOk());
+
+        verify(twitterService).getPaginatedTweets(1, 10);
+    }
+
     @ParameterizedTest(name = "[{index}] {0}")
     @ValueSource(strings = {"Bearer", "bearer", "BEARER", "BeArEr"})
     @DisplayName("reads the bearer scheme name without regard to letter case")
@@ -825,7 +881,7 @@ class AuthControllerTest {
     void carriesACredentialAtTheLengthCeilingToTheAuthenticationManager() {
         RecordingAuthenticationManager manager =
                 RecordingAuthenticationManager.accepting(configuredUsername());
-        AuthController controller = new AuthController(manager, jwtService);
+        AuthController controller = newAuthController(manager);
         LoginRequest atCeiling = new LoginRequest("u".repeat(CREDENTIAL_LENGTH_CEILING),
                 "p".repeat(CREDENTIAL_LENGTH_CEILING));
 
@@ -846,7 +902,7 @@ class AuthControllerTest {
     void stopsACredentialAboveTheLengthCeilingBeforeTheAuthenticationManager(int length) {
         RecordingAuthenticationManager manager =
                 RecordingAuthenticationManager.accepting(configuredUsername());
-        AuthController controller = new AuthController(manager, jwtService);
+        AuthController controller = newAuthController(manager);
 
         ResponseEntity<TokenResponse> byUsername = controller.issueToken(
                 new LoginRequest("u".repeat(length), TEST_PASSWORD));
@@ -866,7 +922,7 @@ class AuthControllerTest {
     void reportsABurstOfRejectedCredentialsWithOneWarningCarryingTheCount() {
         RecordingAuthenticationManager manager =
                 RecordingAuthenticationManager.rejecting(new BadCredentialsException("no"));
-        AuthController controller = new AuthController(manager, jwtService);
+        AuthController controller = newAuthController(manager);
         ListAppender<ILoggingEvent> recorded = attachAppender();
         try {
             for (int attempt = 0; attempt < REJECTION_BURST; attempt++) {
@@ -891,7 +947,7 @@ class AuthControllerTest {
     void reportsABurstOfOverLengthCredentialsWithOneWarningNamingTheBoundOnly() {
         RecordingAuthenticationManager manager =
                 RecordingAuthenticationManager.accepting(configuredUsername());
-        AuthController controller = new AuthController(manager, jwtService);
+        AuthController controller = newAuthController(manager);
         String oversized = "u".repeat(CREDENTIAL_LENGTH_CEILING + 1);
         ListAppender<ILoggingEvent> recorded = attachAppender();
         try {
@@ -916,7 +972,7 @@ class AuthControllerTest {
     void countsTheTwoRejectionReasonsIndependently() {
         RecordingAuthenticationManager manager =
                 RecordingAuthenticationManager.rejecting(new BadCredentialsException("no"));
-        AuthController controller = new AuthController(manager, jwtService);
+        AuthController controller = newAuthController(manager);
         ListAppender<ILoggingEvent> recorded = attachAppender();
         try {
             controller.issueToken(new LoginRequest(configuredUsername(), "wrong"));
@@ -941,7 +997,7 @@ class AuthControllerTest {
             AuthenticationException rejection) {
         RecordingAuthenticationManager manager =
                 RecordingAuthenticationManager.rejecting(rejection);
-        AuthController controller = new AuthController(manager, jwtService);
+        AuthController controller = newAuthController(manager);
 
         ResponseEntity<TokenResponse> response = controller.issueToken(
                 new LoginRequest(configuredUsername(), WRONG_PASSWORD));
@@ -984,7 +1040,7 @@ class AuthControllerTest {
     void propagatesAnAuthenticationServiceFailurePastThe401Mapping() {
         RecordingAuthenticationManager manager = RecordingAuthenticationManager.rejecting(
                 new AuthenticationServiceException("provider unavailable"));
-        AuthController controller = new AuthController(manager, jwtService);
+        AuthController controller = newAuthController(manager);
         LoginRequest request = new LoginRequest(configuredUsername(), TEST_PASSWORD);
 
         assertThatThrownBy(() -> controller.issueToken(request))
@@ -997,7 +1053,7 @@ class AuthControllerTest {
     void readsAnAbsentRequestBodyAsAnUnsuppliedCredential() {
         RecordingAuthenticationManager manager = RecordingAuthenticationManager.rejecting(
                 new BadCredentialsException("rejected"));
-        AuthController controller = new AuthController(manager, jwtService);
+        AuthController controller = newAuthController(manager);
 
         ResponseEntity<TokenResponse> response = controller.issueToken(null);
 
@@ -1006,8 +1062,8 @@ class AuthControllerTest {
         assertThat(response.getBody()).isNull();
     }
 
-    // Net-new bound on the credential verifications in progress — DL-272 — see
-    // docs/DECISION_LOG.md
+    // Net-new bound on the credential verifications in progress, reported as an availability
+    // condition rather than as a rejected credential — DL-272 — see docs/DECISION_LOG.md
     @Nested
     @DisplayName("the bound on credential verification in progress")
     class VerificationWorkBound {
@@ -1015,30 +1071,88 @@ class AuthControllerTest {
 
         private static final int PERMIT_FLOOR = 2;
 
+        /** Value of {@code Retry-After} the 503 carries — DL-272. */
+        private static final String RETRY_AFTER_SECONDS = "1";
+
         private static final int SURPLUS_CALLERS = 2;
 
         private static final long CALLER_TIMEOUT_SECONDS = 20L;
 
+        /** Valid credentials the concurrent burst submits — the reported reproduction's count. */
+        private static final int CONCURRENT_ATTEMPTS = 40;
+
+        /** Callers the concurrent burst submits them over — the reported reproduction's count. */
+        private static final int CONCURRENT_CALLERS = 20;
+
         @Test
-        @DisplayName("issues one permit per processor and never fewer than two")
+        @DisplayName("issues one permit per processor and never fewer than two when the configured "
+                + "count selects derivation")
         void issuesOnePermitPerProcessorAndNeverFewerThanTwo() {
-            AuthController controller = new AuthController(
-                    RecordingAuthenticationManager.accepting(configuredUsername()), jwtService);
+            AuthController controller = newAuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()));
 
             Semaphore permits = verificationPermitsOf(controller);
 
+            assertThat(properties.auth().verificationPermits())
+                    .as("scanner.auth.verification-permits under the test profile").isZero();
             assertThat(permits.availablePermits())
                     .isEqualTo(Math.max(PERMIT_FLOOR, Runtime.getRuntime().availableProcessors()));
             assertThat(permits.availablePermits()).isGreaterThanOrEqualTo(PERMIT_FLOOR);
         }
 
+        // Both admission bounds are configuration — DL-272 — see docs/DECISION_LOG.md
         @Test
-        @DisplayName("answers a credential with 401 while every permit is held, starting no "
-                + "verification")
-        void answersACredentialWith401WhileEveryPermitIsHeldStartingNoVerification() {
+        @DisplayName("issues exactly the configured permit count when one is configured")
+        void issuesExactlyTheConfiguredPermitCountWhenOneIsConfigured() {
+            AuthController controller = newAuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()), 7, 250L);
+
+            assertThat(verificationPermitsOf(controller).availablePermits())
+                    .as("permits issued for a configured count of 7").isEqualTo(7);
+        }
+
+        @Test
+        @DisplayName("waits the configured admission time before reporting the route unavailable")
+        void waitsTheConfiguredAdmissionTimeBeforeReportingTheRouteUnavailable() {
+            AuthController controller = newAuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()), 1, 300L);
+            Semaphore permits = verificationPermitsOf(controller);
+            int held = permits.drainPermits();
+            try {
+                long startedAt = System.nanoTime();
+                ResponseEntity<TokenResponse> response = controller.issueToken(
+                        new LoginRequest(configuredUsername(), TEST_PASSWORD));
+                long waitedMillis =
+                        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+
+                assertThat(response.getStatusCode().value())
+                        .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE.value());
+                assertThat(waitedMillis).as("milliseconds waited for admission")
+                        .isGreaterThanOrEqualTo(250L);
+            } finally {
+                permits.release(held);
+            }
+        }
+
+        // A negative wait is refused at binding time — DL-272 — see docs/DECISION_LOG.md
+        @Test
+        @DisplayName("refuses a negative configured admission wait")
+        void refusesANegativeConfiguredAdmissionWait() {
+            assertThatThrownBy(() -> new ScannerProperties.Auth(
+                    configuredUsername(), properties.auth().passwordHash(), 0, -1L))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("scanner.auth.verification-wait-millis");
+        }
+
+        // A valid credential turned away by the admission bound is never reported as invalid —
+        // DL-272 — see docs/DECISION_LOG.md
+        @Test
+        @DisplayName("answers a credential with 503 rather than 401 while every permit is held, "
+                + "starting no verification")
+        void answersACredentialWith503WhileEveryPermitIsHeldStartingNoVerification() {
             RecordingAuthenticationManager manager =
                     RecordingAuthenticationManager.accepting(configuredUsername());
-            AuthController controller = new AuthController(manager, jwtService);
+            AuthController controller = newAuthController(manager, 2, 0L);
             Semaphore permits = verificationPermitsOf(controller);
             int held = permits.drainPermits();
             try {
@@ -1049,16 +1163,21 @@ class AuthControllerTest {
                 assertThat(permits.availablePermits()).isZero();
                 assertThat(manager.invocations()).isZero();
                 assertThat(response.getStatusCode().value())
-                        .isEqualTo(HttpStatus.UNAUTHORIZED.value());
+                        .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE.value());
+                assertThat(response.getStatusCode().value())
+                        .isNotEqualTo(HttpStatus.UNAUTHORIZED.value());
                 assertThat(response.getBody()).isNull();
+                assertThat(response.getHeaders().getFirst(HttpHeaders.RETRY_AFTER))
+                        .isEqualTo(RETRY_AFTER_SECONDS);
             } finally {
                 permits.release(held);
             }
         }
 
         @Test
-        @DisplayName("answers 401 with an empty body over the wire while every permit is held")
-        void answers401WithAnEmptyBodyOverTheWireWhileEveryPermitIsHeld() throws Exception {
+        @DisplayName("answers 503 with an empty body and Retry-After over the wire while every "
+                + "permit is held")
+        void answers503WithAnEmptyBodyOverTheWireWhileEveryPermitIsHeld() throws Exception {
             Semaphore permits =
                     verificationPermitsOf(applicationContext.getBean(AuthController.class));
             int held = permits.drainPermits();
@@ -1066,8 +1185,9 @@ class AuthControllerTest {
                 mockMvc.perform(post(TOKEN_ENDPOINT)
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(credentialBody(configuredUsername(), TEST_PASSWORD)))
-                        .andExpect(status().isUnauthorized())
+                        .andExpect(status().isServiceUnavailable())
                         .andExpect(content().string(""))
+                        .andExpect(header().string(HttpHeaders.RETRY_AFTER, RETRY_AFTER_SECONDS))
                         .andExpect(header().doesNotExist(HttpHeaders.WWW_AUTHENTICATE));
             } finally {
                 permits.release(held);
@@ -1075,10 +1195,10 @@ class AuthControllerTest {
         }
 
         @Test
-        @DisplayName("names only the permit count in the record an unverified request leaves")
-        void namesOnlyThePermitCountInTheRecordAnUnverifiedRequestLeaves() {
-            AuthController controller = new AuthController(
-                    RecordingAuthenticationManager.accepting(configuredUsername()), jwtService);
+        @DisplayName("names only the permit count in the record an unadmitted request leaves")
+        void namesOnlyThePermitCountInTheRecordAnUnadmittedRequestLeaves() {
+            AuthController controller = newAuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()), 2, 0L);
             Semaphore permits = verificationPermitsOf(controller);
             int held = permits.drainPermits();
             ListAppender<ILoggingEvent> recorded = attachAppender();
@@ -1088,7 +1208,7 @@ class AuthControllerTest {
                 List<String> warnings = warningRecords(recorded);
                 assertThat(warnings).hasSize(1);
                 assertThat(warnings.get(0))
-                        .contains("was not verified: all " + held
+                        .contains("was not admitted: all " + held
                                 + " verification permit(s) were held")
                         .doesNotContain(configuredUsername())
                         .doesNotContain(TEST_PASSWORD);
@@ -1099,11 +1219,11 @@ class AuthControllerTest {
         }
 
         @Test
-        @DisplayName("reports a burst of unverified requests with one warning carrying the count")
-        void reportsABurstOfUnverifiedRequestsWithOneWarningCarryingTheCount() {
+        @DisplayName("reports a burst of unadmitted requests with one warning carrying the count")
+        void reportsABurstOfUnadmittedRequestsWithOneWarningCarryingTheCount() {
             RecordingAuthenticationManager manager =
                     RecordingAuthenticationManager.accepting(configuredUsername());
-            AuthController controller = new AuthController(manager, jwtService);
+            AuthController controller = newAuthController(manager, 2, 0L);
             Semaphore permits = verificationPermitsOf(controller);
             int held = permits.drainPermits();
             ListAppender<ILoggingEvent> recorded = attachAppender();
@@ -1112,7 +1232,7 @@ class AuthControllerTest {
                     assertThat(controller.issueToken(
                                     new LoginRequest(configuredUsername(), TEST_PASSWORD))
                             .getStatusCode().value())
-                            .isEqualTo(HttpStatus.UNAUTHORIZED.value());
+                            .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE.value());
                 }
 
                 assertThat(manager.invocations()).isZero();
@@ -1127,8 +1247,8 @@ class AuthControllerTest {
         @Test
         @DisplayName("returns the permit an issued token held")
         void returnsThePermitAnIssuedTokenHeld() {
-            AuthController controller = new AuthController(
-                    RecordingAuthenticationManager.accepting(configuredUsername()), jwtService);
+            AuthController controller = newAuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()));
             Semaphore permits = verificationPermitsOf(controller);
             int issued = permits.availablePermits();
 
@@ -1142,10 +1262,8 @@ class AuthControllerTest {
         @Test
         @DisplayName("returns the permit a rejected credential held")
         void returnsThePermitARejectedCredentialHeld() {
-            AuthController controller = new AuthController(
-                    RecordingAuthenticationManager.rejecting(
-                            new BadCredentialsException("rejected")),
-                    jwtService);
+            AuthController controller = newAuthController(RecordingAuthenticationManager.rejecting(
+                    new BadCredentialsException("rejected")));
             Semaphore permits = verificationPermitsOf(controller);
             int issued = permits.availablePermits();
 
@@ -1160,10 +1278,8 @@ class AuthControllerTest {
         @Test
         @DisplayName("returns the permit a propagated verifier failure held")
         void returnsThePermitAPropagatedVerifierFailureHeld() {
-            AuthController controller = new AuthController(
-                    RecordingAuthenticationManager.rejecting(
-                            new AuthenticationServiceException("provider unavailable")),
-                    jwtService);
+            AuthController controller = newAuthController(RecordingAuthenticationManager.rejecting(
+                    new AuthenticationServiceException("provider unavailable")));
             Semaphore permits = verificationPermitsOf(controller);
             int issued = permits.availablePermits();
             LoginRequest request = new LoginRequest(configuredUsername(), TEST_PASSWORD);
@@ -1179,7 +1295,7 @@ class AuthControllerTest {
         void acquiresNoPermitForACredentialAboveTheLengthCeiling() {
             RecordingAuthenticationManager manager =
                     RecordingAuthenticationManager.accepting(configuredUsername());
-            AuthController controller = new AuthController(manager, jwtService);
+            AuthController controller = newAuthController(manager, 2, 0L);
             Semaphore permits = verificationPermitsOf(controller);
             int held = permits.drainPermits();
             ListAppender<ILoggingEvent> recorded = attachAppender();
@@ -1203,8 +1319,8 @@ class AuthControllerTest {
         @Test
         @DisplayName("serves a credential again once a permit is returned")
         void servesACredentialAgainOnceAPermitIsReturned() {
-            AuthController controller = new AuthController(
-                    RecordingAuthenticationManager.accepting(configuredUsername()), jwtService);
+            AuthController controller = newAuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()), 2, 0L);
             Semaphore permits = verificationPermitsOf(controller);
             int held = permits.drainPermits();
 
@@ -1215,22 +1331,64 @@ class AuthControllerTest {
                     new LoginRequest(configuredUsername(), TEST_PASSWORD));
 
             assertThat(whileHeld.getStatusCode().value())
-                    .isEqualTo(HttpStatus.UNAUTHORIZED.value());
+                    .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE.value());
             assertThat(afterRelease.getStatusCode().value()).isEqualTo(HttpStatus.OK.value());
             assertThat(afterRelease.getBody()).isNotNull();
             assertThat(permits.availablePermits()).isEqualTo(held);
+        }
+
+        // The reported defect: forty valid credentials over twenty callers were answered with a
+        // mixture of 200 and 401 under the withdrawn 250ms wait. Under the configured wait every one
+        // of them authenticates and none is answered 401 — DL-272 — see docs/DECISION_LOG.md
+        @Test
+        @DisplayName("authenticates every valid credential of a concurrent burst and answers none "
+                + "of them 401")
+        void authenticatesEveryValidCredentialOfAConcurrentBurst() throws Exception {
+            AuthController controller = newAuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()));
+            int permitCount = verificationPermitsOf(controller).availablePermits();
+            ExecutorService callerPool = Executors.newFixedThreadPool(CONCURRENT_CALLERS);
+            try {
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<Integer>> answers = new ArrayList<>();
+                for (int attempt = 0; attempt < CONCURRENT_ATTEMPTS; attempt++) {
+                    answers.add(callerPool.submit(() -> {
+                        start.await(CALLER_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                        return controller.issueToken(
+                                        new LoginRequest(configuredUsername(), TEST_PASSWORD))
+                                .getStatusCode().value();
+                    }));
+                }
+                start.countDown();
+
+                List<Integer> statuses = new ArrayList<>();
+                for (Future<Integer> answer : answers) {
+                    statuses.add(answer.get(CALLER_TIMEOUT_SECONDS, TimeUnit.SECONDS));
+                }
+
+                assertThat(statuses).as("%d valid credentials over %d callers against %d permit(s)",
+                                CONCURRENT_ATTEMPTS, CONCURRENT_CALLERS, permitCount)
+                        .hasSize(CONCURRENT_ATTEMPTS)
+                        .containsOnly(HttpStatus.OK.value());
+                assertThat(verificationPermitsOf(controller).availablePermits())
+                        .isEqualTo(permitCount);
+            } finally {
+                callerPool.shutdownNow();
+            }
         }
 
         // The measured bound: verifications in progress never pass the permit count — DL-272
         @Test
         @DisplayName("holds the verifications in progress at the permit count under load")
         void holdsTheVerificationsInProgressAtThePermitCountUnderLoad() throws Exception {
-            AuthController sizing = new AuthController(
-                    RecordingAuthenticationManager.accepting(configuredUsername()), jwtService);
+            AuthController sizing = newAuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()));
             int permitCount = verificationPermitsOf(sizing).availablePermits();
             BlockingAuthenticationManager manager =
                     new BlockingAuthenticationManager(configuredUsername(), permitCount);
-            AuthController controller = new AuthController(manager, jwtService);
+            // Zero wait, so a caller beyond the permit count is turned away immediately and the
+            // bound is observable rather than absorbed by the queueing wait — DL-272
+            AuthController controller = newAuthController(manager, permitCount, 0L);
             int callers = permitCount + SURPLUS_CALLERS;
             ExecutorService callerPool = Executors.newFixedThreadPool(callers);
             try {
@@ -1252,7 +1410,9 @@ class AuthControllerTest {
                 assertThat(statuses).hasSize(callers);
                 assertThat(statuses).containsAnyOf(HttpStatus.OK.value());
                 assertThat(statuses).allSatisfy(status -> assertThat(status)
-                        .isIn(HttpStatus.OK.value(), HttpStatus.UNAUTHORIZED.value()));
+                        .isIn(HttpStatus.OK.value(), HttpStatus.SERVICE_UNAVAILABLE.value()));
+                assertThat(statuses).as("no caller is reported as presenting a bad credential")
+                        .doesNotContain(HttpStatus.UNAUTHORIZED.value());
                 assertThat(verificationPermitsOf(controller).availablePermits())
                         .isEqualTo(permitCount);
             } finally {
@@ -1267,8 +1427,8 @@ class AuthControllerTest {
         @Test
         @DisplayName("names no principal in the record a successful issuance leaves")
         void namesNoPrincipalInTheRecordASuccessfulIssuanceLeaves() {
-            AuthController controller = new AuthController(
-                    RecordingAuthenticationManager.accepting(configuredUsername()), jwtService);
+            AuthController controller = newAuthController(
+                    RecordingAuthenticationManager.accepting(configuredUsername()));
             ListAppender<ILoggingEvent> records = attachRecorder();
             try {
                 controller.issueToken(new LoginRequest(configuredUsername(), TEST_PASSWORD));
@@ -1287,10 +1447,8 @@ class AuthControllerTest {
         @DisplayName("records the first rejection of a reporting interval at WARN and every later one "
                 + "at DEBUG")
         void recordsTheFirstRejectionOfAnIntervalAtWarnAndEveryLaterOneAtDebug() {
-            AuthController controller = new AuthController(
-                    RecordingAuthenticationManager.rejecting(
-                            new BadCredentialsException("rejected")),
-                    jwtService);
+            AuthController controller = newAuthController(RecordingAuthenticationManager.rejecting(
+                    new BadCredentialsException("rejected")));
             ListAppender<ILoggingEvent> records = attachRecorder();
             try {
                 for (int attempt = 0; attempt < 25; attempt++) {
@@ -1312,10 +1470,8 @@ class AuthControllerTest {
         @Test
         @DisplayName("counts the rejections the record it writes stands for")
         void countsTheRejectionsTheRecordItWritesStandsFor() {
-            AuthController controller = new AuthController(
-                    RecordingAuthenticationManager.rejecting(
-                            new BadCredentialsException("rejected")),
-                    jwtService);
+            AuthController controller = newAuthController(RecordingAuthenticationManager.rejecting(
+                    new BadCredentialsException("rejected")));
             ListAppender<ILoggingEvent> records = attachRecorder();
             try {
                 controller.issueToken(new LoginRequest(UNKNOWN_USERNAME, WRONG_PASSWORD));
@@ -1335,7 +1491,7 @@ class AuthControllerTest {
             String overLength = "p".repeat(CREDENTIAL_LENGTH_CEILING + 1);
             RecordingAuthenticationManager manager = RecordingAuthenticationManager.rejecting(
                     new BadCredentialsException("rejected"));
-            AuthController controller = new AuthController(manager, jwtService);
+            AuthController controller = newAuthController(manager);
             ListAppender<ILoggingEvent> records = attachRecorder();
             try {
                 controller.issueToken(new LoginRequest(configuredUsername(), overLength));
@@ -1503,6 +1659,43 @@ class AuthControllerTest {
         return configured.substring(configured.length() - BCRYPT_TAIL_LENGTH);
     }
 
+    // The controller reads its admission bound from the bound configuration — DL-272 — see
+    // docs/DECISION_LOG.md
+    private AuthController newAuthController(AuthenticationManager manager) {
+        return new AuthController(manager, jwtService, properties);
+    }
+
+    /**
+     * Builds a controller whose admission bound is the supplied permit count and wait, leaving
+     * every other configured value as the {@code test} profile binds it — DL-272.
+     *
+     * @param manager           the credential verifier the controller calls
+     * @param permits           value of {@code scanner.auth.verification-permits}
+     * @param waitMillis        value of {@code scanner.auth.verification-wait-millis}
+     * @return the controller; never {@code null}
+     */
+    private AuthController newAuthController(AuthenticationManager manager, int permits,
+            long waitMillis) {
+        return new AuthController(manager, jwtService,
+                propertiesWithAdmissionBound(permits, waitMillis));
+    }
+
+    private ScannerProperties propertiesWithAdmissionBound(int permits, long waitMillis) {
+        return new ScannerProperties(
+                properties.databaseUrl(),
+                properties.popularityThreshold(),
+                properties.responseGenerationDelaySeconds(),
+                properties.twitter(),
+                properties.notion(),
+                properties.openai(),
+                properties.jwt(),
+                new ScannerProperties.Auth(properties.auth().username(),
+                        properties.auth().passwordHash(), permits, waitMillis),
+                properties.analytics(),
+                properties.ingestion(),
+                properties.background());
+    }
+
     private SecurityConfig securityConfigWith(String passwordHash) {
         return securityConfigWith(configuredUsername(), passwordHash);
     }
@@ -1516,7 +1709,9 @@ class AuthControllerTest {
                 properties.notion(),
                 properties.openai(),
                 properties.jwt(),
-                new ScannerProperties.Auth(username, passwordHash),
+                new ScannerProperties.Auth(username, passwordHash,
+                        properties.auth().verificationPermits(),
+                        properties.auth().verificationWaitMillis()),
                 properties.analytics(),
                 properties.ingestion(),
                 properties.background());

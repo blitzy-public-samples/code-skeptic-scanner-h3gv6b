@@ -37,6 +37,7 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Clob;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
@@ -161,23 +162,33 @@ class JpaMappingIntegrationTest {
 
     /**
      * Value {@code jakarta.persistence.Column#length()} carries when a mapping declares no length.
-     * Every mapped column leaves the facet undeclared, so every mapping reports this value — DL-068 —
-     * see docs/DECISION_LOG.md.
+     * The {@code settings} primary key and every non-character column leave the facet undeclared, so
+     * each of those mappings reports this value — DL-068, DL-069 — see docs/DECISION_LOG.md.
      */
     private static final int UNDECLARED_LENGTH_FACET = 255;
 
     /**
-     * JDBC type code the ten wide character columns state, so each dialect renders its widest
-     * character type that needs no declared capacity — DL-068 — see docs/DECISION_LOG.md.
+     * Value {@code jakarta.persistence.Column#length()} carries on the ten wide character columns.
+     * It states no bound: it lies above every supported dialect's greatest capacity-bearing
+     * character type, which is what selects that dialect's capacity-free character type instead —
+     * DL-068 — see docs/DECISION_LOG.md.
+     */
+    private static final int CAPACITY_FREE_LENGTH_FACET = Integer.MAX_VALUE;
+
+    /**
+     * JDBC type code the ten wide character columns state. With
+     * {@link #CAPACITY_FREE_LENGTH_FACET} it keeps the attribute string-like in the provider's own
+     * type system while selecting the capacity-free rendering — DL-068 — see docs/DECISION_LOG.md.
      */
     private static final int WIDE_CHARACTER_JDBC_TYPE_CODE = SqlTypes.LONGVARCHAR;
 
     /**
-     * Capacity H2 2.3 and PostgreSQL 16 report for a column stating
-     * {@link #WIDE_CHARACTER_JDBC_TYPE_CODE}. It is the vendor's own widest capacity-free character
-     * rendering, not a capacity this mapping states — DL-068 — see docs/DECISION_LOG.md.
+     * Capacity H2 2.3 and PostgreSQL 16 reported for a wide character column under the withdrawn
+     * mapping, which stated the JDBC type code alone. No delivered column is rendered with it: the
+     * assertions below require a reported width above it on every vendor — DL-068 — see
+     * docs/DECISION_LOG.md.
      */
-    private static final int WIDE_CHARACTER_CAPACITY = 32_600;
+    private static final int WITHDRAWN_WIDE_CHARACTER_CAPACITY = 32_600;
 
     /**
      * Capacity the {@code settings} primary key is rendered with on every supported vendor, so the
@@ -187,9 +198,15 @@ class JpaMappingIntegrationTest {
 
     /**
      * A value length beyond the capacity an undeclared length renders, used to store a value the
-     * withdrawn mapping would have rejected — DL-068 — see docs/DECISION_LOG.md.
+     * annotation default would have rejected — DL-068 — see docs/DECISION_LOG.md.
      */
     private static final int BEYOND_UNDECLARED_LENGTH_FACET = 1_000;
+
+    /**
+     * A value length beyond {@link #WITHDRAWN_WIDE_CHARACTER_CAPACITY}, used to store a value the
+     * withdrawn mapping rejected with SQLState 22001 — DL-068 — see docs/DECISION_LOG.md.
+     */
+    private static final int BEYOND_WITHDRAWN_WIDE_CHARACTER_CAPACITY = 40_000;
 
     /**
      * Every character column the source declares as a bare {@code Column(String)} —
@@ -219,13 +236,16 @@ class JpaMappingIntegrationTest {
     private static final int WIDE_CHARACTER_COLUMN_COUNT = 10;
 
     /**
-     * Vendor character types that hold a large object and not a string. No generated statement
-     * may declare one: Hibernate's own type system treats such a column as not string-like,
-     * and MySQL cannot index one without a prefix length — DL-068, DL-069 — see
+     * Vendor types no generated statement may declare. {@code mediumtext} and {@code tinytext} bound
+     * the value at 16 MiB and 255 bytes respectively, so neither is the widest character type MySQL
+     * offers; {@code oid} is PostgreSQL's out-of-line large-object reference rather than a character
+     * column, and {@code blob} is binary. The capacity-free character type each supported dialect
+     * does render — {@code clob} on H2, {@code text} on PostgreSQL, {@code longtext} on MySQL — is
+     * asserted by name in {@link #EXPECTED_GENERATED_COLUMN_TYPES} — DL-068 — see
      * docs/DECISION_LOG.md.
      */
-    private static final List<String> LARGE_OBJECT_CHARACTER_TYPES =
-            List.of("clob", "longtext", "mediumtext", "tinytext", "character large object", " oid");
+    private static final List<String> FORBIDDEN_GENERATED_TYPES =
+            List.of("mediumtext", "tinytext", " oid", "blob");
 
     /**
      * Vendor character type names that require a declared capacity before MySQL accepts them. A
@@ -327,46 +347,44 @@ class JpaMappingIntegrationTest {
     private static final Map<String, Map<String, List<String>>> EXPECTED_GENERATED_COLUMN_TYPES =
             Map.of(
                     "org.hibernate.dialect.H2Dialect", Map.of(
-                            TWEETS_TABLE, List.of("id integer", "content varchar(32600)",
+                            TWEETS_TABLE, List.of("id integer", "content clob",
                                     "like_count integer", "created_at timestamp(6)",
-                                    "doubt_rating float(53)", "media varchar(32600)",
-                                    "quoted_tweet_id varchar(32600)", "user_id varchar(32600)",
-                                    "ai_tools_mentioned varchar(32600)"),
-                            RESPONSES_TABLE, List.of("id integer", "content varchar(32600)",
+                                    "doubt_rating float(53)", "media clob",
+                                    "quoted_tweet_id clob", "user_id clob",
+                                    "ai_tools_mentioned clob"),
+                            RESPONSES_TABLE, List.of("id integer", "content clob",
                                     "generated_at timestamp(6)", "is_approved boolean",
                                     "tweet_id integer"),
                             AI_TOOLS_TABLE,
-                            List.of("id integer", "name varchar(32600)",
-                                    "description varchar(32600)"),
+                            List.of("id integer", "name clob", "description clob"),
                             SETTINGS_TABLE, List.of("\"key\" varchar(255)",
-                                    "\"value\" varchar(32600)", "description varchar(32600)")),
+                                    "\"value\" clob", "description clob")),
                     "org.hibernate.dialect.PostgreSQLDialect", Map.of(
-                            TWEETS_TABLE, List.of("id integer", "content varchar(32600)",
-                                    "like_count integer", "created_at timestamp(6)",
-                                    "doubt_rating float(53)", "media varchar(32600)",
-                                    "quoted_tweet_id varchar(32600)", "user_id varchar(32600)",
-                                    "ai_tools_mentioned varchar(32600)"),
-                            RESPONSES_TABLE, List.of("id integer", "content varchar(32600)",
-                                    "generated_at timestamp(6)", "is_approved boolean",
-                                    "tweet_id integer"),
-                            AI_TOOLS_TABLE,
-                            List.of("id integer", "name varchar(32600)",
-                                    "description varchar(32600)"),
-                            SETTINGS_TABLE, List.of("\"key\" varchar(255)",
-                                    "\"value\" varchar(32600)", "description varchar(32600)")),
-                    "org.hibernate.dialect.MySQLDialect", Map.of(
                             TWEETS_TABLE, List.of("id integer", "content text",
-                                    "like_count integer", "created_at datetime(6)",
+                                    "like_count integer", "created_at timestamp(6)",
                                     "doubt_rating float(53)", "media text",
                                     "quoted_tweet_id text", "user_id text",
                                     "ai_tools_mentioned text"),
                             RESPONSES_TABLE, List.of("id integer", "content text",
-                                    "generated_at datetime(6)", "is_approved bit",
+                                    "generated_at timestamp(6)", "is_approved boolean",
                                     "tweet_id integer"),
                             AI_TOOLS_TABLE,
                             List.of("id integer", "name text", "description text"),
+                            SETTINGS_TABLE, List.of("\"key\" varchar(255)",
+                                    "\"value\" text", "description text")),
+                    "org.hibernate.dialect.MySQLDialect", Map.of(
+                            TWEETS_TABLE, List.of("id integer", "content longtext",
+                                    "like_count integer", "created_at datetime(6)",
+                                    "doubt_rating float(53)", "media longtext",
+                                    "quoted_tweet_id longtext", "user_id longtext",
+                                    "ai_tools_mentioned longtext"),
+                            RESPONSES_TABLE, List.of("id integer", "content longtext",
+                                    "generated_at datetime(6)", "is_approved bit",
+                                    "tweet_id integer"),
+                            AI_TOOLS_TABLE,
+                            List.of("id integer", "name longtext", "description longtext"),
                             SETTINGS_TABLE, List.of("`key` varchar(255)",
-                                    "`value` text", "description text")));
+                                    "`value` longtext", "description longtext")));
 
     private static final String DELIMITER = ",";
     private static final double TOLERANCE = 1.0e-9;
@@ -665,26 +683,39 @@ class JpaMappingIntegrationTest {
     // Ported from backend/app/db/models.py:L10-18,L23-28,L35-37,L42-44 (faithful port) — see
     // docs/DECISION_LOG.md
     // backend/app/db/models.py declares each of those columns as a bare Column(<Type>): none
-    // carries nullable=False, unique=True or a length argument, and neither does any mapped field.
-    // No field states a columnDefinition; the ten wide character fields state a JDBC type code and
-    // nothing else — DL-068, DL-069 — see docs/DECISION_LOG.md
+    // carries nullable=False or unique=True, and neither does any mapped field. No field states a
+    // columnDefinition. The ten wide character fields state a JDBC type code and the capacity-free
+    // length facet, which bounds nothing and selects the dialect's capacity-free character type;
+    // every other field leaves the facet at the annotation default — DL-068, DL-069 — see
+    // docs/DECISION_LOG.md
     @Test
-    @DisplayName("every mapped entity field leaves nullability, uniqueness, length and column "
-            + "definition undeclared")
+    @DisplayName("every mapped entity field leaves nullability, uniqueness and column definition "
+            + "undeclared, and declares a length facet only where it selects the capacity-free "
+            + "character type")
     void everyMappedEntityFieldLeavesTheColumnDefaultsInPlace() {
+        List<String> wideColumnNames = WIDE_CHARACTER_COLUMNS.values().stream()
+                .flatMap(List::stream).toList();
         int columnFields = 0;
         int joinColumnFields = 0;
         int characterFields = 0;
+        int capacityFreeFields = 0;
 
         for (Class<?> entityType : MAPPED_ENTITIES) {
             for (Field field : mappedFields(entityType, Column.class)) {
                 Column column = field.getAnnotation(Column.class);
                 String location = entityType.getSimpleName() + "#" + field.getName();
+                String columnName = column.name().replace("\"", "");
 
                 assertThat(column.nullable()).as("@Column#nullable of %s", location).isTrue();
                 assertThat(column.unique()).as("@Column#unique of %s", location).isFalse();
-                assertThat(column.length()).as("@Column#length of %s", location)
-                        .isEqualTo(UNDECLARED_LENGTH_FACET);
+                if (wideColumnNames.contains(columnName)) {
+                    assertThat(column.length()).as("@Column#length of %s", location)
+                            .isEqualTo(CAPACITY_FREE_LENGTH_FACET);
+                    capacityFreeFields++;
+                } else {
+                    assertThat(column.length()).as("@Column#length of %s", location)
+                            .isEqualTo(UNDECLARED_LENGTH_FACET);
+                }
                 assertThat(column.columnDefinition())
                         .as("@Column#columnDefinition of %s", location)
                         .isEmpty();
@@ -713,6 +744,8 @@ class JpaMappingIntegrationTest {
                 .isEqualTo(MAPPED_COLUMN_COUNT);
         assertThat(characterFields).as("character-mapped fields across the four entities")
                 .isEqualTo(SOURCE_CHARACTER_COLUMN_COUNT);
+        assertThat(capacityFreeFields).as("fields declaring the capacity-free length facet")
+                .isEqualTo(WIDE_CHARACTER_COLUMN_COUNT);
     }
 
     // The ten wide character columns state a JDBC type code; the settings primary key and every
@@ -756,8 +789,8 @@ class JpaMappingIntegrationTest {
     // DL-069 — see docs/DECISION_LOG.md
     @Test
     @DisplayName("every character column the source declares is generated in the character type "
-            + "family, the ten wide ones at the vendor's capacity-free width and the primary key at "
-            + "the indexable width")
+            + "family, the ten wide ones past the width the withdrawn mapping rendered and the "
+            + "primary key at the indexable width")
     void everySourceCharacterColumnIsGeneratedInTheCharacterFamily() throws SQLException {
         List<String> wideColumnNames = WIDE_CHARACTER_COLUMNS.values().stream()
                 .flatMap(List::stream).toList();
@@ -777,14 +810,14 @@ class JpaMappingIntegrationTest {
                                     table.getKey(), columnName, attributes.get(TYPE_NAME))
                             .isIn(CHARACTER_TYPES);
                     if (wideColumnNames.contains(columnName)) {
-                        assertThat((int) attributes.get(COLUMN_SIZE))
-                                .as("generated capacity of wide column %s.%s (reported as %s)",
+                        assertThat((long) attributes.get(COLUMN_SIZE))
+                                .as("generated width of wide column %s.%s (reported as %s)",
                                         table.getKey(), columnName, attributes.get(TYPE_NAME))
                                 .isNotEqualTo(UNDECLARED_LENGTH_FACET)
-                                .isEqualTo(WIDE_CHARACTER_CAPACITY);
+                                .isGreaterThan(WITHDRAWN_WIDE_CHARACTER_CAPACITY);
                         assertedWideColumns++;
                     } else {
-                        assertThat((int) attributes.get(COLUMN_SIZE))
+                        assertThat((long) attributes.get(COLUMN_SIZE))
                                 .as("generated capacity of primary-key column %s.%s (reported as %s)",
                                         table.getKey(), columnName, attributes.get(TYPE_NAME))
                                 .isEqualTo(PRIMARY_KEY_CAPACITY);
@@ -821,6 +854,66 @@ class JpaMappingIntegrationTest {
                 .hasSize(PRIMARY_KEY_CAPACITY).isEqualTo(fullLengthKey);
         assertThat(reloaded.get().getValue()).as("stored value")
                 .hasSize(BEYOND_UNDECLARED_LENGTH_FACET).isEqualTo(longValue);
+    }
+
+    // Every wide character column stores a value past the capacity the withdrawn mapping rendered,
+    // which is the write that failed with SQLState 22001 before the capacity-free rendering — DL-068
+    // — see docs/DECISION_LOG.md
+    @Test
+    @DisplayName("every wide character column stores and reloads a value past the capacity the "
+            + "withdrawn mapping rendered")
+    void everyWideCharacterColumnStoresAValuePastTheWithdrawnCapacity() {
+        String longText = "w".repeat(BEYOND_WITHDRAWN_WIDE_CHARACTER_CAPACITY - 1) + "é";
+        String longElement = "m".repeat(BEYOND_WITHDRAWN_WIDE_CHARACTER_CAPACITY);
+
+        Tweet tweet = new Tweet();
+        tweet.setContent(longText);
+        tweet.setLikeCount(1);
+        tweet.setCreatedAt(LocalDateTime.of(2026, 3, 4, 5, 6, 7));
+        tweet.setDoubtRating(5.0);
+        tweet.setMedia(List.of(longElement));
+        tweet.setQuotedTweetId(longText);
+        tweet.setUserId(longText);
+        tweet.setAiToolsMentioned(List.of(longElement));
+        Tweet storedTweet = tweetRepository.save(tweet);
+
+        Response response = new Response();
+        response.setContent(longText);
+        response.setGeneratedAt(LocalDateTime.of(2026, 3, 4, 5, 6, 8));
+        response.setIsApproved(Boolean.FALSE);
+        response.setTweet(storedTweet);
+        Response storedResponse = responseRepository.save(response);
+
+        AiTool tool = new AiTool();
+        tool.setName(longText);
+        tool.setDescription(longText);
+        AiTool storedTool = aiToolRepository.save(tool);
+
+        settingRepository.save(new Setting("wide_value_probe", longText, longText));
+
+        entityManager.flush();
+        entityManager.clear();
+
+        Tweet reloadedTweet = tweetRepository.findById(storedTweet.getId()).orElseThrow();
+        assertThat(reloadedTweet.getContent()).as("tweets.content")
+                .hasSize(BEYOND_WITHDRAWN_WIDE_CHARACTER_CAPACITY).isEqualTo(longText);
+        assertThat(reloadedTweet.getQuotedTweetId()).as("tweets.quoted_tweet_id")
+                .isEqualTo(longText);
+        assertThat(reloadedTweet.getUserId()).as("tweets.user_id").isEqualTo(longText);
+        assertThat(reloadedTweet.getMedia()).as("tweets.media").containsExactly(longElement);
+        assertThat(reloadedTweet.getAiToolsMentioned()).as("tweets.ai_tools_mentioned")
+                .containsExactly(longElement);
+
+        assertThat(responseRepository.findById(storedResponse.getId()).orElseThrow().getContent())
+                .as("responses.content").isEqualTo(longText);
+
+        AiTool reloadedTool = aiToolRepository.findById(storedTool.getId()).orElseThrow();
+        assertThat(reloadedTool.getName()).as("ai_tools.name").isEqualTo(longText);
+        assertThat(reloadedTool.getDescription()).as("ai_tools.description").isEqualTo(longText);
+
+        Setting reloadedSetting = settingRepository.findById("wide_value_probe").orElseThrow();
+        assertThat(reloadedSetting.getValue()).as("settings.value").isEqualTo(longText);
+        assertThat(reloadedSetting.getDescription()).as("settings.description").isEqualTo(longText);
     }
 
     // Ported from backend/app/db/models.py:L7-8,L20-21,L32-33,L39-40 (faithful port) — see
@@ -1854,21 +1947,21 @@ class JpaMappingIntegrationTest {
         }
     }
 
-    // No generated character column is a large object, and every capacity-requiring type carries a
-    // capacity, so each statement is valid DDL on the vendor it was generated for — DL-068, DL-069,
-    // DL-166 — see docs/DECISION_LOG.md
+    // No generated column is a bounded text variant, a PostgreSQL large-object reference or a
+    // binary type, and every capacity-requiring type carries a capacity, so each statement is valid
+    // DDL on the vendor it was generated for — DL-068, DL-069, DL-166 — see docs/DECISION_LOG.md
     @Test
-    @DisplayName("no generated statement declares a large-object character type on any supported "
-            + "vendor")
-    void noGeneratedStatementDeclaresALargeObjectCharacterType() {
+    @DisplayName("no generated statement declares a bounded text variant, a large-object reference "
+            + "or a binary type on any supported vendor")
+    void noGeneratedStatementDeclaresAForbiddenType() {
         for (String dialect : EXPECTED_GENERATED_COLUMN_TYPES.keySet()) {
             Map<String, String> statements = generateCreateStatements(dialect);
 
             for (Map.Entry<String, String> table : statements.entrySet()) {
-                for (String largeObjectType : LARGE_OBJECT_CHARACTER_TYPES) {
+                for (String forbiddenType : FORBIDDEN_GENERATED_TYPES) {
                     assertThat(table.getValue())
                             .as("create statement of table %s on %s", table.getKey(), dialect)
-                            .doesNotContain(largeObjectType);
+                            .doesNotContain(forbiddenType);
                 }
             }
         }
@@ -2071,7 +2164,9 @@ class JpaMappingIntegrationTest {
                 Map<String, Object> attributes = new LinkedHashMap<>();
                 String columnName = columnRows.getString(COLUMN_NAME);
                 attributes.put(COLUMN_NAME, columnName);
-                attributes.put(COLUMN_SIZE, columnRows.getInt(COLUMN_SIZE));
+                // A capacity-free character column reports a width beyond the int range on H2, so
+                // the metadata width is read as a long — DL-068 — see docs/DECISION_LOG.md
+                attributes.put(COLUMN_SIZE, columnRows.getLong(COLUMN_SIZE));
                 attributes.put(DATA_TYPE, columnRows.getInt(DATA_TYPE));
                 attributes.put(TYPE_NAME, columnRows.getString(TYPE_NAME));
                 attributes.put(NULLABLE, columnRows.getInt(NULLABLE));
@@ -2232,10 +2327,13 @@ class JpaMappingIntegrationTest {
     /**
      * Reads a character column value as text.
      *
-     * <p>The two delimited columns are mapped as unbounded character storage rather than as a
-     * large object — DL-068, DL-166 — so the driver reports them as a {@link String}. Any other
-     * handle type fails this method, so the surrounding assertions describe the stored text and
-     * never a driver handle.
+     * <p>The two delimited columns are rendered in each dialect's capacity-free character type —
+     * DL-068, DL-166 — which a native query reports either as a {@link String} or, on H2, as a
+     * {@link Clob} handle over the same characters. Both are materialised here in full, so the
+     * surrounding assertions describe the stored text and never a driver handle. The mapped
+     * attribute itself is bound and read as a string: the columns state
+     * {@code SqlTypes.LONGVARCHAR}, so the provider's type system treats them as string-like.
+     * Any other handle type fails this method.
      *
      * @param columnValue the raw value the driver reported; may be {@code null}
      * @return the stored text, or {@code null} when the column holds SQL null
@@ -2246,6 +2344,15 @@ class JpaMappingIntegrationTest {
         }
         if (columnValue instanceof String text) {
             return text;
+        }
+        if (columnValue instanceof Clob clob) {
+            try {
+                long length = clob.length();
+                return length == 0L ? "" : clob.getSubString(1L, (int) length);
+            } catch (SQLException unreadable) {
+                throw new AssertionError("A character column handle could not be read.",
+                        unreadable);
+            }
         }
         throw new AssertionError("A character column reported an unexpected handle type: "
                 + columnValue.getClass().getName());

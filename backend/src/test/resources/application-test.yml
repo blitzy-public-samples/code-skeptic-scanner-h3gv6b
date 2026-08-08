@@ -124,6 +124,12 @@ scanner:
     # bcrypt hash of a build-only test credential; the hashing counterpart in the retired tree was
     # backend/app/core/security.py:L14-18.
     password-hash: '$2a$10$Lt3iVHWKlZC2hu2Nyh/NtekAa.gCoG3qZM.xoMT7w1b/zk3o7SBJS'
+    # Net-new (no Python counterpart) — DL-272 — see docs/DECISION_LOG.md
+    # Declared explicitly at the production defaults, so the admission bound a test context runs with
+    # is stated rather than inherited: 0 derives one permit per processor with a floor of 2, and a
+    # verification waits up to 10s for admission.
+    verification-permits: 0
+    verification-wait-millis: 10000
 
   analytics:
     # Net-new (no Python counterpart) — DL-042, DL-278 — see docs/DECISION_LOG.md

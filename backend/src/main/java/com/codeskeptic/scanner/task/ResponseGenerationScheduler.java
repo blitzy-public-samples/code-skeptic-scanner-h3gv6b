@@ -3,6 +3,7 @@ package com.codeskeptic.scanner.task;
 import com.codeskeptic.scanner.config.ScannerProperties;
 import com.codeskeptic.scanner.dto.ResponseDto;
 import com.codeskeptic.scanner.entity.Tweet;
+import com.codeskeptic.scanner.repository.SettingRepository;
 import com.codeskeptic.scanner.repository.TweetRepository;
 import com.codeskeptic.scanner.service.NotionService;
 import com.codeskeptic.scanner.service.ResponseService;
@@ -13,7 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationListener;
@@ -21,7 +22,6 @@ import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
@@ -35,12 +35,15 @@ import org.springframework.stereotype.Component;
  * declares no transaction, so each batch is read in the repository's own transaction, its rows are
  * detached when that call returns, and the calls to OpenAI and Notion run with no transaction open.
  *
- * <p>Pacing is declared on {@link #generatePendingResponses()} itself, as
- * {@code @Scheduled(fixedDelayString = "${scanner.response-generation-delay-seconds}")} in seconds:
- * the interval runs from the completion of one pass to the start of the next, which is the
- * work-then-sleep order of {@code backend/app/tasks/response_generation.py:L41-50} — DL-047, DL-227.
- * The scheduling capability is activated by {@code config/AsyncSchedulingConfig}, the single carrier
- * of {@code @EnableScheduling} in this application; this class declares no thread and submits to no
+ * <p>Pacing is a fixed delay measured from the completion of one pass to the start of the next,
+ * which is the work-then-sleep order of {@code backend/app/tasks/response_generation.py:L41-50} —
+ * DL-047. The interval in force is {@link #responseGenerationDelaySecondsInForce()}: the
+ * {@code response_generation_delay} {@code settings} row when it holds a positive whole number of
+ * seconds, and {@code scanner.response-generation-delay-seconds} otherwise, so an operator's edit
+ * through {@code PUT /settings/{key}} changes the cadence of the next pass without a restart —
+ * DL-227, DL-309. {@code config/AsyncSchedulingConfig} carries {@code @EnableScheduling} and
+ * registers this pass against a trigger that consults that method once per pass, at the moment the
+ * next instant is computed — DL-228, DL-309; this class declares no thread and submits to no
  * executor. No message broker, queue or task-dispatch infrastructure participates — DL-047.
  *
  * <p>Each candidate is handled independently. A failure is recorded against the candidate's
@@ -112,6 +115,12 @@ public class ResponseGenerationScheduler implements ApplicationListener<ContextC
 
     private static final Logger log = LoggerFactory.getLogger(ResponseGenerationScheduler.class);
 
+    /**
+     * Key of the {@code settings} row that sets this pass's interval, seeded by
+     * {@code service.SettingsService} — DL-040, DL-227 — see docs/DECISION_LOG.md.
+     */
+    private static final String RESPONSE_GENERATION_DELAY_SETTING_KEY = "response_generation_delay";
+
     /** Rows one candidate statement returns — DL-248 — see docs/DECISION_LOG.md. */
     private static final int CANDIDATE_BATCH_ROWS = 100;
 
@@ -160,8 +169,25 @@ public class ResponseGenerationScheduler implements ApplicationListener<ContextC
 
     private final NotionService notionService;
 
-    /** Supplies the per-pass candidate ceiling — DL-282. */
+    /**
+     * Supplies the per-pass candidate ceiling and the configured interval this pass falls back to —
+     * DL-282, DL-227.
+     */
     private final ScannerProperties properties;
+
+    /** Reads the {@code response_generation_delay} row that sets the interval — DL-227, DL-309. */
+    private final SettingRepository settingRepository;
+
+    /**
+     * Value of the {@value #RESPONSE_GENERATION_DELAY_SETTING_KEY} row the last unusable-value
+     * warning was recorded for, so a row that stays unusable cannot fill the log — DL-309.
+     *
+     * <p>Read and written from the scheduler pool thread that computes the next instant, and from any
+     * thread that calls {@link #responseGenerationDelaySecondsInForce()} directly; the reference is
+     * atomic so that comparison and replacement are one step.
+     */
+    // Net-new: one warning per distinct unusable value — DL-309 — see docs/DECISION_LOG.md
+    private final AtomicReference<String> lastUnusableDelay = new AtomicReference<>();
 
     /**
      * Consecutive failures per candidate identifier, most recently failing last.
@@ -191,7 +217,10 @@ public class ResponseGenerationScheduler implements ApplicationListener<ContextC
      *     never {@code null}
      * @param responseService generates and stores one reply per candidate; never {@code null}
      * @param notionService mirrors a stored reply onto its Notion page; never {@code null}
-     * @param properties supplies the per-pass candidate ceiling; never {@code null}
+     * @param properties supplies the per-pass candidate ceiling and the configured interval this
+     *     pass falls back to; never {@code null}
+     * @param settingRepository reads the {@value #RESPONSE_GENERATION_DELAY_SETTING_KEY} row that
+     *     sets the interval; never {@code null}
      * @throws NullPointerException when any argument is {@code null}
      */
     // Constructor injection replaces the in-function LLMService() at
@@ -201,7 +230,8 @@ public class ResponseGenerationScheduler implements ApplicationListener<ContextC
     public ResponseGenerationScheduler(TweetRepository tweetRepository,
             ResponseService responseService,
             NotionService notionService,
-            ScannerProperties properties) {
+            ScannerProperties properties,
+            SettingRepository settingRepository) {
         this.tweetRepository = Objects.requireNonNull(tweetRepository,
                 "tweetRepository must not be null.");
         this.responseService = Objects.requireNonNull(responseService,
@@ -209,6 +239,85 @@ public class ResponseGenerationScheduler implements ApplicationListener<ContextC
         this.notionService = Objects.requireNonNull(notionService,
                 "notionService must not be null.");
         this.properties = Objects.requireNonNull(properties, "properties must not be null.");
+        this.settingRepository = Objects.requireNonNull(settingRepository,
+                "settingRepository must not be null.");
+    }
+
+    // Ported from the settings-backed interval the source loop read at
+    // backend/app/tasks/response_generation.py:L50 — which named
+    // settings.response_generation_interval where backend/app/core/config.py:L11 declared
+    // RESPONSE_GENERATION_DELAY — DL-227, DL-309 — see docs/DECISION_LOG.md
+    /**
+     * Resolves the interval between the completion of one pass and the start of the next, in seconds.
+     *
+     * <p>The {@value #RESPONSE_GENERATION_DELAY_SETTING_KEY} {@code settings} row is read first and
+     * its value, once surrounding whitespace is discarded, is used when it parses as a positive
+     * {@code long}. {@code scanner.response-generation-delay-seconds} applies when that row is absent,
+     * holds {@code null}, holds a value that does not parse, or holds a value that is not positive —
+     * the last two are logged at {@code WARN} naming the key without recording the stored value.
+     *
+     * <p>A non-positive stored interval is refused rather than honoured: a zero or negative delay
+     * would place the next instant at or before the previous completion, so the pass would run
+     * without pause. That is the one respect in which this row differs from
+     * {@code tweet_popularity_threshold}, which honours a negative value as stored — DL-309.
+     *
+     * <p>The warning is recorded once per distinct unusable value: a value identical to the one the
+     * last warning was recorded for is recorded at {@code DEBUG} instead. A usable value clears that
+     * memory, so the same unusable value is reported again if it returns.
+     *
+     * <p>The trigger of {@code config/AsyncSchedulingConfig} calls this once per pass, when it
+     * computes the next instant, so an edit written through {@code PUT /settings/{key}} takes effect
+     * on the following interval without a restart — DL-228, DL-309.
+     *
+     * @return the interval in force, always positive
+     */
+    public long responseGenerationDelaySecondsInForce() {
+        String storedDelay = settingRepository.findById(RESPONSE_GENERATION_DELAY_SETTING_KEY)
+                .map(settingRow -> settingRow.getValue())
+                .orElse(null);
+
+        if (storedDelay != null) {
+            try {
+                long parsed = Long.parseLong(storedDelay.trim());
+                if (parsed > 0L) {
+                    lastUnusableDelay.set(null);
+                    return parsed;
+                }
+                reportUnusableDelay(storedDelay, "is not a positive number of seconds");
+            } catch (NumberFormatException ex) {
+                reportUnusableDelay(storedDelay, "does not hold a whole number of seconds");
+            }
+        } else {
+            lastUnusableDelay.set(null);
+        }
+
+        // backend/app/core/config.py:L11 — the configured interval
+        return properties.responseGenerationDelaySeconds();
+    }
+
+    // Net-new: one warning per distinct unusable value — DL-309 — see docs/DECISION_LOG.md
+    /**
+     * Records that the {@value #RESPONSE_GENERATION_DELAY_SETTING_KEY} row does not hold a usable
+     * interval.
+     *
+     * <p>The record is emitted at {@code WARN} when the offending value differs from the one the last
+     * warning was recorded for, and at {@code DEBUG} otherwise. Neither record carries the stored
+     * value; the value is held only to compare against the next one — DL-052.
+     *
+     * @param storedDelay the value that cannot be used, never {@code null}
+     * @param reason      a fixed description of why it cannot be used
+     */
+    private void reportUnusableDelay(String storedDelay, String reason) {
+        String previous = lastUnusableDelay.getAndSet(storedDelay);
+        if (storedDelay.equals(previous)) {
+            log.debug("Setting '{}' still {}; applying "
+                            + "scanner.response-generation-delay-seconds instead.",
+                    RESPONSE_GENERATION_DELAY_SETTING_KEY, reason);
+            return;
+        }
+
+        log.warn("Setting '{}' {}; applying scanner.response-generation-delay-seconds instead.",
+                RESPONSE_GENERATION_DELAY_SETTING_KEY, reason);
     }
 
     /**
@@ -233,12 +342,13 @@ public class ResponseGenerationScheduler implements ApplicationListener<ContextC
      * <p>A candidate ingested after the pass began is answered by this pass when its identifier lies
      * past the cursor at the time the next batch is read, and by the following pass otherwise.
      *
-     * <p>{@code fixedDelayString} measures the interval from the completion of one pass to the start of
-     * the next, so no pass overlaps its predecessor, and the framework runs the first pass at the
-     * startup instant — the work-then-sleep order of
-     * {@code backend/app/tasks/response_generation.py:L41-50}. The interval is
-     * {@code scanner.response-generation-delay-seconds}, read once when the task is registered —
-     * DL-047, DL-227.
+     * <p>The interval is measured from the completion of one pass to the start of the next, so no pass
+     * overlaps its predecessor, and the first pass runs at the startup instant — the work-then-sleep
+     * order of {@code backend/app/tasks/response_generation.py:L41-50}. The interval in force is
+     * {@link #responseGenerationDelaySecondsInForce()}, consulted once per pass by the trigger
+     * {@code config/AsyncSchedulingConfig} registers, so the {@code response_generation_delay}
+     * {@code settings} row sets the cadence and an edit takes effect on the following interval —
+     * DL-047, DL-227, DL-228, DL-309.
      *
      * <p>Nothing runs in a process that does not carry the pass: {@code scanner.background.enabled} and
      * {@code scanner.background.response-generation-enabled} must both hold, and a tick in a process
@@ -248,11 +358,10 @@ public class ResponseGenerationScheduler implements ApplicationListener<ContextC
     // Ported from schedule_response_generation() at
     // backend/app/tasks/response_generation.py:L35-50 (faithful port) — see docs/DECISION_LOG.md
     // DL-047.
-    // fixedDelayString replaces the `while True` loop at :L41 and the trailing `time.sleep(...)` at
-    // :L50, which read `settings.response_generation_interval` while backend/app/core/config.py:L11
-    // declared RESPONSE_GENERATION_DELAY — see docs/DECISION_LOG.md DL-047 and DL-227.
-    @Scheduled(fixedDelayString = "${scanner.response-generation-delay-seconds}",
-            timeUnit = TimeUnit.SECONDS)
+    // The completion-based trigger registered by config/AsyncSchedulingConfig replaces the
+    // `while True` loop at :L41 and the trailing `time.sleep(...)` at :L50, which read
+    // `settings.response_generation_interval` while backend/app/core/config.py:L11 declared
+    // RESPONSE_GENERATION_DELAY — see docs/DECISION_LOG.md DL-047, DL-227, DL-228 and DL-309.
     public void generatePendingResponses() {
         // Only a process that carries the pass runs it — DL-250 — see docs/DECISION_LOG.md
         if (!runsResponseGeneration()) {

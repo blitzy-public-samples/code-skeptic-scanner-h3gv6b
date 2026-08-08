@@ -10,8 +10,9 @@ import javax.sql.DataSource;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.event.ApplicationFailedEvent;
 import org.springframework.boot.diagnostics.FailureAnalysis;
-import org.springframework.boot.diagnostics.FailureAnalyzer;
+import org.springframework.context.ApplicationListener;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -140,7 +141,8 @@ public class DataSourceConfig {
      * <p>A connection that cannot be opened at all is not this method's subject: the failure is
      * reported at {@code WARN} naming the key and the failure type only, and the caller proceeds, so
      * an unreachable database keeps the startup path it already had and is explained by
-     * {@link DatabaseStartupFailureAnalyzer} — DL-305.
+     * {@link DatabaseStartupFailureAnalyzer}, which {@code ScannerApplication.main} registers on the
+     * {@code SpringApplication} — DL-305.
      *
      * @param dataSource the pool to read one connection's metadata from, never {@code null}
      * @param jdbcUrl    the translated JDBC URL whose vendor selects the check, never {@code null}
@@ -243,10 +245,15 @@ public class DataSourceConfig {
      * every {@code jdbc:}-prefixed token in it is replaced before the message is carried, and the
      * result passes through {@link #logSafe(String, int)} — DL-052, DL-052.
      *
-     * <p>Spring Boot instantiates this class through {@code META-INF/spring.factories} and calls it on
-     * the failure path only. It holds no state.
+     * <p>The instance is registered on the {@link org.springframework.boot.SpringApplication} by
+     * {@code ScannerApplication.main}, so it reaches the failure path without a
+     * {@code META-INF/spring.factories} resource — the registration mechanism of DL-305. Spring Boot
+     * multicasts {@link ApplicationFailedEvent} to application-registered listeners even when the
+     * context never became active, which is the only path a database failure takes. The class holds no
+     * state and its analysis is a pure function of the failure it is given.
      */
-    public static class DatabaseStartupFailureAnalyzer implements FailureAnalyzer {
+    public static class DatabaseStartupFailureAnalyzer
+            implements ApplicationListener<ApplicationFailedEvent> {
 
         /** Dialect-determination failure this analyzer recognises, matched case-insensitively. */
         private static final String DIALECT_MARKER = "unable to determine dialect";
@@ -273,12 +280,36 @@ public class DataSourceConfig {
                 the server's own metadata rather than configured.""";
 
         /**
-         * Produces the analysis for a failure of the JDBC and dialect chain.
+         * Reports the analysis when the application failed to start, and nothing otherwise.
          *
-         * @param failure the startup failure, never {@code null}
-         * @return the analysis, or {@code null} when the failure is not one this analyzer recognises
+         * <p>Emitted at {@code ERROR} in two records, the description then the remediation, because a
+         * single record carrying an embedded newline is harder to read in a line-oriented collector.
+         * A failure this class does not recognise produces no record at all, so the framework's own
+         * report stands alone rather than being followed by an empty diagnostic.
+         *
+         * @param event the failure event the framework multicast, never {@code null}
          */
         @Override
+        public void onApplicationEvent(ApplicationFailedEvent event) {
+            FailureAnalysis analysis = analyze(event.getException());
+            if (analysis == null) {
+                return;
+            }
+            log.error("Startup failed: {}", analysis.getDescription());
+            log.error("Remediation:{}{}", System.lineSeparator(), analysis.getAction());
+        }
+
+        /**
+         * Produces the analysis for a failure of the JDBC and dialect chain.
+         *
+         * <p>Public rather than private so the diagnostic can be exercised directly by a test without
+         * booting a context against an unreachable server. It carries the signature the framework's own
+         * {@code FailureAnalyzer} contract declares, so a future move back to that mechanism is a
+         * registration change and not a logic change.
+         *
+         * @param failure the startup failure, possibly {@code null}
+         * @return the analysis, or {@code null} when the failure is not one this analyzer recognises
+         */
         public FailureAnalysis analyze(Throwable failure) {
             Throwable cause = databaseCause(failure);
             if (cause == null) {

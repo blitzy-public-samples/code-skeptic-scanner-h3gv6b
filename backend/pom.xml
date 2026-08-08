@@ -30,11 +30,43 @@
     <name>code-skeptic-scanner-backend</name>
     <description>Code Skeptic Scanner backend service (Java 21 / Spring Boot)</description>
 
-    <!-- The only property this file declares. Every coordinate the parent BOM manages takes the
-         version the BOM resolves; no version property overrides one - see docs/DECISION_LOG.md
-         DL-306 -->
+    <!-- Five properties. `java.version` fixes the release the compiler targets. The four version
+         properties below shadow properties `spring-boot-starter-parent:3.5.16` declares, raising four
+         BOM-managed coordinates to the first patch release that carries the published fix for an
+         advisory the shipped version is inside the affected range of. Every other coordinate the BOM
+         manages still takes the version the BOM resolves. The advisory ranges, the departure from AAP
+         section 0.5.1.2 and the obligation these four create on the next parent move are recorded in
+         docs/DECISION_LOG.md DL-306, and per coordinate in DL-100, DL-101, DL-169, DL-170, DL-171 and
+         DL-240 -->
     <properties>
         <java.version>21</java.version>
+
+        <!-- 3.5.16 resolves 4.1.135.Final, which the advisory ranges of GHSA-93wv-jw9v-4972,
+             GHSA-jppx-w49h-x2qq, GHSA-mvh2-crg5-v77c, GHSA-6jqx-86gh-f27w (high),
+             GHSA-558v-64gr-wgg4 (high) and GHSA-c69g-56f8-xwqj (medium) all name as affected, each
+             first patched in 4.1.136.Final. One property moves every io.netty artifact together,
+             including the purely transitive netty-codec, netty-codec-http and netty-codec-http2 that
+             no coordinate in this file names - see docs/DECISION_LOG.md DL-100, DL-306. -->
+        <netty.version>4.1.136.Final</netty.version>
+
+        <!-- 3.5.16 resolves 2.21.4, which GHSA-5gvw-p9qm-jgwh and GHSA-mhm7-754m-9p8w (both medium,
+             @JsonView bypass) name as affected, first patched in 2.21.5. The property moves the whole
+             Jackson BOM, so jackson-databind, jackson-core and jackson-annotations stay on one release
+             train - see docs/DECISION_LOG.md DL-101, DL-306. -->
+        <jackson-bom.version>2.21.5</jackson-bom.version>
+
+        <!-- 3.5.16 resolves 42.7.11, inside the ">= 42.7.4, < 42.7.12" range of GHSA-j92g-9f8w-j867
+             (high, silent SCRAM channel-binding downgrade), first patched in 42.7.12 - see
+             docs/DECISION_LOG.md DL-169, DL-306. -->
+        <postgresql.version>42.7.12</postgresql.version>
+
+        <!-- 3.5.16 resolves 10.1.55, which the Apache Tomcat vendor advisories record as affected by
+             CVE-2026-55956 (moderate, security constraints ignored for the default servlet),
+             CVE-2026-55955, CVE-2026-55276 (fixed in 10.1.56), CVE-2026-59083 (rewrite-valve URL
+             decoding) and CVE-2026-59084 (fixed in 10.1.57). 10.1.57 is the newest 10.1.x published to
+             Maven Central. The property moves tomcat-embed-core, -el and -websocket together - see
+             docs/DECISION_LOG.md DL-171, DL-240, DL-306. -->
+        <tomcat.version>10.1.57</tomcat.version>
     </properties>
 
     <dependencies>
